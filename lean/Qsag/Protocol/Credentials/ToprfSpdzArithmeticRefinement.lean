@@ -2012,3 +2012,1034 @@ structure RealSpdzRel (cfg : Spec.IdealCredConfig Lane4) (k : Lane4)
 
 /-- An accepted step outside the bad event is a step of `Spec.idealCredMachine` with the same
     output, when the ideal function is the algebraic PRF under the shared key. -/
+theorem realSpdzOutcome_ok_inv {cfg : Spec.IdealCredConfig Lane4} {P : RealSpdzParams Attr}
+    {c c' : RealSpdzState Attr n} {port : Spec.CredPort} {w : RealSpdzWire Attr}
+    {out : Spec.IdealCredOutput Lane4} (k : Lane4)
+    (hOprf : ∀ pt, cfg.oprf pt = evalAlgebraicOprf k (P.enc pt))
+    (hInv : Spec.IdealCredInv cfg c.svc.abs) (hSrv : ServersValid c.servers k)
+    (hSess : ∀ s ∈ c.sessions, SessionValid c.servers s)
+    (hBad : realSpdzBad P c w = false)
+    (h : realSpdzOutcome cfg P c port w = .ok c' out) :
+    (Spec.idealCredMachine cfg).step c.svc.abs (port, w.toBase.toCommand) =
+        some (c'.svc.abs, out) ∧
+      c'.servers = c.servers ∧ ∀ s ∈ c'.sessions, s ∈ c.sessions := by
+  cases w with
+  | base b =>
+    simp only [realSpdzOutcome] at h
+    cases hb : baseAllowed b with
+    | false =>
+      simp only [hb, Bool.false_eq_true, ↓reduceIte] at h
+      cases h
+    | true =>
+      simp only [hb, ↓reduceIte] at h
+      obtain ⟨h1, h2, h3⟩ := gateOutcome_ok h
+      exact ⟨h1, h2, fun s hs => h3 ▸ hs⟩
+  | issueReal hd attrs newRoot tag tr =>
+    simp only [realSpdzOutcome] at h
+    by_cases hChk : tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true
+    · rw [ite_eq_left_of_eq_true _ _ (eq_true hChk)] at h
+      obtain ⟨h1, h2, h3⟩ := gateOutcome_ok h
+      exact ⟨h1, h2, fun s hs => h3 ▸ hs⟩
+    · rw [ite_eq_right_of_eq_false _ _ (eq_false hChk)] at h
+      cases h
+  | evalReal t input adv =>
+    simp only [realSpdzOutcome] at h
+    simp only [realSpdzBad] at hBad
+    cases hL : c.sessions with
+    | nil =>
+      rw [hL] at h
+      cases h
+    | cons sess rest =>
+      rw [hL] at h hBad
+      simp only [evalOutcome] at h
+      cases hAcc : (spdzEval c.servers sess (realEvalInput P t input) adv).accept with
+      | false =>
+        simp only [hAcc, Bool.false_eq_true, ↓reduceIte] at h
+        cases h
+      | true =>
+        simp only [hAcc, ↓reduceIte] at h
+        obtain ⟨svc', v, hS, hc, ho⟩ := evalFinish_ok h
+        subst hc
+        subst ho
+        have hIdeal := piToprfCredService_accept_ok cfg hS
+        obtain ⟨t', input', hCmd⟩ := Spec.idealCredStep_output_command hIdeal
+        have hExec := (Spec.idealCredStep_inv hIdeal).2
+        rw [hCmd] at hExec
+        have hv : v = cfg.oprf ⟨t'.keyId, t'.epoch, input'⟩ := by
+          rcases (Spec.credExec_evalToprf_inv hExec).2 with ⟨o, hMem, _, hOut⟩ | ⟨_, hOut⟩
+          · rw [Spec.IdealCredOutput.toprfEvaluated.inj hOut]
+            exact hInv.table_graph _ hMem
+          · exact Spec.IdealCredOutput.toprfEvaluated.inj hOut
+        have hOutEq := spdzEval_out_of_not_bad c.servers sess k _ adv hSrv
+          (hSess sess (by rw [hL]; exact List.mem_cons_self ..)) hAcc hBad
+        have hIn : realEvalInput P t input = P.enc ⟨t'.keyId, t'.epoch, input'⟩ := by
+          unfold realEvalInput
+          rw [hCmd]
+          rfl
+        refine ⟨?_, rfl, fun s hs => List.mem_cons_of_mem _ hs⟩
+        show (Spec.idealCredMachine cfg).step c.svc.abs
+          (port, (ToprfCredWire.evalToprfWire t input (zeroTranscript t)).toCommand) =
+            some (svc'.abs, .toprfEvaluated
+              (spdzEval c.servers sess (realEvalInput P t input) adv).out)
+        rw [hOutEq, hIn, ← hOprf, ← hv]
+        exact hIdeal
+
+/-- **Refinement on runs outside the bad event.** With the ideal function instantiated as
+    `evalAlgebraicOprf k ∘ enc` for the key `k` the servers share, the guarded real machine is
+    simulated by `Spec.idealCredMachine`: every accepted step is an ideal step on the command the
+    wire denotes, with the same output; in particular every released TOPRF value, reconstructed
+    from output shares, is the value the ideal functionality releases. -/
+def piToprfRealSpdzGuarded_dataRefines (cfg : Spec.IdealCredConfig Lane4)
+    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
+    (k : Lane4) (hOprf : ∀ pt, cfg.oprf pt = evalAlgebraicOprf k (P.enc pt))
+    (hSrv₀ : ServersValid servers₀ k) (hSess₀ : ∀ s ∈ sessions₀, SessionValid servers₀ s) :
+    Spec.DataRefines (piToprfRealSpdzGuarded cfg P servers₀ sessions₀)
+      (Spec.idealCredMachine cfg)
+      (fun inp => some (inp.1, inp.2.toBase.toCommand)) id where
+  Rel := RealSpdzRel cfg k
+  absInit c := c.svc.abs
+  init_ok := by
+    intro c₀ hInit
+    obtain ⟨hSvc, hServ, hSessEq⟩ := hInit
+    have hAbs := piToprfCredService_init_abs cfg hSvc
+    have hInv : Spec.IdealCredInv cfg (Spec.IdealCredState.empty (Attr := Attr) cfg) :=
+      Spec.idealCredInv_reachable ⟨_, [], rfl, .nil _⟩
+    refine ⟨hAbs, rfl, ?_, ?_, ?_⟩
+    · rw [hAbs]; exact hInv
+    · rw [hServ]; exact hSrv₀
+    · rw [hServ, hSessEq]; exact hSess₀
+  sim_visible := by
+    intro c c' a inp out j hRel hStep hVis
+    have hj := Option.some.inj hVis
+    subst hj
+    have hStep' : outcomeStep (guardedOutcome cfg P c inp.1 inp.2) = some (c', out) := hStep
+    unfold guardedOutcome at hStep'
+    cases hBad : realSpdzBad P c inp.2 with
+    | true =>
+      simp only [hBad, ↓reduceIte] at hStep'
+      cases hStep'
+    | false =>
+      simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hStep'
+      cases hO : realSpdzOutcome cfg P c inp.1 inp.2 with
+      | err c'' u =>
+        rw [hO] at hStep'
+        cases hStep'
+      | ok c'' out'' =>
+        rw [hO] at hStep'
+        injection hStep' with hPair
+        obtain ⟨hc, ho⟩ := Prod.mk.inj hPair
+        subst hc
+        subst ho
+        have hInv : Spec.IdealCredInv cfg c.svc.abs := by rw [hRel.abs]; exact hRel.inv
+        obtain ⟨hIdeal, hServ, hSub⟩ :=
+          realSpdzOutcome_ok_inv k hOprf hInv hRel.servers hRel.sessions hBad hO
+        refine ⟨c''.svc.abs, ?_, rfl, ?_, ?_, ?_⟩
+        · rw [← hRel.abs]; exact hIdeal
+        · exact Spec.idealCredInv_exec hInv (Spec.idealCredStep_inv hIdeal).2
+        · rw [hServ]; exact hRel.servers
+        · intro s hs
+          rw [hServ]
+          exact hRel.sessions s (hSub s hs)
+  sim_internal := by
+    intro c c' a inp out _ _ hVis
+    cases hVis
+  sim_reject := by
+    intro c a inp hRel hNone
+    have hNone' : outcomeStep (guardedOutcome cfg P c inp.1 inp.2) = none := hNone
+    show RealSpdzRel cfg k (guardedOutcome cfg P c inp.1 inp.2).nextState a
+    cases hG : guardedOutcome cfg P c inp.1 inp.2 with
+    | ok c'' o =>
+      rw [hG] at hNone'
+      cases hNone'
+    | err c'' u =>
+      show RealSpdzRel cfg k c'' a
+      unfold guardedOutcome at hG
+      cases hBad : realSpdzBad P c inp.2 with
+      | true =>
+        simp only [hBad, ↓reduceIte] at hG
+        injection hG with hc
+        subst hc
+        exact ⟨hRel.abs, hRel.inv, hRel.servers,
+          fun s hs => hRel.sessions s (List.mem_of_mem_tail hs)⟩
+      | false =>
+        simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hG
+        obtain ⟨h1, h2, h3⟩ := realSpdzOutcome_err_inv hG
+        refine ⟨h1.trans hRel.abs, hRel.inv, ?_, ?_⟩
+        · rw [h2]; exact hRel.servers
+        · intro s hs
+          rw [h2]
+          exact hRel.sessions s (h3 s hs)
+
+/-- **Arithmetic soundness dichotomy of the real machine
+    (`piToprfRealSpdz_sound_or_mac_forgery`).** In a state whose servers hold a valid sharing of
+    the key `k` and whose sessions are valid, every accepted evaluation step consumed the next
+    session and released the value reconstructed from the opened output shares, and that value
+    is `evalAlgebraicOprf k` at the encoded point, unless one of the adversary's error lanes is
+    a SPDZ MAC forgery `d ≠ 0 ∧ m = α · d` or it cancelled an honest blinding randomizer. -/
+theorem piToprfRealSpdz_sound_or_mac_forgery (cfg : Spec.IdealCredConfig Lane4)
+    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
+    {c c' : RealSpdzState Attr n} {port : Spec.CredPort} {t : Spec.ToprfTicket}
+    {input : Spec.Bytes} {adv : EvalTamper} {out : Spec.IdealCredOutput Lane4} (k : Lane4)
+    (hSrv : ServersValid c.servers k) (hSess : ∀ s ∈ c.sessions, SessionValid c.servers s)
+    (hStep : (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
+      (port, .evalReal t input adv) = some (c', out)) :
+    ∃ sess rest, c.sessions = sess :: rest ∧ c'.sessions = rest ∧
+      out = .toprfEvaluated (spdzEval c.servers sess (realEvalInput P t input) adv).out ∧
+      ((spdzEval c.servers sess (realEvalInput P t input) adv).out =
+          evalAlgebraicOprf k (realEvalInput P t input) ∨
+        (∃ d m, (d, m) ∈ spdzErrorLanes c.servers sess (realEvalInput P t input) adv ∧
+          d ≠ zero ∧ m = mul c.servers.macKey (GoldilocksExt2.ofBase d)) ∨
+        blindDegenerate adv.rCorrupt 0 sess.rHonest = true) := by
+  have h : outcomeStep (evalOutcome cfg P c port t input adv c.sessions) = some (c', out) := hStep
+  cases hL : c.sessions with
+  | nil =>
+    rw [hL] at h
+    cases h
+  | cons sess rest =>
+    rw [hL] at h
+    simp only [evalOutcome] at h
+    cases hAcc : (spdzEval c.servers sess (realEvalInput P t input) adv).accept with
+    | false =>
+      simp only [hAcc, Bool.false_eq_true, ↓reduceIte] at h
+      cases h
+    | true =>
+      simp only [hAcc, ↓reduceIte] at h
+      cases hO : evalFinish c rest (spdzEval c.servers sess (realEvalInput P t input) adv).out
+          ((piToprfCredService cfg).errStep c.svc
+            (port, .evalToprfWire t input (zeroTranscript t)))
+          ((piToprfCredService cfg).step c.svc
+            (port, .evalToprfWire t input (zeroTranscript t))) with
+      | err c'' u =>
+        rw [hO] at h
+        cases h
+      | ok c'' out'' =>
+        rw [hO] at h
+        injection h with hPair
+        obtain ⟨hc, ho⟩ := Prod.mk.inj hPair
+        subst hc
+        subst ho
+        obtain ⟨svc', v, _, hc', ho'⟩ := evalFinish_ok hO
+        subst hc'
+        exact ⟨sess, rest, rfl, rfl, ho',
+          spdzEval_sound_or_mac_forgery c.servers sess k _ adv hSrv
+            (hSess sess (by rw [hL]; exact List.mem_cons_self ..)) hAcc⟩
+
+omit [DecidableEq Attr] in
+/-- What the bad event of a step says: the wire is an evaluation whose share-level run was
+    accepted while the adversary forged a MAC lane or cancelled an honest randomizer. -/
+theorem realSpdzBad_spec {P : RealSpdzParams Attr} {c : RealSpdzState Attr n}
+    {w : RealSpdzWire Attr} (hBad : realSpdzBad P c w = true) :
+    ∃ t input adv sess rest, w = .evalReal t input adv ∧ c.sessions = sess :: rest ∧
+      (spdzEval c.servers sess (realEvalInput P t input) adv).accept = true ∧
+      ((∃ d m, (d, m) ∈ spdzErrorLanes c.servers sess (realEvalInput P t input) adv ∧
+          d ≠ zero ∧ m = mul c.servers.macKey (GoldilocksExt2.ofBase d)) ∨
+        blindDegenerate adv.rCorrupt 0 sess.rHonest = true) := by
+  cases w with
+  | base b => cases hBad
+  | issueReal hd attrs newRoot tag tr => cases hBad
+  | evalReal t input adv =>
+    simp only [realSpdzBad] at hBad
+    cases hL : c.sessions with
+    | nil =>
+      rw [hL] at hBad
+      cases hBad
+    | cons sess rest =>
+      rw [hL] at hBad
+      have hB : evalBadEvent c.servers sess (realEvalInput P t input) adv = true := hBad
+      unfold evalBadEvent at hB
+      obtain ⟨hAcc, hOr⟩ := Bool.and_eq_true_iff.mp hB
+      refine ⟨t, input, adv, sess, rest, rfl, rfl, hAcc, ?_⟩
+      rcases Bool.or_eq_true_iff.mp hOr with hF | hD
+      · obtain ⟨p, hMem, hp⟩ := List.any_eq_true.mp hF
+        obtain ⟨hNe, hEq⟩ := Bool.and_eq_true_iff.mp hp
+        refine Or.inl ⟨p.1, p.2, hMem, fun h0 => ?_, of_decide_eq_true hEq⟩
+        rw [decide_eq_true h0] at hNe
+        cases hNe
+      · exact Or.inr hD
+
+/-! ### Issuance: commitment opening and cut-and-choose check -/
+
+/-- An accepted issuance opened its commitment tag to the stored attributes, passed the
+    33-repetition cut-and-choose opening check, and is an ideal issuance step. -/
+theorem piToprfRealSpdz_issue_accept_checks (cfg : Spec.IdealCredConfig Lane4)
+    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
+    {c c' : RealSpdzState Attr n} {port : Spec.CredPort} {holder : Nat} {attrs : List Attr}
+    {newRoot : Spec.Digest256} {tag : BitVec 256} {tr : IssuanceTranscript}
+    {out : Spec.IdealCredOutput Lane4}
+    (hStep : (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
+      (port, .issueReal holder attrs newRoot tag tr) = some (c', out)) :
+    tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true ∧
+      (Spec.idealCredMachine cfg).step c.svc.abs
+        (port, (ToprfCredWire.issueWire holder attrs newRoot tag).toCommand) =
+          some (c'.svc.abs, out) := by
+  have h : outcomeStep (if tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true then
+      gateOutcome cfg c port (.issueWire holder attrs newRoot tag) else .err c ()) =
+      some (c', out) := hStep
+  by_cases hChk : tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true
+  · rw [ite_eq_left_of_eq_true _ _ (eq_true hChk)] at h
+    cases hO : gateOutcome cfg c port (.issueWire holder attrs newRoot tag) with
+    | err c'' u =>
+      rw [hO] at h
+      cases h
+    | ok c'' out'' =>
+      rw [hO] at h
+      injection h with hPair
+      obtain ⟨hc, ho⟩ := Prod.mk.inj hPair
+      subst hc
+      subst ho
+      exact ⟨hChk.1, hChk.2, (gateOutcome_ok hO).1⟩
+  · rw [ite_eq_right_of_eq_false _ _ (eq_false hChk)] at h
+    cases h
+
+/-- Two accepted issuances under one commitment tag store the same attributes, or exhibit a
+    collision of the commitment function. -/
+theorem piToprfRealSpdz_issue_binding_or_collision (cfg : Spec.IdealCredConfig Lane4)
+    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
+    {c₁ c₁' c₂ c₂' : RealSpdzState Attr n} {port₁ port₂ : Spec.CredPort} {h₁ h₂ : Nat}
+    {attrs₁ attrs₂ : List Attr} {root₁ root₂ : Spec.Digest256} {tag : BitVec 256}
+    {tr₁ tr₂ : IssuanceTranscript} {out₁ out₂ : Spec.IdealCredOutput Lane4}
+    (hStep₁ : (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c₁
+      (port₁, .issueReal h₁ attrs₁ root₁ tag tr₁) = some (c₁', out₁))
+    (hStep₂ : (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c₂
+      (port₂, .issueReal h₂ attrs₂ root₂ tag tr₂) = some (c₂', out₂)) :
+    attrs₁ = attrs₂ ∨
+      (attrs₁ ≠ attrs₂ ∧ P.commit attrs₁ tr₁.salt = P.commit attrs₂ tr₂.salt) := by
+  have e₁ := (piToprfRealSpdz_issue_accept_checks cfg P servers₀ sessions₀ hStep₁).1
+  have e₂ := (piToprfRealSpdz_issue_accept_checks cfg P servers₀ sessions₀ hStep₂).1
+  by_cases hEq : attrs₁ = attrs₂
+  · exact Or.inl hEq
+  · exact Or.inr ⟨hEq, e₁.symm.trans e₂⟩
+
+/-- `#tooth` An issuance whose tag is not the commitment to the submitted attributes under the
+    opened salt is refused. -/
+theorem tooth_forged_issuance_commitment_rejected (cfg : Spec.IdealCredConfig Lane4)
+    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
+    (c : RealSpdzState Attr n) (port : Spec.CredPort) (holder : Nat) (attrs : List Attr)
+    (newRoot : Spec.Digest256) (tag : BitVec 256) (tr : IssuanceTranscript)
+    (hForged : tag ≠ P.commit attrs tr.salt) :
+    (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
+      (port, .issueReal holder attrs newRoot tag tr) = none := by
+  show outcomeStep (if tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true then
+      gateOutcome cfg c port (.issueWire holder attrs newRoot tag) else .err c ()) = none
+  rw [ite_eq_right_of_eq_false _ _ (eq_false (fun hChk => hForged hChk.1))]
+  rfl
+
+/-- `#tooth` An issuance whose cut-and-choose opening fails `verify33` is refused. -/
+theorem tooth_issuance_failed_opening_rejected (cfg : Spec.IdealCredConfig Lane4)
+    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
+    (c : RealSpdzState Attr n) (port : Spec.CredPort) (holder : Nat) (attrs : List Attr)
+    (newRoot : Spec.Digest256) (tag : BitVec 256) (tr : IssuanceTranscript)
+    (hBadOpening : tr.opening.verify33 = false) :
+    (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
+      (port, .issueReal holder attrs newRoot tag tr) = none := by
+  show outcomeStep (if tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true then
+      gateOutcome cfg c port (.issueWire holder attrs newRoot tag) else .err c ()) = none
+  rw [ite_eq_right_of_eq_false _ _ (eq_false (fun hChk => by
+    rw [hBadOpening] at hChk
+    exact Bool.noConfusion hChk.2))]
+  rfl
+
+/-- The gate layer's evaluation and issuance wires, which carry no shares and no issuance
+    transcript, are refused by the real machine. -/
+theorem piToprfRealSpdz_fiat_wires_refused (cfg : Spec.IdealCredConfig Lane4)
+    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
+    (c : RealSpdzState Attr n)
+    (port : Spec.CredPort) (t : Spec.ToprfTicket) (input : Spec.Bytes)
+    (online : SpdzOnlineTranscript) (holder : Nat) (attrs : List Attr)
+    (newRoot : Spec.Digest256) (tag : BitVec 256) :
+    (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
+        (port, .base (.evalToprfWire t input online)) = none ∧
+      (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
+        (port, .base (.issueWire holder attrs newRoot tag)) = none :=
+  ⟨rfl, rfl⟩
+
+/-- An honest issuance is accepted at an initial state: the issuer's wire with the commitment to
+    one attribute and the honest zero-defect opening issues credential `0`. -/
+theorem piToprfRealSpdz_honest_issuance_accepted (cfg : Spec.IdealCredConfig Lane4)
+    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
+    (holder : Nat) (attr0 : Attr) (newRoot : Spec.Digest256) (salt : BitVec 256) :
+    ∃ c₀ c' : RealSpdzState Attr n,
+      (piToprfRealSpdzMachine cfg P servers₀ sessions₀).Init c₀ ∧
+      (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c₀
+        (.issuer, .issueReal holder [attr0] newRoot (P.commit [attr0] salt)
+          ⟨salt, LimboSdOpeningWire.honest 0⟩) = some (c', .issued 0) := by
+  obtain ⟨svc', hInit, hSvc⟩ := piToprfCredService_issuer_issues_at_init (Attr := Attr) cfg
+    holder attr0 newRoot (P.commit [attr0] salt)
+  refine ⟨⟨PiToprfCredState.init cfg, servers₀, sessions₀⟩,
+    ⟨svc', servers₀, sessions₀⟩, ⟨hInit, rfl, rfl⟩, ?_⟩
+  show outcomeStep (if P.commit [attr0] salt = P.commit [attr0] salt ∧
+      (LimboSdOpeningWire.honest 0).verify33 = true then
+      gateOutcome cfg ⟨PiToprfCredState.init cfg, servers₀, sessions₀⟩ .issuer
+        (.issueWire holder [attr0] newRoot (P.commit [attr0] salt)) else .err _ ()) = _
+  rw [ite_eq_left_of_eq_true _ _ (eq_true ⟨rfl, LimboSdOpeningWire.honest_verify33 0⟩)]
+  unfold gateOutcome
+  dsimp only
+  rw [hSvc]
+  rfl
+
+omit [DecidableEq Attr] in
+/-- **The adversary's view of an evaluation step is independent of the MAC key
+    (`piToprfRealSpdz_macKey_zero_leakage`).** Two states of the real machine with the same
+    value plane and MAC keys `α₁`, `α₂`: for an adversary none of whose nonzero error lanes is a
+    forgery point of either key, every observable of the transcript of the next evaluation
+    (opened values, blinded residuals, accept bit, reconstructed output) has the same sum over
+    the honest parties' uniform blinding randomizers in both states. -/
+theorem piToprfRealSpdz_macKey_zero_leakage {cardF : Nat}
+    (enum : SimpleEquiv (Fin cardF) GoldilocksExt2)
+    {c₁ c₂ : RealSpdzState Attr n} {sess₁ sess₂ : SpdzSession n}
+    {rest₁ rest₂ : List (SpdzSession n)} (k x : Lane4) (adv : EvalTamper)
+    (hL₁ : c₁.sessions = sess₁ :: rest₁) (hL₂ : c₂.sessions = sess₂ :: rest₂)
+    (hSrv₁ : ServersValid c₁.servers k) (hSrv₂ : ServersValid c₂.servers k)
+    (hSess₁ : ∀ s ∈ c₁.sessions, SessionValid c₁.servers s)
+    (hSess₂ : ∀ s ∈ c₂.sessions, SessionValid c₂.servers s)
+    (hPlane : SameValuePlane c₁.servers c₂.servers sess₁ sess₂)
+    (hNo₁ : ∀ d m, (d, m) ∈ spdzErrorLanes c₁.servers sess₁ x adv → d ≠ zero →
+      m ≠ mul c₁.servers.macKey (GoldilocksExt2.ofBase d))
+    (hNo₂ : ∀ d m, (d, m) ∈ spdzErrorLanes c₁.servers sess₁ x adv → d ≠ zero →
+      m ≠ mul c₂.servers.macKey (GoldilocksExt2.ofBase d))
+    (obs : SpdzEval → Nat) :
+    nsum enum ((spdzFinal c₁.servers sess₁ x adv).resid.flatMap ext2Lanes).length
+        (fun rs => obs (spdzEval c₁.servers ⟨sess₁.tuples, rs⟩ x adv)) =
+      nsum enum ((spdzFinal c₁.servers sess₁ x adv).resid.flatMap ext2Lanes).length
+        (fun rs => obs (spdzEval c₂.servers ⟨sess₂.tuples, rs⟩ x adv)) :=
+  spdzEval_macKey_zero_leakage enum k x adv hSrv₁ hSrv₂
+    (hSess₁ sess₁ (by rw [hL₁]; exact List.mem_cons_self ..))
+    (hSess₂ sess₂ (by rw [hL₂]; exact List.mem_cons_self ..)) hPlane hNo₁ hNo₂ obs
+
+end Guarded
+
+/-! ## 8. Completeness, the load-bearing MAC check, and satisfiable hypotheses -/
+
+section Honest
+variable {M : Type} [LawfulCommRing M]
+
+theorem spnValRun_opened_length (adv : SpnTamper M) :
+    ∀ (l : List (SpnRound M × M)) (vr : SpnValRun M),
+      (spnValRun adv l vr).opened.length = l.length + vr.opened.length
+  | [], _ => (Nat.zero_add _).symm
+  | p :: rest, vr => by
+    show (spnValRun adv rest (spnValStep adv p.1 p.2 vr)).opened.length = _
+    rw [spnValRun_opened_length adv rest]
+    show rest.length + (vr.opened.length + 1) = (rest.length + 1) + vr.opened.length
+    omega
+
+/-- An adversary that puts no value error on an opening while fewer than `bound` values have
+    been opened leaves no value error in a run of at most `bound` openings. -/
+theorem spnValRun_trace_errors_zero (adv : SpnTamper M) (bound : Nat)
+    (hQuiet : ∀ hist : List M, hist.length < bound → adv.valErr hist = zero) :
+    ∀ (l : List (SpnRound M × M)) (vr : SpnValRun M), vr.opened.length + l.length ≤ bound →
+      (∀ t ∈ vr.trace, t.1 = zero) → ∀ t ∈ (spnValRun adv l vr).trace, t.1 = zero
+  | [], _, _, h => h
+  | p :: rest, vr, hLen, h => by
+    have hLen' : vr.opened.length + (rest.length + 1) ≤ bound := hLen
+    apply spnValRun_trace_errors_zero adv bound hQuiet rest (spnValStep adv p.1 p.2 vr)
+    · show (vr.opened.length + 1) + rest.length ≤ bound
+      omega
+    · intro t ht
+      rcases List.mem_cons.mp ht with hEq | hOld
+      · rw [hEq]
+        show mul p.1.sel (adv.valErr vr.opened) = zero
+        rw [hQuiet vr.opened (by omega), LawfulCommRing.mul_zero]
+      · exact h t hOld
+
+theorem spnValRun_trace_shift_zero (adv : SpnTamper M)
+    (hShift : ∀ hist : List M, adv.macShift hist = (zero, zero)) :
+    ∀ (l : List (SpnRound M × M)) (vr : SpnValRun M),
+      (∀ t ∈ vr.trace, t.2 = (zero, zero)) → ∀ t ∈ (spnValRun adv l vr).trace, t.2 = (zero, zero)
+  | [], _, h => h
+  | p :: rest, vr, h => by
+    apply spnValRun_trace_shift_zero adv hShift rest (spnValStep adv p.1 p.2 vr)
+    intro t ht
+    rcases List.mem_cons.mp ht with hEq | hOld
+    · rw [hEq]
+      show (mul p.1.sel (adv.macShift _).1, mul p.1.sel (adv.macShift _).2) = (zero, zero)
+      rw [hShift, LawfulCommRing.mul_zero]
+    · exact h t hOld
+
+theorem spnRun_resid_length {n : Nat} (lam a0 a1 : Fin n → M) (adv : SpnTamper M) :
+    ∀ (l : List (SpnRound M × (Fin n → Pow7Share M))) (run : SpnRun n M),
+      (spnRun lam a0 a1 adv l run).resid.length = l.length + run.resid.length
+  | [], _ => (Nat.zero_add _).symm
+  | p :: rest, run => by
+    show (spnRun lam a0 a1 adv rest (spnStep lam a0 a1 adv p.1 p.2 run)).resid.length = _
+    rw [spnRun_resid_length lam a0 a1 adv rest]
+    show rest.length + (run.resid.length + 1) = (rest.length + 1) + run.resid.length
+    omega
+
+end Honest
+
+theorem ext2Lanes_flatMap_length :
+    ∀ (l : List (Poseidon2State12 × Poseidon2State12)),
+      (l.flatMap ext2Lanes).length = 12 * l.length
+  | [] => rfl
+  | p :: l => by
+    have h12 : (ext2Lanes p).length = 12 := by
+      unfold ext2Lanes
+      rw [List.length_map, List.length_finRange]
+    rw [List.flatMap_cons, List.length_append, ext2Lanes_flatMap_length l, h12, List.length_cons]
+    omega
+
+theorem blindList_of_zero (rC : Nat → GoldilocksExt2) :
+    ∀ (rs ds : List GoldilocksExt2) (j : Nat), (∀ d ∈ ds, d = zero) →
+      ∀ w ∈ blindList rC j rs ds, w = zero
+  | [], _, _, _ => fun _ hw => nomatch hw
+  | _ :: _, [], _, _ => fun _ hw => nomatch hw
+  | r :: rs, d :: ds, j, h => by
+    intro w hw
+    rcases List.mem_cons.mp hw with hEq | hTail
+    · rw [hEq, h d (List.mem_cons_self ..)]
+      exact MacBlind.macBlindPure_zero_defect_complete r (rC j)
+    · exact blindList_of_zero rC rs ds (j + 1) (fun e he => h e (List.mem_cons_of_mem _ he)) w hTail
+
+/-- The adversary that tampers with nothing. -/
+def honestSpn : SpnTamper Poseidon2State12 := ⟨fun _ => zero, fun _ => (zero, zero)⟩
+
+/-- The adversary that adds `e` to the output opening only (the opening made after one value
+    per round has been opened) and leaves every MAC residual alone. -/
+def outputTamper (e : Poseidon2State12) : SpnTamper Poseidon2State12 :=
+  ⟨fun hist => if hist.length = poseidonRounds.length then e else zero, fun _ => (zero, zero)⟩
+
+section Complete
+variable {n : Nat}
+
+theorem spdz_resid_lane_count (srv : SpdzServers n) (sess : SpdzSession n) (x : Lane4)
+    (adv : EvalTamper) (hT : sess.tuples.length = poseidonRounds.length) :
+    ((spdzFinal srv sess x adv).resid.flatMap ext2Lanes).length =
+      12 * (poseidonRounds.length + 1) := by
+  rw [ext2Lanes_flatMap_length]
+  have hLen : (spdzFinal srv sess x adv).resid.length = poseidonRounds.length + 1 := by
+    show ((spdzRounds srv sess x adv).resid.length + 1) = _
+    unfold spdzRounds
+    rw [spnRun_resid_length, List.length_zip, hT, Nat.min_self]
+    rfl
+  rw [hLen]
+
+theorem spdzVal_rounds_opened_length (srv : SpdzServers n) (sess : SpdzSession n) (x : Lane4)
+    (adv : EvalTamper) (hT : sess.tuples.length = poseidonRounds.length) :
+    (spnValRun adv.spn
+      ((poseidonRounds.zip sess.tuples).map (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)))
+      ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩).opened.length =
+      poseidonRounds.length := by
+  rw [spnValRun_opened_length, List.length_map, List.length_zip, hT, Nat.min_self]
+  rfl
+
+/-- An evaluation whose value-level trace has no value error reconstructs the PRF value. -/
+theorem spdzEval_out_of_clean (srv : SpdzServers n) (sess : SpdzSession n) (k x : Lane4)
+    (adv : EvalTamper) (hSrv : ServersValid srv k) (hSess : SessionValid srv sess)
+    (hT : sess.tuples.length = poseidonRounds.length)
+    (hClean : ∀ t ∈ (spdzValFinal srv sess x adv).trace, t.1 = zero) :
+    (spdzEval srv sess x adv).out = evalAlgebraicOprf k x := by
+  have hSim := spdz_sim srv sess k x adv hSrv hSess
+  have hIdem : ∀ p ∈ (poseidonRounds.zip sess.tuples).map
+      (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)), mul p.1.sel p.1.sel = p.1.sel := by
+    intro p hp
+    obtain ⟨q, hq, hEq⟩ := List.mem_map.mp hp
+    rw [← hEq]
+    exact (poseidonRounds_ok (List.of_mem_zip (a := q.1) (b := q.2) hq).1).1
+  have hOutErr : mul selOut (adv.spn.valErr (spnValRun adv.spn
+      ((poseidonRounds.zip sess.tuples).map (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)))
+      ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩).opened) = zero :=
+    hClean _ (List.mem_cons_self ..)
+  have hRun := spnValRun_clean adv.spn _ ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩ hIdem
+    (fun t ht => hClean t (List.mem_cons_of_mem _ ht))
+  have hOp : spdzOutState srv sess x adv :: (spdzRounds srv sess x adv).opened =
+      (spdzValFinal srv sess x adv).opened := hSim.opened
+  have hHead : spdzOutState srv sess x adv =
+      add (mul selOut (spnValRun adv.spn
+        ((poseidonRounds.zip sess.tuples).map (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)))
+        ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩).x)
+      (mul selOut (adv.spn.valErr (spnValRun adv.spn
+        ((poseidonRounds.zip sess.tuples).map (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)))
+        ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩).opened)) := (List.cons.inj hOp).1
+  show (spdzOutState srv sess x adv).b0 = _
+  rw [hHead, hOutErr, LawfulCommRing.add_zero, hRun,
+      zip_map_fst (fun t => (aggPow7 srv.lamS t).r1.v) poseidonRounds sess.tuples hT,
+      spdzInit_value srv k x hSrv, ← poseidon2Perm12_eq_spnPlain, selOut_mul_b0]
+  rfl
+
+/-- **Completeness.** With valid shares, one tuple per round and one honest randomizer per
+    residual lane, an evaluation in which the adversary tampers with no opening is accepted and
+    reconstructs `evalAlgebraicOprf k x`, for any corrupt blinding randomizers. -/
+theorem spdzEval_honest_complete (srv : SpdzServers n) (sess : SpdzSession n) (k x : Lane4)
+    (rC : Nat → GoldilocksExt2) (hSrv : ServersValid srv k) (hSess : SessionValid srv sess)
+    (hT : sess.tuples.length = poseidonRounds.length)
+    (hR : sess.rHonest.length = 12 * (poseidonRounds.length + 1)) :
+    (spdzEval srv sess x ⟨honestSpn, rC⟩).accept = true ∧
+      (spdzEval srv sess x ⟨honestSpn, rC⟩).out = evalAlgebraicOprf k x := by
+  have hSim := spdz_sim srv sess k x ⟨honestSpn, rC⟩ hSrv hSess
+  have hErr : ∀ t ∈ (spdzValFinal srv sess x ⟨honestSpn, rC⟩).trace, t.1 = zero := by
+    intro t ht
+    rcases List.mem_cons.mp ht with hEq | hOld
+    · rw [hEq]
+      exact LawfulCommRing.mul_zero _
+    · exact spnValRun_trace_errors_zero honestSpn _ (fun _ _ => rfl) _ _ (Nat.le_refl _)
+        (fun _ h => absurd h List.not_mem_nil) t hOld
+  have hShift : ∀ t ∈ (spdzValFinal srv sess x ⟨honestSpn, rC⟩).trace, t.2 = (zero, zero) := by
+    intro t ht
+    rcases List.mem_cons.mp ht with hEq | hOld
+    · rw [hEq]
+      show (mul selOut zero, mul selOut zero) = (zero, zero)
+      rw [LawfulCommRing.mul_zero]
+    · exact spnValRun_trace_shift_zero honestSpn (fun _ => rfl) _ _ (fun _ h => absurd h List.not_mem_nil) t hOld
+  have hLanes : ∀ d ∈ (spdzFinal srv sess x ⟨honestSpn, rC⟩).resid.flatMap ext2Lanes,
+      d = zero := by
+    intro d hd
+    rw [hSim.resid] at hd
+    obtain ⟨p, hp, hdp⟩ := List.mem_flatMap.mp hd
+    obtain ⟨t, ht, hEq⟩ := List.mem_map.mp hp
+    have hp0 : p = (zero, zero) := by
+      rw [← hEq]
+      unfold residOf
+      rw [hErr t ht, hShift t ht, LawfulCommRing.mul_zero, LawfulCommRing.mul_zero,
+          LawfulCommRing.sub_self]
+    rw [hp0] at hdp
+    obtain ⟨ℓ, _, hℓ⟩ := List.mem_map.mp hdp
+    rw [← hℓ]
+    exact GoldilocksExt2.ext ((stLane_zero ℓ).trans GoldilocksExt2.ringZero_c0.symm)
+      ((stLane_zero ℓ).trans GoldilocksExt2.ringZero_c1.symm)
+  refine ⟨?_, spdzEval_out_of_clean srv sess k x _ hSrv hSess hT hErr⟩
+  show (decide (sess.tuples.length = poseidonRounds.length) &&
+      decide (sess.rHonest.length =
+        ((spdzFinal srv sess x ⟨honestSpn, rC⟩).resid.flatMap ext2Lanes).length) &&
+      (blindList rC 0 sess.rHonest
+        ((spdzFinal srv sess x ⟨honestSpn, rC⟩).resid.flatMap ext2Lanes)).all
+          (fun w => decide (w = zero))) = true
+  rw [decide_eq_true hT, decide_eq_true (hR.trans (spdz_resid_lane_count srv sess x _ hT).symm)]
+  exact List.all_eq_true.mpr (fun w hw => decide_eq_true (blindList_of_zero rC _ _ 0 hLanes w hw))
+
+/-- `#tooth` **A tampered output share is refused.** The adversary shifts the output opening by
+    one on every output lane (what replacing a server's output value share does to the
+    reconstruction) and leaves the MAC residuals alone. Whenever the MAC key is nonzero and no
+    honest blinding randomizer is cancelled, the evaluation is not accepted. -/
+theorem tooth_tampered_output_share_rejected (srv : SpdzServers n) (sess : SpdzSession n)
+    (k x : Lane4) (rC : Nat → GoldilocksExt2) (hSrv : ServersValid srv k)
+    (hSess : SessionValid srv sess) (hT : sess.tuples.length = poseidonRounds.length)
+    (hKey : srv.macKey ≠ zero) (hDeg : blindDegenerate rC 0 sess.rHonest = false) :
+    (spdzEval srv sess x ⟨outputTamper one, rC⟩).accept = false := by
+  cases hAcc : (spdzEval srv sess x ⟨outputTamper one, rC⟩).accept with
+  | false => rfl
+  | true =>
+    have hLenO := spdzVal_rounds_opened_length srv sess x ⟨outputTamper one, rC⟩ hT
+    have hHead := spdzEval_resid_zero srv sess k x ⟨outputTamper one, rC⟩ hSrv hSess hAcc hDeg
+      _ (List.mem_cons_self ..)
+    obtain ⟨h0, h1⟩ := hHead
+    have hE : (outputTamper one).valErr (spnValRun (outputTamper one)
+        ((poseidonRounds.zip sess.tuples).map (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)))
+        ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩).opened = one :=
+      ite_eq_left_of_eq_true _ _ (eq_true hLenO)
+    have h0' : mul selOut (zero : Poseidon2State12) =
+        mul (stConst srv.macKey.c0) (mul selOut one) := by
+      have h := h0
+      dsimp only at h
+      rw [hE] at h
+      exact h
+    have h1' : mul selOut (zero : Poseidon2State12) =
+        mul (stConst srv.macKey.c1) (mul selOut one) := by
+      have h := h1
+      dsimp only at h
+      rw [hE] at h
+      exact h
+    have l0 : mul (one : Goldilocks) zero = mul srv.macKey.c0 (mul one one) :=
+      congrArg (fun s => s.b0.x0) h0'
+    have l1 : mul (one : Goldilocks) zero = mul srv.macKey.c1 (mul one one) :=
+      congrArg (fun s => s.b0.x0) h1'
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_one, LawfulCommRing.mul_one] at l0 l1
+    exact absurd (GoldilocksExt2.ext (l0.symm.trans GoldilocksExt2.ringZero_c0.symm)
+      (l1.symm.trans GoldilocksExt2.ringZero_c1.symm)) hKey
+
+/-- `#tooth` **The MAC check is load-bearing.** Under the same tampering the value reconstructed
+    from the opened output shares is not the PRF value: a machine releasing `out` without the
+    verdict of the blinded MAC check would release a wrong value. -/
+theorem tooth_unchecked_release_is_wrong (srv : SpdzServers n) (sess : SpdzSession n)
+    (k x : Lane4) (rC : Nat → GoldilocksExt2) (hSrv : ServersValid srv k)
+    (hSess : SessionValid srv sess) (hT : sess.tuples.length = poseidonRounds.length) :
+    (spdzEval srv sess x ⟨outputTamper one, rC⟩).out ≠ evalAlgebraicOprf k x := by
+  intro hEq
+  have hSim := spdz_sim srv sess k x ⟨outputTamper one, rC⟩ hSrv hSess
+  have hLenO := spdzVal_rounds_opened_length srv sess x ⟨outputTamper one, rC⟩ hT
+  have hIdem : ∀ p ∈ (poseidonRounds.zip sess.tuples).map
+      (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)), mul p.1.sel p.1.sel = p.1.sel := by
+    intro p hp
+    obtain ⟨q, hq, hQ⟩ := List.mem_map.mp hp
+    rw [← hQ]
+    exact (poseidonRounds_ok (List.of_mem_zip (a := q.1) (b := q.2) hq).1).1
+  have hQuiet : ∀ hist : List Poseidon2State12, hist.length < poseidonRounds.length →
+      (outputTamper one).valErr hist = zero := fun hist h =>
+    ite_eq_right_of_eq_false _ _ (eq_false (Nat.ne_of_lt h))
+  have hRoundsLen : ((poseidonRounds.zip sess.tuples).map
+      (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v))).length = poseidonRounds.length := by
+    rw [List.length_map, List.length_zip, hT, Nat.min_self]
+  have hRun := spnValRun_clean (outputTamper one) _
+    ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩ hIdem
+    (spnValRun_trace_errors_zero (outputTamper one) poseidonRounds.length hQuiet _ _
+      (by rw [hRoundsLen]; exact Nat.le_of_eq (Nat.zero_add _)) (fun _ h => absurd h List.not_mem_nil))
+  have hE : (outputTamper one).valErr (spnValRun (outputTamper one)
+      ((poseidonRounds.zip sess.tuples).map (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)))
+      ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩).opened = one :=
+    ite_eq_left_of_eq_true _ _ (eq_true hLenO)
+  have hOp : spdzOutState srv sess x ⟨outputTamper one, rC⟩ ::
+      (spdzRounds srv sess x ⟨outputTamper one, rC⟩).opened =
+      (spdzValFinal srv sess x ⟨outputTamper one, rC⟩).opened := hSim.opened
+  have hHead : spdzOutState srv sess x ⟨outputTamper one, rC⟩ =
+      add (mul selOut (spnValRun (outputTamper one)
+        ((poseidonRounds.zip sess.tuples).map (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)))
+        ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩).x)
+      (mul selOut ((outputTamper one).valErr (spnValRun (outputTamper one)
+        ((poseidonRounds.zip sess.tuples).map (fun p => (p.1, (aggPow7 srv.lamS p.2).r1.v)))
+        ⟨(aggShare srv.lamS (spdzInit srv x)).v, [], []⟩).opened)) := (List.cons.inj hOp).1
+  have hOut : (spdzOutState srv sess x ⟨outputTamper one, rC⟩).b0 = evalAlgebraicOprf k x := hEq
+  rw [hHead, hE, hRun,
+      zip_map_fst (fun t => (aggPow7 srv.lamS t).r1.v) poseidonRounds sess.tuples hT,
+      spdzInit_value srv k x hSrv, ← poseidon2Perm12_eq_spnPlain] at hOut
+  have hLane : add (mul (one : Goldilocks) (poseidon2Perm12 (toprfState k x)).b0.x0)
+      (mul one one) = (poseidon2Perm12 (toprfState k x)).b0.x0 := congrArg Lane4.x0 hOut
+  have hOne : (one : Goldilocks) = zero := by
+    apply LawfulCommRing.add_left_cancel (a := (poseidon2Perm12 (toprfState k x)).b0.x0)
+    rw [LawfulCommRing.add_zero]
+    refine Eq.trans ?_ hLane
+    constructive_ring
+  exact LawfulField.zero_ne_one hOne.symm
+
+end Complete
+
+/-- `#tooth` **The real machine refuses a tampered output share.** At a state whose next session
+    is valid for servers holding a valid sharing of `k` under a nonzero MAC key, the evaluation
+    wire whose adversary shifts the output opening by one is refused, unless the corrupt
+    randomizer cancels an honest blinding randomizer. -/
+theorem tooth_machine_tampered_output_refused {Attr : Type} [DecidableEq Attr] {n : Nat}
+    (cfg : Spec.IdealCredConfig Lane4) (P : RealSpdzParams Attr) (servers₀ : SpdzServers n)
+    (sessions₀ : List (SpdzSession n)) (c : RealSpdzState Attr n) (port : Spec.CredPort)
+    (t : Spec.ToprfTicket) (input : Spec.Bytes) (rC : Nat → GoldilocksExt2) (k : Lane4)
+    (sess : SpdzSession n) (rest : List (SpdzSession n)) (hL : c.sessions = sess :: rest)
+    (hSrv : ServersValid c.servers k) (hSess : SessionValid c.servers sess)
+    (hT : sess.tuples.length = poseidonRounds.length) (hKey : c.servers.macKey ≠ zero)
+    (hDeg : blindDegenerate rC 0 sess.rHonest = false) :
+    (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
+      (port, .evalReal t input ⟨outputTamper one, rC⟩) = none := by
+  have hAcc := tooth_tampered_output_share_rejected c.servers sess k (realEvalInput P t input) rC
+    hSrv hSess hT hKey hDeg
+  show outcomeStep (evalOutcome cfg P c port t input ⟨outputTamper one, rC⟩ c.sessions) = none
+  rw [hL]
+  show outcomeStep
+    (if (spdzEval c.servers sess (realEvalInput P t input) ⟨outputTamper one, rC⟩).accept = true
+      then evalFinish c rest
+        (spdzEval c.servers sess (realEvalInput P t input) ⟨outputTamper one, rC⟩).out
+        ((piToprfCredService cfg).errStep c.svc
+          (port, .evalToprfWire t input (zeroTranscript t)))
+        ((piToprfCredService cfg).step c.svc (port, .evalToprfWire t input (zeroTranscript t)))
+      else .err { c with sessions := rest } ()) = none
+  rw [ite_eq_right_of_eq_false _ _ (eq_false (fun hA => Bool.noConfusion (hAcc.symm.trans hA)))]
+  rfl
+
+/-! ### A dealer: the hypotheses are jointly satisfiable -/
+
+/-- The single-server sharing of `v` under MAC key `a`: the value and its MAC. -/
+def dealerPub (a : GoldilocksExt2) (v : Poseidon2State12) : AShare Poseidon2State12 :=
+  AShare.pub (stConst a.c0) (stConst a.c1) v
+
+/-- A one-server quorum (weight `1`) holding the MAC key `a` and the key `k`. -/
+def dealerServers (a : GoldilocksExt2) (k : Lane4) : SpdzServers 1 :=
+  ⟨fun _ => one, fun _ => a, fun _ => dealerPub a (keyState k)⟩
+
+def dealerTuple (a : GoldilocksExt2) (r : Poseidon2State12) :
+    Fin 1 → Pow7Share Poseidon2State12 :=
+  fun _ => ⟨dealerPub a r, dealerPub a (npow r 2), dealerPub a (npow r 3), dealerPub a (npow r 4),
+    dealerPub a (npow r 5), dealerPub a (npow r 6), dealerPub a (npow r 7)⟩
+
+/-- A session with one valid tuple per mask in `masks`. -/
+def dealerSession (a : GoldilocksExt2) (masks : List Poseidon2State12)
+    (rH : List GoldilocksExt2) : SpdzSession 1 :=
+  ⟨masks.map (dealerTuple a), rH⟩
+
+theorem recSum_single {M : Type} [LawfulCommRing M] (f : Fin 1 → M) :
+    recSum (fun _ => one) f = f ⟨0, Nat.zero_lt_one⟩ := by
+  show add (mul one (f _)) zero = _
+  constructive_ring
+
+theorem aggShare_single {M : Type} [LawfulCommRing M] (s : Fin 1 → AShare M) :
+    aggShare (fun _ => one) s = s ⟨0, Nat.zero_lt_one⟩ := by
+  unfold aggShare
+  rw [recSum_single, recSum_single, recSum_single]
+
+theorem dealer_macKey (a : GoldilocksExt2) (k : Lane4) : (dealerServers a k).macKey = a := by
+  show (⟨recSum (fun _ : Fin 1 => (one : Goldilocks)) (fun _ => a.c0),
+    recSum (fun _ : Fin 1 => (one : Goldilocks)) (fun _ => a.c1)⟩ : GoldilocksExt2) = a
+  rw [recSum_single, recSum_single]
+
+theorem dealer_serversValid (a : GoldilocksExt2) (k : Lane4) :
+    ServersValid (dealerServers a k) k where
+  lamOne := LawfulCommRing.add_zero one
+  keyAuth := by
+    rw [dealer_macKey]
+    show Authentic _ _ (aggShare (fun _ : Fin 1 => (one : Poseidon2State12))
+      (fun _ => dealerPub a (keyState k)))
+    rw [aggShare_single]
+    exact Authentic.pub _ _ _
+  keyVal := by
+    show (aggShare (fun _ : Fin 1 => (one : Poseidon2State12))
+      (fun _ => dealerPub a (keyState k))).v = _
+    rw [aggShare_single]
+    rfl
+
+theorem dealer_sessionValid (a : GoldilocksExt2) (k : Lane4) (masks : List Poseidon2State12)
+    (rH : List GoldilocksExt2) :
+    SessionValid (dealerServers a k) (dealerSession a masks rH) := by
+  intro t ht
+  obtain ⟨r, _, hr⟩ := List.mem_map.mp ht
+  rw [← hr, dealer_macKey]
+  have hAgg : aggPow7 (dealerServers a k).lamS (dealerTuple a r) =
+      dealerTuple a r ⟨0, Nat.zero_lt_one⟩ := by
+    show aggPow7 (fun _ : Fin 1 => (one : Poseidon2State12)) (dealerTuple a r) = _
+    unfold aggPow7
+    simp only [aggShare_single]
+  rw [hAgg]
+  exact ⟨Authentic.pub _ _ _, Authentic.pub _ _ _, Authentic.pub _ _ _, Authentic.pub _ _ _,
+    Authentic.pub _ _ _, Authentic.pub _ _ _, Authentic.pub _ _ _, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+private theorem dealerServers_lam (a : GoldilocksExt2) (k : Lane4) :
+    (dealerServers a k).lam = fun _ => one := by rfl
+
+private theorem dealerServers_key_v (a : GoldilocksExt2) (k : Lane4) (i : Fin 1) :
+    ((dealerServers a k).key i).v = keyState k := by rfl
+
+private theorem dealerTuple_r1_v (a : GoldilocksExt2) (r : Poseidon2State12) (i : Fin 1) :
+    (dealerTuple a r i).r1.v = r := by rfl
+
+private theorem dealerSession_masks (a : GoldilocksExt2) (masks : List Poseidon2State12)
+    (rH : List GoldilocksExt2) :
+    (dealerSession a masks rH).tuples.map (fun t i => (t i).r1.v) = masks.map (fun r _ => r) := by
+  show (masks.map (dealerTuple a)).map (fun t i => (t i).r1.v) = masks.map (fun r _ => r)
+  rw [List.map_map]
+  exact congrArg (fun f => masks.map f)
+    (funext fun r => funext fun i => dealerTuple_r1_v a r i)
+
+theorem dealer_sameValuePlane (a b : GoldilocksExt2) (k : Lane4)
+    (masks : List Poseidon2State12) (rH₁ rH₂ : List GoldilocksExt2) :
+    SameValuePlane (dealerServers a k) (dealerServers b k) (dealerSession a masks rH₁)
+      (dealerSession b masks rH₂) where
+  lam := (dealerServers_lam a k).trans (dealerServers_lam b k).symm
+  key := fun i => (dealerServers_key_v a k i).trans (dealerServers_key_v b k i).symm
+  masks := (dealerSession_masks a masks rH₁).trans (dealerSession_masks b masks rH₂).symm
+
+/-- The hypotheses of `spdz_mac_forgery_game_bound` are jointly satisfiable: the dealer's worlds
+    indexed by the MAC key share one value plane. -/
+theorem witness_spdz_mac_forgery_game (k : Lane4) (masks : List Poseidon2State12)
+    (rH : List GoldilocksExt2) :
+    ∃ matOf : GoldilocksExt2 → SpdzServers 1 × SpdzSession 1,
+      (∀ a, (matOf a).1.macKey = a) ∧ (∀ a, ServersValid (matOf a).1 k) ∧
+      (∀ a, SessionValid (matOf a).1 (matOf a).2) ∧
+      ∀ a b, SameValuePlane (matOf a).1 (matOf b).1 (matOf a).2 (matOf b).2 :=
+  ⟨fun a => (dealerServers a k, dealerSession a masks rH),
+    fun a => dealer_macKey a k, fun a => dealer_serversValid a k,
+    fun a => dealer_sessionValid a k masks rH,
+    fun a b => dealer_sameValuePlane a b k masks rH rH⟩
+
+/-- The hypotheses of `spdzEval_sound_or_mac_forgery` are jointly satisfiable, and its first
+    disjunct is attained: the dealer's honest evaluation is accepted and reconstructs the PRF. -/
+theorem witness_spdzEval_accepted (a : GoldilocksExt2) (k x : Lane4) :
+    ∃ (srv : SpdzServers 1) (sess : SpdzSession 1) (adv : EvalTamper),
+      ServersValid srv k ∧ SessionValid srv sess ∧
+      (spdzEval srv sess x adv).accept = true ∧
+      (spdzEval srv sess x adv).out = evalAlgebraicOprf k x := by
+  have hT : (dealerSession a (poseidonRounds.map (fun _ => zero))
+      (List.replicate (12 * (poseidonRounds.length + 1)) one)).tuples.length =
+      poseidonRounds.length := by
+    show ((poseidonRounds.map (fun _ => zero)).map (dealerTuple a)).length = _
+    rw [List.length_map, List.length_map]
+  have hC := spdzEval_honest_complete (dealerServers a k)
+    (dealerSession a (poseidonRounds.map (fun _ => zero))
+      (List.replicate (12 * (poseidonRounds.length + 1)) one)) k x (fun _ => zero)
+    (dealer_serversValid a k) (dealer_sessionValid a k _ _) hT List.length_replicate
+  exact ⟨_, _, _, dealer_serversValid a k, dealer_sessionValid a k _ _, hC.1, hC.2⟩
+
+theorem blindDegenerate_replicate_one : ∀ (m j : Nat),
+    blindDegenerate (fun _ => zero) j (List.replicate m (one : GoldilocksExt2)) = false
+  | 0, _ => rfl
+  | m + 1, j => by
+    show (decide (add (one : GoldilocksExt2) zero = zero) ||
+      blindDegenerate (fun _ => zero) (j + 1) (List.replicate m one)) = false
+    rw [blindDegenerate_replicate_one m (j + 1), Bool.or_false]
+    apply decide_eq_false
+    rw [LawfulCommRing.add_zero]
+    exact LawfulField.one_ne_zero
+
+/-- The hypotheses of the tampered-output teeth are jointly satisfiable. -/
+theorem witness_tamper_teeth (k : Lane4) :
+    ∃ (srv : SpdzServers 1) (sess : SpdzSession 1) (rC : Nat → GoldilocksExt2),
+      ServersValid srv k ∧ SessionValid srv sess ∧
+      sess.tuples.length = poseidonRounds.length ∧ srv.macKey ≠ zero ∧
+      blindDegenerate rC 0 sess.rHonest = false := by
+  refine ⟨dealerServers one k,
+    dealerSession one (poseidonRounds.map (fun _ => zero)) (List.replicate 1 one),
+    fun _ => zero, dealer_serversValid one k, dealer_sessionValid one k _ _, ?_, ?_,
+    blindDegenerate_replicate_one 1 0⟩
+  · show ((poseidonRounds.map (fun _ => zero)).map (dealerTuple one)).length = _
+    rw [List.length_map, List.length_map]
+  · rw [dealer_macKey]
+    exact LawfulField.one_ne_zero
+
+/-! ## 9. Audits -/
+
+#verify_constructive
+  Qsag.SpdzToprf.linSum_congr
+  Qsag.SpdzToprf.linSum_add
+  Qsag.SpdzToprf.linSum_mul_left
+  Qsag.SpdzToprf.additive_zero
+  Qsag.SpdzToprf.linSum_map
+  Qsag.SpdzToprf.recSum_add
+  Qsag.SpdzToprf.recSum_sub
+  Qsag.SpdzToprf.recSum_scale
+  Qsag.SpdzToprf.recSum_mul_const
+  Qsag.SpdzToprf.recSum_const
+  Qsag.SpdzToprf.recSum_map
+  Qsag.SpdzToprf.aggShare_add
+  Qsag.SpdzToprf.aggShare_sub
+  Qsag.SpdzToprf.aggShare_scale
+  Qsag.SpdzToprf.aggShare_pub
+  Qsag.SpdzToprf.aggShare_map
+  Qsag.SpdzToprf.Authentic.add
+  Qsag.SpdzToprf.Authentic.sub
+  Qsag.SpdzToprf.Authentic.scale
+  Qsag.SpdzToprf.Authentic.pub
+  Qsag.SpdzToprf.Authentic.map
+  Qsag.SpdzToprf.aggShare_sboxMasked
+  Qsag.SpdzToprf.aggShare_sboxOut
+  Qsag.SpdzToprf.npow_seven_of_idem
+  Qsag.SpdzToprf.idem_mul_pow7
+  Qsag.SpdzToprf.sboxExpand_v
+  Qsag.SpdzToprf.sboxOut_v
+  Qsag.SpdzToprf.sboxMasked_authentic
+  Qsag.SpdzToprf.sboxExpand_authentic
+  Qsag.SpdzToprf.sboxOut_authentic
+  Qsag.SpdzToprf.spnStep_sim
+  Qsag.SpdzToprf.spnRun_sim
+  Qsag.SpdzToprf.spnOpen_sim
+  Qsag.SpdzToprf.spnValRun_trace_mem
+  Qsag.SpdzToprf.spnValStep_clean
+  Qsag.SpdzToprf.spnValRun_clean
+  Qsag.SpdzToprf.spnVal_sound_or_forgery
+  Qsag.SpdzToprf.st_add_eq
+  Qsag.SpdzToprf.st_mul_eq
+  Qsag.SpdzToprf.st_sub_eq
+  Qsag.SpdzToprf.st_one_eq
+  Qsag.SpdzToprf.st_zero_eq
+  Qsag.SpdzToprf.stConst_add
+  Qsag.SpdzToprf.stConst_mul
+  Qsag.SpdzToprf.stConst_linSum
+  Qsag.SpdzToprf.stConst_recSum
+  Qsag.SpdzToprf.state12Add_eq_add
+  Qsag.SpdzToprf.state12Scale_eq_mul
+  Qsag.SpdzToprf.sbox7_eq_npow
+  Qsag.SpdzToprf.st_npow7_eq
+  Qsag.SpdzToprf.sboxState12_eq_npow
+  Qsag.SpdzToprf.extRound_eval
+  Qsag.SpdzToprf.intRound_eval
+  Qsag.SpdzToprf.spnPlain_append
+  Qsag.SpdzToprf.runRounds_ext_eq
+  Qsag.SpdzToprf.runRounds_int_eq
+  Qsag.SpdzToprf.poseidon2Perm12_eq_spnPlain
+  Qsag.SpdzToprf.applyME_additive
+  Qsag.SpdzToprf.applyME_central
+  Qsag.SpdzToprf.applyMI_additive
+  Qsag.SpdzToprf.applyMI_central
+  Qsag.SpdzToprf.stLane0_one_idem
+  Qsag.SpdzToprf.selOut_idem
+  Qsag.SpdzToprf.poseidonRounds_ok
+  Qsag.SpdzToprf.toprfInput_add_keyState
+  Qsag.SpdzToprf.selOut_mul_b0
+  Qsag.SpdzToprf.st_ext_lane
+  Qsag.SpdzToprf.stLane_zero
+  Qsag.SpdzToprf.stLane_mul_const
+  Qsag.SpdzToprf.exists_lane_ne_zero
+  Qsag.SpdzToprf.ext2Lanes_zero
+  Qsag.SpdzToprf.ext2_mul_ofBase
+  Qsag.SpdzToprf.blindList_zero_imp
+  Qsag.SpdzToprf.SpdzServers.recSum_a0
+  Qsag.SpdzToprf.SpdzServers.recSum_a1
+  Qsag.SpdzToprf.spdzInit_value
+  Qsag.SpdzToprf.spdz_sim
+  Qsag.SpdzToprf.zip_map_fst
+  Qsag.SpdzToprf.spdzEval_resid_zero
+  Qsag.SpdzToprf.spdzEval_out_or_error
+  Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery
+  Qsag.SpdzToprf.zip_map_congr
+  Qsag.SpdzToprf.spdzValFinal_eq_of_sameValuePlane
+  Qsag.SpdzToprf.spdzEval_opened_eq_of_sameValuePlane
+  Qsag.SpdzToprf.field_mul_right_cancel
+  Qsag.SpdzToprf.evalFooled_macKey_unique
+  Qsag.SpdzToprf.spdz_mac_forgery_game_bound
+  Qsag.SpdzToprf.goldilocksExt2_card_bits
+  Qsag.SpdzToprf.nsum_congr_len
+  Qsag.SpdzToprf.SamePattern.length_eq
+  Qsag.SpdzToprf.SamePattern.append
+  Qsag.SpdzToprf.samePattern_map
+  Qsag.SpdzToprf.samePattern_flatMap
+  Qsag.SpdzToprf.blindList_view_independent
+  Qsag.SpdzToprf.stLane_sub
+  Qsag.SpdzToprf.residLanes_samePattern
+  Qsag.SpdzToprf.spdzEval_macKey_zero_leakage
+  Qsag.SpdzToprf.gateOutcome_ok
+  Qsag.SpdzToprf.gateOutcome_err
+  Qsag.SpdzToprf.evalFinish_ok
+  Qsag.SpdzToprf.evalFinish_err
+  Qsag.SpdzToprf.realSpdzOutcome_err_inv
+  Qsag.SpdzToprf.spdzEval_out_of_not_bad
+  Qsag.SpdzToprf.piToprfRealSpdzGuarded_step_eq
+  Qsag.SpdzToprf.realSpdzOutcome_ok_inv
+  Qsag.SpdzToprf.piToprfRealSpdz_sound_or_mac_forgery
+  Qsag.SpdzToprf.realSpdzBad_spec
+  Qsag.SpdzToprf.piToprfRealSpdz_issue_accept_checks
+  Qsag.SpdzToprf.piToprfRealSpdz_issue_binding_or_collision
+  Qsag.SpdzToprf.tooth_forged_issuance_commitment_rejected
+  Qsag.SpdzToprf.tooth_issuance_failed_opening_rejected
+  Qsag.SpdzToprf.piToprfRealSpdz_fiat_wires_refused
+  Qsag.SpdzToprf.piToprfRealSpdz_honest_issuance_accepted
+  Qsag.SpdzToprf.piToprfRealSpdz_macKey_zero_leakage
+  Qsag.SpdzToprf.spnValRun_opened_length
+  Qsag.SpdzToprf.spnValRun_trace_errors_zero
+  Qsag.SpdzToprf.spnValRun_trace_shift_zero
+  Qsag.SpdzToprf.spnRun_resid_length
+  Qsag.SpdzToprf.ext2Lanes_flatMap_length
+  Qsag.SpdzToprf.blindList_of_zero
+  Qsag.SpdzToprf.spdz_resid_lane_count
+  Qsag.SpdzToprf.spdzVal_rounds_opened_length
+  Qsag.SpdzToprf.spdzEval_out_of_clean
+  Qsag.SpdzToprf.spdzEval_honest_complete
+  Qsag.SpdzToprf.tooth_tampered_output_share_rejected
+  Qsag.SpdzToprf.tooth_unchecked_release_is_wrong
+  Qsag.SpdzToprf.tooth_machine_tampered_output_refused
+  Qsag.SpdzToprf.recSum_single
+  Qsag.SpdzToprf.aggShare_single
+  Qsag.SpdzToprf.dealer_macKey
+  Qsag.SpdzToprf.dealer_serversValid
+  Qsag.SpdzToprf.dealer_sessionValid
+  Qsag.SpdzToprf.dealer_sameValuePlane
+  Qsag.SpdzToprf.witness_spdz_mac_forgery_game
+  Qsag.SpdzToprf.witness_spdzEval_accepted
+  Qsag.SpdzToprf.blindDegenerate_replicate_one
+  Qsag.SpdzToprf.witness_tamper_teeth
+
+#verify_kernel Qsag.SpdzToprf.piToprfRealSpdzGuarded_dataRefines
+
+#tooth_pair Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery vs
+  Qsag.SpdzToprf.tooth_tampered_output_share_rejected
+#tooth_pair Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery vs
+  Qsag.SpdzToprf.tooth_unchecked_release_is_wrong
+#tooth_pair Qsag.SpdzToprf.piToprfRealSpdz_sound_or_mac_forgery vs
+  Qsag.SpdzToprf.tooth_machine_tampered_output_refused
+#tooth_pair Qsag.SpdzToprf.piToprfRealSpdz_issue_accept_checks vs
+  Qsag.SpdzToprf.tooth_forged_issuance_commitment_rejected
+#tooth_pair Qsag.SpdzToprf.piToprfRealSpdz_issue_accept_checks vs
+  Qsag.SpdzToprf.tooth_issuance_failed_opening_rejected
+
+#verify_inhabited Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery
+  Qsag.SpdzToprf.witness_spdzEval_accepted
+#verify_inhabited Qsag.SpdzToprf.spdz_mac_forgery_game_bound
+  Qsag.SpdzToprf.witness_spdz_mac_forgery_game
+#verify_inhabited Qsag.SpdzToprf.tooth_tampered_output_share_rejected
+  Qsag.SpdzToprf.witness_tamper_teeth
+
+#export_eqns outcomeStep evalOutcome evalFooled SessionValid poseidonRounds
+
+end Qsag.SpdzToprf
+end

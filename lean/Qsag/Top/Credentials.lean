@@ -51,10 +51,17 @@ set_option autoImplicit false
 
 /-! ## 1. Dual-LPN Regular-Block Bias Projected Into Canonical `Spec.RatBound` + Production PCG Taps -/
 
-/-- The generated production row has bias strictly between `2^-118` and `2^-117`.
-    This concrete row calculation and the Stern–Dumer work estimate use no balance premise. -/
+/-- Production 11-tap balanced `pcg_dense` (`DENSE_PCG_TAPS_PER_TREE = 11`,
+    `DENSE_PCG_DEPTH15_MAX_TREE_IMBALANCE = 7593`) gives `< 2^-135` parity bias
+    for every row satisfying the generator’s acceptance predicate (`elevenTap_balanced_all_rows_bias_lt_two_neg_135`), with Row 0 of
+    `auditSession` lying strictly between `2^-220` and `2^-219` (`prodRow0Bal11_bias_bracket`),
+    alongside the Stern–Dumer ISD work bound and the legacy 3-tap Row 0 diagnostic. -/
 theorem pcg_dual_lpn_bias_in_spec_ratBound
     (q l : Nat) (hq : q ≤ 32) :
+    (Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Bal11Weights * 2 ^ 219 < 32768 ^ 64 ∧
+      32768 ^ 64 < Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Bal11Weights * 2 ^ 220 ∧
+      (Qsag.TapRowBias.noiseSignedSum 32768
+        (Qsag.TapRowBias.prodRow0Bal11Taps.map Qsag.TapRowBias.tapFn) false).natAbs * 2 ^ 135 < 32768 ^ 64) ∧
     (Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 117 < 32768 ^ 64 ∧
       32768 ^ 64 < Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 118) ∧
     Qsag.sternDumerWorkExceedsPow2 Qsag.pcgDepth15Cols Qsag.pcgDenseRows Qsag.pcgDenseWeightT q l 256 ∧
@@ -62,7 +69,8 @@ theorem pcg_dual_lpn_bias_in_spec_ratBound
     (Qsag.noiseSignedSum 32768 (Qsag.rowTestFns (Qsag.lpnMatrixRow Qsag.auditSession 0 1 15 0)) false).natAbs *
       2 ^ 117 < 32768 ^ 64 := by
   obtain ⟨hSd, _⟩ := Qsag.pcg_dense_depth15_prange_and_stern_dumer_pq128 q l hq
-  exact ⟨Qsag.TapRowBias.prodRow0_bias_bracket, hSd,
+  obtain ⟨_, _, _, h219, h220, h135⟩ := Qsag.TapRowBias.prodRow0Bal11_bias_bracket
+  exact ⟨⟨h219, h220, h135⟩, Qsag.TapRowBias.prodRow0_bias_bracket, hSd,
     Qsag.prodRow0Taps_eq_generator, Qsag.generatedRow0_bias_bracket.1⟩
 
 /-! ## 2. RLWE-1024 Preprocessing, SPCOT Peer Verification, and Cyclotomic SIS Boundary -/
@@ -775,12 +783,21 @@ theorem blindVc_concrete_fp5_qrom_opening_soundness
     Scope. The transition function validates wire data on its own state: caller port, issuance
     arity, the 33-repetition Limbo opening, ticket quorum and counter window, reservoir cursors,
     and the SPDZ MAC equations on the three openings of an evaluation. It contains no call to
-    `Spec.credExec` and reads no verdict bit from a wire. It is still a model of the gates, not
-    of the arithmetic behind them: an accepted evaluation returns `cfg.oprf` at the ticket's
-    point instead of a value reconstructed from shares, issuance stores the submitted attributes
-    without a ZKBoo transcript, and the MAC key is a state field whose secrecy is not modelled.
-    The refinement therefore shows that these gates admit no behaviour outside
-    `Spec.idealCredMachine`; it does not show that the SPDZ circuit computes the PRF. -/
+    `Spec.credExec` and reads no verdict bit from a wire. It is a model of the gates: an accepted
+    evaluation of this machine returns `cfg.oprf` at the ticket's point, so the refinement shows
+    that these gates admit no behaviour outside `Spec.idealCredMachine`, not that the SPDZ
+    circuit computes the PRF. The arithmetic behind the gates is modelled in
+    `Qsag.Protocol.Credentials.ToprfSpdzArithmeticRefinement`: `piToprfRealSpdzMachine` runs this
+    gate layer over servers holding shares of the PRF key and of the `GF(p²)` MAC key and
+    releases the value reconstructed from opened output shares. There an accepted evaluation
+    releases `evalAlgebraicOprf k` at the encoded point unless an adversarial error lane satisfies
+    `d ≠ 0 ∧ m = α · d` or a corrupt randomizer cancels an honest blinding randomizer; for one
+    evaluation at most one of the `p²` MAC keys is fooled; and outside that bad event the machine
+    refines `Spec.idealCredMachine` with `cfg.oprf = evalAlgebraicOprf k ∘ enc`. Issuance there
+    opens an attribute commitment and passes the 33-repetition opening check. Still assumed or
+    unproved: valid preprocessing, the probability of randomizer cancellation, composition of
+    the key bound over evaluations, binding of the commitment function, and pseudorandomness of
+    the PRF. -/
 def toprfCredentialImplementation {O : Type} (Attr : Type) [DecidableEq Attr]
     (cfg : Qsag.Spec.IdealCredConfig O) :
     CredentialImplementation Attr cfg (Qsag.piToprfCredService (Attr := Attr) cfg) where
@@ -852,9 +869,11 @@ theorem piToprfCredMachine_reservoir_never_rewinds {Attr O : Type} [DecidableEq 
 /-- **An accepted TOPRF evaluation passed the checks computed from its wire data**: context equal
     to the granted ticket, canonical request word, the SPDZ MAC equation on all three openings
     under the MAC key in the machine state, zero dual-copy difference, equal output copies. The
-    wire carries no verdict bit. What this does not say: the released value is `cfg.oprf` at the
-    ticket's point; the machine does not recompute the PRF from shares, and the MAC key's secrecy
-    is not modelled. -/
+    wire carries no verdict bit. This theorem is about the gate layer only, whose released value
+    is `cfg.oprf` at the ticket's point. Reconstruction of that value from shares, and
+    independence of one evaluation's transcript from the MAC key for an adversary with no
+    forgery lane, are stated for `piToprfRealSpdzMachine` in
+    `Qsag.Protocol.Credentials.ToprfSpdzArithmeticRefinement`. -/
 theorem piToprfCredService_eval_accept_checks {Attr O : Type} [DecidableEq Attr]
     (cfg : Qsag.Spec.IdealCredConfig O) (c c' : Qsag.PiToprfCredState Attr O)
     (port : Qsag.Spec.CredPort) (t : Qsag.Spec.ToprfTicket) (input : Qsag.Spec.Bytes)
