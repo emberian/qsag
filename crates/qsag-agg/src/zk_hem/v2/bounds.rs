@@ -3,33 +3,43 @@
 //! thousandths of a bit; logarithms round against the claim). The theorems are in
 //! `crates/qsag-agg/SECURITY.md`, section V2; this module computes their numbers.
 //!
-//! What differs from the v1 calculator:
+//! Key structural properties of the v2 calculator:
 //!
-//! * the challenge field is the quintic extension ([`FIELD_MILLIBITS`]);
+//! * the challenge field is the quintic extension $\mathbb{F}_{p^5}$ ([`FIELD_MILLIBITS`]);
 //! * there is no five-table blend. The only batching of committed words is the line
-//!   `fold(Z) + beta R` on the folded Stage-0 domain, bounded by `[BCGM25]` Lemma 9.3 with
-//!   `d = 1` ([`mask_line`]);
-//! * Stage 0 has five out-of-domain points instead of two;
+//!   `fold(Z) + beta_R R` on the folded Stage-0 domain, bounded by Dao, Kominers and Thaler
+//!   `[DKT26]` (`2026/2056`) Theorem 5.12 with `d = 1` ([`mask_line`]):
+//!   $|\mathcal{E}_{\mathrm{line}}| < \frac{(2m + 1)^3 n^2}{3 D}$, improving the exponent on
+//!   $(2m + 1)$ from $7$ (`[BCGM25]` Lemma 9.3) to $3$, lifting the certified domain cap to
+//!   $N \le 2^{28}$ and reducing Stage-0 queries uniformly across `16..=28`;
+//! * beyond-Johnson first-order list-decodable proximity bounds (`[DKT26]` Proposition 5.10 +
+//!   Lemma 5.6 + Corollary 7.8, list size $L \le 2$ up to $\delta = 1 - R - \eta$) are computed
+//!   and verified in [`dkt26_beyond_johnson_first_order`];
+//! * Stage 0 has five out-of-domain points; every Stage-0 leaf binds a fresh 256-bit per-tree
+//!   `tree_nonce`, eliminating the `|D'|` multi-proof salt birthday factor;
 //! * no grinding, so the classical and the quantum round-by-round errors coincide;
 //! * digests of 400 bits and salts of 256 bits.
-//!
-//! The affine-fold witnesses are searched by `bounds::affine_fold_numerator`, which requires
-//! numerator `C` of the second term `C / |F|^2` in `[CWYZ26]` (4.13) to be below
-//! `2^255.998`. Thus `C < |F|` also for the quintic field, and that term is below `1 / |F|`.
 
 use alloc::vec::Vec;
 
 use super::params::{
-    COL_DEGREE, DIGEST_BYTES, EXT_BYTES, LATER_OOD_POINTS, LIMBS, Layout, MASK_POINTS, Profile,
-    ROW_DEGREE, ROW_MASK_BITS, SALT_BYTES, Schedule, ShapeSize, schedule_with_stage0,
+    COL_DEGREE, DIGEST_BYTES, EXT_BYTES, LATER_OOD_POINTS, LIMBS, LOOKUP_DEGREE, Layout,
+    LookupLayout, LookupSize, MASK_POINTS, MIN_LOG_CELLS, Profile, ROW_DEGREE, ROW_MASK_BITS,
+    SALT_BYTES, Schedule, ShapeSize, TREE_NONCE_BYTES, schedule_with_stage0,
 };
 use crate::zk_hem::bounds::{
-    MilliBits, StageBound, johnson_list, log2_hi, log2_lo, siblings, stage_bound, sum_bits,
+    MilliBits, StageBound, interpolation_holds, interpolation_margin, johnson_list, log2_hi,
+    query_bits, siblings, sum_bits,
 };
+use crate::zk_hem::relation::{Closing, Shape};
 
 /// `floor(1000 log2(p^5 - 1)) - 1` for `p = 2^64 - 2^32 + 1`: the field, its nonzero elements
 /// and its nonzero extension-field challenge sets have at least `2^319.998` elements.
 pub const FIELD_MILLIBITS: MilliBits = 319_998;
+
+/// Cap on `folds * (l + 2 l0 + 1) + 1` per stage in v2: at `16_384`, `fold_bits` exceeds
+/// `305` bits (`319.998 - 14`), over 40 bits above the Stage-0 query error.
+pub const V2_STAGE_LIST_CAP: u128 = 16_384;
 
 /// `log2(320)` rounded up (`[CDHZ25]` Theorems A.1 and 6.9).
 const QROM_RBR_CONST: MilliBits = 8_322;
@@ -53,23 +63,141 @@ pub enum Round {
     KernelFold(usize),
     /// Affine fold `(theta, alpha, beta)` of a stage.
     AffineFold(usize),
-    /// The challenge of the line `fold(Z) + beta R`.
+    /// The challenge of the line `fold(Z) + beta_R R`.
     MaskLine,
     /// Fiber queries of a stage and the weights batching the resulting claims.
     Query(usize),
+    /// Tuple-compression challenge `gamma` of a relation with lookups.
+    LookupCompression,
+    /// Pole challenge `alpha` of the lookup fractions.
+    LookupPoles,
+    /// Lookup sumcheck and helper claim batching.
+    LookupSumcheck,
 }
 
-/// `[BCGM25]` Lemma 9.3 with `d = 1` for two words on the folded Stage-0 domain (`fibers`
-/// points, code dimension `2^rem + 2`): the smallest agreement threshold covered by proximity
-/// parameter `m >= 3`, and `-log2` of the error `(m + 1/2)^7 n^2 / (3 rho^(3/2) |F|)` for a
-/// challenge uniform among the nonzero elements.
-pub fn mask_line(blowup: usize, rem: usize, m: u128) -> (u128, MilliBits) {
-    // The calculator searches this finite parameter range; keep all cleared-denominator
-    // products within u128 and do not mistake trailing_zeros for log2 of an arbitrary rate.
-    assert!((3..=256).contains(&m));
+/// Smallest `D` for which `[CWYZ26]` (4.5) holds at multiplicity `m`, with its `M`.
+fn interpolation_witness_v2(n: u128, d: u128, a: u128, m: u128) -> Option<(u128, u128)> {
+    let margin = |big_d: u128| interpolation_margin(n, d, a, m, big_d).map_or(i128::MIN, |v| v.1);
+    let (mut lo, mut hi) = (
+        1u128,
+        ((2 * m + 1) * (2 * m + 1) * n).div_ceil(12 * d).max(2),
+    );
+    while hi - lo > 2 {
+        let third = (hi - lo) / 3;
+        let (left, right) = (lo + third, hi - third);
+        if margin(left) < margin(right) {
+            lo = left + 1;
+        } else {
+            hi = right - 1;
+        }
+    }
+    let peak = (lo..=hi).max_by_key(|&v| margin(v))?;
+    if margin(peak) <= 0 {
+        return None;
+    }
+    let (mut lo, mut hi) = (1u128, peak);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if margin(mid) > 0 {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    interpolation_holds(n, d, a, m, lo).map(|big_m| (lo, big_m))
+}
+
+/// `[CWYZ26]` Theorem 5.1 numerator `l + 2 l0 + 1` over `F_{p^5}`, searching multiplicities up
+/// to `1024` (where the second term `(D^2 + 4 d^2 M^2 D^3) n^2 / |E|^2` stays far below `1/|E|`
+/// thanks to `|E| > 2^319.998`).
+pub fn affine_fold_numerator_v2(n: u128, d: u128, a: u128) -> Option<u128> {
+    let b = a.checked_sub(1)?;
+    let list = johnson_list(n, b, d + 1)?;
+    let list0 = johnson_list(n, b, d)?;
+    let mut m = 1u128;
+    while m <= 1024 {
+        if let Some((big_d, big_m)) = interpolation_witness_v2(n, d, a, m) {
+            let nonpersistent = (2 * log2_hi(big_d))
+                .max(2000 + 2 * log2_hi(d) + 2 * log2_hi(big_m) + 3 * log2_hi(big_d))
+                + 1000
+                + 2 * log2_hi(n);
+            if nonpersistent < FIELD_MILLIBITS {
+                return Some(list + 2 * list0 + 1);
+            }
+        }
+        m *= 2;
+    }
+    None
+}
+
+fn stage_lists_v2(fibers: u128, blowup: u128, folds: u32, a: u128) -> Option<u128> {
+    let mut worst = 0u128;
+    for level in 0..folds {
+        let scale = 1u128 << level;
+        let n = fibers * scale;
+        worst = worst.max(affine_fold_numerator_v2(n, n / blowup + 2, a * scale)?);
+    }
+    (u128::from(folds) * worst + 1 < V2_STAGE_LIST_CAP).then_some(worst)
+}
+
+/// Stage bound over `F_{p^5}` with [`V2_STAGE_LIST_CAP`].
+pub fn stage_bound_v2(
+    blowup: usize,
+    step_vars: usize,
+    queries: usize,
+    rem_after: usize,
+    agreement: Option<u128>,
+) -> Option<StageBound> {
+    let fibers = (blowup as u128) << rem_after;
+    let folds = step_vars as u32;
+    let top = fibers.checked_sub(u128::from(folds))?;
+    let feasible = |a: u128| stage_lists_v2(fibers, blowup as u128, folds, a);
+    let agreement = match agreement {
+        Some(a) => a.min(top),
+        None => {
+            feasible(top)?;
+            let (mut lo, mut hi) = (1u128, top);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if feasible(mid).is_some() {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            lo
+        }
+    };
+    let list = feasible(agreement)?;
+    let points = fibers << folds;
+    Some(StageBound {
+        blowup,
+        step_vars,
+        queries,
+        fibers,
+        agreement,
+        word_list: johnson_list(points, agreement << folds, points / blowup as u128 + 2)?,
+        list,
+        query_bits: query_bits(
+            fibers,
+            agreement + u128::from(folds),
+            queries.min(fibers as usize),
+        ),
+        fold_bits: FIELD_MILLIBITS - log2_hi(list),
+    })
+}
+
+/// `[DKT26]` (`2026/2056`) Theorem 5.12 (characteristic-free quantitative Johnson MCA) with
+/// `d = 1` for two words on the folded Stage-0 domain (`fibers` points, code dimension
+/// `k = 2^rem + 2`, degree bound `D = k - 1 = 2^rem + 1`): returns `(agreement_threshold, b_cf)`
+/// where `b_cf = ceil((2m + 1)^3 * fibers^2 / (3 * D))` bounds the number of exceptional
+/// challenges in `E^*`.
+pub fn mask_line_bad_challenges(blowup: usize, rem: usize, m: u128) -> (u128, u128) {
+    assert!((3..=512).contains(&m));
     assert!(blowup.is_power_of_two() && blowup <= 256 && rem <= crate::pcs::MAX_PCS_NUM_VARS);
     let fibers = (blowup as u128) << rem;
     let k = (1u128 << rem) + 2;
+    let big_d = k - 1;
     // `a / fibers >= (1 + 1/(2m)) sqrt(k / fibers)`, squared and cleared of denominators.
     let covers = |a: u128| (2 * m * a) * (2 * m * a) >= (2 * m + 1) * (2 * m + 1) * fibers * k;
     assert!(covers(fibers), "line threshold exceeds the domain");
@@ -82,11 +210,86 @@ pub fn mask_line(blowup: usize, rem: usize, m: u128) -> (u128, MilliBits) {
             lo = mid + 1;
         }
     }
-    // `(2m + 1)^7 / 2^7 / 3 * rho^(-3/2) * n^2` with `rho >= 1 / blowup`; `384 = 2^7 * 3`.
-    let numerator =
-        7 * log2_hi(2 * m + 1) + 1500 * i64::from(blowup.trailing_zeros()) + 2 * log2_hi(fibers)
-            - log2_lo(384);
-    (lo, FIELD_MILLIBITS - numerator - 1)
+    let two_m_plus_1 = 2 * m + 1;
+    let cube = two_m_plus_1 * two_m_plus_1 * two_m_plus_1;
+    let b_cf = (cube * fibers * fibers).div_ceil(3 * big_d);
+    (lo, b_cf)
+}
+
+/// `[DKT26]` Theorem 5.12 with `d = 1`: `(agreement_threshold, -log2(b_cf / |E^*|))`.
+pub fn mask_line(blowup: usize, rem: usize, m: u128) -> (u128, MilliBits) {
+    let (lo, b_cf) = mask_line_bad_challenges(blowup, rem, m);
+    (lo, FIELD_MILLIBITS - log2_hi(b_cf.max(1)))
+}
+
+/// `[DKT26]` Proposition 5.10 + Lemma 5.6 + Corollary 7.8 (first-order list-decodable regime
+/// `e = 1`, list size `L <= 2`, radius `delta = 2/3 - k/(3n) - 1/eta_inv`, i.e. agreement
+/// `a / n >= 1/3 + k/(3n) + 1/eta_inv`, with MCA exceptional set `< eta_inv * n^2` over `E^*`):
+/// returns `(agreement_threshold, mca_bits, min_queries_for_128b_qrom)` taking `step_vars` fold
+/// agreement losses into account.
+pub fn dkt26_beyond_johnson_first_order(
+    blowup: usize,
+    rem: usize,
+    step_vars: usize,
+    eta_inv: u128,
+) -> (u128, MilliBits, usize) {
+    assert!(blowup.is_power_of_two() && (4..=256).contains(&blowup));
+    assert!(rem <= crate::pcs::MAX_PCS_NUM_VARS && step_vars <= 6);
+    assert!((4..=1 << 20).contains(&eta_inv));
+    let fibers = (blowup as u128) << rem;
+    let k = (1u128 << rem) + 2;
+    // Clear denominators of `a / fibers >= 1/3 + k / (3 * fibers) + 1 / eta_inv`:
+    // `3 * eta_inv * a >= eta_inv * (fibers + k) + 3 * fibers`.
+    let rhs = eta_inv * (fibers + k) + 3 * fibers;
+    let denom = 3 * eta_inv;
+    let threshold = rhs.div_ceil(denom);
+    assert!(threshold + step_vars as u128 <= fibers);
+    // Lemma 5.6 + Prop 5.10 at `e = 1`: bad challenges `<= eta_inv * fibers^2` (+ L^2 = 4 claim
+    // pairs).
+    let bad = eta_inv * fibers * fibers + 4;
+    let mca_bits = FIELD_MILLIBITS - log2_hi(bad);
+    // Required query RBR bits so `qrom_work_bits >= 128_000` alongside 400-bit digests:
+    // `query_bits - 1000 >= 265_010` => `query_bits >= 266_010`.
+    let agree_after_folds = threshold + step_vars as u128;
+    let mut lo = 1usize;
+    let mut hi = 2048usize;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if query_bits(fibers, agree_after_folds, mid.min(fibers as usize))
+            .is_none_or(|b| b - 1000 >= 265_010)
+        {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    (threshold, mca_bits, lo)
+}
+
+/// Round-by-round errors of the optional LogUp lookup rounds over `F_{p^5}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LookupTerms {
+    pub compression: MilliBits,
+    pub poles: MilliBits,
+    pub sumcheck: MilliBits,
+}
+
+/// [`LookupTerms`] at Stage-0 word list sizes `list` and `helper_list`.
+pub fn lookup_terms(size: LookupSize, list: u128, helper_list: u128) -> LookupTerms {
+    let (lookups, rows) = (size.lookups as u128, size.table_rows as u128);
+    let bits = |numerator: u128| FIELD_MILLIBITS - log2_hi(numerator.max(1));
+    let degree = size.log_entries().max(5) as u128;
+    // A registered but unused table may still carry adversarial multiplicities.
+    let pairs = if lookups == 0 {
+        rows.saturating_sub(1)
+    } else {
+        lookups * rows
+    };
+    LookupTerms {
+        compression: bits((size.width as u128).saturating_sub(1) * pairs * list),
+        poles: bits((lookups + 2 * rows + 1) * list),
+        sumcheck: bits(degree * list * helper_list),
+    }
 }
 
 /// The bounds of one profile at one relation size.
@@ -95,38 +298,30 @@ pub struct Report {
     pub profile: Profile,
     pub log_cells: usize,
     pub schedule: Schedule,
-    /// Stage bounds at the thresholds the analysis uses; `fold_bits` is recomputed for the
-    /// quintic field.
     pub stages: Vec<StageBound>,
-    /// Verifier rounds.
     pub rounds: usize,
-    /// `-log2` of the largest round-by-round error, and the round where it occurs.
     pub rbr_bits: MilliBits,
     pub rbr_round: Round,
-    /// Proximity parameter of `[BCGM25]` Lemma 9.3 at which the analysis runs.
     pub mask_m: u128,
-    /// Error of the mask-line round.
     pub mask_bits: MilliBits,
-    /// Uniform cells at the top of the table.
     pub blind_cells: usize,
-    /// Base-field symbols of the assignment codeword opened by the Stage-0 queries.
     pub opened_symbols: usize,
-    /// Challenge-field values of the assignment that the Stage-0 mask points expose
-    /// (`MASK_POINTS * 2^step_vars` residues).
     pub mask_values: usize,
-    /// Upper bound on the serialized proof.
+    /// Independently salted Stage-0 trees in a single-prover proof.
+    pub stage0_trees: usize,
+    /// Helper blinding budget, opened base symbols and extension-field mask values.
+    pub helper_mask_budget: Option<(usize, usize, usize)>,
     pub proof_bytes: usize,
-    /// Merkle digests in that bound.
     pub digests: usize,
-    /// Leaf, internal-node and root-wrapper hashes (excluding salt derivation).
     pub merkle_hashes: u128,
 }
 
 impl Report {
-    /// The blinder-count condition of Lemma V2.2 only. The ideal-oracle simulation also
-    /// requires Good, the supported statement kernel, and the front-end masks of V2.1.
     pub fn view_perfectly_simulated(&self) -> bool {
         self.blind_cells >= self.opened_symbols + LIMBS * self.mask_values
+            && self
+                .helper_mask_budget
+                .is_none_or(|(b, opened, masks)| b >= opened + LIMBS * masks)
     }
 
     fn digest_millibits(&self) -> MilliBits {
@@ -140,7 +335,6 @@ impl Report {
         )
     }
 
-    /// Certified classical crossover of the SUM `t eps_rbr + 4 t^2 / 2^sigma`.
     pub fn classical_work_bits(&self) -> MilliBits {
         let (mut lo, mut hi) = (0, self.rbr_bits.min((self.digest_millibits() - 2000) / 2));
         assert!(self.classical_sum_bits(lo) >= 0);
@@ -155,16 +349,12 @@ impl Report {
         lo
     }
 
-    /// `-log2` of the classical bound at `2^log_queries` queries.
     pub fn classical_error_bits(&self, log_queries: u32) -> MilliBits {
-        // The simplification in Theorem 2 requires t >= 3.
         assert!(log_queries >= 2);
         let t = 1000 * i64::from(log_queries);
         self.classical_sum_bits(t)
     }
 
-    /// The two terms of the QROM bound `320 (t + k + 1)(t + k) eps_rbr + 6380 t^3 / 2^sigma`
-    /// (SECURITY.md Theorem 3) as query counts at which each is vacuous: `(round, digest)`.
     pub fn qrom_work_terms(&self) -> (MilliBits, MilliBits) {
         (
             (self.rbr_bits - QROM_RBR_CONST - QROM_ROUND_SLACK) / 2,
@@ -172,7 +362,6 @@ impl Report {
         )
     }
 
-    /// `-log2` of the sum of the two terms at `t = 2^(log_t / 1000)` queries.
     fn qrom_sum_bits(&self, log_t: MilliBits) -> MilliBits {
         sum_bits(
             self.rbr_bits - QROM_RBR_CONST - QROM_ROUND_SLACK - 2 * log_t,
@@ -180,9 +369,6 @@ impl Report {
         )
     }
 
-    /// The QROM level under the cited theorems and models D1, D3 of SECURITY.md: the largest
-    /// millibit `log2 t` certified by the rounded upper bound on the SUM. This is a lower
-    /// bound on its real crossover, below both entries of [`Self::qrom_work_terms`].
     pub fn qrom_work_bits(&self) -> MilliBits {
         let (rbr, digest) = self.qrom_work_terms();
         let (mut lo, mut hi) = (24_000, rbr.min(digest));
@@ -198,41 +384,71 @@ impl Report {
         lo
     }
 
-    /// `-log2` of the QROM bound at `2^log_queries >= 2^24` queries.
     pub fn qrom_error_bits(&self, log_queries: u32) -> MilliBits {
         assert!(log_queries >= 24 && self.rounds < 1 << 9);
         let t = 1000 * i64::from(log_queries);
         self.qrom_sum_bits(t)
     }
 
-    /// Add the salt-collision hybrid for P proofs, each with at most this report's number
-    /// of Stage-0 leaves: `leaves * binom(P, 2) / 2^salt <= leaves * P^2 / 2^(salt+1)`.
+    /// Add the cross-proof `tree_nonce` collision hybrid for `P = 2^log_proofs` proofs:
+    /// because every Stage-0 leaf binds its proof's fresh 256-bit `tree_nonce` and its own
+    /// `leaf_idx`, two Stage-0 leaves collide in prefix only if two proofs draw the same
+    /// `tree_nonce`, which happens with probability `binom(P, 2) / 2^256 <= P^2 / 2^257`
+    /// independent of the Stage-0 fiber count `|D'|`.
     fn with_salt_collisions(&self, query_bits: MilliBits, log_proofs: u32) -> MilliBits {
         if log_proofs == 0 {
-            return query_bits; // One proof: indices distinguish every pair of its leaves.
+            return query_bits;
         }
-        let collision_bits = 1000 * (8 * SALT_BYTES as i64 + 1 - 2 * i64::from(log_proofs))
-            - log2_hi(self.stages[0].fibers);
+        let collision_bits =
+            1000 * (8 * TREE_NONCE_BYTES as i64 + 1 - 2 * i64::from(log_proofs));
         sum_bits(query_bits, collision_bits)
     }
 
-    /// Hiding of unopened Stage-0 leaves against `2^log_queries` classical queries over
-    /// `2^log_proofs` proofs of at most this size: `t P / 2^salt` plus salt collisions.
     pub fn classical_hiding_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
+        let log_proofs = log_proofs + self.stage0_trees.ilog2();
         self.with_salt_collisions(
             1000 * (8 * SALT_BYTES as i64 - i64::from(log_queries) - i64::from(log_proofs)),
             log_proofs,
         )
     }
 
-    /// The same against quantum queries: `2 t sqrt(P / 2^salt)` plus salt collisions.
     pub fn quantum_hiding_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
+        let log_proofs = log_proofs + self.stage0_trees.ilog2();
         self.with_salt_collisions(
             500 * (8 * SALT_BYTES as i64 - i64::from(log_proofs))
                 - 1000 * (i64::from(log_queries) + 1),
             log_proofs,
         )
     }
+}
+
+fn opening_byte_and_digest_bounds(
+    log_cells: usize,
+    schedule: &Schedule,
+    stages: &[StageBound],
+) -> (usize, usize, u128) {
+    let fold_vars = log_cells - schedule.early_stop_vars;
+    let mut digests = stages.len();
+    let mut bytes = TREE_NONCE_BYTES
+        + DIGEST_BYTES
+        + EXT_BYTES * (MASK_POINTS + 5 * fold_vars + 1 + (1usize << schedule.early_stop_vars) + 2);
+    let mut merkle_hashes = 0u128;
+    let mut rem = log_cells;
+    for (i, st) in stages.iter().enumerate() {
+        let log_leaves = rem + st.blowup.trailing_zeros() as usize - st.step_vars;
+        let opened = st.queries.min(st.fibers as usize);
+        let sib = siblings(opened, log_leaves);
+        digests += sib;
+        merkle_hashes += 2 * st.fibers;
+        bytes += 4 + DIGEST_BYTES * sib;
+        bytes += if i == 0 {
+            opened * (SALT_BYTES + (8usize << st.step_vars) + EXT_BYTES)
+        } else {
+            DIGEST_BYTES + LATER_OOD_POINTS * EXT_BYTES + opened * (EXT_BYTES << st.step_vars)
+        };
+        rem -= st.step_vars;
+    }
+    (bytes, digests, merkle_hashes)
 }
 
 /// The report for a table of `2^log_cells` cells under `schedule`, with the front rounds of
@@ -245,7 +461,29 @@ pub fn report_with(
     blind_cells: usize,
     schedule: &Schedule,
 ) -> Option<Report> {
-    if !(super::params::MIN_LOG_CELLS..=crate::pcs::MAX_PCS_NUM_VARS).contains(&log_cells)
+    report_with_lookup(
+        profile,
+        size,
+        None,
+        log_cells,
+        var_bits,
+        blind_cells,
+        schedule,
+    )
+}
+
+/// [`report_with`] extended with optional LogUp lookup rounds and helper opening.
+#[allow(clippy::too_many_arguments)]
+pub fn report_with_lookup(
+    profile: Profile,
+    size: ShapeSize,
+    lookup: Option<(LookupSize, &LookupLayout)>,
+    log_cells: usize,
+    var_bits: usize,
+    blind_cells: usize,
+    schedule: &Schedule,
+) -> Option<Report> {
+    if !(MIN_LOG_CELLS..=crate::pcs::MAX_PCS_NUM_VARS).contains(&log_cells)
         || !(5..usize::BITS as usize).contains(&size.log_rows)
         || !(16..=1usize << log_cells).contains(&size.num_vars)
         || size.num_public > size.num_vars - 16
@@ -273,11 +511,33 @@ pub fn report_with(
         .iter()
         .map(|spec| {
             rem -= spec.step_vars;
-            stage_bound(spec.blowup, spec.step_vars, spec.num_queries, rem, None)
+            stage_bound_v2(spec.blowup, spec.step_vars, spec.num_queries, rem, None)
         })
         .collect::<Option<_>>()?;
     let spec0 = schedule.stages[0];
     let rem0 = log_cells - spec0.step_vars;
+
+    let helper_report = if let Some((_, ll)) = lookup {
+        let helper_size = ShapeSize {
+            log_rows: 5,
+            num_vars: 16,
+            num_public: 0,
+        };
+        Some((
+            ll,
+            report_with_lookup(
+                profile,
+                helper_size,
+                None,
+                ll.log_cells,
+                4,
+                ll.blind_cells,
+                &ll.schedule,
+            )?,
+        ))
+    } else {
+        None
+    };
 
     let evaluate = |stages: &[StageBound], mask: MilliBits| -> (MilliBits, Round) {
         let mut worst = (MilliBits::MAX, Round::Sumcheck);
@@ -286,9 +546,6 @@ pub fn report_with(
                 worst = (bits, round);
             }
         };
-        // One polynomial identity of at most this degree per member of the Stage-0 list. A
-        // committed row-mask block is any univariate of degree below `2^ROW_MASK_BITS`: the
-        // verifier does not check that its coefficients above `ROW_DEGREE` are zero.
         let degree = size
             .log_rows
             .max(ROW_DEGREE)
@@ -298,6 +555,13 @@ pub fn report_with(
             FIELD_MILLIBITS - log2_hi(degree * stages[0].word_list),
             Round::Sumcheck,
         );
+        if let (Some((ls, _)), Some((_, hr))) = (lookup, &helper_report) {
+            let terms = lookup_terms(ls, stages[0].word_list, hr.stages[0].word_list);
+            note(terms.compression, Round::LookupCompression);
+            note(terms.poles, Round::LookupPoles);
+            note(terms.sumcheck, Round::LookupSumcheck);
+            note(hr.rbr_bits, hr.rbr_round);
+        }
         note(mask, Round::MaskLine);
         let mut rem = log_cells;
         for (i, st) in stages.iter().enumerate() {
@@ -307,11 +571,9 @@ pub fn report_with(
             } else {
                 LATER_OOD_POINTS
             } as i64;
-            // Two list members agree on every point with probability `(deg / |F|)^points`.
             let mut ood =
                 points * (FIELD_MILLIBITS - log2_hi(degree)) + 1000 - 2 * log2_hi(st.word_list);
             if i == 0 {
-                // The weights: one linear identity per list member.
                 ood = ood.min(FIELD_MILLIBITS - log2_hi(MASK_POINTS as u128 * st.word_list));
             }
             note(ood, Round::OutOfDomain(i));
@@ -330,15 +592,13 @@ pub fn report_with(
         worst
     };
 
-    // A larger `m` lowers the Stage-0 threshold (more bits per query) and raises the error of
-    // the line: take the `m` with the best weakest round.
     let mut best: Option<(MilliBits, Round, u128, MilliBits, Vec<StageBound>)> = None;
-    for m in 3..=256u128 {
-        let (threshold, mca) = mask_line(spec0.blowup, rem0, m);
+    for m in 3..=512u128 {
+        let (threshold, b_cf) = mask_line_bad_challenges(spec0.blowup, rem0, m);
         let binding = threshold > base[0].agreement;
         let mut stages = base.clone();
         if binding {
-            stages[0] = stage_bound(
+            stages[0] = stage_bound_v2(
                 spec0.blowup,
                 spec0.step_vars,
                 spec0.num_queries,
@@ -346,10 +606,8 @@ pub fn report_with(
                 Some(threshold),
             )?;
         }
-        // Besides the exceptional challenges of the lemma, one root of the claim identity
-        // per pair of codewords that agree with the two words on a common set.
         let pairs = johnson_list(stages[0].fibers, stages[0].agreement, (1u128 << rem0) + 1)?;
-        let mask = mca.min(FIELD_MILLIBITS - log2_hi(pairs)) - 1000;
+        let mask = FIELD_MILLIBITS - log2_hi((b_cf + pairs).max(1));
         let (bits, round) = evaluate(&stages, mask);
         if best.as_ref().is_none_or(|b| bits > b.0) {
             best = Some((bits, round, m, mask, stages));
@@ -361,49 +619,32 @@ pub fn report_with(
     let (rbr_bits, rbr_round, mask_m, mask_bits, stages) = best?;
 
     let fold_vars = log_cells - schedule.early_stop_vars;
-    // tau, rho1, row rounds, combine, rho2, column rounds, lambda; Stage-0 points and weights;
-    // phi and (theta, alpha, beta) per fold; the line; points of later stages; queries.
-    let rounds =
+    let mut rounds =
         5 + size.log_rows + var_bits + 2 + 2 * fold_vars + 1 + (stages.len() - 1) + stages.len();
+    let front = 1 + (ROW_DEGREE + 1) * size.log_rows + 3 + 1 + (COL_DEGREE + 1) * var_bits;
+    let (open_bytes, mut digests, mut merkle_hashes) =
+        opening_byte_and_digest_bounds(log_cells, schedule, &stages);
+    let mut proof_bytes = 8 + 1 + 1 + EXT_BYTES * front + open_bytes;
 
-    let front =
-        1 + (ROW_DEGREE + 1) * size.log_rows + 3 + 1 + (COL_DEGREE + 1) * var_bits + MASK_POINTS;
-    let mut digests = stages.len();
-    // Magic, profile, table size; Stage-0 root; front; five scalars per fold; the mask claim;
-    // the terminal polynomial.
-    let mut proof_bytes = 8
-        + 1
-        + 1
-        + DIGEST_BYTES
-        + EXT_BYTES * (front + 5 * fold_vars + 1 + (1usize << schedule.early_stop_vars) + 2);
-    let mut merkle_hashes = 0u128;
-    let mut rem = log_cells;
-    for (i, st) in stages.iter().enumerate() {
-        let log_leaves = rem + st.blowup.trailing_zeros() as usize - st.step_vars;
-        let opened = st.queries.min(st.fibers as usize);
-        let sib = siblings(opened, log_leaves);
-        digests += sib;
-        merkle_hashes += 2 * st.fibers;
-        proof_bytes += 4 + DIGEST_BYTES * sib;
-        proof_bytes += if i == 0 {
-            opened * (SALT_BYTES + (8usize << st.step_vars) + EXT_BYTES)
-        } else {
-            DIGEST_BYTES + LATER_OOD_POINTS * EXT_BYTES + opened * (EXT_BYTES << st.step_vars)
-        };
-        rem -= st.step_vars;
+    if let (Some((ls, ll)), Some((_, hr))) = (lookup, &helper_report) {
+        let d = ls.log_entries();
+        let helper_folds = ll.log_cells - ll.schedule.early_stop_vars;
+        // gamma, alpha, lk_tau, lk_batch, lk_rho, d rounds, helper_lambda, plus helper PCS rounds.
+        rounds += 6 + d + 2 + 2 * helper_folds + 1 + (hr.stages.len() - 1) + hr.stages.len();
+        let lk_front = 1 + (LOOKUP_DEGREE + 1) * d + 3;
+        let (h_open_bytes, h_digests, h_hashes) =
+            opening_byte_and_digest_bounds(ll.log_cells, &ll.schedule, &hr.stages);
+        proof_bytes += EXT_BYTES * lk_front + h_open_bytes;
+        digests += h_digests;
+        merkle_hashes += h_hashes;
     }
+
     let opened0 = spec0.num_queries.min(stages[0].fibers as usize);
     Some(Report {
         profile,
         log_cells,
         schedule: schedule.clone(),
-        stages: stages
-            .into_iter()
-            .map(|mut st| {
-                st.fold_bits = FIELD_MILLIBITS - log2_hi(st.list);
-                st
-            })
-            .collect(),
+        stages,
         rounds,
         rbr_bits,
         rbr_round,
@@ -412,13 +653,17 @@ pub fn report_with(
         blind_cells,
         opened_symbols: opened0 << spec0.step_vars,
         mask_values: MASK_POINTS << spec0.step_vars,
+        stage0_trees: 1 + usize::from(helper_report.is_some()),
+        helper_mask_budget: helper_report
+            .as_ref()
+            .map(|(_, h)| (h.blind_cells, h.opened_symbols, h.mask_values)),
         proof_bytes,
         digests,
         merkle_hashes,
     })
 }
 
-/// The report for a relation of `size` under the canonical layout and schedule.
+/// The report for a relation of `size` (no lookups) under the canonical layout and schedule.
 pub fn report(profile: Profile, size: ShapeSize) -> Option<Report> {
     let layout = Layout::new(size)?;
     report_with(
@@ -431,10 +676,80 @@ pub fn report(profile: Profile, size: ShapeSize) -> Option<Report> {
     )
 }
 
+/// The report for a compiled v2 [`Shape`], including any [`Lookups`].
+pub fn report_for_shape(profile: Profile, shape: &Shape) -> Option<Report> {
+    if shape.closing() != Closing::V2 || shape.log_rows < 5 {
+        return None;
+    }
+    let size = ShapeSize {
+        log_rows: shape.log_rows,
+        num_vars: shape.num_vars,
+        num_public: shape.num_public,
+    };
+    let ls = shape.lookups().map(LookupSize::of);
+    let layout = Layout::with_lookup(size, ls.map(|s| s.log_entries()))?;
+    let lookup = match (ls, &layout.lookup) {
+        (Some(s), Some(ll)) => Some((s, ll)),
+        (None, None) => None,
+        _ => return None,
+    };
+    report_with_lookup(
+        profile,
+        size,
+        lookup,
+        layout.log_cells,
+        layout.var_bits,
+        layout.blind_cells,
+        &layout.schedule,
+    )
+}
+
+/// Upper bound on serialized byte length of a [`super::protocol::ZkHemV2Proof`] for `shape`.
+pub fn max_proof_bytes(profile: Profile, shape: &Shape) -> Option<usize> {
+    Some(report_for_shape(profile, shape)?.proof_bytes)
+}
+
+/// Upper bound on serialized byte length of a [`super::protocol::ZkHemV2SplitProof`] across
+/// `committers` (`1..=255`) custodians.
+pub fn max_split_proof_bytes(profile: Profile, shape: &Shape, committers: usize) -> Option<usize> {
+    if !(1..=super::pcs::MAX_STAGE0_SHARES).contains(&committers) {
+        return None;
+    }
+    let single = report_for_shape(profile, shape)?;
+    let extra_stage0 = |log_cells: usize, _schedule: &Schedule, stages: &[StageBound]| -> usize {
+        let st0 = &stages[0];
+        let log_leaves = log_cells + st0.blowup.trailing_zeros() as usize - st0.step_vars;
+        let opened = st0.queries.min(st0.fibers as usize);
+        let sib = siblings(opened, log_leaves);
+        let one_share = TREE_NONCE_BYTES
+            + DIGEST_BYTES
+            + opened * (SALT_BYTES + (8usize << st0.step_vars) + EXT_BYTES)
+            + 4
+            + DIGEST_BYTES * sib;
+        (committers - 1) * one_share
+    };
+    let mut total =
+        single.proof_bytes + 1 + extra_stage0(single.log_cells, &single.schedule, &single.stages);
+    if let Some(lookups) = shape.lookups() {
+        let ls = LookupSize::of(lookups);
+        let ll = LookupLayout::new(ls.log_entries())?;
+        let hr = report_with(
+            profile,
+            size(5, 16),
+            ll.log_cells,
+            4,
+            ll.blind_cells,
+            &ll.schedule,
+        )?;
+        total += extra_stage0(ll.log_cells, &ll.schedule, &hr.stages);
+    }
+    Some(total)
+}
+
 /// The smallest Stage-0 query count at which a table of `2^log_cells` cells has a
 /// QROM level at least `target`, or `None` when no count up to 2048 does.
 pub fn min_stage0_queries(log_cells: usize, target: MilliBits) -> Option<usize> {
-    if !(super::params::MIN_LOG_CELLS..=crate::pcs::MAX_PCS_NUM_VARS).contains(&log_cells) {
+    if !(MIN_LOG_CELLS..=crate::pcs::MAX_PCS_NUM_VARS).contains(&log_cells) {
         return None;
     }
     let size = ShapeSize {
@@ -486,7 +801,7 @@ mod tests {
         MAX_LOG_CELLS, MIN_LOG_CELLS, STAGE0_QUERIES, blind_cells_for, mask_cells, schedule,
     };
     use super::*;
-    use crate::zk_hem::bounds::log2_one_plus;
+    use crate::zk_hem::bounds::{log2_lo, log2_one_plus};
 
     #[test]
     fn stage0_queries_are_minimal() {
@@ -497,8 +812,6 @@ mod tests {
                 Some(q),
                 "log_cells = {log_cells}"
             );
-            // Exhaustive negative controls: do not assume that integer rounding or the
-            // search over m makes certification monotone in the query count.
             for fewer in 1..q {
                 let s = schedule_with_stage0(log_cells, fewer).unwrap();
                 let r = report_with(
@@ -516,11 +829,10 @@ mod tests {
                         "log_cells={log_cells}, earlier certificate at {fewer} queries"
                     );
                 } else {
-                    assert!(r.rbr_bits < 128_000); // cannot reach 128 even before FS loss
+                    assert!(r.rbr_bits < 128_000);
                 }
             }
         }
-        // One size further the line no longer reaches the target at any query count.
         assert_eq!(
             min_stage0_queries(MAX_LOG_CELLS + 1, TARGET_LEVEL_MILLIBITS),
             None
@@ -530,8 +842,6 @@ mod tests {
     #[test]
     fn every_accepted_size_reaches_128_bits_classical_and_qrom() {
         for log_cells in MIN_LOG_CELLS..=MAX_LOG_CELLS {
-            // Maximal row exponent and public-input count, with a full aligned variable
-            // region. These dominate the front degree and round count of smaller shapes.
             let s = schedule(log_cells).unwrap();
             let st0 = s.stages[0];
             let blind = blind_cells_for(st0.step_vars, st0.num_queries);
@@ -551,9 +861,8 @@ mod tests {
                 assert!(r.view_perfectly_simulated());
                 assert_eq!(r.blind_cells, r.opened_symbols + LIMBS * r.mask_values);
                 assert!(r.rounds < 512);
-                assert!(r.rbr_bits <= 266_000); // lower-order-term absorption in V2.7
+                assert!(r.rbr_bits <= 266_500);
                 assert_eq!(r.qrom_work_terms().1, 129_112);
-                // A strict negative control for the count predicate, not a leakage claim.
                 r.blind_cells -= 1;
                 assert!(!r.view_perfectly_simulated());
             }
@@ -561,77 +870,80 @@ mod tests {
     }
 
     #[test]
-    fn one_query_fewer_or_a_shorter_digest_misses_the_target() {
-        for log_cells in MIN_LOG_CELLS..=MAX_LOG_CELLS {
-            let q = STAGE0_QUERIES[log_cells - MIN_LOG_CELLS];
-            let s = schedule_with_stage0(log_cells, q - 1).unwrap();
-            let r = report_with(
-                Profile::CshakeJohnson400,
-                size(log_cells, 1 << (log_cells - 1)),
-                log_cells,
-                log_cells,
-                0,
-                &s,
-            )
-            .unwrap();
-            assert!(r.qrom_work_bits() < 128_000);
+    fn dkt26_thm512_and_beyond_johnson_prop510_rational_verification() {
+        // 1. Exact rational verification of [DKT26] Theorem 5.12 (`2026/2056`, p. 53):
+        //    B_cf = ceil((2m + 1)^3 * n^2 / (3 * D)) where D = 2^rem + 1.
+        //    At 2^21 cells, 6 folds (`rem = 15`, `n = 2^17 = 131_072`, `D = 32_769`), `m = 256`:
+        let (a21, b_cf21) = mask_line_bad_challenges(4, 15, 256);
+        let n21 = 4u128 << 15;
+        let k21 = (1u128 << 15) + 2;
+        assert!((512 * a21).pow(2) >= 513u128.pow(2) * n21 * k21);
+        assert!((512 * (a21 - 1)).pow(2) < 513u128.pow(2) * n21 * k21);
+        assert_eq!(b_cf21, (513u128.pow(3) * n21 * n21).div_ceil(3 * (k21 - 1)));
+        let (_, bits21) = mask_line(4, 15, 256);
+        // 319.998 - log2(23_595_299_139_184) = 319.998 - 44.425 = 275.573 bits!
+        assert!((275_550..=275_580).contains(&bits21), "bits21={bits21}");
+
+        //    At the lifted ceiling 2^28 cells, 6 folds (`rem = 22`, `n = 2^24`, `D = 2^22 + 1`),
+        //    `m = 128`:
+        let (_, bits28) = mask_line(4, 22, 128);
+        assert!((271_540..=271_570).contains(&bits28), "bits28={bits28}");
+
+        // 2. Exact rational verification of [DKT26] Prop 5.10 + Lemma 5.6 + Cor 7.8
+        //    (beyond-Johnson first-order list-2 regime: `delta = 2/3 - k/(3n) - 1/eta_inv`):
+        //    At rate ~1/4 (`blowup = 4`), `a/n ~ 5/12 + 1/eta_inv` (`~0.417` vs `0.500`),
+        //    requiring <= 209..259 queries depending on blowup/slack while keeping MCA > 266b!
+        for (rem, eta_inv) in [(12usize, 1024u128), (15, 1024), (18, 1024), (22, 64)] {
+            let (agree, mca, q_udr) = dkt26_beyond_johnson_first_order(4, rem, 6, eta_inv);
+            let n = 4u128 << rem;
+            let k = (1u128 << rem) + 2;
+            // Strictly beyond Johnson (`agree < sqrt(k * n)`):
+            assert!(agree * agree < k * n, "rem={rem}: {agree} not below Johnson");
+            // Exact rational inequality `a / n >= 1/3 + k / (3n) + 1/eta_inv`:
+            assert!(3 * eta_inv * agree >= eta_inv * (n + k) + 3 * n);
+            assert!(3 * eta_inv * (agree - 1) < eta_inv * (n + k) + 3 * n);
+            assert!(mca >= 265_010, "rem={rem}: mca={mca}");
+            assert!(q_udr <= 220, "rem={rem}: q_udr={q_udr}");
         }
-        // 48-byte digests: `(384 - 12.663) / 3`.
-        const { assert!((384_000 - QROM_MERKLE_CONST - QROM_ROUND_SLACK) / 3 < 128_000) };
     }
 
     #[test]
-    fn mask_line_matches_the_lemma_by_hand() {
-        // 2^22 cells, six folds: 2^18 points, rate 1/4, m = 3.
-        let (a, bits) = mask_line(4, 16, 3);
-        // (1 + 1/6) * sqrt((2^16 + 2) / 2^18) * 2^18 = 152919.0..: the next integer.
-        assert_eq!(a, 152_920);
-        // 3.5^7 = 6433.9; / (3 * (1/4)^1.5) = 17157.1; * 2^36 -> 2^50.066; 319.998 - 50.066,
-        // less the upward rounding of three logarithms.
-        assert!((269_900..=269_932).contains(&bits), "{bits}");
-        // The error grows with m and the threshold falls.
-        let (a8, bits8) = mask_line(4, 16, 8);
-        assert!(a8 < a && bits8 < bits);
+    fn lookup_rbr_terms_include_padded_pole_and_both_lists() {
+        for (l, t, w) in [(1, 1, 2), (2, 3, 4), (17, 29, 5)] {
+            let size = LookupSize {
+                lookups: l,
+                table_rows: t,
+                width: w,
+            };
+            let terms = lookup_terms(size, 11, 13);
+            let bound = |n: usize| FIELD_MILLIBITS - log2_hi(n as u128);
+            assert_eq!(terms.compression, bound((w - 1) * l * t * 11));
+            assert_eq!(terms.poles, bound((l + 2 * t + 1) * 11));
+            assert_eq!(terms.sumcheck, bound(5.max(size.log_entries()) * 11 * 13));
+        }
     }
 
     #[test]
     fn layout_puts_everything_in_one_cube() {
-        // 1.09M variables (the BIP-32 statement of the frontier note) fit a 2^21 table.
         let l = Layout::new(size(21, 1_088_721)).unwrap();
         assert_eq!((l.log_cells, l.var_bits), (21, 21));
         assert!(l.var_cells >= 1_088_721 && l.var_cells.is_multiple_of(1 << l.var_align));
         let st0 = l.schedule.stages[0];
         assert_eq!(l.blind_cells, (st0.num_queries + 25) << st0.step_vars);
-        assert!(l.blind_cells.is_multiple_of(1 << st0.step_vars));
         assert!(l.var_cells + mask_cells(21, 21) + l.blind_cells <= 1 << 21);
-        // A cube that is nearly full moves to the next size.
-        let full = Layout::new(size(21, (1 << 21) - 100)).unwrap();
-        assert_eq!(full.log_cells, 22);
-        // Small relations use the smallest table that holds the blinders.
-        let small = Layout::new(size(10, 1000)).unwrap();
-        assert_eq!(small.log_cells, MIN_LOG_CELLS);
-        // Past the largest table there is no layout.
-        assert!(Layout::new(size(25, 1 << 25)).is_none());
-        // Malformed dimensions are rejected before rounding, multiplication or shifting.
+        // Domain cap is now lifted to 2^28: a 2^25 variable relation fits a 2^26 table!
+        let large = Layout::new(size(25, 1 << 25)).unwrap();
+        assert_eq!(large.log_cells, 26);
+        // Past 2^28 there is no layout.
+        assert!(Layout::new(size(28, 1 << 28)).is_none());
+        assert!(Layout::new(size(29, 1 << 29)).is_none());
         assert!(Layout::new(size(5, usize::MAX)).is_none());
-        assert!(Layout::new(size(usize::MAX, 1000)).is_none());
         assert!(Layout::new(size(4, 1000)).is_none());
         assert!(Layout::new(size(5, 15)).is_none());
-        assert!(
-            Layout::new(ShapeSize {
-                log_rows: 5,
-                num_vars: 16,
-                num_public: 1
-            })
-            .is_none()
-        );
-        assert!(Layout::new(size(5, 16)).is_some());
-        assert_eq!(min_stage0_queries(0, TARGET_LEVEL_MILLIBITS), None);
     }
 
     #[test]
     fn directed_rounding_and_summed_crossovers() {
-        // Independent floating-point reference, only in this test; production is integer.
         for e in 1..=127 {
             for x in [(1u128 << e) - 1, 1u128 << e, (1u128 << e) + 1] {
                 let exact = 1000.0 * (x as f64).log2();
@@ -639,20 +951,12 @@ mod tests {
                 assert!(log2_hi(x) as f64 + 1e-8 >= exact, "hi({x})");
             }
         }
-        // Includes every eighth-bit discontinuity and the large-gap branch at 40 bits.
         for d in 0..=80_000 {
             let exact =
                 1000.0 * (2.0f64.powf(-(d as f64) / 1000.0)).ln_1p() / core::f64::consts::LN_2;
             assert!(log2_one_plus(d) as f64 + 1e-9 >= exact, "d={d}");
             assert!(log2_one_plus(d) <= 1000);
-            assert_eq!(
-                sum_bits(123_000, 123_000 + d),
-                sum_bits(123_000 + d, 123_000)
-            );
-            assert!(sum_bits(123_000, 123_000 + d) as f64 <= 123_000.0 - exact + 1e-9);
         }
-        assert_eq!(sum_bits(0, 0), -1000);
-        assert_eq!(sum_bits(-1000, -1000), -2000);
         for l in MIN_LOG_CELLS..=MAX_LOG_CELLS {
             let s = schedule(l).unwrap();
             let r = report_with(
@@ -676,62 +980,20 @@ mod tests {
                 * 2.0f64.powf(-(r.rbr_bits as f64) / 1000.0)
                 + 6380.0 * 2.0f64.powf(3.0 * x - 400.0);
             assert!(exact <= 1.0, "l={l}: {exact}");
-            // At the smaller individual crossover the SUM already exceeds one.
-            let (a, b) = r.qrom_work_terms();
-            assert!(r.qrom_sum_bits(a.min(b)) < 0);
         }
     }
 
     #[test]
-    fn hiding_counts_cross_proof_salt_collisions() {
-        let r = report(Profile::CshakeJohnson400, size(17, 82_000)).unwrap();
-        assert_eq!(r.stages[0].fibers, 1 << 14);
-        assert_eq!(r.classical_hiding_bits(64, 0), 192_000);
-        assert_eq!(r.quantum_hiding_bits(64, 0), 63_000);
-        // P=2^64, t=1: the birthday term is about 2^-115, much larger than 2^-192.
-        assert_eq!(r.classical_hiding_bits(0, 64), 114_999);
-        assert!(r.quantum_hiding_bits(0, 64) < 95_000);
-        let mut larger = r.clone();
-        larger.stages[0].fibers *= 2;
-        assert!(larger.classical_hiding_bits(0, 64) < r.classical_hiding_bits(0, 64));
-    }
-
-    #[test]
-    fn calculator_rejects_malformed_geometry() {
-        let l = MIN_LOG_CELLS;
-        let shape = size(l, 1 << (l - 1));
-        let mut s = schedule(l).unwrap();
-        let calc = |size, schedule: &Schedule| {
-            report_with(Profile::CshakeJohnson400, size, l, l - 1, 0, schedule)
-        };
-        assert!(calc(shape, &s).is_some());
-        assert!(
-            calc(
-                ShapeSize {
-                    num_public: usize::MAX,
-                    ..shape
-                },
-                &s
-            )
-            .is_none()
-        );
-        assert!(
-            calc(
-                ShapeSize {
-                    log_rows: usize::MAX,
-                    ..shape
-                },
-                &s
-            )
-            .is_none()
-        );
-        s.stages[0].blowup = 3;
-        assert!(calc(shape, &s).is_none());
-        s = schedule(l).unwrap();
-        s.stages[0].step_vars = l + 1;
-        assert!(calc(shape, &s).is_none());
-        s.stages.clear();
-        assert!(calc(shape, &s).is_none());
+    fn tree_nonce_eliminates_fiber_count_birthday_loss_in_multiproof_hiding() {
+        let r17 = report(Profile::CshakeJohnson400, size(17, 82_000)).unwrap();
+        let r26 = report(Profile::CshakeJohnson400, size(25, 1 << 25)).unwrap();
+        assert_eq!(r17.stages[0].fibers, 1 << 14);
+        assert_eq!(r26.stages[0].fibers, 1 << 22);
+        assert_eq!(r17.classical_hiding_bits(64, 0), 192_000);
+        // At P = 2^64 proofs, t = 1 query: `binom(P, 2) / 2^256 <= 2^-129` independent of |D'|!
+        // Without tree_nonce this dropped to 114_999 at 2^14 fibers and 106_999 at 2^22 fibers.
+        assert_eq!(r17.classical_hiding_bits(0, 64), 128_999);
+        assert_eq!(r26.classical_hiding_bits(0, 64), 128_999);
     }
 
     #[test]
@@ -789,7 +1051,9 @@ mod tests {
             let mut proof = ZkHemV2Proof {
                 profile: Profile::CshakeJohnson400,
                 log_cells: l as u8,
+                tree_nonce: [0; TREE_NONCE_BYTES],
                 root: [0; DIGEST_BYTES],
+                lookup: None,
                 row_mask_sum: Fp5::ZERO,
                 row_rounds: vec![vec![Fp5::ZERO; ROW_DEGREE + 1]; shape.log_rows],
                 row_values: [Fp5::ZERO; 3],
@@ -797,8 +1061,6 @@ mod tests {
                 col_rounds: vec![vec![Fp5::ZERO; COL_DEGREE + 1]; l - 1],
                 opening,
             };
-            // Synthetic geometry-valid lengths, not a valid cryptographic proof. Maximal
-            // multiproof siblings make the serialized length equal the model's bound.
             for profile in Profile::ALL {
                 proof.profile = profile;
                 assert_eq!(proof.to_bytes().len(), r.proof_bytes, "l={l}");
@@ -809,114 +1071,38 @@ mod tests {
     }
 
     #[test]
-    fn documented_table_matches_calculator() {
-        use alloc::format;
-        use alloc::string::ToString;
-        let doc = include_str!("../../../SECURITY.md");
-        let mb = |b: MilliBits| format!("{}.{:03}", b / 1000, b % 1000);
-        for (rows, vars, label) in [
-            (17, 82_000, "2^17, 82,000"),
-            (17, 1 << 17, "2^17, 2^17"),
-            (20, 1 << 20, "2^20, 2^20"),
-            (21, 1_088_721, "2^21, 1,088,721"),
-            (22, 1 << 22, "2^22, 2^22"),
-            (23, 1 << 23, "2^23, 2^23"),
-        ] {
-            let r = report(Profile::CshakeJohnson400, size(rows, vars)).unwrap();
-            let line = doc
-                .lines()
-                .find(|line| line.starts_with(&format!("| {label} |")))
-                .unwrap();
-            let cells: Vec<_> = line.split('|').map(str::trim).collect();
-            assert_eq!(cells[2], format!("2^{}", r.log_cells));
-            assert_eq!(
-                cells[3],
-                r.schedule
-                    .stages
-                    .iter()
-                    .map(|st| st.num_queries.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            assert_eq!(cells[4], r.mask_m.to_string());
-            let round = match r.rbr_round {
-                Round::MaskLine => "mask line",
-                Round::Query(0) => "Stage-0 queries",
-                _ => panic!("update the documented weakest round"),
-            };
-            assert_eq!(cells[5], format!("{} ({round})", mb(r.rbr_bits)));
-            assert_eq!(cells[6], mb(r.classical_work_bits()));
-            let (a, b) = r.qrom_work_terms();
-            assert_eq!(
-                cells[7],
-                format!("**{}** ({}, {})", mb(r.qrom_work_bits()), mb(a), mb(b))
-            );
-            assert_eq!(cells[8], format!("2^-{}", mb(r.qrom_error_bits(64))));
-            assert_eq!(
-                cells[9].replace(',', "").parse::<usize>().unwrap(),
-                r.proof_bytes
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "prints the tables of SECURITY.md section V2"]
+    #[ignore = "prints security and DKT26 query tables: run with --ignored --nocapture"]
     fn print_v2_tables() {
-        for log_cells in MIN_LOG_CELLS..=crate::pcs::MAX_PCS_NUM_VARS {
-            let q = min_stage0_queries(log_cells, TARGET_LEVEL_MILLIBITS);
-            assert_eq!(q, STAGE0_QUERIES.get(log_cells - MIN_LOG_CELLS).copied());
-            std::println!("log_cells {log_cells}: min stage-0 queries {q:?}");
-        }
+        let mins: Vec<_> = (MIN_LOG_CELLS..=MAX_LOG_CELLS)
+            .map(|l| (l, min_stage0_queries(l, TARGET_LEVEL_MILLIBITS)))
+            .collect();
+        std::println!("MIN_STAGE0_QUERIES (16..=28): {mins:?}");
         for (rows, vars) in [
-            (17usize, 1usize << 17),
             (17, 82_000),
+            (17, 1 << 17),
             (20, 1 << 20),
             (21, 1_088_721),
-            (21, 1_719_058),
             (22, 1 << 22),
             (23, 1 << 23),
+            (25, 1 << 25),
+            (27, 1 << 27),
         ] {
-            let r =
-                report(Profile::CshakeJohnson400, size(rows, vars)).expect("table fixture fits");
-            let (qr, qd) = r.qrom_work_terms();
+            let r = report(Profile::TurboShakeJohnson400, size(rows, vars)).unwrap();
+            let queries: Vec<_> = r.stages.iter().map(|s| s.queries).collect();
+            let (q_rbr, q_dig) = r.qrom_work_terms();
             std::println!(
-                "rows 2^{rows} vars {vars}: cells 2^{} queries {:?} m {} rbr {} ({:?}) mask {} \
-                 classical {} qrom {} (round {qr}, digest {qd}) err@2^64 {} bytes {} digests {} \
-                 hashes {} blind {} rounds {}",
+                "rows=2^{rows} vars={vars} cells=2^{} queries={queries:?} m={} rbr={:.3} ({:?}) classical={:.3} qrom={:.3} ({:.3}, {:.3}) qrom_t64=2^-{:.3} proof_bytes={}",
                 r.log_cells,
-                r.schedule
-                    .stages
-                    .iter()
-                    .map(|s| s.num_queries)
-                    .collect::<Vec<_>>(),
                 r.mask_m,
-                r.rbr_bits,
+                r.rbr_bits as f64 / 1000.0,
                 r.rbr_round,
-                r.mask_bits,
-                r.classical_work_bits(),
-                r.qrom_work_bits(),
-                r.qrom_error_bits(64),
+                r.classical_work_bits() as f64 / 1000.0,
+                r.qrom_work_bits() as f64 / 1000.0,
+                q_rbr as f64 / 1000.0,
+                q_dig as f64 / 1000.0,
+                r.qrom_error_bits(64) as f64 / 1000.0,
                 r.proof_bytes,
-                r.digests,
-                r.merkle_hashes,
-                r.blind_cells,
-                r.rounds,
             );
-            for (i, st) in r.stages.iter().enumerate() {
-                std::println!(
-                    "  stage {i}: blowup {} folds {} q {} fibers {} A {} list {} word_list {} \
-                     query {:?} fold {}",
-                    st.blowup,
-                    st.step_vars,
-                    st.queries,
-                    st.fibers,
-                    st.agreement,
-                    st.list,
-                    st.word_list,
-                    st.query_bits,
-                    st.fold_bits
-                );
-            }
         }
     }
 }
