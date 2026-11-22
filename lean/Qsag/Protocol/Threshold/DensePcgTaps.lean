@@ -587,6 +587,21 @@ theorem kernelPowSum_depth15_six :
     kernelPowSum 32768 6 = 189889716159439485911132785856217088 :=
   kernelPowSum_depth15_six_aux
 
+private theorem kernelPowSum_depth15_eleven_aux :
+    kernelPowSum (2 ^ 15) 11 = 3862832024233242616915361001962515669347244877348926914560 := by
+  rw [kernelPowSum_pow2]; decide +kernel
+
+theorem kernelPowSum_depth15_eleven :
+    kernelPowSum 32768 11 = 3862832024233242616915361001962515669347244877348926914560 :=
+  kernelPowSum_depth15_eleven_aux
+
+/-- Mean squared bias of one 11-tap row (`DENSE_PCG_TAPS_PER_TREE = 11`, `Depth15`) over uniform
+    taps is below `2^-236` (`88` bits smaller than 3-tap's `2^-148`). -/
+theorem denseDepth15_eleven_tap_second_moment :
+    matrixSum 32768 11 64 (fun gs => noiseSignedSum 32768 gs false * noiseSignedSum 32768 gs false) *
+        2 ^ 236 ≤ (((32768 ^ 11) ^ 64 : Nat) : Int) * (32768 ^ 64) ^ 2 := by
+  rw [matrix_second_moment, kernelPowSum_depth15_eleven]; decide +kernel
+
 /-- Mean squared bias of one row over uniform taps is below `2^-148`: the sum over all
 `(2^15)^(3·64)` tap choices of the squared signed count, against `(2^15)^(2·64)` per choice. -/
 theorem denseDepth15_single_row_second_moment :
@@ -735,6 +750,21 @@ theorem kernelPowSum_depth14_six :
     kernelPowSum 16384 6 = 741756732762029982447477945532416 :=
   kernelPowSum_depth14_six_aux
 
+private theorem kernelPowSum_depth14_eleven_aux :
+    kernelPowSum (2 ^ 14) 11 = 471537180841046409580040361609385453432744360638676992 := by
+  rw [kernelPowSum_pow2]; decide +kernel
+
+theorem kernelPowSum_depth14_eleven :
+    kernelPowSum 16384 11 = 471537180841046409580040361609385453432744360638676992 :=
+  kernelPowSum_depth14_eleven_aux
+
+/-- At depth 14 (`N = 16384`, `T = 64`), mean squared single-row bias for `m = 11` taps per tree
+    is below `2^-236`. -/
+theorem denseDepth14_eleven_tap_second_moment :
+    matrixSum 16384 11 64 (fun gs => noiseSignedSum 16384 gs false * noiseSignedSum 16384 gs false) *
+        2 ^ 236 ≤ (((16384 ^ 11) ^ 64 : Nat) : Int) * (16384 ^ 64) ^ 2 := by
+  rw [matrix_second_moment, kernelPowSum_depth14_eleven]; decide +kernel
+
 /-- At depth 14 (`N = 2^14 = 16384`, `T = 64`), mean squared single-row bias over uniform taps
 is below `2^-148`. -/
 theorem denseDepth14_single_row_second_moment :
@@ -861,11 +891,13 @@ end
   Qsag.row_signed_count_natAbs Qsag.prodRow0_bias_bracket Qsag.prodRow0_balanced_tree_count
   Qsag.tap_pair_kernel Qsag.tapsSum_pair Qsag.tree_second_moment Qsag.matrix_second_moment
   Qsag.largeBiasCount_markov Qsag.kernelPowSum_closed Qsag.dcSum_eq Qsag.kernelPowSum_pow2
-  Qsag.kernelPowSum_depth15_three Qsag.kernelPowSum_depth15_six
+  Qsag.kernelPowSum_depth15_three Qsag.kernelPowSum_depth15_six Qsag.kernelPowSum_depth15_eleven
   Qsag.denseDepth15_single_row_second_moment Qsag.denseDepth15_two_row_second_moment
+  Qsag.denseDepth15_eleven_tap_second_moment
   Qsag.denseDepth15_single_row_markov Qsag.kernelPowSum_tail_le Qsag.kernelPowSum_nonneg
   Qsag.denseDepth15_tap_count_ge_four_second_moment Qsag.threeTap_constant_tree Qsag.matrix_second_moment_toy
   Qsag.kernelPowSum_depth14_three Qsag.kernelPowSum_depth14_four Qsag.kernelPowSum_depth14_six
+  Qsag.kernelPowSum_depth14_eleven Qsag.denseDepth14_eleven_tap_second_moment
   Qsag.denseDepth14_single_row_second_moment Qsag.denseDepth14_two_row_second_moment
   Qsag.denseDepth14_tap_count_ge_four_second_moment Qsag.denseDepth14_single_row_markov
   Qsag.regularNoise_support_hits_le_config_count Qsag.tooth_densePcg_regularNoise_entropy_deficit

@@ -3872,7 +3872,7 @@ private theorem bvSum_congr {k : Nat} {f g : BitVec k → Nat} (h : ∀ v, f v =
   | succ k ih =>
     simp only [bvSum, ih (fun v => h (BitVec.cons false v)), ih (fun v => h (BitVec.cons true v))]
 
-private theorem bvSum_const (k c : Nat) : bvSum k (fun _ => c) = (2 ^ k) * c := by
+theorem bvSum_const (k c : Nat) : bvSum k (fun _ => c) = (2 ^ k) * c := by
   induction k with
   | zero => simp [bvSum]
   | succ k ih =>
@@ -4126,21 +4126,828 @@ theorem kos_bitwise_selective_failure_exact (tRow xRow e : BitVec 128) :
     rw [bvOrthogonalCount_exact 128 (1#128), hWt1]
   exact ⟨hXorDist, hIff, hCount, hProd, ⟨hWt1, hTooth1⟩⟩
 
-/-- Interactive $\mathbb{F}_{2^{128}}$ (`Tower128`) KOS linear-combination soundness when `e &&& delta ≠ 0#128`:
-    for any nonzero row discrepancy `e &&& delta ≠ 0#128` locked *before* `chi` is sampled, at most
-    `1` challenge `chi : Tower128` hits any target residual `rhs` (`≤ 1 / 2^128` forgery probability). -/
+/-- Adaptive-response single-column $\mathbb{F}_{2^{128}}$ (`Tower128`) check predicate:
+    given column hashes `(tHash, xHash)` and **adaptive** response `(xHat, tHat) := adv chi`
+    chosen *after* `chi` is sampled, Sender checks `tHash + bit • xHash = tHat + bit • xHat`. -/
+def kosAdaptiveBitCheckPasses (tHash xHash xHat tHat : Tower128) (bit : Bool) : Bool :=
+  decide (towerAdd 7 tHash (if bit then xHash else towerZero 7) =
+          towerAdd 7 tHat (if bit then xHat else towerZero 7))
+
+/-- **Quantifier-Corrected `kos_gf2_128_sacrifice_linear_soundness`**:
+    1. For any nonzero column discrepancy `e ≠ 0#128` locked *before* `chi : Tower128` is sampled,
+       `towerMul 7 (unpackTower 7 e) chi` is injective in `chi` (hence hits `0` on **at most `1`**
+       challenge `chi = 0`).
+    2. For **every** challenge `chi` where the discrepancy hash `hDiff = xHash₁ + xHash₂ ≠ 0` and
+       **every adaptive prover strategy** `adv : Tower128 → Tower128 × Tower128 × Tower128`
+       (`chi ↦ (xHat, tHat₁, tHat₂)`, quantified *inside* `chi`!), `xHat` disagrees with at least
+       one of `xHash₁, xHash₂`, and on any column where `xHat ≠ xHash`, **at most `1` of `2`**
+       secret key bits `bit ∈ Bool` satisfies `kosAdaptiveBitCheckPasses`! -/
 theorem kos_gf2_128_sacrifice_linear_soundness
-    (e delta : BitVec 128) (hNonOrth : (e &&& delta) ≠ 0#128)
-    (rhs : Tower128) (chi₁ chi₂ : Tower128)
-    (h1 : towerMul 7 (unpackTower 7 (e &&& delta)) chi₁ = rhs)
-    (h2 : towerMul 7 (unpackTower 7 (e &&& delta)) chi₂ = rhs) :
-    chi₁ = chi₂ := by
-  have hNz : unpackTower 7 (e &&& delta) ≠ towerZero 7 := by
-    intro hZ
-    have hp := congrArg (packTower 7) hZ
-    rw [packTower_unpackTower, packTower_zero] at hp
-    exact hNonOrth hp
-  exact towerMul_cancel_left 7 (unpackTower 7 (e &&& delta)) chi₁ chi₂ hNz (h1.trans h2.symm)
+    (e : BitVec 128) (he : e ≠ 0#128) :
+    (∀ chi₁ chi₂ : Tower128,
+      towerMul 7 (unpackTower 7 e) chi₁ = towerMul 7 (unpackTower 7 e) chi₂ → chi₁ = chi₂) ∧
+    (∀ (tHash xHash : Tower128) (adv : Tower128 → Tower128 × Tower128) (chi : Tower128),
+      (adv chi).1 ≠ xHash →
+      (if kosAdaptiveBitCheckPasses tHash xHash (adv chi).1 (adv chi).2 false then 1 else 0) +
+      (if kosAdaptiveBitCheckPasses tHash xHash (adv chi).1 (adv chi).2 true then 1 else 0) ≤ 1) ∧
+    (∀ (xHash₁ xHash₂ : Tower128) (adv : Tower128 → Tower128) (chi : Tower128),
+      xHash₁ ≠ xHash₂ → adv chi ≠ xHash₁ ∨ adv chi ≠ xHash₂) := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro chi₁ chi₂ hEq
+    have hNz : unpackTower 7 e ≠ towerZero 7 := by
+      intro hZ
+      have hp := congrArg (packTower 7) hZ
+      rw [packTower_unpackTower, packTower_zero] at hp
+      exact he hp
+    exact towerMul_cancel_left 7 (unpackTower 7 e) chi₁ chi₂ hNz hEq
+  · intro tHash xHash adv chi hNe
+    cases h0 : kosAdaptiveBitCheckPasses tHash xHash (adv chi).1 (adv chi).2 false
+    · cases h1 : kosAdaptiveBitCheckPasses tHash xHash (adv chi).1 (adv chi).2 true <;> decide
+    · cases h1 : kosAdaptiveBitCheckPasses tHash xHash (adv chi).1 (adv chi).2 true
+      · decide
+      · exfalso
+        have e0 : towerAdd 7 tHash (towerZero 7) = towerAdd 7 (adv chi).2 (towerZero 7) :=
+          of_decide_eq_true h0
+        have e1 : towerAdd 7 tHash xHash = towerAdd 7 (adv chi).2 (adv chi).1 :=
+          of_decide_eq_true h1
+        rw [towerAdd_zero, towerAdd_zero] at e0
+        rw [e0] at e1
+        have hEqX : xHash = (adv chi).1 := by
+          have hc := congrArg (towerAdd 7 (adv chi).2) e1
+          rwa [towerAdd_cancel, towerAdd_cancel] at hc
+        exact hNe hEqX.symm
+  · intro xHash₁ xHash₂ adv chi hNe12
+    if h1 : adv chi = xHash₁ then
+      exact Or.inr (fun h2 => hNe12 (h1.symm.trans h2))
+    else
+      exact Or.inl h1
+
+/-! #### `SoftSpokenOT (n_C = 256, k = 2)` $\mathbb{F}_4$-VOLE Subspace Soundness & Shared-Latch Fork Poisoning -/
+
+/-- Decidable check whether a coefficient list contains at least one nonzero element. -/
+def hasNonzeroCoeff {R : Type} [CommRingOps R] [DecidableEq R] : List R → Bool
+  | [] => false
+  | c :: cs => decide (c ≠ CommRingOps.zero) || hasNonzeroCoeff cs
+
+private theorem evalCoeffs_eq_zero_of_hasNonzero_false {R : Type} [LawfulCommRing R] [DecidableEq R] :
+    ∀ (cs : List R) (x : R), hasNonzeroCoeff cs = false →
+      RoundPoly.evalCoeffs cs x = CommRingOps.zero
+  | [], _, _ => rfl
+  | c :: cs, x, h => by
+    simp only [hasNonzeroCoeff, Bool.or_eq_false_iff, decide_eq_false_iff_not, Decidable.not_not] at h
+    rw [RoundPoly.evalCoeffs_cons, h.1, evalCoeffs_eq_zero_of_hasNonzero_false cs x h.2,
+        LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+
+private theorem hasNonzeroCoeff_quotLinear_of_tail {R : Type} [LawfulCommRing R] [DecidableEq R] (r : R) :
+    ∀ (c₀ : R) (tl : List R), hasNonzeroCoeff tl = true →
+      hasNonzeroCoeff (RoundPoly.quotLinear (c₀ :: tl) r) = true
+  | _, [], h => nomatch h
+  | c₀, [c₁], h => by
+    simp only [hasNonzeroCoeff, Bool.or_false] at h
+    simp only [RoundPoly.quotLinear, RoundPoly.evalCoeffs, LawfulCommRing.mul_zero,
+               LawfulCommRing.add_zero, hasNonzeroCoeff, h, Bool.or_false]
+  | c₀, c₁ :: c₂ :: cs', h => by
+    rw [hasNonzeroCoeff] at h
+    cases hRest : hasNonzeroCoeff (c₂ :: cs')
+    · rw [hRest, Bool.or_false] at h
+      have hEval : RoundPoly.evalCoeffs (c₁ :: c₂ :: cs') r = c₁ := by
+        rw [RoundPoly.evalCoeffs_cons, evalCoeffs_eq_zero_of_hasNonzero_false (c₂ :: cs') r hRest,
+            LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+      rw [RoundPoly.quotLinear, hasNonzeroCoeff, hEval, h, Bool.true_or]
+    · have ih := hasNonzeroCoeff_quotLinear_of_tail r c₁ (c₂ :: cs') hRest
+      rw [RoundPoly.quotLinear, hasNonzeroCoeff, ih, Bool.or_true]
+
+private theorem mem_of_mem_filter_ss {α : Type} {p : α → Bool} {x : α} :
+    ∀ {l : List α}, x ∈ l.filter p → x ∈ l
+  | [], h => nomatch h
+  | _ :: _, h => by
+    simp only [List.filter] at h
+    split at h
+    · cases h with
+      | head => exact .head _
+      | tail _ hm => exact .tail _ (mem_of_mem_filter_ss hm)
+    · exact .tail _ (mem_of_mem_filter_ss h)
+
+private theorem pred_of_mem_filter_ss {α : Type} {p : α → Bool} {x : α} :
+    ∀ {l : List α}, x ∈ l.filter p → p x = true
+  | [], h => nomatch h
+  | _ :: _, h => by
+    simp only [List.filter] at h
+    split at h
+    · rename_i hp
+      cases h with
+      | head => exact hp
+      | tail _ hm => exact pred_of_mem_filter_ss hm
+    · exact pred_of_mem_filter_ss h
+
+private theorem nodup_filter_ss {α : Type} (p : α → Bool) :
+    ∀ {l : List α}, l.Nodup → (l.filter p).Nodup
+  | [], _ => .nil
+  | _ :: _, .cons hrel htail => by
+    simp only [List.filter]
+    split
+    · exact .cons (fun b hb => hrel b (mem_of_mem_filter_ss hb)) (nodup_filter_ss p htail)
+    · exact nodup_filter_ss p htail
+
+private theorem filter_eq_self_ss {α : Type} {p : α → Bool} :
+    ∀ {xs : List α}, (∀ x ∈ xs, p x = true) → xs.filter p = xs
+  | [], _ => rfl
+  | y :: ys, h => by
+    simp only [List.filter, h y (.head _)]
+    exact congrArg (y :: ·) (filter_eq_self_ss (fun z hz => h z (.tail _ hz)))
+
+/-- Constructive root-count bound from a syntactic nonzero coefficient (`0 Classical.choice`):
+    any coefficient list `cs` of length `≤ d + 1` with `hasNonzeroCoeff cs = true` over an integral
+    domain `R` has **at most `d`** roots in any duplicate-free list `S : List R`. -/
+theorem roots_nodup_length_le_of_hasNonzero
+    {R : Type} [LawfulCommRing R] [DecidableEq R] [NoZeroDivisors R] :
+    ∀ (d : Nat) (cs : List R) (S : List R),
+      S.Nodup →
+      cs.length ≤ d + 1 →
+      hasNonzeroCoeff cs = true →
+      (S.filter (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero))).length ≤ d
+  | 0, cs, S, _, hlen, hNz => by
+    cases cs with
+    | nil => nomatch hNz
+    | cons c₀ tl =>
+      cases tl with
+      | cons _ _ => simp only [List.length_cons] at hlen; omega
+      | nil =>
+        simp only [hasNonzeroCoeff, Bool.or_false, decide_eq_true_eq] at hNz
+        cases hFilt : S.filter (fun r => decide (RoundPoly.evalCoeffs [c₀] r = CommRingOps.zero)) with
+        | nil => exact Nat.le_refl 0
+        | cons r _ =>
+          exfalso
+          have hp := of_decide_eq_true (pred_of_mem_filter_ss (l := S) (x := r) (by rw [hFilt]; exact .head _))
+          simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hp
+          exact hNz hp
+  | d + 1, cs, S, hNodup, hlen, hNz => by
+    have hndRoots := nodup_filter_ss (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero)) hNodup
+    cases hRoots : S.filter (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero)) with
+    | nil => simp
+    | cons r rest =>
+      rw [hRoots] at hndRoots
+      cases hndRoots with
+      | cons hNotMem hndRest =>
+        have hrRoot : RoundPoly.evalCoeffs cs r = CommRingOps.zero :=
+          of_decide_eq_true (pred_of_mem_filter_ss (l := S) (x := r) (by rw [hRoots]; exact .head _))
+        cases cs with
+        | nil => nomatch hNz
+        | cons c₀ tl =>
+          cases hTlNz : hasNonzeroCoeff tl
+          · exfalso
+            simp only [hasNonzeroCoeff, hTlNz, Bool.or_false, decide_eq_true_eq] at hNz
+            rw [RoundPoly.evalCoeffs_cons, evalCoeffs_eq_zero_of_hasNonzero_false tl r hTlNz,
+                LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hrRoot
+            exact hNz hrRoot
+          · let qcs := RoundPoly.quotLinear (c₀ :: tl) r
+            have hqLen : qcs.length ≤ d + 1 := by
+              dsimp only [qcs]
+              rw [RoundPoly.quotLinear_length, List.length_cons]
+              simp only [List.length_cons] at hlen
+              omega
+            have hqNz : hasNonzeroCoeff qcs = true := hasNonzeroCoeff_quotLinear_of_tail r c₀ tl hTlNz
+            have hSubRest : ∀ y ∈ rest, decide (RoundPoly.evalCoeffs qcs y = CommRingOps.zero) = true := by
+              intro y hy
+              have hyInFilt : y ∈ S.filter (fun z => decide (RoundPoly.evalCoeffs (c₀ :: tl) z = CommRingOps.zero)) := by
+                rw [hRoots]; exact .tail _ hy
+              have hyRoot : RoundPoly.evalCoeffs (c₀ :: tl) y = CommRingOps.zero :=
+                of_decide_eq_true (pred_of_mem_filter_ss (p := fun z => decide (RoundPoly.evalCoeffs (c₀ :: tl) z = CommRingOps.zero)) hyInFilt)
+              have hyNeR : y ≠ r := fun heq => hNotMem y hy heq.symm
+              have hSubNe : CommRingOps.sub y r ≠ CommRingOps.zero :=
+                fun hsub0 => hyNeR (LawfulCommRing.sub_eq_zero_iff.mp hsub0)
+              have hfac := RoundPoly.evalCoeffs_eq_mul_quotLinear_add (c₀ :: tl) r y
+              rw [hyRoot, hrRoot, LawfulCommRing.add_zero] at hfac
+              rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hfac.symm with hbad | hqy0
+              · exact False.elim (hSubNe hbad)
+              · exact decide_eq_true hqy0
+            have ih := roots_nodup_length_le_of_hasNonzero d qcs rest hndRest hqLen hqNz
+            rw [filter_eq_self_ss hSubRest] at ih
+            simp only [List.length_cons]; omega
+
+/-- One bit-column of `SoftSpokenOT` packed into `payload` (`B` 128-bit field blocks) + two
+    sacrificial 128-bit OTP blocks `(tail0, tail1)` matching `OtExtCheckKey::hash` (`[X | I_256]`). -/
+structure OtExtColumn (F : Type) where
+  payload : List F
+  tail0 : F
+  tail1 : F
+  deriving DecidableEq, Repr
+
+def otExtColSub {F : Type} [CommRingOps F] (a b : OtExtColumn F) : OtExtColumn F :=
+  { payload := RoundPoly.subCoeffs a.payload b.payload
+    tail0 := CommRingOps.sub a.tail0 b.tail0
+    tail1 := CommRingOps.sub a.tail1 b.tail1 }
+
+def otExtColNonzero {F : Type} [CommRingOps F] [DecidableEq F] (e : OtExtColumn F) : Bool :=
+  hasNonzeroCoeff e.payload || decide (e.tail0 ≠ CommRingOps.zero) || decide (e.tail1 ≠ CommRingOps.zero)
+
+/-- Roy (`CRYPTO 2022` Def. 4.1 & Fig. 9) polynomial-basis `[X | I_256]` universal linear hash
+    at two independent evaluation points `(s0, s1) ∈ F × F`. -/
+def otExtCheckHash {F : Type} [CommRingOps F] (s0 s1 : F) (col : OtExtColumn F) : F × F :=
+  (RoundPoly.evalCoeffs (col.tail0 :: col.payload) s0,
+   RoundPoly.evalCoeffs (col.tail1 :: col.payload) s1)
+
+theorem otExtCheckHash_sub {F : Type} [LawfulCommRing F] (s0 s1 : F) (a b : OtExtColumn F) :
+    otExtCheckHash s0 s1 (otExtColSub a b) =
+      (CommRingOps.sub (otExtCheckHash s0 s1 a).1 (otExtCheckHash s0 s1 b).1,
+       CommRingOps.sub (otExtCheckHash s0 s1 a).2 (otExtCheckHash s0 s1 b).2) := by
+  unfold otExtCheckHash otExtColSub
+  dsimp only
+  rw [← RoundPoly.subCoeffs_cons_cons, ← RoundPoly.subCoeffs_cons_cons,
+      RoundPoly.evalCoeffs_sub, RoundPoly.evalCoeffs_sub]
+
+private theorem hasNonzeroCoeff_subCoeffs_of_ne {F : Type} [LawfulCommRing F] [DecidableEq F] :
+    ∀ {xs ys : List F}, xs.length = ys.length → xs ≠ ys →
+      hasNonzeroCoeff (RoundPoly.subCoeffs xs ys) = true
+  | [], [], _, hNe => False.elim (hNe rfl)
+  | x :: xs, y :: ys, hLen, hNe => by
+    rw [RoundPoly.subCoeffs_cons_cons]
+    simp only [hasNonzeroCoeff]
+    if hxy : x = y then
+      subst hxy
+      have hTailNe : xs ≠ ys := fun h => hNe (congrArg (x :: ·) h)
+      simp only [List.length_cons] at hLen
+      rw [hasNonzeroCoeff_subCoeffs_of_ne (by omega) hTailNe, Bool.or_true]
+    else
+      have hSubNe : CommRingOps.sub x y ≠ CommRingOps.zero :=
+        fun h0 => hxy (LawfulCommRing.sub_eq_zero_iff.mp h0)
+      simp only [decide_eq_true hSubNe, Bool.true_or]
+
+theorem otExtColNonzero_sub_of_ne {F : Type} [LawfulCommRing F] [DecidableEq F]
+    {a b : OtExtColumn F} (hLen : a.payload.length = b.payload.length) (hNe : a ≠ b) :
+    otExtColNonzero (otExtColSub a b) = true := by
+  unfold otExtColNonzero otExtColSub
+  dsimp only
+  if hp : a.payload = b.payload then
+    if ht0 : a.tail0 = b.tail0 then
+      have ht1 : a.tail1 ≠ b.tail1 := fun ht1 => by
+        cases a; cases b; dsimp only at hp ht0 ht1; subst hp; subst ht0; subst ht1; exact hNe rfl
+      have hSub1 : CommRingOps.sub a.tail1 b.tail1 ≠ CommRingOps.zero :=
+        fun h0 => ht1 (LawfulCommRing.sub_eq_zero_iff.mp h0)
+      simp only [decide_eq_true hSub1, Bool.or_true]
+    else
+      have hSub0 : CommRingOps.sub a.tail0 b.tail0 ≠ CommRingOps.zero :=
+        fun h0 => ht0 (LawfulCommRing.sub_eq_zero_iff.mp h0)
+      simp only [decide_eq_true hSub0, Bool.or_true, Bool.true_or]
+  else
+    rw [hasNonzeroCoeff_subCoeffs_of_ne hLen hp]
+    rfl
+
+/-- Exact 2D collision count of `otExtCheckHash s0 s1 e = (0, 0)` over `(s0, s1) ∈ S × S`. -/
+def otExtHashZeroPairCount {F : Type} [CommRingOps F] [DecidableEq F]
+    (S : List F) (e : OtExtColumn F) : Nat :=
+  (S.filter (fun s0 => decide (RoundPoly.evalCoeffs (e.tail0 :: e.payload) s0 = CommRingOps.zero))).length *
+  (S.filter (fun s1 => decide (RoundPoly.evalCoeffs (e.tail1 :: e.payload) s1 = CommRingOps.zero))).length
+
+/-- **Roy Lemma 4.2 Quadratic Collision Bound (`otExtCheckHash_kernel_le_sq`)**:
+    Because `OtExtCheckKey` evaluates the **same** `B`-block payload polynomial at two independent
+    points `(s0, s1) ∈ S × S` with independent OTP tails `(tail0, tail1)`, any nonzero column
+    discrepancy `e` (`otExtColNonzero e = true`, `e.payload.length ≤ B`) collides to `(0, 0)` on
+    **at most `B ^ 2`** pairs `(s0, s1) ∈ S × S` (`≤ B^2 / 2^256` over `Gf2Pow128 × Gf2Pow128`)! -/
+theorem otExtCheckHash_kernel_le_sq
+    {F : Type} [LawfulCommRing F] [DecidableEq F] [NoZeroDivisors F]
+    (B : Nat) (S : List F) (hNodup : S.Nodup) (e : OtExtColumn F)
+    (hLen : e.payload.length ≤ B) (hNz : otExtColNonzero e = true) :
+    otExtHashZeroPairCount S e ≤ B ^ 2 := by
+  unfold otExtHashZeroPairCount
+  cases hPay : hasNonzeroCoeff e.payload
+  · unfold otExtColNonzero at hNz
+    rw [hPay, Bool.false_or] at hNz
+    cases ht0 : decide (e.tail0 ≠ CommRingOps.zero)
+    · rw [ht0, Bool.false_or] at hNz
+      have ht1Ne : e.tail1 ≠ CommRingOps.zero := of_decide_eq_true hNz
+      have hEmpty1 : S.filter (fun s1 => decide (RoundPoly.evalCoeffs (e.tail1 :: e.payload) s1 = CommRingOps.zero)) = [] := by
+        cases hf : S.filter (fun s1 => decide (RoundPoly.evalCoeffs (e.tail1 :: e.payload) s1 = CommRingOps.zero)) with
+        | nil => rfl
+        | cons s1 _ =>
+          exfalso
+          have hp := of_decide_eq_true (pred_of_mem_filter_ss (l := S) (x := s1) (by rw [hf]; exact .head _))
+          rw [RoundPoly.evalCoeffs_cons, evalCoeffs_eq_zero_of_hasNonzero_false e.payload s1 hPay,
+              LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hp
+          exact ht1Ne hp
+      rw [hEmpty1, List.length_nil, Nat.mul_zero]
+      exact Nat.zero_le _
+    · have ht0Ne : e.tail0 ≠ CommRingOps.zero := of_decide_eq_true ht0
+      have hEmpty0 : S.filter (fun s0 => decide (RoundPoly.evalCoeffs (e.tail0 :: e.payload) s0 = CommRingOps.zero)) = [] := by
+        cases hf : S.filter (fun s0 => decide (RoundPoly.evalCoeffs (e.tail0 :: e.payload) s0 = CommRingOps.zero)) with
+        | nil => rfl
+        | cons s0 _ =>
+          exfalso
+          have hp := of_decide_eq_true (pred_of_mem_filter_ss (l := S) (x := s0) (by rw [hf]; exact .head _))
+          rw [RoundPoly.evalCoeffs_cons, evalCoeffs_eq_zero_of_hasNonzero_false e.payload s0 hPay,
+              LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hp
+          exact ht0Ne hp
+      rw [hEmpty0, List.length_nil, Nat.zero_mul]
+      exact Nat.zero_le _
+  · have hNz0 : hasNonzeroCoeff (e.tail0 :: e.payload) = true := by
+      simp only [hasNonzeroCoeff, hPay, Bool.or_true]
+    have hNz1 : hasNonzeroCoeff (e.tail1 :: e.payload) = true := by
+      simp only [hasNonzeroCoeff, hPay, Bool.or_true]
+    have h0 := roots_nodup_length_le_of_hasNonzero B (e.tail0 :: e.payload) S hNodup
+      (by simp only [List.length_cons]; omega) hNz0
+    have h1 := roots_nodup_length_le_of_hasNonzero B (e.tail1 :: e.payload) S hNodup
+      (by simp only [List.length_cons]; omega) hNz1
+    have hSq : B ^ 2 = B * B := by simp [Nat.pow_succ]
+    rw [hSq]
+    exact Nat.mul_le_mul h0 h1
+
+/-- Depth-2 GGM $\mathbb{F}_4$ (`k = 2`) 3-out-of-4 punctured leaf quadruple (`v* = 2*b0 + b1` zeroed). -/
+def softspokenPunctureLeaves {w : Nat} (b0 b1 : Bool) (g0 g1 g2 g3 : BitVec w) :
+    BitVec w × BitVec w × BitVec w × BitVec w :=
+  (if !b0 && !b1 then 0#w else g0,
+   if !b0 && b1 then 0#w else g1,
+   if b0 && !b1 then 0#w else g2,
+   if b0 && b1 then 0#w else g3)
+
+/-- Exact $\mathbb{F}_4$ GGM slice correlation: Receiver sends 1 column `u = g0 ^^^ g1 ^^^ g2 ^^^ g3 ^^^ x`
+    and keeps `(tLo, tHi) = (g2 ^^^ g3, g1 ^^^ g3)`; Sender recovers `(qLo, qHi)` from the 3 unpunctured
+    leaves satisfying `qLo = tLo ^^^ (b0 ? x : 0)` and `qHi = tHi ^^^ (b1 ? x : 0)` simultaneously! -/
+theorem softspoken_f4_slice_exact {w : Nat} (b0 b1 : Bool) (g0 g1 g2 g3 x : BitVec w) :
+    let tLo := g2 ^^^ g3
+    let tHi := g1 ^^^ g3
+    let u := g0 ^^^ g1 ^^^ g2 ^^^ g3 ^^^ x
+    let (h0, h1, h2, h3) := softspokenPunctureLeaves b0 b1 g0 g1 g2 g3
+    let wCorr := u ^^^ h0 ^^^ h1 ^^^ h2 ^^^ h3
+    let qLo := h2 ^^^ h3 ^^^ (if b0 then wCorr else 0#w)
+    let qHi := h1 ^^^ h3 ^^^ (if b1 then wCorr else 0#w)
+    qLo = tLo ^^^ (if b0 then x else 0#w) ∧
+    qHi = tHi ^^^ (if b1 then x else 0#w) := by
+  dsimp only [softspokenPunctureLeaves]
+  constructor <;> (
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    cases b0 <;> cases b1 <;>
+      simp only [Bool.not_false, Bool.not_true, Bool.and_self, Bool.true_and, Bool.false_and,
+                 Bool.false_eq_true, ↓reduceIte, BitVec.getLsbD_xor, BitVec.getLsbD_zero] <;>
+      cases g0.getLsbD i <;> cases g1.getLsbD i <;> cases g2.getLsbD i <;>
+      cases g3.getLsbD i <;> cases x.getLsbD i <;> rfl)
+
+def otPairAdd {F : Type} [CommRingOps F] (a b : F × F) : F × F :=
+  (CommRingOps.add a.1 b.1, CommRingOps.add a.2 b.2)
+
+def otPairScaleBit {F : Type} [CommRingOps F] (b : Bool) (x : F × F) : F × F :=
+  if b then x else (CommRingOps.zero, CommRingOps.zero)
+
+def otSingleColPasses {F : Type} [CommRingOps F] [DecidableEq F]
+    (tH xH tHat xHat : F × F) (b : Bool) : Bool :=
+  decide (otPairAdd tH (otPairScaleBit b xH) = otPairAdd tHat (otPairScaleBit b xHat))
+
+def otF4SlicePasses {F : Type} [CommRingOps F] [DecidableEq F]
+    (tLoH tHiH xH tLoHat tHiHat xHat : F × F) (b0 b1 : Bool) : Bool :=
+  otSingleColPasses tLoH xH tLoHat xHat b0 && otSingleColPasses tHiH xH tHiHat xHat b1
+
+private theorem otSingleCol_pass_le_one_of_ne {F : Type} [LawfulCommRing F] [DecidableEq F]
+    {tH xH tHat xHat : F × F} (hNe : xHat ≠ xH) :
+    (if otSingleColPasses tH xH tHat xHat false then 1 else 0) +
+    (if otSingleColPasses tH xH tHat xHat true then 1 else 0) ≤ 1 := by
+  cases h0 : otSingleColPasses tH xH tHat xHat false
+  · cases h1 : otSingleColPasses tH xH tHat xHat true <;> decide
+  · cases h1 : otSingleColPasses tH xH tHat xHat true
+    · decide
+    · exfalso
+      have e0 := of_decide_eq_true h0
+      have e1 := of_decide_eq_true h1
+      unfold otPairAdd otPairScaleBit at e0 e1
+      simp only [Bool.false_eq_true, ↓reduceIte] at e0 e1
+      rw [LawfulCommRing.add_zero, LawfulCommRing.add_zero,
+          LawfulCommRing.add_zero, LawfulCommRing.add_zero] at e0
+      have ht1 : tH.1 = tHat.1 := congrArg Prod.fst e0
+      have ht2 : tH.2 = tHat.2 := congrArg Prod.snd e0
+      have ex1 : CommRingOps.add tH.1 xH.1 = CommRingOps.add tHat.1 xHat.1 := congrArg Prod.fst e1
+      have ex2 : CommRingOps.add tH.2 xH.2 = CommRingOps.add tHat.2 xHat.2 := congrArg Prod.snd e1
+      rw [ht1] at ex1
+      rw [ht2] at ex2
+      exact hNe (Prod.ext (LawfulCommRing.add_left_cancel ex1).symm
+                          (LawfulCommRing.add_left_cancel ex2).symm)
+
+private theorem otSingleCol_pass_le_two {F : Type} [CommRingOps F] [DecidableEq F]
+    (tH xH tHat xHat : F × F) :
+    (if otSingleColPasses tH xH tHat xHat false then 1 else 0) +
+    (if otSingleColPasses tH xH tHat xHat true then 1 else 0) ≤ 2 := by
+  cases otSingleColPasses tH xH tHat xHat false <;>
+    cases otSingleColPasses tH xH tHat xHat true <;> decide
+
+private theorem otF4Slice_pass_sum_eq_mul {F : Type} [CommRingOps F] [DecidableEq F]
+    (tLoH tHiH xH tLoHat tHiHat xHat : F × F) :
+    (if otF4SlicePasses tLoH tHiH xH tLoHat tHiHat xHat false false then 1 else 0) +
+    (if otF4SlicePasses tLoH tHiH xH tLoHat tHiHat xHat true false then 1 else 0) +
+    (if otF4SlicePasses tLoH tHiH xH tLoHat tHiHat xHat false true then 1 else 0) +
+    (if otF4SlicePasses tLoH tHiH xH tLoHat tHiHat xHat true true then 1 else 0) =
+    ((if otSingleColPasses tLoH xH tLoHat xHat false then 1 else 0) +
+     (if otSingleColPasses tLoH xH tLoHat xHat true then 1 else 0)) *
+    ((if otSingleColPasses tHiH xH tHiHat xHat false then 1 else 0) +
+     (if otSingleColPasses tHiH xH tHiHat xHat true then 1 else 0)) := by
+  unfold otF4SlicePasses
+  cases otSingleColPasses tLoH xH tLoHat xHat false <;>
+    cases otSingleColPasses tLoH xH tLoHat xHat true <;>
+    cases otSingleColPasses tHiH xH tHiHat xHat false <;>
+    cases otSingleColPasses tHiH xH tHiHat xHat true <;> rfl
+
+/-- Receiver's committed column triple on one $\mathbb{F}_4$ slice (locked by `u_j` *before* `(s0, s1)`). -/
+structure SoftSpokenSliceCols (F : Type) where
+  xCol : OtExtColumn F
+  tLoCol : OtExtColumn F
+  tHiCol : OtExtColumn F
+  deriving DecidableEq, Repr
+
+/-- Adaptive prover's per-slice hash claims `(tLoHat, tHiHat)` chosen *after* seeing `(s0, s1)`. -/
+structure SoftSpokenSliceClaim (F : Type) where
+  tLoHat : F × F
+  tHiHat : F × F
+  deriving DecidableEq, Repr
+
+/-- Number of $\mathbb{F}_4$ slices whose hashed effective choice `H_{s0,s1}(x_j)` disagrees with `xHat`. -/
+def softspokenActiveSlices {F : Type} [CommRingOps F] [DecidableEq F]
+    (s0 s1 : F) (xHat : F × F) : List (SoftSpokenSliceCols F) → Nat
+  | [] => 0
+  | sl :: rest =>
+    (if xHat = otExtCheckHash s0 s1 sl.xCol then 0 else 1) +
+      softspokenActiveSlices s0 s1 xHat rest
+
+private theorem if_eq_zero_one_true {α : Type} [DecidableEq α] {a b : α} (h : a = b) :
+    (if a = b then 0 else 1) = 0 := by
+  simp only [h, ↓reduceIte]
+
+private theorem if_eq_zero_one_false {α : Type} [DecidableEq α] {a b : α} (h : a ≠ b) :
+    (if a = b then 0 else 1) = 1 := by
+  simp only [h, ↓reduceIte]
+
+theorem softspokenActiveSlices_le {F : Type} [CommRingOps F] [DecidableEq F]
+    (s0 s1 : F) (xHat : F × F) :
+    ∀ (slices : List (SoftSpokenSliceCols F)),
+      softspokenActiveSlices s0 s1 xHat slices ≤ slices.length
+  | [] => Nat.le_refl 0
+  | sl :: rest => by
+    simp only [softspokenActiveSlices, List.length_cons]
+    have ih := softspokenActiveSlices_le s0 s1 xHat rest
+    cases decEq xHat (otExtCheckHash s0 s1 sl.xCol) with
+    | isTrue h => rw [if_eq_zero_one_true h]; omega
+    | isFalse h => rw [if_eq_zero_one_false h]; omega
+
+/-- Joint consistency check across `slices.length` $\mathbb{F}_4$ slices (`2 * slices.length` secret `Δ` bits). -/
+def softspokenAllSlicesPass {F : Type} [CommRingOps F] [DecidableEq F]
+    (s0 s1 : F) (xHat : F × F) (claims : Nat → SoftSpokenSliceClaim F) :
+    (slices : List (SoftSpokenSliceCols F)) → BitVec (2 * slices.length) → Bool
+  | [], _ => true
+  | sl :: rest, delta =>
+    let b1 := delta.getLsbD (2 * rest.length + 1)
+    let b0 := delta.getLsbD (2 * rest.length)
+    let cl := claims rest.length
+    otF4SlicePasses
+      (otExtCheckHash s0 s1 sl.tLoCol)
+      (otExtCheckHash s0 s1 sl.tHiCol)
+      (otExtCheckHash s0 s1 sl.xCol)
+      cl.tLoHat cl.tHiHat xHat b0 b1 &&
+    softspokenAllSlicesPass s0 s1 xHat claims rest (delta.setWidth (2 * rest.length))
+
+#export_eqns softspokenAllSlicesPass otF4SlicePasses
+
+private theorem softspokenAllSlicesPass_cons2 {F : Type} [CommRingOps F] [DecidableEq F]
+    (s0 s1 : F) (xHat : F × F) (claims : Nat → SoftSpokenSliceClaim F)
+    (sl : SoftSpokenSliceCols F) (rest : List (SoftSpokenSliceCols F))
+    (b1 b0 : Bool) (dRest : BitVec (2 * rest.length)) :
+    softspokenAllSlicesPass s0 s1 xHat claims (sl :: rest)
+      (BitVec.cons b1 (BitVec.cons b0 dRest)) =
+    (otF4SlicePasses
+      (otExtCheckHash s0 s1 sl.tLoCol)
+      (otExtCheckHash s0 s1 sl.tHiCol)
+      (otExtCheckHash s0 s1 sl.xCol)
+      (claims rest.length).tLoHat (claims rest.length).tHiHat xHat b0 b1 &&
+     softspokenAllSlicesPass s0 s1 xHat claims rest dRest) := by
+  conv => lhs; unfold softspokenAllSlicesPass
+  have hb1 : (BitVec.cons b1 (BitVec.cons b0 dRest)).getLsbD (2 * rest.length + 1) = b1 := by
+    rw [BitVec.getLsbD_cons]; simp only [↓reduceIte]
+  have hb0 : (BitVec.cons b1 (BitVec.cons b0 dRest)).getLsbD (2 * rest.length) = b0 := by
+    rw [BitVec.getLsbD_cons]
+    have hNe : ¬ (2 * rest.length = 2 * rest.length + 1) := by omega
+    simp only [hNe, ↓reduceIte]
+    rw [BitVec.getLsbD_cons]; simp only [↓reduceIte]
+  have hSet : (BitVec.cons b1 (BitVec.cons b0 dRest)).setWidth (2 * rest.length) = dRest := by
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    have hi2 : ¬ ((i : Nat) = 2 * rest.length + 1) := by omega
+    have hi3 : ¬ ((i : Nat) = 2 * rest.length) := by omega
+    rw [BitVec.getLsbD_setWidth]
+    simp only [hi]
+    rw [BitVec.getLsbD_cons]; simp only [hi2, ↓reduceIte]
+    rw [BitVec.getLsbD_cons]; simp only [hi3, ↓reduceIte]
+    rfl
+  dsimp only
+  rw [hb1, hb0, hSet]
+
+private theorem bvSum_and_const_left (k : Nat) ( flag : Bool ) (p : BitVec k → Bool) :
+    bvSum k (fun d => if (flag && p d) then 1 else 0) =
+      (if flag then 1 else 0) * bvSum k (fun d => if p d then 1 else 0) := by
+  cases flag
+  · simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, Nat.zero_mul, bvSum_const, Nat.mul_zero]
+  · simp only [Bool.true_and, ↓reduceIte, Nat.one_mul]
+
+/-- Constructive `4^(m - active)` Subspace Cardinality Theorem over `BitVec (2 * m)`:
+    For EVERY challenge `(s0, s1)` and EVERY adaptive `(xHat, claims)` chosen *after* `(s0, s1)`,
+    at most `4 ^ (slices.length - softspokenActiveSlices s0 s1 xHat slices)` secret keys
+    `Δ ∈ BitVec (2 * slices.length)` pass all slice checks! -/
+theorem softspokenPassCount_le_pow4 {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (s0 s1 : F) (xHat : F × F) (claims : Nat → SoftSpokenSliceClaim F) :
+    ∀ (slices : List (SoftSpokenSliceCols F)),
+      bvSum (2 * slices.length)
+        (fun delta => if softspokenAllSlicesPass s0 s1 xHat claims slices delta then 1 else 0) ≤
+      4 ^ (slices.length - softspokenActiveSlices s0 s1 xHat slices)
+  | [] => by simp [softspokenAllSlicesPass, softspokenActiveSlices, bvSum]
+  | sl :: rest => by
+    let inner := bvSum (2 * rest.length)
+      (fun d => if softspokenAllSlicesPass s0 s1 xHat claims rest d then 1 else 0)
+    have hExpand :
+        bvSum (2 * (sl :: rest).length)
+          (fun delta => if softspokenAllSlicesPass s0 s1 xHat claims (sl :: rest) delta then 1 else 0) =
+        ((if otF4SlicePasses (otExtCheckHash s0 s1 sl.tLoCol) (otExtCheckHash s0 s1 sl.tHiCol)
+              (otExtCheckHash s0 s1 sl.xCol) (claims rest.length).tLoHat (claims rest.length).tHiHat
+              xHat false false then 1 else 0) +
+         (if otF4SlicePasses (otExtCheckHash s0 s1 sl.tLoCol) (otExtCheckHash s0 s1 sl.tHiCol)
+              (otExtCheckHash s0 s1 sl.xCol) (claims rest.length).tLoHat (claims rest.length).tHiHat
+              xHat true false then 1 else 0) +
+         (if otF4SlicePasses (otExtCheckHash s0 s1 sl.tLoCol) (otExtCheckHash s0 s1 sl.tHiCol)
+              (otExtCheckHash s0 s1 sl.xCol) (claims rest.length).tLoHat (claims rest.length).tHiHat
+              xHat false true then 1 else 0) +
+         (if otF4SlicePasses (otExtCheckHash s0 s1 sl.tLoCol) (otExtCheckHash s0 s1 sl.tHiCol)
+              (otExtCheckHash s0 s1 sl.xCol) (claims rest.length).tLoHat (claims rest.length).tHiHat
+              xHat true true then 1 else 0)) * inner := by
+      change bvSum ((2 * rest.length + 1) + 1)
+          (fun delta => if softspokenAllSlicesPass s0 s1 xHat claims (sl :: rest) delta then 1 else 0) = _
+      simp only [bvSum, softspokenAllSlicesPass_cons2, bvSum_and_const_left]
+      dsimp only [inner]
+      simp only [Nat.add_mul, Nat.add_assoc]
+    rw [hExpand, otF4Slice_pass_sum_eq_mul]
+    have ih : inner ≤ 4 ^ (rest.length - softspokenActiveSlices s0 s1 xHat rest) :=
+      softspokenPassCount_le_pow4 s0 s1 xHat claims rest
+    have hActLe := softspokenActiveSlices_le s0 s1 xHat rest
+    simp only [softspokenActiveSlices, List.length_cons]
+    cases decEq xHat (otExtCheckHash s0 s1 sl.xCol) with
+    | isFalse hNe =>
+      rw [if_eq_zero_one_false hNe]
+      have hSub : rest.length + 1 - (1 + softspokenActiveSlices s0 s1 xHat rest) =
+          rest.length - softspokenActiveSlices s0 s1 xHat rest := by omega
+      rw [hSub]
+      have hLo := otSingleCol_pass_le_one_of_ne (tH := otExtCheckHash s0 s1 sl.tLoCol)
+        (tHat := (claims rest.length).tLoHat) hNe
+      have hHi := otSingleCol_pass_le_one_of_ne (tH := otExtCheckHash s0 s1 sl.tHiCol)
+        (tHat := (claims rest.length).tHiHat) hNe
+      have hProd1 :
+          ((if otSingleColPasses (otExtCheckHash s0 s1 sl.tLoCol) (otExtCheckHash s0 s1 sl.xCol)
+                (claims rest.length).tLoHat xHat false then 1 else 0) +
+           (if otSingleColPasses (otExtCheckHash s0 s1 sl.tLoCol) (otExtCheckHash s0 s1 sl.xCol)
+                (claims rest.length).tLoHat xHat true then 1 else 0)) *
+          ((if otSingleColPasses (otExtCheckHash s0 s1 sl.tHiCol) (otExtCheckHash s0 s1 sl.xCol)
+                (claims rest.length).tHiHat xHat false then 1 else 0) +
+           (if otSingleColPasses (otExtCheckHash s0 s1 sl.tHiCol) (otExtCheckHash s0 s1 sl.xCol)
+                (claims rest.length).tHiHat xHat true then 1 else 0)) ≤ 1 :=
+        Nat.mul_le_mul hLo hHi
+      calc _ ≤ 1 * inner := Nat.mul_le_mul_right inner hProd1
+        _ = inner := Nat.one_mul inner
+        _ ≤ _ := ih
+    | isTrue hEq =>
+      rw [if_eq_zero_one_true hEq, Nat.zero_add]
+      have hSub : rest.length + 1 - softspokenActiveSlices s0 s1 xHat rest =
+          (rest.length - softspokenActiveSlices s0 s1 xHat rest) + 1 := by omega
+      rw [hSub, Nat.pow_succ, Nat.mul_comm (4 ^ _)]
+      have hLo := otSingleCol_pass_le_two (otExtCheckHash s0 s1 sl.tLoCol)
+        (otExtCheckHash s0 s1 sl.xCol) (claims rest.length).tLoHat xHat
+      have hHi := otSingleCol_pass_le_two (otExtCheckHash s0 s1 sl.tHiCol)
+        (otExtCheckHash s0 s1 sl.xCol) (claims rest.length).tHiHat xHat
+      exact Nat.mul_le_mul (Nat.mul_le_mul hLo hHi) ih
+
+private theorem softspokenActiveSlices_pos_of_mem {F : Type} [CommRingOps F] [DecidableEq F]
+    (s0 s1 : F) (xHat : F × F) :
+    ∀ {slices : List (SoftSpokenSliceCols F)} {sl : SoftSpokenSliceCols F},
+      sl ∈ slices → xHat ≠ otExtCheckHash s0 s1 sl.xCol →
+      1 ≤ softspokenActiveSlices s0 s1 xHat slices
+  | [], _, hm, _ => nomatch hm
+  | s :: rest, sl, hm, hNe => by
+    simp only [softspokenActiveSlices]
+    cases hm with
+    | head => rw [if_eq_zero_one_false hNe]; omega
+    | tail _ hTail =>
+      have ih := softspokenActiveSlices_pos_of_mem s0 s1 xHat hTail hNe
+      cases decEq xHat (otExtCheckHash s0 s1 s.xCol) with
+      | isTrue h => rw [if_eq_zero_one_true h]; omega
+      | isFalse h => rw [if_eq_zero_one_false h]; omega
+
+/-- Shared-latch `fork_substream` family state across `OtExtSenderChannel` parent & forked children. -/
+structure SoftSpokenFamilyState where
+  delta : BitVec 256
+  poisoned : Bool
+  streamCtrs : Nat → Nat
+
+/-- Batch check input targeting substream `streamIdx` of a `SoftSpokenFamilyState`. -/
+structure SoftSpokenSubstreamCheckInput where
+  streamIdx : Nat
+  checkPassed : Bool
+
+/-- Family `PartyMachine` modeling `OtExtSenderChannel::fork_substream`'s shared `Arc<AtomicBool>`:
+    any failed check on any substream sets `poisoned := true`, permanently disabling every substream! -/
+def softspokenFamilyMachine : PartyMachine SoftSpokenFamilyState SoftSpokenSubstreamCheckInput Nat :=
+  PartyMachine.ofOutcome fun st inp =>
+    if st.poisoned then
+      .err st ()
+    else if inp.checkPassed then
+      let ctr := st.streamCtrs inp.streamIdx
+      .ok { st with streamCtrs := fun i => if i = inp.streamIdx then ctr + 1 else st.streamCtrs i } ctr
+    else
+      .err { st with poisoned := true } ()
+
+theorem softspokenFamily_poisoned_terminal :
+    ∀ {st stFinal : SoftSpokenFamilyState} {trace : List (SoftSpokenSubstreamCheckInput × Nat)},
+      st.poisoned = true →
+      softspokenFamilyMachine.ValidTrace st trace stFinal →
+      trace = [] ∧ stFinal.poisoned = true
+  | _, _, _, hPois, .nil _ => ⟨rfl, hPois⟩
+  | st, _, _, hPois, .accept hStep _ => by
+    unfold softspokenFamilyMachine PartyMachine.ofOutcome at hStep
+    simp [hPois] at hStep
+  | st, _, _, hPois, .reject inp _ hTail => by
+    have hPois' : (softspokenFamilyMachine.errStep st inp).poisoned = true := by
+      unfold softspokenFamilyMachine PartyMachine.ofOutcome
+      simp [hPois]
+    exact softspokenFamily_poisoned_terminal hPois' hTail
+
+/-- **`softspoken_vole_subspace_soundness` (`E1` §1 Constructive `SoftSpokenOT (n_C = 256, k = 2)` Theorem)**:
+    Over polynomial-basis `Gf2Pow128` (`|F| = 2^128`, `|F × F| = 2^256`) with **adaptive prover
+    quantified strictly inside the challenge `(s0, s1)`**:
+    1. **Adaptive Subspace Cardinality Bound**: For every challenge `(s0, s1)` and every adaptive
+       response `(xHat, claims) := adv s0 s1`, at most `4 ^ (slices.length - active)` of the
+       `2 ^ (2 * slices.length)` secret keys `Δ` pass all $\mathbb{F}_4$ slice checks.
+    2. **Quadratic `[X | I_256]` Kernel + Non-Vacuous Active Slice Enforcement**: Whenever any two
+       slices `sl₁, sl₂ ∈ slices` encode distinct `B`-block columns (`sl₁.xCol ≠ sl₂.xCol`),
+       `otExtCheckHash` collides on **at most `B ^ 2`** pairs in `S × S`, and on **every**
+       non-colliding `(s0, s1)` and **every** adaptive `adv s0 s1`, `1 ≤ active` and
+       `passCount ≤ 4 ^ (slices.length - 1)`.
+    3. **Roy parameter arithmetic and the query ceiling**:
+       `(256 - 1) * 16 = 240 * 17` (`t = 240`, `2^-241 < 2^-128`), and for every active slice
+       count `a` and quantum RO query count `q` with `2 * q + 1 ≤ 2 ^ 64`,
+       `Nat.min (4 ^ (128 - a)) ((2 * q + 1) ^ 2) * 2 ^ 128 ≤ 2 ^ 256` (a numerical work-factor inequality). The theorem does not bound a quantum experiment by this expression.
+    4. **Shared-Latch `fork_substream` Poisoning**: A failed check on any substream `idx` trips
+       `poisoned = true` and permanently blocks every substream in `softspokenFamilyMachine`. -/
+theorem softspoken_vole_subspace_soundness
+    (B : Nat) (S : List Qsag.Math.Gf2Pow128) (hNodup : S.Nodup)
+    (slices : List (SoftSpokenSliceCols Qsag.Math.Gf2Pow128))
+    (adv : Qsag.Math.Gf2Pow128 → Qsag.Math.Gf2Pow128 →
+      (Qsag.Math.Gf2Pow128 × Qsag.Math.Gf2Pow128) × (Nat → SoftSpokenSliceClaim Qsag.Math.Gf2Pow128)) :
+    (∀ s0 s1 : Qsag.Math.Gf2Pow128,
+      let resp := adv s0 s1
+      bvSum (2 * slices.length)
+        (fun delta => if softspokenAllSlicesPass s0 s1 resp.1 resp.2 slices delta then 1 else 0) ≤
+      4 ^ (slices.length - softspokenActiveSlices s0 s1 resp.1 slices)) ∧
+    (∀ sl₁ ∈ slices, ∀ sl₂ ∈ slices,
+      sl₁.xCol.payload.length = sl₂.xCol.payload.length →
+      sl₁.xCol.payload.length ≤ B →
+      sl₁.xCol ≠ sl₂.xCol →
+      otExtHashZeroPairCount S (otExtColSub sl₁.xCol sl₂.xCol) ≤ B ^ 2 ∧
+      ∀ s0 s1 : Qsag.Math.Gf2Pow128,
+        otExtCheckHash s0 s1 sl₁.xCol ≠ otExtCheckHash s0 s1 sl₂.xCol →
+        let resp := adv s0 s1
+        1 ≤ softspokenActiveSlices s0 s1 resp.1 slices ∧
+        bvSum (2 * slices.length)
+          (fun delta => if softspokenAllSlicesPass s0 s1 resp.1 resp.2 slices delta then 1 else 0) ≤
+        4 ^ (slices.length - 1)) ∧
+    ((256 - 1) * 16 = 240 * 17 ∧ 2 ^ 128 < 2 ^ (240 + 1) ∧
+     ∀ a q : Nat, 2 * q + 1 ≤ 2 ^ 64 →
+       Nat.min (4 ^ (128 - a)) ((2 * q + 1) ^ 2) * 2 ^ 128 ≤ 2 ^ 256) ∧
+    (∀ (st stFinal : SoftSpokenFamilyState) (badIdx : Nat)
+       (trace : List (SoftSpokenSubstreamCheckInput × Nat)),
+       softspokenFamilyMachine.ValidTrace
+         (softspokenFamilyMachine.errStep st ⟨badIdx, false⟩) trace stFinal →
+       trace = [] ∧ stFinal.poisoned = true) := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro s0 s1
+    exact softspokenPassCount_le_pow4 s0 s1 (adv s0 s1).1 (adv s0 s1).2 slices
+  · intro sl₁ hMem₁ sl₂ hMem₂ hEqLen hLeB hNeCol
+    refine ⟨?_, ?_⟩
+    · apply otExtCheckHash_kernel_le_sq B S hNodup (otExtColSub sl₁.xCol sl₂.xCol)
+      · simp only [otExtColSub, RoundPoly.subCoeffs_length]
+        exact Nat.max_le.mpr ⟨hLeB, hEqLen ▸ hLeB⟩
+      · exact otExtColNonzero_sub_of_ne hEqLen hNeCol
+    · intro s0 s1 hHashNe
+      dsimp only
+      have hActPos : 1 ≤ softspokenActiveSlices s0 s1 (adv s0 s1).1 slices := by
+        cases decEq (adv s0 s1).1 (otExtCheckHash s0 s1 sl₁.xCol) with
+        | isTrue h1 =>
+          have h2 : (adv s0 s1).1 ≠ otExtCheckHash s0 s1 sl₂.xCol :=
+            fun hEq2 => hHashNe (h1.symm.trans hEq2)
+          exact softspokenActiveSlices_pos_of_mem s0 s1 (adv s0 s1).1 hMem₂ h2
+        | isFalse h1 =>
+          exact softspokenActiveSlices_pos_of_mem s0 s1 (adv s0 s1).1 hMem₁ h1
+      have hPass := softspokenPassCount_le_pow4 s0 s1 (adv s0 s1).1 (adv s0 s1).2 slices
+      have hMono : 4 ^ (slices.length - softspokenActiveSlices s0 s1 (adv s0 s1).1 slices) ≤
+          4 ^ (slices.length - 1) :=
+        Nat.pow_le_pow_right (by decide) (by omega)
+      exact ⟨hActPos, Nat.le_trans hPass hMono⟩
+  · refine ⟨by decide, by decide, ?_⟩
+    intro a q hq
+    have hMin : Nat.min (4 ^ (128 - a)) ((2 * q + 1) ^ 2) ≤ (2 * q + 1) ^ 2 := Nat.min_le_right _ _
+    have hSq : (2 * q + 1) ^ 2 ≤ (2 ^ 64) ^ 2 := by
+      simp only [Nat.pow_succ, Nat.pow_zero, Nat.one_mul]
+      exact Nat.mul_le_mul hq hq
+    have hPow : (2 ^ 64) ^ 2 * 2 ^ 128 = 2 ^ 256 := by decide
+    calc Nat.min (4 ^ (128 - a)) ((2 * q + 1) ^ 2) * 2 ^ 128
+        ≤ (2 * q + 1) ^ 2 * 2 ^ 128 := Nat.mul_le_mul_right _ hMin
+      _ ≤ (2 ^ 64) ^ 2 * 2 ^ 128 := Nat.mul_le_mul_right _ hSq
+      _ = 2 ^ 256 := hPow
+  · intro st stFinal badIdx trace hTr
+    have hErrPois : (softspokenFamilyMachine.errStep st ⟨badIdx, false⟩).poisoned = true := by
+      unfold softspokenFamilyMachine PartyMachine.ofOutcome
+      cases hP : st.poisoned <;> simp [hP]
+    exact softspokenFamily_poisoned_terminal hErrPois hTr
+
+/-- Non-vacuity witness for `softspoken_vole_subspace_soundness`: two inconsistent $\mathbb{F}_4$
+    slices (`0` vs `1` in payload) over `Gf2Pow128` force `1 ≤ active` and `passCount ≤ 4` out of `16`. -/
+theorem witness_softspoken_vole_subspace_soundness :
+    ∃ (_B : Nat) (S : List Qsag.Math.Gf2Pow128)
+      (slices : List (SoftSpokenSliceCols Qsag.Math.Gf2Pow128))
+      (adv : Qsag.Math.Gf2Pow128 → Qsag.Math.Gf2Pow128 →
+        (Qsag.Math.Gf2Pow128 × Qsag.Math.Gf2Pow128) × (Nat → SoftSpokenSliceClaim Qsag.Math.Gf2Pow128)),
+      S.Nodup ∧ slices.length = 2 ∧
+      1 ≤ softspokenActiveSlices (CommRingOps.one : Qsag.Math.Gf2Pow128) CommRingOps.one
+        (adv CommRingOps.one CommRingOps.one).1 slices ∧
+      bvSum (2 * slices.length)
+        (fun delta => if softspokenAllSlicesPass (CommRingOps.one : Qsag.Math.Gf2Pow128) CommRingOps.one
+          (adv CommRingOps.one CommRingOps.one).1
+          (adv CommRingOps.one CommRingOps.one).2 slices delta then 1 else 0) ≤ 4 := by
+  let z : Qsag.Math.Gf2Pow128 := CommRingOps.zero
+  let o : Qsag.Math.Gf2Pow128 := CommRingOps.one
+  let c0 : OtExtColumn Qsag.Math.Gf2Pow128 := ⟨[z], z, z⟩
+  let c1 : OtExtColumn Qsag.Math.Gf2Pow128 := ⟨[o], z, z⟩
+  let sl0 : SoftSpokenSliceCols Qsag.Math.Gf2Pow128 := ⟨c0, c0, c0⟩
+  let sl1 : SoftSpokenSliceCols Qsag.Math.Gf2Pow128 := ⟨c1, c0, c0⟩
+  let slices := [sl0, sl1]
+  let adv : Qsag.Math.Gf2Pow128 → Qsag.Math.Gf2Pow128 →
+      (Qsag.Math.Gf2Pow128 × Qsag.Math.Gf2Pow128) × (Nat → SoftSpokenSliceClaim Qsag.Math.Gf2Pow128) :=
+    fun _ _ => ((z, z), fun _ => ⟨(z, z), (z, z)⟩)
+  have hMain := softspoken_vole_subspace_soundness 1 [o] (.cons (fun _ h => nomatch h) .nil) slices adv
+  have hNeCol : sl0.xCol ≠ sl1.xCol := fun hEq => by
+    have hZO : z = o :=
+      congrArg (fun (col : OtExtColumn Qsag.Math.Gf2Pow128) => col.payload.getD 0 z) hEq
+    exact LawfulField.zero_ne_one hZO
+  have hNeHash : otExtCheckHash o o sl0.xCol ≠ otExtCheckHash o o sl1.xCol := by
+    intro hEq
+    have hFst : (otExtCheckHash o o sl0.xCol).1 = (otExtCheckHash o o sl1.xCol).1 :=
+      congrArg Prod.fst hEq
+    simp only [otExtCheckHash, RoundPoly.evalCoeffs, sl0, sl1, c0, c1, z, o,
+               LawfulCommRing.mul_zero, LawfulCommRing.add_zero, LawfulCommRing.one_mul,
+               LawfulCommRing.zero_add] at hFst
+    exact LawfulField.zero_ne_one hFst
+  have hDich := (hMain.2.1 sl0 (.head _) sl1 (.tail _ (.head _)) rfl (by decide) hNeCol).2 o o hNeHash
+  exact ⟨1, [o], slices, adv, .cons (fun _ h => nomatch h) .nil, rfl, hDich.1, hDich.2⟩
+
+/-- **`#tooth` (`tooth_kos_adaptive_residual_passes_all_chi`)**:
+    1. **Inverted-Quantifier Failure**: If a single target key `deltaTarget` is fixed *outside* the
+       adversary's adaptive response `adv` (or leaked by reusing an unpoisoned substream), even
+       inconsistent slices (`sl0.xCol ≠ sl1.xCol`) pass on `deltaTarget` for **every** `(s0, s1)`!
+    2. **Legacy 128-Bit KOS Grover Failure**: Replacing the `2^256` `SoftSpokenOT` keyspace with
+       legacy 128-bit `Δ` (`2^128`) fails the 128-bit PQ Grover bound at `q = 2^63 - 1` (`2*q + 1 ≤ 2^64`)! -/
+theorem tooth_kos_adaptive_residual_passes_all_chi :
+    ∃ (sl0 sl1 : SoftSpokenSliceCols Qsag.Math.Gf2Pow128) (deltaTarget : BitVec 4)
+      (advKnownDelta : Qsag.Math.Gf2Pow128 → Qsag.Math.Gf2Pow128 →
+        (Qsag.Math.Gf2Pow128 × Qsag.Math.Gf2Pow128) × (Nat → SoftSpokenSliceClaim Qsag.Math.Gf2Pow128))
+      (q : Nat),
+      sl0.xCol ≠ sl1.xCol ∧
+      (∀ s0 s1 : Qsag.Math.Gf2Pow128,
+        softspokenAllSlicesPass s0 s1 (advKnownDelta s0 s1).1 (advKnownDelta s0 s1).2
+          [sl0, sl1] deltaTarget = true) ∧
+      2 * q + 1 ≤ 2 ^ 64 ∧
+      ¬ (Nat.min (2 ^ 128) ((2 * q + 1) ^ 2) * 2 ^ 128 ≤ 2 ^ 128) := by
+  let z : Qsag.Math.Gf2Pow128 := CommRingOps.zero
+  let o : Qsag.Math.Gf2Pow128 := CommRingOps.one
+  let c0 : OtExtColumn Qsag.Math.Gf2Pow128 := ⟨[z], z, z⟩
+  let c1 : OtExtColumn Qsag.Math.Gf2Pow128 := ⟨[o], z, z⟩
+  let sl0 : SoftSpokenSliceCols Qsag.Math.Gf2Pow128 := ⟨c0, c0, c0⟩
+  let sl1 : SoftSpokenSliceCols Qsag.Math.Gf2Pow128 := ⟨c1, c0, c0⟩
+  have hNeCol : sl0.xCol ≠ sl1.xCol := fun hEq => by
+    have hZO : z = o :=
+      congrArg (fun (col : OtExtColumn Qsag.Math.Gf2Pow128) => col.payload.getD 0 z) hEq
+    exact LawfulField.zero_ne_one hZO
+  refine ⟨sl0, sl1, 0#4,
+    (fun s0 s1 => ((z, z), fun _ => ⟨otExtCheckHash s0 s1 c0, otExtCheckHash s0 s1 c0⟩)),
+    2 ^ 63 - 1, hNeCol, ?_, by decide, by decide⟩
+  intro s0 s1
+  have h00 : (0#4).getLsbD 3 = false := by decide
+  have h01 : (0#4).getLsbD 2 = false := by decide
+  have hSet2 : (0#4).setWidth 2 = 0#2 := by decide
+  have h10 : (0#2).getLsbD 1 = false := by decide
+  have h11 : (0#2).getLsbD 0 = false := by decide
+  have hPassRefl : otF4SlicePasses (otExtCheckHash s0 s1 c0) (otExtCheckHash s0 s1 c0)
+      (otExtCheckHash s0 s1 c0) (otExtCheckHash s0 s1 c0) (otExtCheckHash s0 s1 c0) (z, z) false false = true := by
+    unfold otF4SlicePasses otSingleColPasses otPairScaleBit
+    simp only [Bool.false_eq_true, ↓reduceIte, decide_true, Bool.and_self]
+  have hPassRefl1 : otF4SlicePasses (otExtCheckHash s0 s1 c0) (otExtCheckHash s0 s1 c0)
+      (otExtCheckHash s0 s1 c1) (otExtCheckHash s0 s1 c0) (otExtCheckHash s0 s1 c0) (z, z) false false = true := by
+    unfold otF4SlicePasses otSingleColPasses otPairScaleBit
+    simp only [Bool.false_eq_true, ↓reduceIte, decide_true, Bool.and_self]
+  conv => lhs; unfold softspokenAllSlicesPass
+  dsimp only [List.length_cons, List.length_nil, sl0]
+  rw [h00, h01, hSet2, hPassRefl, Bool.true_and]
+  conv => lhs; unfold softspokenAllSlicesPass
+  dsimp only [List.length_nil, sl1]
+  rw [h10, h11, hPassRefl1, Bool.true_and]
+  rfl
 
 /-- Sticky-poisoning KOS Sender channel state (`poisoned = true` permanently disables future batches). -/
 structure KosSenderChannelState where
@@ -6644,7 +7451,7 @@ namespace DensePcgV3
 
 def wireMagic : List UInt8 := [0x51, 0x53, 0x41, 0x47, 0x44, 0x50, 0x43, 0x33]
 def numTrees : Nat := 64
-def tapsPerTree : Nat := 3
+def tapsPerTree : Nat := 11
 
 /-- Level-domain-separated length-doubling 256-bit PRG `lvl → BitVec 256 → (BitVec 256 × BitVec 256)`. -/
 abbrev GgmPrg := Nat → BitVec 256 → BitVec 256 × BitVec 256
@@ -7488,5 +8295,14 @@ theorem rlwe_pq24_grover_and_box_bridge {N : Nat} (z : PolyInt N) :
 end Qsag
 end
 
+#verify_constructive
+  Qsag.kos_gf2_128_sacrifice_linear_soundness
+  Qsag.otExtCheckHash_kernel_le_sq
+  Qsag.softspoken_f4_slice_exact
+  Qsag.softspoken_vole_subspace_soundness
+  Qsag.tooth_kos_adaptive_residual_passes_all_chi
+
 #tooth_pair Qsag.chal11_diff_nonzero_short_and_invertible vs Qsag.tooth_legacy_challenge_pair_has_no_inverse
+#tooth_pair Qsag.softspoken_vole_subspace_soundness vs Qsag.tooth_kos_adaptive_residual_passes_all_chi
 #verify_inhabited Qsag.joint_fork_has_isometric_relation Qsag.witness_joint_or_fork
+#verify_inhabited Qsag.softspoken_vole_subspace_soundness Qsag.witness_softspoken_vole_subspace_soundness
