@@ -14,13 +14,13 @@ ECP5_LABEL="${ECP5_LABEL:-LFE5U-85F-6BG381C}"
 INLINE_CSA="flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; opt -fast;"
 if [ ! -s "$out.json" ]; then
     if [ "${NOFLAT:-0}" = "1" ]; then
-        yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; proc; $INLINE_CSA synth_ecp5 -nowidelut -noflatten -top $top -json $out.json" > /dev/null
+        yosys -l "$out.yosys.log" -q -p "read_verilog -sv -DQSAG_ECP5_CARRY $SRC; hierarchy -top $top $*; proc; flatten t:*qsag_sum_csa*; flatten t:*qsag_add_split*; opt -fast; synth_ecp5 -nowidelut -noflatten -top $top -json $out.json" > /dev/null
     else
-        yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; proc; $INLINE_CSA synth_ecp5 -nowidelut -top $top -json $out.json" > /dev/null
+        yosys -l "$out.yosys.log" -q -p "read_verilog -sv -DQSAG_ECP5_CARRY $SRC; hierarchy -top $top $*; proc; flatten t:*qsag_sum_csa*; flatten t:*qsag_add_split*; opt -fast; synth_ecp5 -nowidelut -top $top -json $out.json" > /dev/null
     fi
 fi
-nextpnr-ecp5 $ECP5_DEV --json "$out.json" --textcfg "$out.config" --freq "${FREQ:-120}" \
-    --timing-allow-fail --seed "${SEED:-1}" --threads 4 ${NEXTPNR_ARGS:---router router2} \
+stdbuf -oL -eL nextpnr-ecp5 $ECP5_DEV --json "$out.json" --textcfg "$out.config" --freq "${FREQ:-120}" \
+    --timing-allow-fail --seed "${SEED:-1}" --threads 8 ${NEXTPNR_ARGS:---router router2} \
     --report "$out.report.json" > "$out.log" 2>&1
 ecppack --compress "$out.config" "$out.bit"
 python3 - "$out.report.json" "$tag" "$ECP5_LABEL" "$out.bit" <<'PY'

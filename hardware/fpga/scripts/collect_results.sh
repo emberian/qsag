@@ -34,6 +34,6 @@ cd "$(dirname "$0")/.."
         echo '```'
     done
     echo "## nextpnr-ecp5 (LFE5U-85F-6BG381C, \$45 ECP5-85F, CABGA381, speed 6)"; echo '```'
-    grep -a -h "^==\|^  \|FAILED" build/run_fmax*.log 2>/dev/null || true; echo '```'
+    grep -a -h "^==\|^  \|FAILED" build/run_fmax.log 2>/dev/null || true; echo '```'
 } > RESULTS.md
 echo "wrote RESULTS.md ($(wc -l < RESULTS.md) lines)"

@@ -13,6 +13,12 @@ module qsag_add_split #(
 );
     localparam int N = (W + CHUNK - 1) / CHUNK;
 
+`ifdef QSAG_ECP5_CARRY
+    /* verilator lint_off UNUSEDPARAM */
+    localparam int UNUSED_N = N;
+    /* verilator lint_on UNUSEDPARAM */
+    assign y = a + b;
+`else
     if (N == 1) begin : g_single
         assign y = a + b;
     end else begin : g_split
@@ -71,4 +77,5 @@ module qsag_add_split #(
             assign y[i*CHUNK +: B] = cin ? c1_s[B-1:0] : c0_s[B-1:0];
         end
     end
+`endif
 endmodule

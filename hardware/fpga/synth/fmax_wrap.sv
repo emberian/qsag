@@ -99,7 +99,7 @@ module fmax_compact_top(input logic clk, input logic rst, input logic si, output
         so     <= ^{awready, wready, bvalid, arready, rvalid, tready, bresp, rresp, rdata};
     end
     qsag_ni_fpga_top #(
-        .PROFILE_COMPACT(1), .ECP5_FULLRATE(0), .FOLD_TAW(11), .KECCAK_RPC(1), .AW(16), .BW(16)
+        .PROFILE_COMPACT(1), .ECP5_FULLRATE(0), .CHAIN_SLOTW(2), .FOLD_TAW(9), .TS_SAW(9), .KECCAK_RPC(1), .AW(16), .BW(16)
     ) dut (
         .clk(clk), .rst(rst_s1),
         .s_axis_tdata(sr[511:0]), .s_axis_tvalid(sr[512]), .s_axis_tready(tready),
@@ -126,7 +126,7 @@ module fmax_ecp5_fullrate_top(input logic clk, input logic rst, input logic si, 
         so     <= ^{awready, wready, bvalid, arready, rvalid, tready, bresp, rresp, rdata};
     end
     qsag_ni_fpga_top #(
-        .PROFILE_COMPACT(1), .ECP5_FULLRATE(1), .FOLD_TAW(11), .KECCAK_RPC(1), .AW(16), .BW(16)
+        .PROFILE_COMPACT(1), .ECP5_FULLRATE(1), .CHAIN_SLOTW(2), .FOLD_TAW(9), .TS_SAW(9), .KECCAK_RPC(1), .AW(16), .BW(16)
     ) dut (
         .clk(clk), .rst(rst_s1),
         .s_axis_tdata(sr[511:0]), .s_axis_tvalid(sr[512]), .s_axis_tready(tready),

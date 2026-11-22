@@ -60,6 +60,7 @@ module qsag_ni_fpga_top #(
     parameter bit KECCAK_PIPE     = P2_UNROLLED,
     parameter int CHAIN_SLOTW     = P2_UNROLLED ? 8 : 5,
     parameter int FOLD_TAW        = PROFILE_COMPACT ? 11 : 16,
+    parameter int TS_SAW          = 11,
     parameter int KECCAK_RPC      = PROFILE_COMPACT ? 1 : 2,
     parameter int AW              = PROFILE_COMPACT ? 16 : 26,
     parameter int BW              = PROFILE_COMPACT ? 16 : 17
@@ -98,7 +99,6 @@ module qsag_ni_fpga_top #(
     localparam int          STEPW        = 6;
     localparam int          TAGW         = SLOTW + 2;
     localparam int          TS_FAW       = PROFILE_COMPACT ? 8 : 9;
-    localparam int          TS_SAW       = 11;
 
     // Primitive 5th root of unity zeta_5 = 3^((p-1)/5) mod p (`zk_hem/v2/field5.rs:FROBENIUS_ZETA5`).
     function automatic logic [63:0] zeta5_rom(input logic [2:0] idx);
