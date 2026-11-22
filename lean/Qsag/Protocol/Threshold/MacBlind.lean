@@ -328,6 +328,47 @@ theorem macBlind_spdz_alpha_zero_leakage {F : Type} [LawfulField F] [DecidableEq
     (spdzMacDefect_ne_zero_of_key_ne hDx hAlpha₁)
     (spdzMacDefect_ne_zero_of_key_ne hDx hAlpha₂)).1 obs
 
+/-- **256-Bit `SoftSpokenOT (n_C = 256, k = 2)` Post-Quantum Grover ROT Budget + Zero-Leakage SPDZ Abort
+    (`macBlind_spdz_pq128_grover_256bit_rot_budget`)**:
+    1. Across any active $\mathbb{F}_4$ slice count `a` (`0 ≤ a ≤ 128`, passing subspace size `4 ^ (128 - a)`)
+       and any quantum RO query budget `q` with `2 * q + 1 ≤ 2 ^ 64`, the joint `SoftSpokenOT` subspace pass
+       $\times$ Grover correlation-recovery numerator satisfies
+       `Nat.min (4 ^ (128 - a)) ((2 * q + 1) ^ 2) * 2 ^ 128 ≤ 2 ^ 256` (`≤ 2^-128` PQ security).
+    2. Conditioned on the correlation pads being uniform (`macBlindPure`), any aborting wire/MAC fault
+       `Δ_x ≠ 0` leaks **0 statistical bits** (`natAbsDiff = 0`) between any two persistent SPDZ MAC keys
+       `α₁, α₂ ≠ Δ_m · Δ_x⁻¹`, even under unanimous dishonest majority `t = n`. -/
+theorem macBlind_spdz_pq128_grover_256bit_rot_budget {F : Type} [LawfulField F] [DecidableEq F]
+    {cardF : Nat} (enum : SimpleEquiv (Fin cardF) F)
+    (a q : Nat) (hq : 2 * q + 1 ≤ 2 ^ 64)
+    (deltaX deltaM rCorrupt alpha₁ alpha₂ : F)
+    (hDx : deltaX ≠ zero)
+    (hAlpha₁ : alpha₁ ≠ mul deltaM (LawfulField.inv deltaX))
+    (hAlpha₂ : alpha₂ ≠ mul deltaM (LawfulField.inv deltaX))
+    (obs : Bool × F → Nat) :
+    Nat.min (4 ^ (128 - a)) ((2 * q + 1) ^ 2) * 2 ^ 128 ≤ 2 ^ 256 ∧
+    natAbsDiff
+      (qsum cardF (fun i =>
+        let w := macBlindPure (enum.toFun i) rCorrupt (spdzMacDefect deltaX alpha₁ deltaM)
+        obs (decide (w ≠ zero), w)))
+      (qsum cardF (fun i =>
+        let w := macBlindPure (enum.toFun i) rCorrupt (spdzMacDefect deltaX alpha₂ deltaM)
+        obs (decide (w ≠ zero), w))) = 0 := by
+  refine ⟨?_, ?_⟩
+  · have hMin : Nat.min (4 ^ (128 - a)) ((2 * q + 1) ^ 2) ≤ (2 * q + 1) ^ 2 := Nat.min_le_right _ _
+    have hSq : (2 * q + 1) ^ 2 ≤ (2 ^ 64) ^ 2 := by
+      simp only [Nat.pow_succ, Nat.pow_zero, Nat.one_mul]
+      exact Nat.mul_le_mul hq hq
+    have hPow : (2 ^ 64) ^ 2 * 2 ^ 128 = 2 ^ 256 := by decide
+    calc Nat.min (4 ^ (128 - a)) ((2 * q + 1) ^ 2) * 2 ^ 128
+        ≤ (2 * q + 1) ^ 2 * 2 ^ 128 := Nat.mul_le_mul_right _ hMin
+      _ ≤ (2 ^ 64) ^ 2 * 2 ^ 128 := Nat.mul_le_mul_right _ hSq
+      _ = 2 ^ 256 := hPow
+  · exact (macBlind_abort_independent_of_alpha enum rCorrupt
+      (spdzMacDefect deltaX alpha₁ deltaM)
+      (spdzMacDefect deltaX alpha₂ deltaM)
+      (spdzMacDefect_ne_zero_of_key_ne hDx hAlpha₁)
+      (spdzMacDefect_ne_zero_of_key_ne hDx hAlpha₂)).2.1 obs
+
 /-- **`#tooth` 1 (`tooth_unblinded_mac_residual_recovers_alpha`)**:
     Without multiplicative blinding (`macBlindPure` replaced by `spdzMacDefect`), an aborting
     shift `Δ_x ≠ 0` deterministically distinguishes any two candidate MAC keys `α₁ ≠ α₂`
@@ -1021,6 +1062,7 @@ theorem inhabited_combineBucket_hypergeometric :
   macBlind_uniform_of_nonzero_defect
   macBlind_abort_independent_of_alpha
   macBlind_spdz_alpha_zero_leakage
+  macBlind_spdz_pq128_grover_256bit_rot_budget
   goldilocksExt2_macBlind_soundness_and_lhl_budget
   macBlind_tower128_two_round_256bit_sound
   macBlind_gf2Pow128_iso_commutes
