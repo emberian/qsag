@@ -14,8 +14,14 @@ pub use keccak::{
     sp800_185_encode_string, sp800_185_left_encode,
 };
 pub use poseidon2::{
-    POSEIDON2_CONST_IV, POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INIT_STATE,
-    POSEIDON2_INTERNAL_ROUNDS, Poseidon2State12, bytes_to_limbs56, poseidon2_apply_me,
-    poseidon2_apply_mi, poseidon2_const_at, poseidon2_hash32, poseidon2_pad, poseidon2_perm12,
-    poseidon2_rc_bijection, poseidon2_sbox7,
+    POSEIDON2_CONST_IV, POSEIDON2_GL24_CAPACITY, POSEIDON2_GL24_DIGEST_LIMBS,
+    POSEIDON2_GL24_HALF_EXTERNAL_ROUNDS, POSEIDON2_GL24_INTERNAL_DIAG,
+    POSEIDON2_GL24_INTERNAL_ROUNDS, POSEIDON2_GL24_IV, POSEIDON2_GL24_MERKLE_TAG,
+    POSEIDON2_GL24_RATE, POSEIDON2_GL24_RC, POSEIDON2_GL24_SBOX_COUNT, POSEIDON2_GL24_WIDTH,
+    POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INIT_STATE, POSEIDON2_INTERNAL_ROUNDS,
+    Poseidon2Gl24Sponge, Poseidon2State12, Poseidon2State24, bytes_to_limbs56,
+    goldilocks_shl_small, poseidon2_apply_me, poseidon2_apply_mi, poseidon2_const_at,
+    poseidon2_gl24_apply_me, poseidon2_gl24_apply_mi, poseidon2_gl24_compress_merkle,
+    poseidon2_gl24_grain_constants, poseidon2_gl24_hash56, poseidon2_gl24_perm, poseidon2_hash32,
+    poseidon2_pad, poseidon2_perm12, poseidon2_rc_bijection, poseidon2_sbox7,
 };

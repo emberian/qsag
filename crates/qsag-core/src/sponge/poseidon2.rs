@@ -13,8 +13,12 @@ use crate::field::goldilocks::Goldilocks;
 /// `"POS2_GL1"` (`poseidon2ConstIV`), `poseidon2ConstWord` (`(tag, round, lane)` absorbed
 /// into the IV), and the round counts ($R_F = 2 \cdot 4$ external, $R_P = 22$ internal).
 pub use qsag_accel::poseidon2::{
-    POSEIDON2_CONST_IV, POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INTERNAL_ROUNDS,
-    poseidon2_const_word, poseidon2_rc_bijection,
+    POSEIDON2_CONST_IV, POSEIDON2_GL24_CAPACITY, POSEIDON2_GL24_DIGEST_LIMBS,
+    POSEIDON2_GL24_HALF_EXTERNAL_ROUNDS, POSEIDON2_GL24_INTERNAL_DIAG,
+    POSEIDON2_GL24_INTERNAL_ROUNDS, POSEIDON2_GL24_IV, POSEIDON2_GL24_MERKLE_TAG,
+    POSEIDON2_GL24_RATE, POSEIDON2_GL24_RC, POSEIDON2_GL24_SBOX_COUNT, POSEIDON2_GL24_WIDTH,
+    POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INTERNAL_ROUNDS, Poseidon2Gl24Sponge, gl_shl_small,
+    poseidon2_const_word, poseidon2_gl24_grain_constants, poseidon2_rc_bijection,
 };
 
 /// `poseidon2ConstAt`: round constant reduced modulo $p$.
@@ -242,5 +246,148 @@ mod canonical_kat {
                 2734959974607798415
             ]
         );
+    }
+}
+
+// ============================================================================
+// Width-24 Goldilocks `Poseidon2-GL-w24` (`rate = 16, capacity = 8`, 7-limb digest)
+// ============================================================================
+
+/// Width-24 sponge state: lanes `0..16` are the rate (`7 + 7 + 2`), lanes `16..24` are the 512-bit capacity.
+pub type Poseidon2State24 = [Goldilocks; 24];
+
+/// Shift-only scaling $(x \cdot 2^{\text{shift}}) \bmod p$ (`shift <= 23`, `0` field multiplications).
+#[inline]
+pub const fn goldilocks_shl_small(x: Goldilocks, shift: u32) -> Goldilocks {
+    Goldilocks::from_u64_reduced(gl_shl_small(x.to_canonical_u64(), shift))
+}
+
+/// Kronecker-swapped Width-24 external diffusion layer $M_E = M_4 \otimes P_6$ (`0` field muls;
+/// immune to `ePrint 2026/306` subfield/subspace trail skipping).
+pub fn poseidon2_gl24_apply_me(st: &mut Poseidon2State24) {
+    let mut y = [[Goldilocks::ZERO; 4]; 6];
+    for c in 0..6 {
+        y[c] = poseidon2_apply_m4([st[c], st[6 + c], st[12 + c], st[18 + c]]);
+    }
+    for g in 0..4 {
+        let s = ((y[0][g] + y[1][g]) + (y[2][g] + y[3][g])) + (y[4][g] + y[5][g]);
+        for c in 0..6 {
+            st[6 * g + c] = y[c][g] + s;
+        }
+    }
+}
+
+/// Shift-only Width-24 internal diffusion layer $M_I = J_{24} + \mathrm{diag}(-2^{23}, 1, 2, \dots, 2^{22})$
+/// (`0` field multiplications, Rabin-irreducible degree-24 charpoly over Goldilocks, nonzero-sum branch number `25`).
+pub fn poseidon2_gl24_apply_mi(st: &mut Poseidon2State24) {
+    let mut s = Goldilocks::ZERO;
+    for x in st.iter() {
+        s += *x;
+    }
+    st[0] = s - goldilocks_shl_small(st[0], 23);
+    st[1] += s;
+    for j in 2..24 {
+        st[j] = s + goldilocks_shl_small(st[j], (j - 1) as u32);
+    }
+}
+
+/// Width-24 `Poseidon2-GL-w24` permutation (`(R_F, R_P) = (8, 44)`, `236` Grain constants).
+pub fn poseidon2_gl24_perm(st: &mut Poseidon2State24) {
+    poseidon2_gl24_apply_me(st);
+    for r in 0..POSEIDON2_GL24_HALF_EXTERNAL_ROUNDS {
+        let base = 24 * r;
+        for lane in 0..24 {
+            st[lane] =
+                poseidon2_sbox7(st[lane] + Goldilocks::from_u64_reduced(POSEIDON2_GL24_RC[base + lane]));
+        }
+        poseidon2_gl24_apply_me(st);
+    }
+    for r in 0..POSEIDON2_GL24_INTERNAL_ROUNDS {
+        st[0] = poseidon2_sbox7(st[0] + Goldilocks::from_u64_reduced(POSEIDON2_GL24_RC[96 + r]));
+        poseidon2_gl24_apply_mi(st);
+    }
+    for r in 0..POSEIDON2_GL24_HALF_EXTERNAL_ROUNDS {
+        let base = 140 + 24 * r;
+        for lane in 0..24 {
+            st[lane] =
+                poseidon2_sbox7(st[lane] + Goldilocks::from_u64_reduced(POSEIDON2_GL24_RC[base + lane]));
+        }
+        poseidon2_gl24_apply_me(st);
+    }
+}
+
+/// 1-call 2-to-1 Merkle compression of two 7-limb (56-byte) digests + 2 tweak limbs (`7 + 7 + 2 = 16`
+/// rate limbs) with Jive-weighted feed-forward (`left + 2 * right + 4 * tweak`).
+pub fn poseidon2_gl24_compress_merkle(
+    left: &[Goldilocks; 7],
+    right: &[Goldilocks; 7],
+    tweak: &[Goldilocks; 2],
+) -> [Goldilocks; 7] {
+    let mut st = [Goldilocks::ZERO; 24];
+    st[0..7].copy_from_slice(left);
+    st[7..14].copy_from_slice(right);
+    st[14] = tweak[0];
+    st[15] = tweak[1];
+    st[16] = Goldilocks::from_u64_reduced(POSEIDON2_GL24_RATE as u64);
+    st[17] = Goldilocks::from_u64_reduced(POSEIDON2_GL24_CAPACITY as u64);
+    st[18] = Goldilocks::from_u64_reduced(POSEIDON2_GL24_DIGEST_LIMBS as u64);
+    st[19] = Goldilocks::from_u64_reduced(POSEIDON2_GL24_MERKLE_TAG);
+    st[23] = Goldilocks::from_u64_reduced(POSEIDON2_GL24_IV);
+
+    let mut perm = st;
+    poseidon2_gl24_perm(&mut perm);
+
+    let mut out = [Goldilocks::ZERO; 7];
+    for i in 0..7 {
+        let mut ff = st[i] + goldilocks_shl_small(st[7 + i], 1);
+        if i < 2 {
+            ff += goldilocks_shl_small(st[14 + i], 2);
+        }
+        out[i] = perm[i] + ff;
+    }
+    crate::wipe::wipe_goldilocks(&mut st);
+    crate::wipe::wipe_goldilocks(&mut perm);
+    out
+}
+
+/// 448-bit (56-byte, 7-limb) algebraic `Poseidon2-GL-w24` sponge hash (`rate = 16, capacity = 8`).
+pub fn poseidon2_gl24_hash56(domain_tag: u64, msg: &[u8]) -> [u8; 56] {
+    qsag_accel::poseidon2::poseidon2_gl24_hash56(domain_tag, msg)
+}
+
+#[cfg(test)]
+mod gl24_tests {
+    use super::*;
+
+    #[test]
+    fn gl24_field_and_accel_match_bit_for_bit() {
+        let mut st_field: Poseidon2State24 =
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced(i as u64));
+        let mut st_u64: [u64; 24] = core::array::from_fn(|i| i as u64);
+        poseidon2_gl24_perm(&mut st_field);
+        qsag_accel::poseidon2::poseidon2_gl24_perm(&mut st_u64);
+        assert_eq!(st_field.map(|x| x.to_canonical_u64()), st_u64);
+
+        let left: [Goldilocks; 7] =
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced((i + 1) as u64));
+        let right: [Goldilocks; 7] =
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced((i + 8) as u64));
+        let tweak = [
+            Goldilocks::from_u64_reduced(100),
+            Goldilocks::from_u64_reduced(200),
+        ];
+        let out_field = poseidon2_gl24_compress_merkle(&left, &right, &tweak);
+        let out_u64 = qsag_accel::poseidon2::poseidon2_gl24_compress_merkle(
+            &left.map(|x| x.to_canonical_u64()),
+            &right.map(|x| x.to_canonical_u64()),
+            &tweak.map(|x| x.to_canonical_u64()),
+        );
+        assert_eq!(out_field.map(|x| x.to_canonical_u64()), out_u64);
+
+        let d1 = poseidon2_gl24_hash56(0x4142, b"abc");
+        let d2 = poseidon2_gl24_hash56(0x4142, b"abc\x00");
+        let d3 = poseidon2_gl24_hash56(0x4143, b"abc");
+        assert_ne!(d1, d2);
+        assert_ne!(d1, d3);
     }
 }
