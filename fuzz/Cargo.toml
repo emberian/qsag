@@ -27,6 +27,7 @@ qsag-fts = { path = "../crates/qsag-fts", features = ["std", "test-dealer"] }
 qsag-policy = { path = "../crates/qsag-policy", features = ["std"] }
 qsag-addr = { path = "../crates/qsag-addr", features = ["std"] }
 qsag-quorum = { path = "../crates/qsag-quorum", features = ["std"] }
+qsag-migrate = { path = "../crates/qsag-migrate", features = ["std"] }
 
 # Independent upstream reference implementations for coverage-guided differential fuzzing
 sha3 = "0.10"
@@ -88,6 +89,13 @@ bench = false
 [[bin]]
 name = "fuzz_hologram_and_subtree_decode"
 path = "fuzz_targets/fuzz_hologram_and_subtree_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_migrate_ownership"
+path = "fuzz_targets/fuzz_migrate_ownership.rs"
 test = false
 doc = false
 bench = false
