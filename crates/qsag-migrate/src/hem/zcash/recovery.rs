@@ -1082,3 +1082,1149 @@ pub struct AddressWitness {
 /// Public statement of ownership of an Orchard address: the prover knows the key
 /// material behind the incoming viewing key of `address`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddressStatement {
+    pub key_source: KeySource,
+    /// The raw Orchard address `d || pk_d` (the Orchard receiver of a unified address).
+    pub address: [u8; 43],
+    pub pq_commitment: [u8; 32],
+    pub migration_domain: [u8; 32],
+    pub epoch: u64,
+}
+
+fn address_points(address: &[u8; 43]) -> Option<(AffineBytes, [u8; 32])> {
+    let d: [u8; 11] = address[..11].try_into().ok()?;
+    let pk_d: [u8; 32] = address[11..].try_into().ok()?;
+    Point::from_bytes_nonidentity(&pk_d)?;
+    Some((affine_bytes(&orchard::diversify_hash(&d))?, pk_d))
+}
+
+fn address_of(source: &KeySource, w: &AddressWitness, d: &[u8; 11]) -> Option<[u8; 43]> {
+    let keys = resolve_keys(source, &w.key)?;
+    let scope = if w.internal {
+        orchard::Scope::Internal
+    } else {
+        orchard::Scope::External
+    };
+    keys.fvk.address(d, scope)
+}
+
+impl AddressStatement {
+    /// The statement for the address of the witness key at diversifier `d`.
+    pub fn derive(
+        key_source: &KeySource,
+        witness: &AddressWitness,
+        d: &[u8; 11],
+        pq_commitment: [u8; 32],
+        migration_domain: [u8; 32],
+        epoch: u64,
+    ) -> Option<Self> {
+        Some(Self {
+            key_source: key_source.clone(),
+            address: address_of(key_source, witness, d)?,
+            pq_commitment,
+            migration_domain,
+            epoch,
+        })
+    }
+
+    /// Whether the parameters are in range and `pk_d` is a non-identity point.
+    pub fn is_well_formed(&self) -> bool {
+        self.key_source.is_well_formed() && address_points(&self.address).is_some()
+    }
+
+    /// The registry nullifier: one value per address and domain,
+    /// `BLAKE2b-256("QSAG_ZcashAddrNf", domain || address)`. It is public: an address is
+    /// its own identifier.
+    pub fn nullifier(&self) -> [u8; 32] {
+        blake2b_256(
+            ADDRESS_NULLIFIER_PERSONAL,
+            &[&self.migration_domain, &self.address],
+        )
+    }
+
+    /// `tag(29) || epoch(8, BE) || domain(32) || pq(32) || address(43) || key source`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(160);
+        out.extend_from_slice(ADDRESS_TAG);
+        out.extend_from_slice(&self.epoch.to_be_bytes());
+        out.extend_from_slice(&self.migration_domain);
+        out.extend_from_slice(&self.pq_commitment);
+        out.extend_from_slice(&self.address);
+        self.key_source.encode(&mut out);
+        out
+    }
+
+    /// Strict inverse of [`Self::to_bytes`].
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut rest = bytes.strip_prefix(ADDRESS_TAG.as_slice())?;
+        let mut take = |n: usize| -> Option<&[u8]> {
+            let (head, tail) = rest.split_at_checked(n)?;
+            rest = tail;
+            Some(head)
+        };
+        let epoch = u64::from_be_bytes(take(8)?.try_into().ok()?);
+        let migration_domain: [u8; 32] = take(32)?.try_into().ok()?;
+        let pq_commitment: [u8; 32] = take(32)?.try_into().ok()?;
+        let address: [u8; 43] = take(43)?.try_into().ok()?;
+        let key_source = KeySource::decode(&mut rest)?;
+        let statement = Self {
+            key_source,
+            address,
+            pq_commitment,
+            migration_domain,
+            epoch,
+        };
+        (rest.is_empty() && statement.is_well_formed()).then_some(statement)
+    }
+
+    fn public_bits(&self) -> Option<Vec<bool>> {
+        let ((gx, gy), pk_d) = address_points(&self.address)?;
+        let mut out: Vec<bool> = byte_bits(&gx, 255).collect();
+        out.extend(byte_bits(&gy, 255));
+        out.extend(byte_bits(&pk_d, 256));
+        Some(out)
+    }
+
+    /// The relation's public inputs, one per bit: the affine coordinates of
+    /// `DiversifyHash(d)` (255 bits each) and `repr_P(pk_d)`.
+    pub fn public_inputs(&self) -> Option<Vec<F>> {
+        self.key_source
+            .is_well_formed()
+            .then(|| self.public_bits())
+            .flatten()
+            .map(to_field)
+    }
+
+    fn transcript(&self, regime: Profile) -> Vec<u8> {
+        let mut out = self.to_bytes();
+        out.push(regime.wire_tag());
+        out
+    }
+
+    /// The binding a verified statement asks the registry to record.
+    #[cfg(feature = "std")]
+    pub fn binding(&self) -> crate::hem::registry::MigrationBinding {
+        crate::hem::registry::MigrationBinding {
+            nullifier: self.nullifier(),
+            migration_domain: self.migration_domain,
+            legacy_id: credential_identifier(LEGACY_TAG_ORCHARD_ADDRESS, &self.address),
+            pq_commitment: self.pq_commitment,
+            epoch: self.epoch,
+            exposure: crate::hem::registry::KeyExposure::Hidden,
+        }
+    }
+}
+
+/// The public relation of an address statement; it depends on the key source only.
+pub fn address_shape(statement: &AddressStatement) -> Option<Arc<Shape>> {
+    statement
+        .is_well_formed()
+        .then(|| shape_of(&Relation::Address(statement.key_source.clone())))
+}
+
+/// The relation of `statement` with the assignment for `witness`, after checking natively
+/// that the witness owns the address.
+pub fn synthesize_address(
+    statement: &AddressStatement,
+    witness: &AddressWitness,
+) -> Result<(Shape, Vec<F>), RecoveryError> {
+    let public = statement
+        .key_source
+        .is_well_formed()
+        .then(|| statement.public_bits())
+        .flatten()
+        .ok_or(RecoveryError::MalformedStatement)?;
+    let d: [u8; 11] = statement.address[..11].try_into().expect("11 bytes");
+    if address_of(&statement.key_source, witness, &d) != Some(statement.address) {
+        return Err(RecoveryError::WitnessMismatch);
+    }
+    let relation = Relation::Address(statement.key_source.clone());
+    let mut inputs = Inputs::placeholder(&relation);
+    (inputs.secret, inputs.ak, inputs.nk) = Inputs::keys(&witness.key);
+    inputs.internal = witness.internal;
+    let (shape, assignment, _) = build(&relation, &public, &inputs);
+    Ok((shape, assignment))
+}
+
+/// The statement bytes [`prove_address`] and [`verify_address`] hand to zk-Hem.
+pub fn address_transcript(statement: &AddressStatement, regime: Profile) -> Vec<u8> {
+    statement.transcript(regime)
+}
+
+/// An address ownership proof.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddressProof {
+    key_tag: u8,
+    pub regime: Profile,
+    pub proof: ZkHemV2Proof,
+}
+
+impl AddressProof {
+    /// `magic(8) || key source tag || regime || zk-Hem proof`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = ADDRESS_PROOF_MAGIC.to_vec();
+        out.push(self.key_tag);
+        out.push(self.regime.wire_tag());
+        out.extend_from_slice(&self.proof.to_bytes());
+        out
+    }
+
+    /// Strict decoding against the statement the proof is for.
+    pub fn from_bytes(bytes: &[u8], statement: &AddressStatement) -> Option<Self> {
+        let rest = bytes.strip_prefix(ADDRESS_PROOF_MAGIC.as_slice())?;
+        let (&key_tag, rest) = rest.split_first()?;
+        let (&regime, rest) = rest.split_first()?;
+        if key_tag != statement.key_source.tag() {
+            return None;
+        }
+        let regime = Profile::from_wire_tag(regime)?;
+        let shape = address_shape(statement)?;
+        let proof = ZkHemV2Proof::from_bytes(rest, &shape)?;
+        (proof.profile == regime).then_some(Self {
+            key_tag,
+            regime,
+            proof,
+        })
+    }
+}
+
+/// Prove ownership of an address. `seed` must be uniform and secret.
+pub fn prove_address(
+    statement: &AddressStatement,
+    witness: &AddressWitness,
+    regime: Profile,
+    seed: &[u8; 32],
+) -> Result<AddressProof, RecoveryError> {
+    let (shape, assignment) = synthesize_address(statement, witness)?;
+    let proof = protocol::prove(
+        &shape,
+        assignment,
+        &statement.transcript(regime),
+        regime,
+        seed,
+    )
+    .map_err(RecoveryError::Proof)?;
+    Ok(AddressProof {
+        key_tag: statement.key_source.tag(),
+        regime,
+        proof,
+    })
+}
+
+/// Verify an address ownership proof under the regime the verifier requires.
+pub fn verify_address(
+    statement: &AddressStatement,
+    regime: Profile,
+    proof: &AddressProof,
+) -> bool {
+    if proof.regime != regime || proof.key_tag != statement.key_source.tag() {
+        return false;
+    }
+    let (Some(shape), Some(public_inputs)) = (address_shape(statement), statement.public_inputs())
+    else {
+        return false;
+    };
+    proof.proof.profile == regime
+        && protocol::verify(
+            &shape,
+            &public_inputs,
+            &statement.transcript(regime),
+            regime,
+            &proof.proof,
+        )
+}
+
+/// Row counts of a relation before padding, for reports: `(rows, variables)`.
+pub fn relation_size(key_source: &KeySource, note: bool) -> (usize, usize) {
+    let relation = if note {
+        Relation::Note(key_source.clone())
+    } else {
+        Relation::Address(key_source.clone())
+    };
+    let public = vec![false; relation.public_bits()];
+    let (shape, _, rows) = build(&relation, &public, &Inputs::placeholder(&relation));
+    (rows, shape.num_vars)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::vectors::{KEY_COMPONENTS, hex32};
+    use super::*;
+    use crate::hem::zcash::orchard::Scope;
+    use std::println;
+    use std::string::String;
+
+    const REGIME: Profile = Profile::TurboShakeJohnson400;
+    const PQ: [u8; 32] = [0x51; 32];
+    const DOMAIN: [u8; 32] = [0x44; 32];
+    const EPOCH: u64 = 7;
+
+    fn sk(i: usize) -> [u8; 32] {
+        hex32(KEY_COMPONENTS[i].sk)
+    }
+
+    fn seed() -> Vec<u8> {
+        (0..32).map(|i| (i * 7 + 1) as u8).collect()
+    }
+
+    fn sample_fp(i: u64) -> Fp {
+        let mut x = Fp::from_u64(0x0123_4567_89ab_cdef ^ i);
+        for _ in 0..5 {
+            x = x.square() + Fp::from_u64(i + 11);
+        }
+        x
+    }
+
+    fn alpha(i: u64) -> [u8; 32] {
+        let mut x = Fq::from_u64(0xfeed_face_cafe_beef ^ i);
+        for _ in 0..5 {
+            x = x * x + Fq::from_u64(i + 5);
+        }
+        x.to_bytes()
+    }
+
+    /// The key witness of a source and the full viewing key it resolves to.
+    fn key(source: &KeySource) -> (KeyWitness, FullViewingKey) {
+        let witness = match source {
+            KeySource::SpendingKey => KeyWitness::SpendingKey(sk(0)),
+            KeySource::Zip32Seed { .. } => KeyWitness::Zip32Seed(seed()),
+            KeySource::QuantumSpendingKey => {
+                // A key as ZIP 2005 derives it with use_qsk: nk and qsk from sk, ak from
+                // an independent spend authorizing key.
+                let ask = orchard::spend_authorizing_key(&sk(3)).unwrap();
+                KeyWitness::QuantumSpendingKey {
+                    qsk: orchard::h_qsk(&sk(1)),
+                    ak: orchard::redpallas_public_key(&ask),
+                    nk: orchard::h_nk(&sk(1)).to_bytes(),
+                }
+            }
+        };
+        let fvk = resolve_keys(source, &witness).unwrap().fvk;
+        (witness, fvk)
+    }
+
+    fn note_for(fvk: &FullViewingKey, internal: bool, version: NoteVersion) -> Note {
+        let scope = if internal {
+            Scope::Internal
+        } else {
+            Scope::External
+        };
+        let note = Note {
+            recipient: fvk.default_address(scope).unwrap(),
+            value: 1_234_567_890_123,
+            rho: sample_fp(1),
+            rseed: [0x5e; 32],
+            version,
+        };
+        assert!(note.commitment().is_some());
+        note
+    }
+
+    /// A rehashed tree with a few other leaves and `note` at `position`.
+    fn tree(note: &Note, position: u32) -> ([[u8; 32]; rehash::DEPTH], [u8; 32]) {
+        let mut leaves: Vec<[u8; 32]> = (0..position + 3)
+            .map(|i| rehash::leaf_hash(&[i as u8 + 1; 32], &[0x77; 32]))
+            .collect();
+        leaves[position as usize] =
+            rehash::leaf_hash(&note.cmx().unwrap().to_bytes(), &note.rho.to_bytes());
+        rehash::witness(&leaves, position).unwrap()
+    }
+
+    fn witness(source: &KeySource, internal: bool) -> RecoveryWitness {
+        let (key, fvk) = key(source);
+        let note = note_for(&fvk, internal, NoteVersion::V3);
+        let (path, _) = tree(&note, 5);
+        RecoveryWitness {
+            key,
+            internal,
+            alpha: alpha(1),
+            note,
+            position: 5,
+            path,
+        }
+    }
+
+    fn statement(source: &KeySource, w: &RecoveryWitness) -> RecoveryStatement {
+        RecoveryStatement::derive(source, w, PQ, DOMAIN, EPOCH).unwrap()
+    }
+
+    /// The signature the holders of the spend authorizing key make in the QK branch.
+    fn external_signature(st: &RecoveryStatement, w: &RecoveryWitness) -> [u8; 64] {
+        let ask = orchard::spend_authorizing_key(&sk(3)).unwrap();
+        let key = ask + Fq::from_bytes(&w.alpha).unwrap();
+        orchard::redpallas_sign(&key, &st.sighash(), &[0x33; 80])
+    }
+
+    fn sources() -> [KeySource; 3] {
+        [
+            KeySource::SpendingKey,
+            KeySource::mainnet_account(0),
+            KeySource::QuantumSpendingKey,
+        ]
+    }
+
+    #[test]
+    fn statement_matches_the_native_protocol() {
+        for source in sources() {
+            let w = witness(&source, false);
+            let st = statement(&source, &w);
+            let (_, fvk) = key(&source);
+            assert_eq!(st.value, w.note.value);
+            assert_eq!(st.nullifier, w.note.nullifier(&fvk.nk).unwrap().to_bytes());
+            assert_eq!(st.anchor, tree(&w.note, 5).1);
+            assert!(st.is_well_formed());
+            assert_eq!(st.public_inputs().unwrap().len(), 831);
+        }
+        // The seed source is the account key of ZIP 32.
+        let (_, fvk) = key(&KeySource::mainnet_account(0));
+        let account = orchard::ExtendedSpendingKey::account(&seed(), 133, 0).unwrap();
+        assert_eq!(fvk, FullViewingKey::from_spending_key(&account.sk).unwrap());
+        // In the SK branch rk is the randomization of [H^ask(sk)] G.
+        let w = witness(&KeySource::SpendingKey, false);
+        let st = statement(&KeySource::SpendingKey, &w);
+        let signing = orchard::h_ask(&sk(0)) + Fq::from_bytes(&w.alpha).unwrap();
+        assert_eq!(st.rk, orchard::redpallas_public_key(&signing));
+    }
+
+    #[test]
+    fn inconsistent_witnesses_have_no_statement() {
+        let source = KeySource::SpendingKey;
+        let good = witness(&source, false);
+        assert!(RecoveryStatement::derive(&source, &good, PQ, DOMAIN, EPOCH).is_some());
+        let derive = |w: &RecoveryWitness| RecoveryStatement::derive(&source, w, PQ, DOMAIN, EPOCH);
+
+        // A note of another key.
+        let mut w = good.clone();
+        w.key = KeyWitness::SpendingKey(sk(1));
+        assert!(derive(&w).is_none());
+        // The wrong scope.
+        let mut w = good.clone();
+        w.internal = true;
+        assert!(derive(&w).is_none());
+        // A pre-ZIP-2005 note (lead byte 0x02).
+        let mut w = good.clone();
+        w.note.version = NoteVersion::V2;
+        assert!(derive(&w).is_none());
+        // A randomizer that is not a canonical scalar, and the zero randomizer.
+        let mut w = good.clone();
+        w.alpha = [0xff; 32];
+        assert!(derive(&w).is_none());
+        w.alpha = [0; 32];
+        assert!(derive(&w).is_none());
+        // A witness of the wrong kind, a seed of the wrong length.
+        assert!(
+            RecoveryStatement::derive(&KeySource::QuantumSpendingKey, &good, PQ, DOMAIN, EPOCH)
+                .is_none()
+        );
+        let mut w = good.clone();
+        w.key = KeyWitness::Zip32Seed(vec![1; 33]);
+        assert!(
+            RecoveryStatement::derive(&KeySource::mainnet_account(0), &w, PQ, DOMAIN, EPOCH)
+                .is_none()
+        );
+        // A changed note or path gives another statement, which the witness check of the
+        // prover rejects.
+        let st = derive(&good).unwrap();
+        let mut w = good.clone();
+        w.note.value += 1;
+        assert_ne!(derive(&w).unwrap(), st);
+        assert_eq!(
+            synthesize_recovery(&st, &w).err(),
+            Some(RecoveryError::WitnessMismatch)
+        );
+        let mut w = good.clone();
+        w.path[3][0] ^= 1;
+        assert_ne!(derive(&w).unwrap().anchor, st.anchor);
+        let mut w = good.clone();
+        w.position ^= 1;
+        assert_ne!(derive(&w).unwrap().anchor, st.anchor);
+    }
+
+    #[test]
+    fn note_statement_encoding_is_strict() {
+        for source in sources() {
+            let w = witness(&source, false);
+            let st = statement(&source, &w);
+            let bytes = st.to_bytes();
+            assert_eq!(RecoveryStatement::from_bytes(&bytes), Some(st.clone()));
+            assert!(RecoveryStatement::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+            let mut longer = bytes.clone();
+            longer.push(0);
+            assert!(RecoveryStatement::from_bytes(&longer).is_none());
+            let mut tag = bytes.clone();
+            tag[28] ^= 1;
+            assert!(RecoveryStatement::from_bytes(&tag).is_none());
+            // Every field is in the encoding and in the signed message.
+            let variants = [
+                RecoveryStatement {
+                    epoch: 8,
+                    ..st.clone()
+                },
+                RecoveryStatement {
+                    migration_domain: [1; 32],
+                    ..st.clone()
+                },
+                RecoveryStatement {
+                    pq_commitment: [1; 32],
+                    ..st.clone()
+                },
+                RecoveryStatement {
+                    anchor: [1; 32],
+                    ..st.clone()
+                },
+                RecoveryStatement {
+                    nullifier: [1; 32],
+                    ..st.clone()
+                },
+                RecoveryStatement {
+                    rk: st.nullifier,
+                    ..st.clone()
+                },
+                RecoveryStatement {
+                    value: st.value + 1,
+                    ..st.clone()
+                },
+            ];
+            for other in &variants {
+                assert_ne!(other.to_bytes(), bytes);
+                assert_ne!(other.sighash(), st.sighash());
+            }
+        }
+        let st = statement(
+            &KeySource::SpendingKey,
+            &witness(&KeySource::SpendingKey, false),
+        );
+        // Non-canonical field element, identity and off-curve rk, unknown or bad key source.
+        let at = |offset: usize| 29 + 8 + 32 + 32 + offset;
+        let mut bad = st.to_bytes();
+        bad[at(32)..at(64)].fill(0xff);
+        assert!(RecoveryStatement::from_bytes(&bad).is_none());
+        let mut bad = st.to_bytes();
+        bad[at(64)..at(96)].fill(0);
+        assert!(RecoveryStatement::from_bytes(&bad).is_none());
+        let mut bad = st.to_bytes();
+        *bad.last_mut().unwrap() = 9;
+        assert!(RecoveryStatement::from_bytes(&bad).is_none());
+        let seed_st = RecoveryStatement {
+            key_source: KeySource::Zip32Seed {
+                seed_len: 31,
+                coin_type: 133,
+                account: 0,
+            },
+            ..st.clone()
+        };
+        assert!(!seed_st.is_well_formed());
+        assert!(RecoveryStatement::from_bytes(&seed_st.to_bytes()).is_none());
+        assert!(seed_st.public_inputs().is_none());
+        assert!(recovery_shape(&seed_st).is_none());
+        let hardened = RecoveryStatement {
+            key_source: KeySource::Zip32Seed {
+                seed_len: 32,
+                coin_type: 133,
+                account: ZIP32_HARDENED,
+            },
+            ..st
+        };
+        assert!(RecoveryStatement::from_bytes(&hardened.to_bytes()).is_none());
+    }
+
+    #[test]
+    fn address_statement_matches_the_native_protocol() {
+        for source in sources() {
+            let (key, fvk) = key(&source);
+            for internal in [false, true] {
+                let scope = if internal {
+                    Scope::Internal
+                } else {
+                    Scope::External
+                };
+                let w = AddressWitness {
+                    key: key.clone(),
+                    internal,
+                };
+                let d = fvk.diversifier(&[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], scope);
+                let st = AddressStatement::derive(&source, &w, &d, PQ, DOMAIN, EPOCH).unwrap();
+                assert_eq!(st.address, fvk.address(&d, scope).unwrap());
+                assert_eq!(st.public_inputs().unwrap().len(), 766);
+                let bytes = st.to_bytes();
+                assert_eq!(AddressStatement::from_bytes(&bytes), Some(st.clone()));
+                assert!(AddressStatement::from_bytes(&bytes[1..]).is_none());
+                let mut longer = bytes.clone();
+                longer.push(0);
+                assert!(AddressStatement::from_bytes(&longer).is_none());
+                // An address of another key or scope is not this witness's.
+                let other = AddressStatement {
+                    address: FullViewingKey::from_spending_key(&sk(5))
+                        .unwrap()
+                        .default_address(Scope::External)
+                        .unwrap(),
+                    ..st.clone()
+                };
+                assert_eq!(
+                    synthesize_address(&other, &w).err(),
+                    Some(RecoveryError::WitnessMismatch)
+                );
+                let flipped = AddressWitness {
+                    key: key.clone(),
+                    internal: !internal,
+                };
+                assert_eq!(
+                    synthesize_address(&st, &flipped).err(),
+                    Some(RecoveryError::WitnessMismatch)
+                );
+                assert_ne!(
+                    st.nullifier(),
+                    AddressStatement {
+                        migration_domain: [9; 32],
+                        ..st.clone()
+                    }
+                    .nullifier()
+                );
+            }
+        }
+        // pk_d must decode to a point other than the identity.
+        let (key, fvk) = key(&KeySource::SpendingKey);
+        let w = AddressWitness {
+            key,
+            internal: false,
+        };
+        let d = fvk.diversifier(&[0; 11], Scope::External);
+        let st =
+            AddressStatement::derive(&KeySource::SpendingKey, &w, &d, PQ, DOMAIN, EPOCH).unwrap();
+        let mut zero = st.clone();
+        zero.address[11..].fill(0);
+        assert!(!zero.is_well_formed());
+        assert!(AddressStatement::from_bytes(&zero.to_bytes()).is_none());
+        let mut off = st;
+        off.address[11..].fill(0xff);
+        assert!(off.public_inputs().is_none());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn registry_bindings_identify_the_credential() {
+        use crate::hem::registry::KeyExposure;
+        let source = KeySource::SpendingKey;
+        let w = witness(&source, false);
+        let st = statement(&source, &w);
+        let b = st.binding();
+        assert_eq!(b.nullifier, st.nullifier);
+        assert_eq!(b.exposure, KeyExposure::Hidden);
+        assert_eq!(
+            (b.pq_commitment, b.migration_domain, b.epoch),
+            (PQ, DOMAIN, EPOCH)
+        );
+        // The same note in another domain or epoch has the same registry identifiers, so
+        // the registry refuses a second binding.
+        let again = RecoveryStatement {
+            migration_domain: [1; 32],
+            epoch: 9,
+            ..st.clone()
+        }
+        .binding();
+        assert_eq!(
+            (again.nullifier, again.legacy_id),
+            (b.nullifier, b.legacy_id)
+        );
+        // The identifier is not one a Bitcoin, Ethereum, Ed25519 or BLS credential can have.
+        use crate::hem::relations::Credential;
+        let mut twenty_bytes = [0u8; 20];
+        twenty_bytes.copy_from_slice(&st.nullifier[..20]);
+        for other in [
+            Credential::BitcoinKeyHash(twenty_bytes),
+            Credential::BitcoinTaproot(st.nullifier),
+            Credential::EthereumAddress(twenty_bytes),
+            Credential::Ed25519Key(st.nullifier),
+            Credential::BitcoinScriptHash(twenty_bytes),
+            Credential::BlsWithdrawal(st.nullifier),
+        ] {
+            assert_ne!(other.identifier(), b.legacy_id);
+        }
+        assert_ne!(
+            credential_identifier(LEGACY_TAG_ORCHARD_ADDRESS, &st.nullifier),
+            b.legacy_id
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // The relations themselves. Each build is a relation of up to 2^22 rows; these run
+    // on a build host:
+    // cargo test --release -p qsag-migrate --features std --lib -- \
+    //     hem::zcash::recovery::tests::relation --ignored --nocapture --test-threads 1
+    // ------------------------------------------------------------------------
+
+    fn flip_public(shape: &Shape, z: &[F], at: usize) -> bool {
+        let mut bad = z.to_vec();
+        bad[1 + at] = F::ONE - bad[1 + at];
+        shape.is_satisfied(&bad)
+    }
+
+    #[test]
+    #[ignore = "builds 2^22-row relations"]
+    fn relation_of_a_note_binds_every_public_input() {
+        let source = KeySource::SpendingKey;
+        let relation = Relation::Note(source.clone());
+        let w = witness(&source, false);
+        let st = statement(&source, &w);
+        let e = evaluate_note(&source, &w).unwrap();
+        let (shape, z, rows) = build(&relation, &st.public_bits(), &e.inputs);
+        println!("note relation: {rows} rows, {} variables", shape.num_vars);
+        assert!(shape.is_satisfied(&z));
+        assert_eq!(
+            shape.num_sbox, 0,
+            "the collaborative prover needs mul rows only"
+        );
+        assert_eq!(shape.num_public, 831);
+        // Anchor, nullifier, rk and value: a flipped bit anywhere is rejected.
+        for at in [0, 100, 255, 256, 300, 510, 511, 600, 766, 767, 800, 830] {
+            assert!(!flip_public(&shape, &z, at), "public bit {at}");
+        }
+
+        // The shape does not depend on the witness: another key, scope, note, position.
+        assert_eq!(shape.digest(), recovery_shape(&st).unwrap().digest());
+        let mut other = witness(&source, true);
+        other.key = KeyWitness::SpendingKey(sk(4));
+        let fvk = FullViewingKey::from_spending_key(&sk(4)).unwrap();
+        other.note = note_for(&fvk, true, NoteVersion::V3);
+        other.note.value = 5;
+        other.note.rseed = [0x99; 32];
+        other.position = 2;
+        other.path = tree(&other.note, 2).0;
+        other.alpha = alpha(2);
+        let other_st = statement(&source, &other);
+        let e2 = evaluate_note(&source, &other).unwrap();
+        let (shape2, z2, _) = build(&relation, &other_st.public_bits(), &e2.inputs);
+        assert!(shape2.is_satisfied(&z2));
+        assert_eq!(shape2.digest(), shape.digest());
+
+        // The first witness does not satisfy the second statement or the reverse.
+        let (_, z_cross, _) = build(&relation, &other_st.public_bits(), &e.inputs);
+        assert!(!shape.is_satisfied(&z_cross));
+    }
+
+    #[test]
+    #[ignore = "builds 2^22-row relations"]
+    fn relation_of_a_note_rejects_what_the_statement_excludes() {
+        let source = KeySource::SpendingKey;
+        let relation = Relation::Note(source.clone());
+        let w = witness(&source, false);
+        let st = statement(&source, &w);
+        let good = evaluate_note(&source, &w).unwrap().inputs;
+        let unsatisfied = |inputs: &Inputs| {
+            let (shape, z, _) = build(&relation, &st.public_bits(), inputs);
+            !shape.is_satisfied(&z)
+        };
+
+        // A key that does not own the note.
+        let mut inputs = good.clone();
+        inputs.secret = sk(1).to_vec();
+        assert!(unsatisfied(&inputs), "foreign key");
+        // The other scope of the right key.
+        let mut inputs = good.clone();
+        inputs.internal = true;
+        assert!(unsatisfied(&inputs), "wrong scope");
+        // A wrong sibling and a wrong position.
+        let mut inputs = good.clone();
+        inputs.path[7][3] ^= 0x10;
+        assert!(unsatisfied(&inputs), "wrong path");
+        let mut inputs = good.clone();
+        inputs.position ^= 4;
+        assert!(unsatisfied(&inputs), "wrong position");
+        // Another rho, another rseed, another base point, another randomizer.
+        let mut inputs = good.clone();
+        inputs.rho = sample_fp(2).to_bytes();
+        assert!(unsatisfied(&inputs), "wrong rho");
+        let mut inputs = good.clone();
+        inputs.rseed[0] ^= 1;
+        assert!(unsatisfied(&inputs), "wrong rseed");
+        let mut inputs = good.clone();
+        inputs.g_d = affine_bytes(&orchard::diversify_hash(&[9; 11])).unwrap();
+        assert!(unsatisfied(&inputs), "wrong g_d");
+        let mut inputs = good.clone();
+        inputs.alpha = alpha(3);
+        assert!(unsatisfied(&inputs), "wrong alpha");
+
+        // A note with the pre-ZIP-2005 derivation of rcm (lead byte 0x02), in a tree that
+        // really contains it: the relation derives rcm from the note fields, so it does
+        // not open.
+        let fvk = FullViewingKey::from_spending_key(&sk(0)).unwrap();
+        let legacy = note_for(&fvk, false, NoteVersion::V2);
+        let (path, anchor) = tree(&legacy, 5);
+        let nf = legacy.nullifier(&fvk.nk).unwrap().to_bytes();
+        let legacy_st = RecoveryStatement {
+            anchor,
+            nullifier: nf,
+            ..st.clone()
+        };
+        let mut inputs = good.clone();
+        inputs.path = path;
+        let (shape, z, _) = build(&relation, &legacy_st.public_bits(), &inputs);
+        assert!(!shape.is_satisfied(&z), "pre-ZIP-2005 note");
+    }
+
+    #[test]
+    #[ignore = "builds 2^22-row relations"]
+    fn relation_of_a_note_accepts_every_key_source() {
+        let mut digests = Vec::new();
+        for source in sources() {
+            for internal in [false, true] {
+                let w = witness(&source, internal);
+                let st = statement(&source, &w);
+                let e = evaluate_note(&source, &w).unwrap();
+                let relation = Relation::Note(source.clone());
+                let (shape, z, rows) = build(&relation, &st.public_bits(), &e.inputs);
+                println!("note relation {source:?} internal={internal}: {rows} rows");
+                assert!(shape.is_satisfied(&z));
+                assert_eq!(shape.num_sbox, 0);
+                digests.push(shape.digest());
+                if matches!(source, KeySource::QuantumSpendingKey) && !internal {
+                    // qsk, nk and ak^P are each bound.
+                    for change in 0..3 {
+                        let mut inputs = e.inputs.clone();
+                        match change {
+                            0 => inputs.secret[0] ^= 1,
+                            1 => inputs.nk = sample_fp(3).to_bytes(),
+                            _ => {
+                                let other = orchard::spend_auth_base().mul(&Fq::from_u64(77));
+                                inputs.ak = affine_bytes(&other).unwrap();
+                            }
+                        }
+                        let (shape, z, _) = build(&relation, &st.public_bits(), &inputs);
+                        assert!(!shape.is_satisfied(&z), "QK change {change}");
+                    }
+                }
+            }
+        }
+        // One shape per key source, the same for both scopes.
+        assert_eq!(digests[0], digests[1]);
+        assert_eq!(digests[2], digests[3]);
+        assert_eq!(digests[4], digests[5]);
+        assert_ne!(digests[0], digests[2]);
+        assert_ne!(digests[0], digests[4]);
+        assert_ne!(digests[2], digests[4]);
+    }
+
+    #[test]
+    #[ignore = "builds 2^21-row relations"]
+    fn relation_of_an_address() {
+        let mut digests = Vec::new();
+        for source in sources() {
+            let (key, fvk) = key(&source);
+            let w = AddressWitness {
+                key,
+                internal: false,
+            };
+            let d = fvk.diversifier(&[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], Scope::External);
+            let st = AddressStatement::derive(&source, &w, &d, PQ, DOMAIN, EPOCH).unwrap();
+            let (shape, z) = synthesize_address(&st, &w).unwrap();
+            println!(
+                "address relation {source:?}: 2^{} rows, {} variables",
+                shape.log_rows, shape.num_vars
+            );
+            assert!(shape.is_satisfied(&z));
+            assert_eq!(shape.num_sbox, 0);
+            assert_eq!(shape.num_public, 766);
+            assert_eq!(shape.digest(), address_shape(&st).unwrap().digest());
+            for at in [0, 254, 255, 509, 510, 700, 765] {
+                assert!(!flip_public(&shape, &z, at), "public bit {at}");
+            }
+            digests.push(shape.digest());
+            if matches!(source, KeySource::SpendingKey) {
+                // The other scope and another key do not satisfy the relation.
+                let relation = Relation::Address(source.clone());
+                let public = st.public_bits().unwrap();
+                let mut inputs = Inputs::placeholder(&relation);
+                inputs.secret = sk(0).to_vec();
+                inputs.internal = true;
+                let (s, z, _) = build(&relation, &public, &inputs);
+                assert!(!s.is_satisfied(&z), "wrong scope");
+                inputs.internal = false;
+                inputs.secret = sk(2).to_vec();
+                let (s, z, _) = build(&relation, &public, &inputs);
+                assert!(!s.is_satisfied(&z), "foreign key");
+                // The internal address of the same key has the same shape.
+                let wi = AddressWitness {
+                    key: KeyWitness::SpendingKey(sk(0)),
+                    internal: true,
+                };
+                let di = fvk.diversifier(&[0; 11], Scope::Internal);
+                let sti = AddressStatement::derive(&source, &wi, &di, PQ, DOMAIN, EPOCH).unwrap();
+                let (si, zi) = synthesize_address(&sti, &wi).unwrap();
+                assert!(si.is_satisfied(&zi));
+                assert_eq!(si.digest(), shape.digest());
+            }
+        }
+        assert_ne!(digests[0], digests[1]);
+        assert_ne!(digests[0], digests[2]);
+    }
+
+    #[test]
+    #[ignore = "proves 2^22-row relations"]
+    fn relation_proofs_roundtrip_and_reject_tampering() {
+        // A note recovered with a spending key.
+        let source = KeySource::SpendingKey;
+        let w = witness(&source, false);
+        let st = statement(&source, &w);
+        let proof = prove_recovery(&st, &w, REGIME, &[3; 32], None).unwrap();
+        let bytes = proof.to_bytes();
+        let decoded = RecoveryProof::from_bytes(&bytes, &st).unwrap();
+        assert_eq!(decoded, proof);
+        assert!(verify_recovery(&st, REGIME, &decoded));
+
+        // Every public field is bound, through the relation or the transcript.
+        let mut flipped_rk = st.rk;
+        flipped_rk[31] ^= 0x80;
+        for other in [
+            RecoveryStatement {
+                epoch: 8,
+                ..st.clone()
+            },
+            RecoveryStatement {
+                migration_domain: [1; 32],
+                ..st.clone()
+            },
+            RecoveryStatement {
+                pq_commitment: [1; 32],
+                ..st.clone()
+            },
+            RecoveryStatement {
+                anchor: tree(&w.note, 6).1,
+                ..st.clone()
+            },
+            RecoveryStatement {
+                nullifier: sample_fp(8).to_bytes(),
+                ..st.clone()
+            },
+            RecoveryStatement {
+                rk: flipped_rk,
+                ..st.clone()
+            },
+            RecoveryStatement {
+                value: st.value + 1,
+                ..st.clone()
+            },
+            RecoveryStatement {
+                key_source: KeySource::QuantumSpendingKey,
+                ..st.clone()
+            },
+        ] {
+            assert!(!verify_recovery(&other, REGIME, &proof), "{other:?}");
+        }
+        // Another regime, a bad signature, tampered proof bytes.
+        assert!(!verify_recovery(
+            &st,
+            Profile::CshakeJohnson400,
+            &proof
+        ));
+        let mut bad = proof.clone();
+        bad.spend_auth_sig[40] ^= 1;
+        assert!(!verify_recovery(&st, REGIME, &bad));
+        for at in [8, 9, 10, 74, 80, bytes.len() / 2, bytes.len() - 1] {
+            let mut tampered = bytes.clone();
+            tampered[at] ^= 1;
+            assert!(
+                RecoveryProof::from_bytes(&tampered, &st)
+                    .is_none_or(|p| !verify_recovery(&st, REGIME, &p)),
+                "byte {at}"
+            );
+        }
+        assert!(RecoveryProof::from_bytes(&bytes[..bytes.len() - 1], &st).is_none());
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(RecoveryProof::from_bytes(&longer, &st).is_none());
+
+        // The prover refuses a witness that does not produce the statement.
+        let mut wrong = w.clone();
+        wrong.key = KeyWitness::SpendingKey(sk(1));
+        assert_eq!(
+            prove_recovery(&st, &wrong, REGIME, &[3; 32], None).err(),
+            Some(RecoveryError::WitnessMismatch)
+        );
+
+        // The QK branch needs the signature of the spend authorizing key holders.
+        let source = KeySource::QuantumSpendingKey;
+        let wq = witness(&source, true);
+        let stq = statement(&source, &wq);
+        assert_eq!(
+            prove_recovery(&stq, &wq, REGIME, &[4; 32], None).err(),
+            Some(RecoveryError::SignatureRequired)
+        );
+        assert_eq!(
+            prove_recovery(&stq, &wq, REGIME, &[4; 32], Some(&[1; 64])).err(),
+            Some(RecoveryError::BadSignature)
+        );
+        let sig = external_signature(&stq, &wq);
+        let proof_q = prove_recovery(&stq, &wq, REGIME, &[4; 32], Some(&sig)).unwrap();
+        assert!(verify_recovery(&stq, REGIME, &proof_q));
+        // A proof is for its own statement and its own kind of statement.
+        assert!(!verify_recovery(&st, REGIME, &proof_q));
+        assert!(RecoveryProof::from_bytes(&proof_q.to_bytes(), &st).is_none());
+
+        // An address of the same key.
+        let (key, fvk) = key(&KeySource::SpendingKey);
+        let wa = AddressWitness {
+            key,
+            internal: false,
+        };
+        let d = fvk.diversifier(&[0; 11], Scope::External);
+        let sta =
+            AddressStatement::derive(&KeySource::SpendingKey, &wa, &d, PQ, DOMAIN, EPOCH).unwrap();
+        let proof_a = prove_address(&sta, &wa, REGIME, &[5; 32]).unwrap();
+        let bytes_a = proof_a.to_bytes();
+        assert!(verify_address(
+            &sta,
+            REGIME,
+            &AddressProof::from_bytes(&bytes_a, &sta).unwrap()
+        ));
+        for other in [
+            AddressStatement {
+                epoch: 8,
+                ..sta.clone()
+            },
+            AddressStatement {
+                migration_domain: [1; 32],
+                ..sta.clone()
+            },
+            AddressStatement {
+                pq_commitment: [1; 32],
+                ..sta.clone()
+            },
+            AddressStatement {
+                address: fvk.default_address(Scope::Internal).unwrap(),
+                ..sta.clone()
+            },
+            AddressStatement {
+                key_source: KeySource::mainnet_account(0),
+                ..sta.clone()
+            },
+        ] {
+            assert!(!verify_address(&other, REGIME, &proof_a), "{other:?}");
+        }
+        let mut tampered = bytes_a.clone();
+        let mid = tampered.len() / 2;
+        tampered[mid] ^= 1;
+        assert!(
+            AddressProof::from_bytes(&tampered, &sta)
+                .is_none_or(|p| !verify_address(&sta, REGIME, &p))
+        );
+        // A note proof is not an address proof and the reverse.
+        assert!(AddressProof::from_bytes(&bytes, &sta).is_none());
+        assert!(RecoveryProof::from_bytes(&bytes_a, &st).is_none());
+    }
+
+    fn peak_rss_mib() -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kib / 1024)
+    }
+
+    /// `cargo test --release -p qsag-migrate --features std --lib --
+    /// hem::zcash::recovery::tests::measure --ignored --nocapture --test-threads 1`
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_zcash_proofs() {
+        println!(
+            "cpus={}",
+            std::thread::available_parallelism().map_or(0, |n| n.get())
+        );
+        let only = std::env::var("HEM_MEASURE_ONLY").ok();
+        let skip = |name: &str| only.as_ref().is_some_and(|o| !name.contains(o.as_str()));
+        let report = |name: &str,
+                      shape: &Shape,
+                      rows: usize,
+                      synth_s: f64,
+                      prove_s: f64,
+                      verify_cold_s: f64,
+                      verify_warm_ms: f64,
+                      proof_bytes: usize| {
+            let layout = protocol::layout_of(shape).unwrap();
+            println!(
+                "HEM_ZCASH statement=\"{name}\" regime={} rows={rows} padded_rows=2^{} vars={} \
+                 public_inputs={} cells=2^{} synth_s={synth_s:.2} prove_s={prove_s:.2} \
+                 verify_cold_s={verify_cold_s:.2} verify_warm_ms={verify_warm_ms:.1} \
+                 proof_bytes={proof_bytes} proof_kib={:.1} peak_rss_mib={}",
+                REGIME.wire_tag(),
+                shape.log_rows,
+                shape.num_vars,
+                shape.num_public,
+                layout.log_cells,
+                proof_bytes as f64 / 1024.0,
+                peak_rss_mib().map_or_else(|| String::from("n/a"), |m| std::format!("{m}")),
+            );
+        };
+        for source in sources() {
+            let name = std::format!("orchard-address {source:?}");
+            if skip(&name) {
+                continue;
+            }
+            let (key, fvk) = key(&source);
+            let w = AddressWitness {
+                key,
+                internal: false,
+            };
+            let d = fvk.diversifier(&[0; 11], Scope::External);
+            let st = AddressStatement::derive(&source, &w, &d, PQ, DOMAIN, EPOCH).unwrap();
+            let t = std::time::Instant::now();
+            let (shape, _) = synthesize_address(&st, &w).unwrap();
+            let synth_s = t.elapsed().as_secs_f64();
+            let (rows, _) = relation_size(&source, false);
+            let t = std::time::Instant::now();
+            let proof = prove_address(&st, &w, REGIME, &[3; 32]).unwrap();
+            let prove_s = t.elapsed().as_secs_f64();
+            let bytes = proof.to_bytes();
+            let t = std::time::Instant::now();
+            assert!(verify_address(&st, REGIME, &proof));
+            let cold = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let decoded = AddressProof::from_bytes(&bytes, &st).unwrap();
+            assert!(verify_address(&st, REGIME, &decoded));
+            let warm = t.elapsed().as_secs_f64() * 1e3;
+            report(
+                &name,
+                &shape,
+                rows,
+                synth_s,
+                prove_s,
+                cold,
+                warm,
+                bytes.len(),
+            );
+        }
+        for source in sources() {
+            let name = std::format!("ironwood-note {source:?}");
+            if skip(&name) {
+                continue;
+            }
+            let w = witness(&source, false);
+            let st = statement(&source, &w);
+            let t = std::time::Instant::now();
+            let (shape, _) = synthesize_recovery(&st, &w).unwrap();
+            let synth_s = t.elapsed().as_secs_f64();
+            let (rows, _) = relation_size(&source, true);
+            let sig = matches!(source, KeySource::QuantumSpendingKey)
+                .then(|| external_signature(&st, &w));
+            let t = std::time::Instant::now();
+            let proof = prove_recovery(&st, &w, REGIME, &[3; 32], sig.as_ref()).unwrap();
+            let prove_s = t.elapsed().as_secs_f64();
+            let bytes = proof.to_bytes();
+            let t = std::time::Instant::now();
+            assert!(verify_recovery(&st, REGIME, &proof));
+            let cold = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let decoded = RecoveryProof::from_bytes(&bytes, &st).unwrap();
+            assert!(verify_recovery(&st, REGIME, &decoded));
+            let warm = t.elapsed().as_secs_f64() * 1e3;
+            report(
+                &name,
+                &shape,
+                rows,
+                synth_s,
+                prove_s,
+                cold,
+                warm,
+                bytes.len(),
+            );
+        }
+    }
+}
