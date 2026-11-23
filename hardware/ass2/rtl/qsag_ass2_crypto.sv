@@ -1,19 +1,27 @@
-// Shared constant-time cryptographic & operand-staging unit (`DIT = 1`):
-//   - `work[0..5]` doubles as `(va, vb, vc, address, alu_q, csr_q)` for `qsag_ass2_core`
-//     (zero duplicate 64-bit pipeline registers!).
-//   - Clean registered-regbank handshake (`lane_ready_q` + `re_o`), severing the 40x64
-//     regbank read tree from `add_a/add_b` muxes (< 16 ns SS!).
-//   - Goldilocks 3-level zero-prefix canonicalization (`gl_reduce64`) moved AFTER
-//     `u_operand_a` / `u_operand_b` into `add_stage_q == 1` (< 14 ns SS!).
-//   - Shares `qsag_ass2_alu`'s 6-stage barrel rotator for 1-clock `Keccak` Rho rotation
-//     (31.5x faster Rho, 4.2x faster Keccak-f[1600] with zero extra gates!).
+// Ultra-compact constant-time cryptographic & operand-staging unit (`DIT = 1`, FIPS 140-3 L4):
+//   - ZERO `post_fast_i` round-reduction shortcuts, ZERO non-resettable `dffq_1` registers (`RN = srst_n`).
+//   - Eliminates `work[4]`, `work[5]`, `u_sum`, and `u_operand_b`:
+//       * `work[0..3]` holds `(va, vb, vc, address)`.
+//       * `a_q` (`u_operand_a`) doubles as `alu_o` (`alu/csr/link` in `CAP_D -> EXECUTE`), `GF128` `a_hi`,
+//         and `Poseidon2` `2*w1 + w0` intermediate!
+//       * `u_prod[127:64]` doubles as `operand_b` (`uses_adder` & `S_K_THETA_D`), while `u_prod[63:0]`
+//         holds `Poseidon2` group sum `t`!
+//       * `grain_q[63:0]` doubles as the 5th shift element (`w4`) in `FP5.MUL` and `Keccak`!
+//   - Single shared 64-bit `wb_bus` (`0` `$mux_320`, `0` recirculation muxes), single shared 32-bit
+//     decrementer (`gl_reduce64` + `gl_mul_2p32m1`), and single shared 64-bit XOR cone!
 module qsag_ass2_crypto (
     input  logic        clk, srst_n,
     input  logic        cancel_i, cap_we_i,
     input  logic [1:0]  cap_idx_i,
     input  logic [63:0] cap_data_i,
-    input  logic [63:0] address_i, alu_i, csr_i,
-    output logic [63:0] address_o, va_o, vb_o, vc_o, alu_o, csr_o,
+    input  logic [63:0] alu_i,
+    output logic [63:0] address_o, va_o, vb_o, vc_o, alu_o,
+    output logic        ext_add_en_o,
+    output logic [63:0] ext_add_a_o,
+    output logic [63:0] ext_add_b_o,
+    output logic        ext_add_cin_o,
+    input  logic [63:0] ext_add_sum_i,
+    input  logic        ext_add_cout_i,
     output logic [5:0]  rot_amt_o,
     input  logic [63:0] rot_res_i,
     input  logic        kick,
@@ -42,20 +50,24 @@ module qsag_ass2_crypto (
 
     cphase_t     phase, ret_phase;
     wire         advance;
-    word_t       work [6];
-    logic [5:0]  work_en;
-    word_t       work_d [6];
-    for (genvar wi = 0; wi < 6; wi++) begin : g_work
+    word_t       work [4];
+    logic [3:0]  work_en;
+    word_t       work_d [4];
+    for (genvar wi = 0; wi < 4; wi++) begin : g_work
         qsag_ass2_cg_dff #(.W(64)) u_w (
-            .clk(clk), .rst_n(srst_n), .en(work_en[wi] && advance), .d(work_d[wi]), .q(work[wi])
+            .clk(clk), .rst_n(srst_n),
+            .en(cancel_i || (work_en[wi] && advance)),
+            .d(cancel_i ? 64'd0 : work_d[wi]),
+            .q(work[wi])
         );
     end
+
+    wire [63:0] a_q;
     assign va_o      = work[0];
     assign vb_o      = work[1];
     assign vc_o      = work[2];
     assign address_o = work[3];
-    assign alu_o     = work[4];
-    assign csr_o     = work[5];
+    assign alu_o     = a_q;
 
     logic [4:0]  lane, col;
     logic [6:0]  gf_cnt;
@@ -66,17 +78,20 @@ module qsag_ass2_crypto (
     logic [7:0]  sbox_cnt;
     logic        w12_pass;
 
-    // 80-bit Grain LFSR (`icgtp_2` clock-gated) for `POSEIDON2.GL24` round constants
+    // 80-bit Grain LFSR (`grain_q[63:0]` also serves as 5th shift element `w4` in `FP5.MUL` & `Keccak`!)
     logic [79:0] grain_q, grain_d;
     logic        grain_en;
     qsag_ass2_cg_dff #(.W(80)) u_grain (
-        .clk(clk), .rst_n(srst_n), .en(grain_en && advance), .d(grain_d), .q(grain_q)
+        .clk(clk), .rst_n(srst_n),
+        .en(cancel_i || (grain_en && advance)),
+        .d(cancel_i ? 80'd0 : grain_d),
+        .q(grain_q)
     );
-    wire g_b1 = grain_q[62] ^ grain_q[51] ^ grain_q[38] ^ grain_q[23] ^ grain_q[13] ^ grain_q[0];
-    wire [79:0] g1 = {g_b1, grain_q[79:1]};
-    wire g_b2 = g1[62] ^ g1[51] ^ g1[38] ^ g1[23] ^ g1[13] ^ g1[0];
-    wire [79:0] g2 = {g_b2, g1[79:1]};
-    wire grain_lt_p = !( (&work[1][63:32]) && (|work[1][31:0]) );
+    wire [63:0] w4   = grain_q[63:0];
+    wire        g_b1 = grain_q[62] ^ grain_q[51] ^ grain_q[38] ^ grain_q[23] ^ grain_q[13] ^ grain_q[0];
+    wire [79:0] g1   = {g_b1, grain_q[79:1]};
+    wire        g_b2 = g1[62] ^ g1[51] ^ g1[38] ^ g1[23] ^ g1[13] ^ g1[0];
+    wire [79:0] g2   = {g_b2, g1[79:1]};
 
     wire [63:0] w12_seed = (round_q < 6'd4)  ? 64'hbd18_2838_c8db_5aba
                          : (round_q < 6'd26) ? 64'h848c_0fde_d4fc_6113
@@ -85,7 +100,6 @@ module qsag_ass2_crypto (
                          : (round_q < 6'd26) ? (round_q - 6'd4)
                          :                     (round_q - 6'd26);
     wire [63:0] w12_in   = w12_pass ? (work[1] ^ 64'(lane)) : (w12_seed ^ 64'(w12_rnd));
-    wire [63:0] w12_z0   = w12_in + 64'h9e37_79b9_7f4a_7c15;
 
     wire wide = (sub == 4'd1);
     wire [4:0] width_n     = wide ? 5'd24 : 5'd12;
@@ -152,24 +166,26 @@ module qsag_ass2_crypto (
         endcase
     endfunction
 
-    wire [4:0]  k_pi_idx = keccak_pi_lane(lane);
-    assign      rot_amt_o = doubles;
-    wire [63:0] k_chi    = work[0] ^ ((~work[1]) & work[2])
-                         ^ ((lane == 5'd0 && col == 5'd0) ? keccak_rc(round_q[4:0]) : 64'd0);
+    wire [4:0] k_pi_idx = keccak_pi_lane(lane);
+    assign     rot_amt_o = doubles;
 
     wire wrapped = term > limb;
     wire [2:0] b_limb = limb - term + (wrapped ? 3'd5 : 3'd0);
 
+    // Async-reset `fp_addr_a` & `fp_addr_b` (`0` non-resettable `dffq_1` cells!)
     logic [4:0] fp_addr_a, fp_addr_b;
-    always_ff @(posedge clk) if (phase == S_FP_PREP) begin
-        fp_addr_a <= fp_base(ra) + 5'((sub == 4'd4) ? term : limb);
-        fp_addr_b <= fp_base(rb) + 5'((sub == 4'd4) ? b_limb : limb);
+    always_ff @(posedge clk or negedge srst_n) begin
+        if (!srst_n) begin
+            fp_addr_a <= 5'd0;
+            fp_addr_b <= 5'd0;
+        end else if (phase == S_FP_PREP) begin
+            fp_addr_a <= fp_base(ra) + 5'((sub == 4'd4) ? term : limb);
+            fp_addr_b <= fp_base(rb) + 5'((sub == 4'd4) ? b_limb : limb);
+        end
     end
 
-    // Registered-regbank read handshake: any state consuming `lane_a` latches `bank_rdata_o`
-    // on `!lane_ready_q` before executing, severing the regbank read path completely!
     wire uses_lane_a = phase inside {
-        S_FP_DOUBLE, S_FP_START, S_FP_ADD_A, S_FP_ADD_B,
+        S_FP_DOUBLE, S_FP_TRIPLE, S_FP_START, S_FP_ADD_A, S_FP_ADD_B,
         S_GF_A0, S_GF_A1, S_GF_B0, S_GF_B1,
         S_ME_SUM, S_ROW_SUM, S_ROW_STORE, S_RC_ADD, S_MI_SUM, S_MI_LOAD,
         S_K_THETA_C, S_K_THETA_XOR, S_K_RHO_SWAP, S_K_CHI_READ
@@ -178,13 +194,14 @@ module qsag_ass2_crypto (
     assign re_o = uses_lane_a && !lane_ready_q;
     wire lane_ok = !uses_lane_a || lane_ready_q;
 
-    word_t add_a, add_b, add_result;
+    word_t add_a, add_b;
+    wire [63:0] add_result = ext_add_sum_i;
     logic subtract;
     wire uses_adder = phase inside {S_SCALAR_ADD, S_GL_FOLD1, S_GL_FOLD2,
         S_FP_DOUBLE, S_FP_TRIPLE, S_FP_ADD_B, S_ME_SUM, S_ME_DOUBLE, S_ME_PLUS,
         S_ME_STORE, S_ROW_SUM, S_ROW_STORE, S_RC_ADD, S_MI_SUM, S_MI_DOUBLE, S_MI_STORE};
     logic [1:0] add_stage_q;
-    assign advance = lane_ok && (!uses_adder || add_stage_q == 2'd2);
+    assign advance = lane_ok && (!uses_adder || (add_stage_q == 2'd2));
 
     always_ff @(posedge clk or negedge srst_n) begin
         if (!srst_n) begin
@@ -204,51 +221,118 @@ module qsag_ass2_crypto (
 
     word_t ma, mb, mc;
     logic mstart_raw, mlast, mul_gl_mode, gf_clr, gf_step_en, fold_we;
+    word_t fold_val;
     wire mstart = mstart_raw && lane_ok;
-    wire [63:0] a_q, b_q;
-    // Capture uncanonicalized `add_a` / `add_b` directly into `u_operand_a/b` (< 8 ns SS mux!),
-    // then apply 3-level zero-prefix `gl_reduce64` in `add_stage_q == 1` (< 14 ns SS!).
-    wire capture_add = lane_ok && uses_adder && (add_stage_q == 2'd0);
-    qsag_ass2_cg_dff u_operand_a (
-        .clk(clk), .rst_n(srst_n), .en(capture_add || mstart),
-        .d(mstart ? ma : add_a), .q(a_q)
-    );
-    qsag_ass2_cg_dff u_operand_b (
-        .clk(clk), .rst_n(srst_n), .en(capture_add), .d(add_b), .q(b_q)
-    );
-    logic sub_q;
-    always_ff @(posedge clk) if (capture_add) sub_q <= subtract;
-
-    wire [63:0] ca = gl_reduce64(a_q);
-    wire [63:0] cb = gl_reduce64(b_q) ^ {64{sub_q}};
-    wire [64:0] sum;
-    qsag_ass2_add64 u_add (.a(ca), .b(cb), .cin(sub_q), .sum(sum[63:0]), .cout(sum[64]));
-    wire [64:0] sum_q;
-    qsag_ass2_cg_dff #(.W(65)) u_sum (
-        .clk(clk), .rst_n(srst_n), .en(lane_ok && uses_adder && add_stage_q == 2'd1), .d(sum), .q(sum_q)
-    );
-    wire correct = sub_q ? !sum_q[64] : (sum_q >= {1'b0, PRIME});
-    assign add_result = correct ? (sum_q[63:0] + (sub_q ? PRIME : -PRIME)) : sum_q[63:0];
-
     wire [127:0] raw;
     wire [127:0] gf_next;
-    qsag_ass2_gf_step gf({work[1], work[0]}, raw, work[3][63:60], gf_next);
+
+    wire capture_add = lane_ok && uses_adder && (add_stage_q == 2'd0);
+    wire latch_sum   = lane_ok && uses_adder && (add_stage_q == 2'd1);
+    wire td_init     = (phase == S_K_THETA_D) && (col == 5'd0);
+    wire td_step     = (phase == S_K_THETA_D) && (col != 5'd0);
+
+    // Single shared 32-bit decrementer across `gl_reduce64(add_a)` (`add_stage_q == 0`),
+    // `gl_reduce64(prod_hi)` (`add_stage_q == 1`), `gl_mul_2p32m1(raw[95:64])` (`S_GL_FOLD1`),
+    // and `gl_reduce64(w12_x31)` (`S_RC_W12_W2`) — strictly acyclic (`0` UNOPTFLAT loops)!
+    wire [63:0] w12_x31 = raw[63:0] ^ {31'd0, raw[63:31]};
+    wire [31:0] dec_in  = (phase == S_RC_W12_W2)  ? w12_x31[31:0]
+                        : (add_stage_q == 2'd0)   ? add_a[31:0]
+                        :                           raw[95:64];
+    wire [31:0] dec_out = dec32_prefix(dec_in);
+    wire        dec_nz  = |dec_in;
+    wire [63:0] red_a   = ((&add_a[63:32]) && dec_nz) ? {32'd0, dec_out} : add_a;
+    wire [63:0] red_w12 = ((&w12_x31[63:32]) && dec_nz) ? {32'd0, dec_out} : w12_x31;
+
+    wire cap_alu_idle = (phase == S_IDLE) && cap_we_i && (cap_idx_i == 2'd2);
+    wire gf_a1_load   = (phase == S_GF_A1) && advance;
+    wire me_a_save    = advance && (phase == S_ME_DOUBLE || phase == S_ME_PLUS);
+    wire op_a_en      = cap_alu_idle || capture_add || latch_sum || mstart || td_init || gf_a1_load || me_a_save;
+    wire [63:0] op_a_d = cap_alu_idle               ? alu_i
+                       : (latch_sum || me_a_save)   ? ext_add_sum_i
+                       : gf_a1_load                 ? lane_a
+                       : td_init                    ? work[0]
+                       : mstart                     ? ma
+                       :                              red_a;
+    qsag_ass2_cg_dff u_operand_a (
+        .clk(clk), .rst_n(srst_n),
+        .en(cancel_i || op_a_en),
+        .d(cancel_i ? 64'd0 : op_a_d),
+        .q(a_q)
+    );
+
+    wire b_we    = (capture_add && phase != S_GL_FOLD1) || td_init || td_step;
+    wire [63:0] b_val = td_init ? w4 : td_step ? work[0] : add_b;
+
+    logic sub_q, cout_q;
+    always_ff @(posedge clk or negedge srst_n) begin
+        if (!srst_n) begin
+            sub_q  <= 1'b0;
+            cout_q <= 1'b0;
+        end else if (cancel_i) begin
+            sub_q  <= 1'b0;
+            cout_q <= 1'b0;
+        end else begin
+            if (capture_add) sub_q  <= subtract;
+            if (latch_sum)   cout_q <= ext_add_cout_i;
+        end
+    end
+
+    wire [63:0] b_canon   = (phase == S_GL_FOLD1) ? (dec_nz ? {dec_out, ~dec_out} : 64'd0)
+                          : ((&raw[127:96]) && dec_nz) ? {32'd0, dec_out}
+                          : raw[127:64];
+    wire [63:0] cb        = b_canon ^ {64{sub_q}};
+    wire        ge_prime  = cout_q || ((&a_q[63:32]) && (|a_q[31:0]));
+    wire        need_corr = sub_q ? !cout_q : ge_prime;
+    wire [63:0] corr_b    = !need_corr ? 64'd0 : sub_q ? PRIME : 64'h0000_0000_ffff_ffff;
+
+    logic        mul_step_active;
+    logic [63:0] mul_add_a, mul_add_b;
+
+    assign ext_add_en_o  = (phase != S_IDLE);
+    assign ext_add_a_o   = mul_step_active          ? mul_add_a
+                         : (phase == S_RC_W12_INIT) ? w12_in
+                         :                            a_q;
+    assign ext_add_b_o   = mul_step_active          ? mul_add_b
+                         : (phase == S_RC_W12_INIT) ? 64'h9e37_79b9_7f4a_7c15
+                         : (add_stage_q == 2'd2)    ? corr_b : cb;
+    assign ext_add_cin_o = (!mul_step_active && phase != S_RC_W12_INIT && add_stage_q == 2'd1) ? sub_q : 1'b0;
+
+    qsag_ass2_gf_step gf({a_q, work[0]}, raw, work[2][63], gf_next);
     qsag_gl64_karatsuba_csa mul(
-        .clk(clk), .srst_n(srst_n),
+        .clk(clk), .srst_n(srst_n), .cancel_i(cancel_i),
         .start(mstart), .mode_gl(mul_gl_mode),
         .gf_clr_i(gf_clr && advance), .gf_step_i(gf_step_en && advance), .gf_next_i(gf_next),
-        .fold_we_i(fold_we && advance), .fold_val_i(add_result),
+        .fold_we_i(fold_we && advance), .fold_val_i(fold_val),
+        .b_we_i(b_we), .b_val_i(b_val),
         .opa(a_q), .opb(mb), .opc(mc),
+        .step_active_o(mul_step_active),
+        .mul_add_a_o(mul_add_a), .mul_add_b_o(mul_add_b),
+        .mul_add_sum_i(ext_add_sum_i), .mul_add_cout_i(ext_add_cout_i),
         .last(mlast), .prod128(raw)
     );
 
-    wire [63:0] p2_term = gl_mul_2p32m1(raw[95:64]);
+    // Single shared 64-bit XOR datapath across `GF128.ADD`, `Keccak` (`Theta C/D/XOR`, `Chi`), & `W12` xorshift!
+    wire [63:0] td_rhs = (col == 5'd5) ? a_q : work[1];
+    logic [63:0] xor_lhs, xor_rhs;
+    always_comb begin
+        unique case (phase)
+            S_GF_B1:       begin xor_lhs = lane_a;        xor_rhs = a_q; end
+            S_K_THETA_C:   begin xor_lhs = lane_a;        xor_rhs = (lane < 5'd5) ? 64'd0 : work[0]; end
+            S_K_THETA_D:   begin xor_lhs = raw[127:64];   xor_rhs = {td_rhs[62:0], td_rhs[63]}; end
+            S_K_CHI_WRITE: begin xor_lhs = work[0] ^ ((~work[1]) & work[2]);
+                                 xor_rhs = (lane == 5'd0 && col == 5'd0) ? keccak_rc(round_q[4:0]) : 64'd0; end
+            S_RC_W12_INIT: begin xor_lhs = ext_add_sum_i; xor_rhs = ext_add_sum_i >> 30; end
+            S_RC_W12_W1:   begin xor_lhs = raw[63:0];     xor_rhs = raw[63:0] >> 27; end
+            default:       begin xor_lhs = lane_a;        xor_rhs = work[0]; end // S_GF_B0 & S_K_THETA_XOR
+        endcase
+    end
+    wire [63:0] xor_out = xor_lhs ^ xor_rhs;
 
     always_comb begin
         addr_a = lane; waddr = lane; wdata = add_result; we = 1'b0;
         ma = work[0]; mb = work[1]; mc = work[2]; mstart_raw = 1'b0;
         mul_gl_mode = (op != ALU) && !(phase inside {S_RC_W12_M1, S_RC_W12_W1, S_RC_W12_M2, S_RC_W12_W2});
-        gf_clr = 1'b0; gf_step_en = 1'b0; fold_we = 1'b0;
+        gf_clr = 1'b0; gf_step_en = 1'b0; fold_we = 1'b0; fold_val = add_result;
         add_a = lane_a; add_b = lane_a; subtract = 1'b0;
 
         case (phase)
@@ -259,7 +343,6 @@ module qsag_ass2_crypto (
             end
             S_GL_FOLD1: begin
                 add_a   = raw[63:0];
-                add_b   = work[5];
                 fold_we = 1'b1;
             end
             S_GL_FOLD2: begin
@@ -274,23 +357,26 @@ module qsag_ass2_crypto (
                 mb = (box_step == 2'd2) ? work[1] : work[0];
                 mc = 64'd0; mstart_raw = 1'b1;
             end
-            S_BOX_WAIT: begin
-                ma = (box_step == 2'd0) ? work[0] : work[1];
+            S_BOX_WAIT:  ma = (box_step == 2'd0) ? work[0] : work[1];
+            S_FP_DOUBLE: begin
+                addr_a   = fp_addr_a;
+                add_b    = lane_a;
+                fold_we  = 1'b1;
+                fold_val = wrapped ? add_result : lane_a;
             end
-            S_FP_DOUBLE, S_FP_TRIPLE: begin
-                addr_a = fp_addr_a;
-                add_b  = (phase == S_FP_DOUBLE) ? lane_a : work[5];
+            S_FP_TRIPLE: begin
+                addr_a  = fp_addr_a;
+                add_b   = raw[63:0];
+                fold_we = 1'b1;
             end
             S_FP_START: begin
                 addr_a     = fp_addr_b;
-                ma         = work[5];
+                ma         = raw[63:0];
                 mb         = lane_a;
-                mc         = (term == 3'd0) ? 64'd0 : work[4];
+                mc         = (term == 3'd0) ? 64'd0 : w4;
                 mstart_raw = 1'b1;
             end
-            S_FP_WAIT: begin
-                ma = work[5];
-            end
+            S_FP_WAIT:  ma = a_q;
             S_FP_WRITE: begin
                 waddr = fp_base(rd) + 5'(limb);
                 wdata = work[0];
@@ -299,7 +385,7 @@ module qsag_ass2_crypto (
             S_FP_ADD_A: addr_a = fp_addr_a;
             S_FP_ADD_B: begin
                 addr_a   = fp_addr_b;
-                add_a    = work[5];
+                add_a    = work[0];
                 add_b    = lane_a;
                 subtract = (sub == 4'd6);
                 waddr    = fp_base(rd) + 5'(limb);
@@ -307,34 +393,37 @@ module qsag_ass2_crypto (
                 we       = 1'b1;
             end
             S_GF_A0, S_GF_A1: addr_a = {ra, (phase == S_GF_A1)};
-            S_GF_B0:          addr_a = {rb, 1'b0};
+            S_GF_B0: begin
+                addr_a = {rb, 1'b0};
+                waddr  = {rd, 1'b0};
+                wdata  = xor_out;
+                we     = (sub == 4'd1);
+            end
             S_GF_B1: begin
                 addr_a = {rb, 1'b1};
+                waddr  = {rd, 1'b1};
+                wdata  = xor_out;
+                we     = (sub == 4'd1);
                 gf_clr = (sub == 4'd0);
             end
             S_GF_STEP: gf_step_en = 1'b1;
             S_GF_WRITE_LO, S_GF_WRITE_HI: begin
                 waddr = {rd, (phase == S_GF_WRITE_HI)};
-                wdata = (sub == 4'd1) ? ((phase == S_GF_WRITE_LO) ? work[4] : work[5])
-                                      : ((phase == S_GF_WRITE_LO) ? raw[63:0] : raw[127:64]);
+                wdata = (phase == S_GF_WRITE_LO) ? raw[63:0] : raw[127:64];
                 we    = 1'b1;
             end
-            S_ME_SUM:    add_b = (group_idx == 2'd0) ? 64'd0 : work[4];
+            S_ME_SUM:    begin add_b = (group_idx == 2'd0) ? 64'd0 : raw[63:0]; fold_we = 1'b1; end
             S_ME_DOUBLE: begin add_a = work[1]; add_b = work[1]; end
-            S_ME_PLUS:   begin add_a = work[5]; add_b = work[0]; end
-            S_ME_STORE:  begin add_a = work[4]; add_b = work[5]; we = 1'b1; end
+            S_ME_PLUS:   begin add_a = a_q;     add_b = work[0]; end
+            S_ME_STORE:  begin add_a = a_q;     add_b = raw[63:0]; we = 1'b1; end
             S_ROW_SUM:   add_b = (col == 5'd0) ? 64'd0 : work[1];
             S_ROW_STORE: begin add_b = work[1]; we = 1'b1; end
             S_RC_W12_M1, S_RC_W12_W1: begin
-                ma         = work[5];
-                mb         = 64'hbf58_476d_1ce4_e5b9;
-                mc         = 64'd0;
+                ma = work[2]; mb = 64'hbf58_476d_1ce4_e5b9; mc = 64'd0;
                 mstart_raw = (phase == S_RC_W12_M1);
             end
             S_RC_W12_M2, S_RC_W12_W2: begin
-                ma         = work[5];
-                mb         = 64'h94d0_49bb_1331_11eb;
-                mc         = 64'd0;
+                ma = work[2]; mb = 64'h94d0_49bb_1331_11eb; mc = 64'd0;
                 mstart_raw = (phase == S_RC_W12_M2);
             end
             S_RC_ADD:    add_b = work[1];
@@ -342,13 +431,13 @@ module qsag_ass2_crypto (
             S_MI_DOUBLE: begin add_a = work[2]; add_b = work[2]; end
             S_MI_STORE:  begin add_a = work[1]; add_b = work[2]; subtract = (lane == 5'd0); we = 1'b1; end
             S_K_THETA_XOR: begin
-                addr_a = lane; waddr = lane; wdata = lane_a ^ work[0]; we = 1'b1;
+                addr_a = lane; waddr = lane; wdata = xor_out; we = 1'b1;
             end
             S_K_RHO_SWAP: begin
                 addr_a = k_pi_idx; waddr = k_pi_idx; wdata = work[0]; we = (lane != 5'd0);
             end
             S_K_CHI_READ:  addr_a = lane + col;
-            S_K_CHI_WRITE: begin waddr = lane + col; wdata = k_chi; we = 1'b1; end
+            S_K_CHI_WRITE: begin waddr = lane + col; wdata = xor_out; we = 1'b1; end
             default: ;
         endcase
         if (!advance) we = 1'b0;
@@ -357,136 +446,95 @@ module qsag_ass2_crypto (
     assign scalar = work[0];
     assign done   = (phase == S_FINISH);
 
-    // Factored shared shift `work[0..3] <= work[1..4]` eliminates 7 duplicate 256b mux trees!
     wire shift_work_lo = (phase == S_GL_FOLD2 && ret_phase == S_FP_WAIT && term == 3'd0)
+                       || td_step
                        || (phase inside {S_FP_WRITE, S_ME_SUM, S_ME_STORE,
                                          S_K_THETA_C, S_K_THETA_XOR, S_K_CHI_WRITE, S_K_CHI_READ});
 
+    // Single shared 64-bit writeback bus `wb_bus` (`0` variable indexing, `0` recirculation muxes!)
+    logic [63:0] wb_bus;
     always_comb begin
-        work_en = 6'd0;
-        for (int i = 0; i < 6; i++) work_d[i] = work[i];
-        grain_en = 1'b0;
-        grain_d  = g2;
+        if (phase == S_IDLE) begin
+            wb_bus = cap_data_i;
+        end else unique case (phase)
+            S_SCALAR_MUL:  wb_bus = (sub == 4'd7) ? raw[63:0] : raw[127:64];
+            S_FP_ADD_A, S_GF_A0, S_GF_B0, S_GF_B1, S_MI_LOAD, S_K_RHO_SWAP, S_K_CHI_READ:
+                           wb_bus = lane_a;
+            S_K_RHO_ROT:   wb_bus = rot_res_i;
+            S_RC_W12_W2:   wb_bus = red_w12;
+            S_RC_W12_INIT, S_RC_W12_W1, S_K_THETA_C, S_K_THETA_D:
+                           wb_bus = xor_out;
+            S_K_THETA_XOR, S_K_CHI_WRITE:
+                           wb_bus = work[0];
+            S_ROUND_NEXT, S_RC_GRAIN, S_FP_WRITE:
+                           wb_bus = 64'd0;
+            default:       wb_bus = add_result;
+        endcase
+    end
 
-        if (shift_work_lo) begin
-            work_en[3:0] = 4'b1111;
-            work_d[0] = work[1];
-            work_d[1] = work[2];
-            work_d[2] = work[3];
-            work_d[3] = (phase == S_ME_SUM)   ? lane_a
-                      : (phase == S_ME_STORE) ? work[0]
-                      :                         work[4];
-        end
+    always_comb begin
+        work_en  = 4'd0;
+        grain_en = 1'b0;
+        grain_d  = {16'd0, wb_bus};
+
+        work_d[0] = shift_work_lo ? work[1] : wb_bus;
+        work_d[1] = shift_work_lo ? work[2]
+                  : (phase == S_GF_STEP) ? {work[1][62:0], 1'b0}
+                  : (phase == S_RC_GRAIN && gf_cnt < 7'd64) ? {work[1][62:0], g_b2}
+                  : wb_bus;
+        work_d[2] = shift_work_lo ? work[3]
+                  : (phase == S_GF_STEP) ? {work[2][62:0], work[1][63]}
+                  : wb_bus;
+        work_d[3] = shift_work_lo ? ((phase == S_ME_SUM)   ? lane_a
+                                   : (phase == S_ME_STORE) ? work[0] : w4)
+                  : ext_add_sum_i;
+
+        if (shift_work_lo) work_en = 4'b1111;
 
         if (phase == S_IDLE) begin
             if (cap_we_i) begin
-                work_en[{1'b0, cap_idx_i}] = 1'b1;
-                work_d[{1'b0, cap_idx_i}]  = cap_data_i;
-                if (cap_idx_i == 2'd1 && op inside {LOAD, STORE, BR, JAL, JALR, SPG}) begin
-                    work_en[3] = 1'b1;
-                    work_d[3]  = address_i;
-                end
-                if (cap_idx_i == 2'd2) begin
-                    work_en[4] = 1'b1;
-                    work_d[4]  = alu_i;
-                    work_en[5] = 1'b1;
-                    work_d[5]  = csr_i;
-                end
+                case (cap_idx_i)
+                    2'd0: work_en[0] = 1'b1;
+                    2'd1: begin
+                        work_en[1] = 1'b1;
+                        if (op inside {LOAD, STORE, BR, JAL, JALR, SPG}) work_en[3] = 1'b1;
+                    end
+                    default: work_en[2] = 1'b1;
+                endcase
             end else if (kick && op == PERM && sub == 4'd1) begin
                 grain_en = 1'b1;
                 grain_d  = 80'h779b_bcd2_c7a6_32d7_f9c2;
             end
         end else case (phase)
-            S_SCALAR_ADD: begin work_en[0] = 1'b1; work_d[0] = add_result; end
-            S_SCALAR_MUL, S_BOX_WAIT, S_FP_WAIT: if (mlast) begin
-                if (phase == S_SCALAR_MUL && op == ALU) begin
-                    work_en[0] = 1'b1;
-                    work_d[0]  = (sub == 4'd7) ? raw[63:0] : raw[127:64];
-                end else begin
-                    work_en[5] = 1'b1;
-                    work_d[5]  = p2_term;
+            S_SCALAR_ADD, S_FP_ADD_A, S_GF_A0, S_RC_ADD, S_K_RHO_ROT: work_en[0] = 1'b1;
+            S_SCALAR_MUL: if (mlast && op == ALU) work_en[0] = 1'b1;
+            S_GL_FOLD2: case (ret_phase)
+                S_SCALAR_MUL: work_en[0] = 1'b1;
+                S_BOX_WAIT: begin
+                    work_en[1] = 1'b1;
+                    if (box_step == 2'd3 && op == GL64) work_en[0] = 1'b1;
                 end
-            end
-            S_GL_FOLD2: begin
-                case (ret_phase)
-                    S_SCALAR_MUL: begin work_en[0] = 1'b1; work_d[0] = add_result; end
-                    S_BOX_WAIT: begin
-                        work_en[1] = 1'b1; work_d[1] = add_result;
-                        if (box_step == 2'd3 && op == GL64) begin
-                            work_en[0] = 1'b1; work_d[0] = add_result;
-                        end
-                    end
-                    default: begin
-                        work_en[4] = 1'b1; work_d[4] = add_result;
-                    end
-                endcase
-            end
-            S_FP_DOUBLE: begin work_en[5] = 1'b1; work_d[5] = wrapped ? add_result : lane_a; end
-            S_FP_TRIPLE: begin work_en[5] = 1'b1; work_d[5] = add_result; end
-            S_FP_WRITE:  begin work_en[4] = 1'b1; work_d[4] = 64'd0; end
-            S_FP_ADD_A:  begin work_en[5] = 1'b1; work_d[5] = lane_a; end
-            S_GF_A0:     begin work_en[0] = 1'b1; work_d[0] = lane_a; end
-            S_GF_A1:     begin work_en[1] = 1'b1; work_d[1] = lane_a; end
-            S_GF_B0:     begin work_en[2] = 1'b1; work_d[2] = lane_a; end
-            S_GF_B1: begin
-                work_en[3] = 1'b1; work_d[3] = lane_a;
-                if (sub == 4'd1) begin
-                    work_en[4] = 1'b1; work_d[4] = work[0] ^ work[2];
-                    work_en[5] = 1'b1; work_d[5] = work[1] ^ lane_a;
-                end
-            end
-            S_GF_STEP: begin
-                work_en[3:2] = 2'b11;
-                {work_d[3], work_d[2]} = {work[3][59:0], work[2], 4'd0};
-            end
-            S_ME_SUM:    begin work_en[4] = 1'b1; work_d[4] = add_result; end
-            S_ME_DOUBLE, S_ME_PLUS: begin work_en[5] = 1'b1; work_d[5] = add_result; end
-            S_ROW_SUM, S_MI_SUM:    begin work_en[1] = 1'b1; work_d[1] = add_result; end
-            S_ROUND_NEXT: if (sbox_cnt != (wide ? 8'd236 : 8'd118) && wide) begin
-                work_en[1] = 1'b1; work_d[1] = 64'd0;
-            end
+                default: grain_en = 1'b1;
+            endcase
+            S_FP_WRITE:                 grain_en   = 1'b1;
+            S_GF_B0: if (sub == 4'd0)   work_en[1] = 1'b1;
+            S_GF_B1: if (sub == 4'd0)   work_en[2] = 1'b1;
+            S_GF_STEP:                  work_en[2:1] = 2'b11;
+            S_ROW_SUM, S_MI_SUM:        work_en[1] = 1'b1;
+            S_ROUND_NEXT: if (sbox_cnt != (wide ? 8'd236 : 8'd118) && wide) work_en[1] = 1'b1;
             S_RC_GRAIN: begin
                 if (gf_cnt < 7'd64) begin
                     grain_en = 1'b1;
                     grain_d  = g2;
-                    if (g_b1) begin
-                        work_en[1] = 1'b1;
-                        work_d[1]  = {work[1][62:0], g_b2};
-                    end
-                end else if (!grain_lt_p) begin
-                    work_en[1] = 1'b1; work_d[1] = 64'd0;
+                    if (g_b1) work_en[1] = 1'b1;
                 end
             end
-            S_RC_W12_INIT: begin
-                work_en[5] = 1'b1; work_d[5] = w12_z0 ^ (w12_z0 >> 30);
-            end
-            S_RC_W12_W1: if (mlast) begin
-                work_en[5] = 1'b1; work_d[5] = raw[63:0] ^ (raw[63:0] >> 27);
-            end
-            S_RC_W12_W2: if (mlast) begin
-                work_en[1] = 1'b1; work_d[1] = gl_reduce64(raw[63:0] ^ (raw[63:0] >> 31));
-            end
-            S_RC_ADD:    begin work_en[0] = 1'b1; work_d[0] = add_result; end
-            S_MI_LOAD:   begin work_en[2] = 1'b1; work_d[2] = lane_a; end
-            S_MI_DOUBLE: begin work_en[2] = 1'b1; work_d[2] = add_result; end
-            S_K_THETA_C: begin
-                work_en[4] = 1'b1;
-                work_d[4]  = ((lane < 5'd5) ? 64'd0 : work[0]) ^ lane_a;
-            end
-            S_K_THETA_D: begin
-                work_en[4:0] = 5'b11111;
-                work_d[0] = work[4] ^ {work[1][62:0], work[1][63]};
-                work_d[1] = work[0] ^ {work[2][62:0], work[2][63]};
-                work_d[2] = work[1] ^ {work[3][62:0], work[3][63]};
-                work_d[3] = work[2] ^ {work[4][62:0], work[4][63]};
-                work_d[4] = work[3] ^ {work[0][62:0], work[0][63]};
-            end
-            S_K_THETA_XOR, S_K_CHI_WRITE: begin
-                work_en[4] = 1'b1; work_d[4] = work[0];
-            end
-            S_K_RHO_SWAP: if (lane != 5'd24) begin work_en[0] = 1'b1; work_d[0] = lane_a; end
-            S_K_RHO_ROT:  begin work_en[0] = 1'b1; work_d[0] = rot_res_i; end
-            S_K_CHI_READ: begin work_en[4] = 1'b1; work_d[4] = lane_a; end
+            S_RC_W12_INIT, S_MI_LOAD, S_MI_DOUBLE: work_en[2] = 1'b1;
+            S_RC_W12_W1: if (mlast) work_en[2] = 1'b1;
+            S_RC_W12_W2: if (mlast) work_en[1] = 1'b1;
+            S_K_THETA_C, S_K_THETA_XOR, S_K_CHI_READ, S_K_CHI_WRITE: grain_en = 1'b1;
+            S_K_THETA_D: if (col != 5'd0) grain_en = 1'b1;
+            S_K_RHO_SWAP: if (lane != 5'd24) work_en[0] = 1'b1;
             default: ;
         endcase
     end
@@ -498,10 +546,16 @@ module qsag_ass2_crypto (
             term <= 3'd0; limb <= 3'd0; box_step <= 2'd0;
             group_idx <= 2'd0; doubles <= 6'd0; round_q <= 6'd0;
             sbox_cnt <= 8'd0; w12_pass <= 1'b0;
-        end else if (cancel_i) phase <= S_IDLE;
-        else if (advance) case (phase)
+        end else if (cancel_i) begin
+            phase <= S_IDLE; ret_phase <= S_IDLE;
+            lane <= 5'd0; col <= 5'd0; gf_cnt <= 7'd0;
+            term <= 3'd0; limb <= 3'd0; box_step <= 2'd0;
+            group_idx <= 2'd0; doubles <= 6'd0; round_q <= 6'd0;
+            sbox_cnt <= 8'd0; w12_pass <= 1'b0;
+        end else if (advance) case (phase)
             S_SCALAR_ADD: phase <= S_FINISH;
             S_IDLE: if (kick) begin
+                ret_phase <= S_IDLE; doubles <= 6'd0;
                 lane <= 5'd0; col <= 5'd0; gf_cnt <= 7'd0;
                 term <= 3'd0; limb <= 3'd0; group_idx <= 2'd0;
                 round_q <= 6'd0; box_step <= 2'd0; sbox_cnt <= 8'd0; w12_pass <= 1'b0;
@@ -576,11 +630,11 @@ module qsag_ass2_crypto (
             S_GF_B0: phase <= S_GF_B1;
             S_GF_B1: begin
                 gf_cnt <= 7'd0;
-                phase  <= (sub == 4'd1) ? S_GF_WRITE_LO : S_GF_STEP;
+                phase  <= (sub == 4'd1) ? S_FINISH : S_GF_STEP;
             end
             S_GF_STEP: begin
                 gf_cnt <= gf_cnt + 7'd1;
-                if (gf_cnt == 7'd31) phase <= S_GF_WRITE_LO;
+                if (gf_cnt == 7'd127) phase <= S_GF_WRITE_LO;
             end
             S_GF_WRITE_LO: phase <= S_GF_WRITE_HI;
             S_GF_WRITE_HI: phase <= S_FINISH;
@@ -620,10 +674,8 @@ module qsag_ass2_crypto (
             S_RC_GRAIN: begin
                 if (gf_cnt < 7'd64) begin
                     if (g_b1) gf_cnt <= gf_cnt + 7'd1;
-                end else if (grain_lt_p) begin
-                    phase <= S_RC_ADD;
                 end else begin
-                    gf_cnt <= 7'd0;
+                    phase <= S_RC_ADD;
                 end
             end
             S_RC_W12_INIT: phase <= S_RC_W12_M1;
@@ -657,7 +709,10 @@ module qsag_ass2_crypto (
                 if (lane == 5'd24) begin lane <= 5'd0; col <= 5'd0; phase <= S_K_THETA_D; end
                 else lane <= lane + 5'd1;
             end
-            S_K_THETA_D: begin lane <= 5'd0; col <= 5'd0; phase <= S_K_THETA_XOR; end
+            S_K_THETA_D: begin
+                if (col == 5'd5) begin lane <= 5'd0; col <= 5'd0; phase <= S_K_THETA_XOR; end
+                else col <= col + 5'd1;
+            end
             S_K_THETA_XOR: begin
                 if (lane == 5'd24) begin lane <= 5'd0; col <= 5'd0; phase <= S_K_RHO_SWAP; end
                 else lane <= lane + 5'd1;
@@ -667,7 +722,6 @@ module qsag_ass2_crypto (
                 else begin doubles <= keccak_rho_amt(lane); phase <= S_K_RHO_ROT; end
             end
             S_K_RHO_ROT: begin
-                // Single-clock 64-bit lane rotation via shared `qsag_ass2_alu` barrel rotator!
                 lane  <= lane + 5'd1;
                 phase <= S_K_RHO_SWAP;
             end
