@@ -681,7 +681,7 @@ structure tower.BdozWireOpening2Lane where
   key_lanes : Array tower.Tower128 2#usize
 
 /-- [qsag_verified::threshold::RssShare64]
-    Source: 'src/threshold.rs', lines 349:0-353:1
+    Source: 'src/threshold.rs', lines 348:0-352:1
     Visibility: public -/
 structure threshold.RssShare64 where
   x0 : Std.U64
@@ -689,7 +689,7 @@ structure threshold.RssShare64 where
   x2 : Std.U64
 
 /-- [qsag_verified::threshold::RssZeroSeeds64]
-    Source: 'src/threshold.rs', lines 358:0-362:1
+    Source: 'src/threshold.rs', lines 357:0-361:1
     Visibility: public -/
 structure threshold.RssZeroSeeds64 where
   r0 : Std.U64
@@ -697,7 +697,7 @@ structure threshold.RssZeroSeeds64 where
   r2 : Std.U64
 
 /-- [qsag_verified::threshold::BoundEpochRecord]
-    Source: 'src/threshold.rs', lines 450:0-454:1
+    Source: 'src/threshold.rs', lines 449:0-453:1
     Visibility: public -/
 structure threshold.BoundEpochRecord where
   epoch : Std.U64
@@ -705,7 +705,7 @@ structure threshold.BoundEpochRecord where
   r_rand : Array Std.U8 32#usize
 
 /-- [qsag_verified::threshold::LastBoundEpoch]
-    Source: 'src/threshold.rs', lines 460:0-463:1
+    Source: 'src/threshold.rs', lines 459:0-462:1
     Visibility: public -/
 @[discriminant isize]
 inductive threshold.LastBoundEpoch where
@@ -713,7 +713,7 @@ inductive threshold.LastBoundEpoch where
 | Bound : threshold.BoundEpochRecord → threshold.LastBoundEpoch
 
 /-- [qsag_verified::threshold::EpochLatch]
-    Source: 'src/threshold.rs', lines 475:0-480:1
+    Source: 'src/threshold.rs', lines 474:0-479:1
     Visibility: public -/
 structure threshold.EpochLatch where
   next_epoch : Std.U64
@@ -722,7 +722,7 @@ structure threshold.EpochLatch where
   last_bound : threshold.LastBoundEpoch
 
 /-- [qsag_verified::threshold::EpochSignRequest]
-    Source: 'src/threshold.rs', lines 485:0-490:1
+    Source: 'src/threshold.rs', lines 484:0-489:1
     Visibility: public -/
 structure threshold.EpochSignRequest where
   requested_epoch : Std.U64
@@ -731,7 +731,7 @@ structure threshold.EpochSignRequest where
   deterministic_r_rand : Array Std.U8 32#usize
 
 /-- [qsag_verified::threshold::EpochAuthGrant]
-    Source: 'src/threshold.rs', lines 500:0-506:1
+    Source: 'src/threshold.rs', lines 499:0-505:1
     Visibility: public -/
 structure threshold.EpochAuthGrant where
   _private : Unit
@@ -741,14 +741,14 @@ structure threshold.EpochAuthGrant where
   is_idempotent_retry : Bool
 
 /-- [qsag_verified::threshold::EpochRequest]
-    Source: 'src/threshold.rs', lines 510:0-513:1
+    Source: 'src/threshold.rs', lines 509:0-512:1
     Visibility: public -/
 structure threshold.EpochRequest where
   requested_epoch : Std.U64
   key_epoch_id : Array Std.U8 32#usize
 
 /-- [qsag_verified::threshold::EpochLatchError]
-    Source: 'src/threshold.rs', lines 517:0-524:1
+    Source: 'src/threshold.rs', lines 516:0-523:1
     Visibility: public -/
 @[discriminant isize]
 inductive threshold.EpochLatchError where

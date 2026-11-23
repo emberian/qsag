@@ -4,13 +4,12 @@
 //!    `lagrange_at_zero`, degree reduction, and DKG Frobenius Booleanity checks (`s^2 ⊕ s == 0`),
 //! 2. 2-of-3 Replicated Secret Sharing (`RSS`) 64-lane bitsliced `rss_and_gate`, degree-reduction
 //!    resharing, and Keccak `chi` lane evaluation,
-//! 3. Affine `EpochLatch` transitions for caller-managed durable WAL storage (`EpochLatch::acquire_or_retry`, `epoch_latch_advance`,
-//!    and the legacy v1 fixture `derive_jorts_legacy_v1_det_r_rand`) reject epoch equivocation and `r_rand` drift after state restoration.
+//! 3. Affine `EpochLatch` transitions for caller-managed durable WAL storage (`EpochLatch::acquire_or_retry`
+//!    and `epoch_latch_advance`) reject epoch equivocation and `r_rand` drift after state restoration.
 
 use crate::goldilocks::{
     Goldilocks, goldilocks_add, goldilocks_canon, goldilocks_inv, goldilocks_mul, goldilocks_sub,
 };
-use crate::keccak::Shake256Sponge;
 pub use crate::tower::ct_eq_bytes32;
 use crate::tower::{
     BdozCommittedBatchOpening2Lane, BdozWireOpening2Lane, Gf256, Tower128, gf256_add,
@@ -521,50 +520,6 @@ pub enum EpochLatchError {
     RetryRandomizerMismatch { epoch: u64 },
     NonSequentialEpoch { expected: u64, requested: u64 },
     TreeExhausted { max_epoch: u64 },
-}
-
-#[inline]
-const fn encode_be_u64(v: u64) -> [u8; 8] {
-    [
-        ((v >> 56) & 0xFF) as u8,
-        ((v >> 48) & 0xFF) as u8,
-        ((v >> 40) & 0xFF) as u8,
-        ((v >> 32) & 0xFF) as u8,
-        ((v >> 24) & 0xFF) as u8,
-        ((v >> 16) & 0xFF) as u8,
-        ((v >> 8) & 0xFF) as u8,
-        (v & 0xFF) as u8,
-    ]
-}
-
-/// LEGACY v1 MODEL (`QSAG.JORTSV1.DET`): a deterministic stateful `Jorts` message randomizer
-/// `r_rand = SHAKE256(tag || sk_prf || key_epoch_id || epoch_be || msg_digest)`.
-///
-/// This is not the production derivation and no production crate calls it. Production derives
-/// `r_rand` in `qsag_core::tsw_baggy::derive_stateful_r_rand` as `PRF_msg` over the frame
-/// `encode_multi_frame(["QSAG.PQ.BAGGYSIG.DET/v1", epoch_be, pk_seed])`; the two outputs differ.
-/// It is kept as the fixture that drives the `EpochLatch` retry tests, which only need *some*
-/// deterministic randomizer (crash-retries must derive the bit-identical `r_rand`).
-pub fn derive_jorts_legacy_v1_det_r_rand(
-    sk_prf: &[u8; 32],
-    key_epoch_id: &[u8; 32],
-    epoch: u64,
-    msg_digest: &[u8; 32],
-) -> [u8; 32] {
-    let domain_tag: [u8; 16] = [
-        0x51, 0x53, 0x41, 0x47, 0x2E, 0x4A, 0x4F, 0x52, // "QSAG.JOR"
-        0x54, 0x53, 0x56, 0x31, 0x2E, 0x44, 0x45, 0x54, // "TSV1.DET"
-    ];
-    let ep_be = encode_be_u64(epoch);
-    let mut sp = Shake256Sponge::new_shake256();
-    sp.absorb(&domain_tag);
-    sp.absorb(sk_prf);
-    sp.absorb(key_epoch_id);
-    sp.absorb(&ep_be);
-    sp.absorb(msg_digest);
-    let mut r_rand = [0u8; 32];
-    sp.squeeze(&mut r_rand);
-    r_rand
 }
 
 impl EpochLatch {

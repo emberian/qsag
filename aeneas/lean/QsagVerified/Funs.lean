@@ -9211,7 +9211,7 @@ def rss_cut_session.RssCutGateSession.step
     | core.result.Result.Err e => ok (next, core.result.Result.Err e)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]: loop body 1:
-    Source: 'src/threshold.rs', lines 38:8-43:9
+    Source: 'src/threshold.rs', lines 37:8-42:9
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_validate_points_gf256_loop0_loop0.body
@@ -9231,7 +9231,7 @@ def threshold.shamir_validate_points_gf256_loop0_loop0.body
   else ok (done ok1)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]: loop 1:
-    Source: 'src/threshold.rs', lines 38:8-43:9
+    Source: 'src/threshold.rs', lines 37:8-42:9
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_validate_points_gf256_loop0_loop0
@@ -9245,7 +9245,7 @@ def threshold.shamir_validate_points_gf256_loop0_loop0
     (ok1, j)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 33:4-45:5
+    Source: 'src/threshold.rs', lines 32:4-44:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_validate_points_gf256_loop0.body
@@ -9266,7 +9266,7 @@ def threshold.shamir_validate_points_gf256_loop0.body
   else ok (done ok1)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 33:4-45:5
+    Source: 'src/threshold.rs', lines 32:4-44:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_validate_points_gf256_loop0
@@ -9279,7 +9279,7 @@ def threshold.shamir_validate_points_gf256_loop0
     (ok1, i)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]:
-    Source: 'src/threshold.rs', lines 26:0-47:1
+    Source: 'src/threshold.rs', lines 25:0-46:1
     Visibility: public -/
 def threshold.shamir_validate_points_gf256
   (points : Slice tower.Gf256) : Result Bool := do
@@ -9389,7 +9389,7 @@ def tower.gf256_add
   ok i
 
 /-- [qsag_verified::threshold::shamir_eval_poly_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 53:4-56:5
+    Source: 'src/threshold.rs', lines 52:4-55:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_eval_poly_gf256_loop.body
@@ -9407,7 +9407,7 @@ def threshold.shamir_eval_poly_gf256_loop.body
   else ok (done acc)
 
 /-- [qsag_verified::threshold::shamir_eval_poly_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 53:4-56:5
+    Source: 'src/threshold.rs', lines 52:4-55:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_eval_poly_gf256_loop
@@ -9421,7 +9421,7 @@ def threshold.shamir_eval_poly_gf256_loop
     (acc, rem)
 
 /-- [qsag_verified::threshold::shamir_eval_poly_gf256]:
-    Source: 'src/threshold.rs', lines 50:0-58:1
+    Source: 'src/threshold.rs', lines 49:0-57:1
     Visibility: public -/
 def threshold.shamir_eval_poly_gf256
   (coeffs : Slice tower.Gf256) (x : tower.Gf256) : Result tower.Gf256 := do
@@ -9429,7 +9429,7 @@ def threshold.shamir_eval_poly_gf256
   threshold.shamir_eval_poly_gf256_loop coeffs x 0#u8 rem
 
 /-- [qsag_verified::threshold::shamir_eval_poly_goldilocks]: loop body 0:
-    Source: 'src/threshold.rs', lines 64:4-67:5
+    Source: 'src/threshold.rs', lines 63:4-66:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_eval_poly_goldilocks_loop.body
@@ -9448,7 +9448,7 @@ def threshold.shamir_eval_poly_goldilocks_loop.body
   else ok (done acc)
 
 /-- [qsag_verified::threshold::shamir_eval_poly_goldilocks]: loop 0:
-    Source: 'src/threshold.rs', lines 64:4-67:5
+    Source: 'src/threshold.rs', lines 63:4-66:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_eval_poly_goldilocks_loop
@@ -9462,7 +9462,7 @@ def threshold.shamir_eval_poly_goldilocks_loop
     (acc, rem)
 
 /-- [qsag_verified::threshold::shamir_eval_poly_goldilocks]:
-    Source: 'src/threshold.rs', lines 61:0-69:1
+    Source: 'src/threshold.rs', lines 60:0-68:1
     Visibility: public -/
 def threshold.shamir_eval_poly_goldilocks
   (coeffs : Slice goldilocks.Goldilocks) (x : goldilocks.Goldilocks) :
@@ -9499,7 +9499,7 @@ def tower.gf256_inv (a : tower.Gf256) : Result (Option tower.Gf256) := do
   else ok (some inv)
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 86:4-98:5
+    Source: 'src/threshold.rs', lines 85:4-97:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_lagrange_weight_zero_gf256_loop.body
@@ -9528,7 +9528,7 @@ def threshold.shamir_lagrange_weight_zero_gf256_loop.body
   else ok (done (num, den, valid))
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 86:4-98:5
+    Source: 'src/threshold.rs', lines 85:4-97:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_lagrange_weight_zero_gf256_loop
@@ -9543,7 +9543,7 @@ def threshold.shamir_lagrange_weight_zero_gf256_loop
     (num, den, valid, j)
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_gf256]:
-    Source: 'src/threshold.rs', lines 73:0-106:1
+    Source: 'src/threshold.rs', lines 72:0-105:1
     Visibility: public -/
 def threshold.shamir_lagrange_weight_zero_gf256
   (points : Slice tower.Gf256) (i : Std.Usize) :
@@ -9570,7 +9570,7 @@ def threshold.shamir_lagrange_weight_zero_gf256
       else ok none
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 118:4-128:5
+    Source: 'src/threshold.rs', lines 117:4-127:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_lagrange_at_zero_gf256_loop.body
@@ -9595,7 +9595,7 @@ def threshold.shamir_lagrange_at_zero_gf256_loop.body
   else ok (done (secret, valid))
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 118:4-128:5
+    Source: 'src/threshold.rs', lines 117:4-127:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_lagrange_at_zero_gf256_loop
@@ -9610,7 +9610,7 @@ def threshold.shamir_lagrange_at_zero_gf256_loop
     (secret, valid, i)
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_gf256]:
-    Source: 'src/threshold.rs', lines 110:0-130:1
+    Source: 'src/threshold.rs', lines 109:0-129:1
     Visibility: public -/
 def threshold.shamir_lagrange_at_zero_gf256
   (points : Slice tower.Gf256) (shares : Slice tower.Gf256) :
@@ -9632,7 +9632,7 @@ def threshold.shamir_lagrange_at_zero_gf256
       else ok none
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks]: loop body 0:
-    Source: 'src/threshold.rs', lines 150:4-162:5
+    Source: 'src/threshold.rs', lines 149:4-161:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_lagrange_weight_zero_goldilocks_loop.body
@@ -9663,7 +9663,7 @@ def threshold.shamir_lagrange_weight_zero_goldilocks_loop.body
   else ok (done (num, den, valid))
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks]: loop 0:
-    Source: 'src/threshold.rs', lines 150:4-162:5
+    Source: 'src/threshold.rs', lines 149:4-161:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_lagrange_weight_zero_goldilocks_loop
@@ -9679,7 +9679,7 @@ def threshold.shamir_lagrange_weight_zero_goldilocks_loop
     (num, den, valid, j)
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks]:
-    Source: 'src/threshold.rs', lines 134:0-170:1
+    Source: 'src/threshold.rs', lines 133:0-169:1
     Visibility: public -/
 def threshold.shamir_lagrange_weight_zero_goldilocks
   (points : Slice goldilocks.Goldilocks) (i : Std.Usize) :
@@ -9708,7 +9708,7 @@ def threshold.shamir_lagrange_weight_zero_goldilocks
       else ok none
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks]: loop body 0:
-    Source: 'src/threshold.rs', lines 185:4-195:5
+    Source: 'src/threshold.rs', lines 184:4-194:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_lagrange_at_zero_goldilocks_loop.body
@@ -9735,7 +9735,7 @@ def threshold.shamir_lagrange_at_zero_goldilocks_loop.body
   else ok (done (secret, valid))
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks]: loop 0:
-    Source: 'src/threshold.rs', lines 185:4-195:5
+    Source: 'src/threshold.rs', lines 184:4-194:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_lagrange_at_zero_goldilocks_loop
@@ -9751,7 +9751,7 @@ def threshold.shamir_lagrange_at_zero_goldilocks_loop
     (secret, valid, i)
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks]:
-    Source: 'src/threshold.rs', lines 174:0-197:1
+    Source: 'src/threshold.rs', lines 173:0-196:1
     Visibility: public -/
 def threshold.shamir_lagrange_at_zero_goldilocks
   (points : Slice goldilocks.Goldilocks) (shares : Slice goldilocks.Goldilocks)
@@ -9774,7 +9774,7 @@ def threshold.shamir_lagrange_at_zero_goldilocks
       else ok none
 
 /-- [qsag_verified::threshold::shamir_degree_reduce_2of3_gf256]:
-    Source: 'src/threshold.rs', lines 203:0-242:1
+    Source: 'src/threshold.rs', lines 202:0-241:1
     Visibility: public -/
 def threshold.shamir_degree_reduce_2of3_gf256
   (points : Array tower.Gf256 3#usize)
@@ -9838,7 +9838,7 @@ def threshold.shamir_degree_reduce_2of3_gf256
               ok (some g16)
 
 /-- [qsag_verified::threshold::dkg_beaver_frobenius_eval_gf256]:
-    Source: 'src/threshold.rs', lines 252:0-260:1
+    Source: 'src/threshold.rs', lines 251:0-259:1
     Visibility: public -/
 def threshold.dkg_beaver_frobenius_eval_gf256
   (a : tower.Gf256) (b : tower.Gf256) (c : tower.Gf256) (s : tower.Gf256) :
@@ -9855,7 +9855,7 @@ def threshold.dkg_beaver_frobenius_eval_gf256
   tower.gf256_add s_sq s
 
 /-- [qsag_verified::threshold::dkg_beaver_frobenius_share_shamir_gf256]:
-    Source: 'src/threshold.rs', lines 265:0-281:1
+    Source: 'src/threshold.rs', lines 264:0-280:1
     Visibility: public -/
 def threshold.dkg_beaver_frobenius_share_shamir_gf256
   (s_share : tower.Gf256) (a_share : tower.Gf256) (b_share : tower.Gf256)
@@ -10272,7 +10272,7 @@ def tower.verify_mac_2lane
     else ok false
 
 /-- [qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 298:4-301:5
+    Source: 'src/threshold.rs', lines 297:4-300:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.dkg_verify_key_shares_boolean_bdoz_gf256_loop.body
@@ -10291,7 +10291,7 @@ def threshold.dkg_verify_key_shares_boolean_bdoz_gf256_loop.body
   else ok (done non_boolean_acc)
 
 /-- [qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 298:4-301:5
+    Source: 'src/threshold.rs', lines 297:4-300:5
     Visibility: public -/
 @[rust_loop]
 def threshold.dkg_verify_key_shares_boolean_bdoz_gf256_loop
@@ -10306,7 +10306,7 @@ def threshold.dkg_verify_key_shares_boolean_bdoz_gf256_loop
     (non_boolean_acc, i)
 
 /-- [qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256]:
-    Source: 'src/threshold.rs', lines 288:0-303:1
+    Source: 'src/threshold.rs', lines 287:0-302:1
     Visibility: public -/
 def threshold.dkg_verify_key_shares_boolean_bdoz_gf256
   (alpha_lanes : Array tower.Tower128 2#usize)
@@ -10338,7 +10338,7 @@ def tower.gf256_is_boolean_frobenius (x : tower.Gf256) : Result Bool := do
   ok (g = 0#u8)
 
 /-- [qsag_verified::threshold::dkg_verify_shamir_2of3_key_bit_gf256]:
-    Source: 'src/threshold.rs', lines 310:0-340:1
+    Source: 'src/threshold.rs', lines 309:0-339:1
     Visibility: public -/
 def threshold.dkg_verify_shamir_2of3_key_bit_gf256
   (points : Array tower.Gf256 3#usize) (shares : Array tower.Gf256 3#usize) :
@@ -10384,14 +10384,14 @@ def threshold.dkg_verify_shamir_2of3_key_bit_gf256
   else ok false
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::RssShare64}::clone]:
-    Source: 'src/threshold.rs', lines 348:9-348:14
+    Source: 'src/threshold.rs', lines 347:9-347:14
     Visibility: public -/
 def threshold.RssShare64.Insts.CoreCloneClone.clone
   (self : threshold.RssShare64) : Result threshold.RssShare64 := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::RssShare64}]
-    Source: 'src/threshold.rs', lines 348:9-348:14 -/
+    Source: 'src/threshold.rs', lines 347:9-347:14 -/
 @[reducible]
 def threshold.RssShare64.Insts.CoreCloneClone : core.clone.Clone
   threshold.RssShare64 := {
@@ -10399,7 +10399,7 @@ def threshold.RssShare64.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::RssShare64}]
-    Source: 'src/threshold.rs', lines 348:16-348:20 -/
+    Source: 'src/threshold.rs', lines 347:16-347:20 -/
 @[reducible]
 def threshold.RssShare64.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.RssShare64 := {
@@ -10407,7 +10407,7 @@ def threshold.RssShare64.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::threshold::{impl core::default::Default for qsag_verified::threshold::RssShare64}::default]:
-    Source: 'src/threshold.rs', lines 348:22-348:29
+    Source: 'src/threshold.rs', lines 347:22-347:29
     Visibility: public -/
 def threshold.RssShare64.Insts.CoreDefaultDefault.default
   : Result threshold.RssShare64 := do
@@ -10419,7 +10419,7 @@ def threshold.RssShare64.Insts.CoreDefaultDefault.default
     }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::default::Default for qsag_verified::threshold::RssShare64}]
-    Source: 'src/threshold.rs', lines 348:22-348:29 -/
+    Source: 'src/threshold.rs', lines 347:22-347:29 -/
 @[reducible]
 def threshold.RssShare64.Insts.CoreDefaultDefault : core.default.Default
   threshold.RssShare64 := {
@@ -10427,14 +10427,14 @@ def threshold.RssShare64.Insts.CoreDefaultDefault : core.default.Default
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::RssZeroSeeds64}::clone]:
-    Source: 'src/threshold.rs', lines 357:9-357:14
+    Source: 'src/threshold.rs', lines 356:9-356:14
     Visibility: public -/
 def threshold.RssZeroSeeds64.Insts.CoreCloneClone.clone
   (self : threshold.RssZeroSeeds64) : Result threshold.RssZeroSeeds64 := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::RssZeroSeeds64}]
-    Source: 'src/threshold.rs', lines 357:9-357:14 -/
+    Source: 'src/threshold.rs', lines 356:9-356:14 -/
 @[reducible]
 def threshold.RssZeroSeeds64.Insts.CoreCloneClone : core.clone.Clone
   threshold.RssZeroSeeds64 := {
@@ -10442,7 +10442,7 @@ def threshold.RssZeroSeeds64.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::RssZeroSeeds64}]
-    Source: 'src/threshold.rs', lines 357:16-357:20 -/
+    Source: 'src/threshold.rs', lines 356:16-356:20 -/
 @[reducible]
 def threshold.RssZeroSeeds64.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.RssZeroSeeds64 := {
@@ -10450,7 +10450,7 @@ def threshold.RssZeroSeeds64.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::threshold::{impl core::default::Default for qsag_verified::threshold::RssZeroSeeds64}::default]:
-    Source: 'src/threshold.rs', lines 357:22-357:29
+    Source: 'src/threshold.rs', lines 356:22-356:29
     Visibility: public -/
 def threshold.RssZeroSeeds64.Insts.CoreDefaultDefault.default
   : Result threshold.RssZeroSeeds64 := do
@@ -10462,7 +10462,7 @@ def threshold.RssZeroSeeds64.Insts.CoreDefaultDefault.default
     }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::default::Default for qsag_verified::threshold::RssZeroSeeds64}]
-    Source: 'src/threshold.rs', lines 357:22-357:29 -/
+    Source: 'src/threshold.rs', lines 356:22-356:29 -/
 @[reducible]
 def threshold.RssZeroSeeds64.Insts.CoreDefaultDefault : core.default.Default
   threshold.RssZeroSeeds64 := {
@@ -10470,7 +10470,7 @@ def threshold.RssZeroSeeds64.Insts.CoreDefaultDefault : core.default.Default
 }
 
 /-- [qsag_verified::threshold::rss_share_u64]:
-    Source: 'src/threshold.rs', lines 366:0-372:1
+    Source: 'src/threshold.rs', lines 365:0-371:1
     Visibility: public -/
 def threshold.rss_share_u64
   (secret : Std.U64) (m0 : Std.U64) (m1 : Std.U64) :
@@ -10481,7 +10481,7 @@ def threshold.rss_share_u64
   ok { x0 := m0, x1 := m1, x2 := i1 }
 
 /-- [qsag_verified::threshold::rss_reconstruct]:
-    Source: 'src/threshold.rs', lines 376:0-378:1
+    Source: 'src/threshold.rs', lines 375:0-377:1
     Visibility: public -/
 def threshold.rss_reconstruct
   (sh : threshold.RssShare64) : Result Std.U64 := do
@@ -10489,7 +10489,7 @@ def threshold.rss_reconstruct
   ok (i ^^^ sh.x2)
 
 /-- [qsag_verified::threshold::rss_xor]:
-    Source: 'src/threshold.rs', lines 382:0-388:1
+    Source: 'src/threshold.rs', lines 381:0-387:1
     Visibility: public -/
 def threshold.rss_xor
   (a : threshold.RssShare64) (b : threshold.RssShare64) :
@@ -10501,7 +10501,7 @@ def threshold.rss_xor
   ok { x0 := i, x1 := i1, x2 := i2 }
 
 /-- [qsag_verified::threshold::rss_not]:
-    Source: 'src/threshold.rs', lines 392:0-398:1
+    Source: 'src/threshold.rs', lines 391:0-397:1
     Visibility: public -/
 def threshold.rss_not
   (a : threshold.RssShare64) : Result threshold.RssShare64 := do
@@ -10509,7 +10509,7 @@ def threshold.rss_not
   ok { a with x0 := i }
 
 /-- [qsag_verified::threshold::rss_party_and_local]:
-    Source: 'src/threshold.rs', lines 403:0-412:1
+    Source: 'src/threshold.rs', lines 402:0-411:1
     Visibility: public -/
 def threshold.rss_party_and_local
   (ax_i : Std.U64) (ax_next : Std.U64) (bx_i : Std.U64) (bx_next : Std.U64)
@@ -10525,7 +10525,7 @@ def threshold.rss_party_and_local
   ok (i4 ^^^ i5)
 
 /-- [qsag_verified::threshold::rss_and_gate]:
-    Source: 'src/threshold.rs', lines 417:0-423:1
+    Source: 'src/threshold.rs', lines 416:0-422:1
     Visibility: public -/
 def threshold.rss_and_gate
   (a : threshold.RssShare64) (b : threshold.RssShare64)
@@ -10540,7 +10540,7 @@ def threshold.rss_and_gate
   ok { x0 := i, x1 := i1, x2 := i2 }
 
 /-- [qsag_verified::threshold::rss_reshare_views]:
-    Source: 'src/threshold.rs', lines 427:0-429:1
+    Source: 'src/threshold.rs', lines 426:0-428:1
     Visibility: public -/
 def threshold.rss_reshare_views
   (z : threshold.RssShare64) :
@@ -10551,7 +10551,7 @@ def threshold.rss_reshare_views
     Array.make 2#usize [ z.x2, z.x0 ])
 
 /-- [qsag_verified::threshold::rss_keccak_chi_lane]:
-    Source: 'src/threshold.rs', lines 433:0-440:1
+    Source: 'src/threshold.rs', lines 432:0-439:1
     Visibility: public -/
 def threshold.rss_keccak_chi_lane
   (a : threshold.RssShare64) (b : threshold.RssShare64)
@@ -10563,14 +10563,14 @@ def threshold.rss_keccak_chi_lane
   threshold.rss_xor a rs1
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::BoundEpochRecord}::clone]:
-    Source: 'src/threshold.rs', lines 449:9-449:14
+    Source: 'src/threshold.rs', lines 448:9-448:14
     Visibility: public -/
 def threshold.BoundEpochRecord.Insts.CoreCloneClone.clone
   (self : threshold.BoundEpochRecord) : Result threshold.BoundEpochRecord := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 449:9-449:14 -/
+    Source: 'src/threshold.rs', lines 448:9-448:14 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreCloneClone : core.clone.Clone
   threshold.BoundEpochRecord := {
@@ -10578,7 +10578,7 @@ def threshold.BoundEpochRecord.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 449:16-449:20 -/
+    Source: 'src/threshold.rs', lines 448:16-448:20 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.BoundEpochRecord := {
@@ -10586,14 +10586,14 @@ def threshold.BoundEpochRecord.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 449:22-449:31 -/
+    Source: 'src/threshold.rs', lines 448:22-448:31 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.BoundEpochRecord := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::BoundEpochRecord> for qsag_verified::threshold::BoundEpochRecord}::eq]:
-    Source: 'src/threshold.rs', lines 449:22-449:31
+    Source: 'src/threshold.rs', lines 448:22-448:31
     Visibility: public -/
 def threshold.BoundEpochRecord.Insts.CoreCmpPartialEqBoundEpochRecord.eq
   (self : threshold.BoundEpochRecord) (other : threshold.BoundEpochRecord) :
@@ -10612,7 +10612,7 @@ def threshold.BoundEpochRecord.Insts.CoreCmpPartialEqBoundEpochRecord.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::BoundEpochRecord> for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 449:22-449:31 -/
+    Source: 'src/threshold.rs', lines 448:22-448:31 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreCmpPartialEqBoundEpochRecord :
   core.cmp.PartialEq threshold.BoundEpochRecord threshold.BoundEpochRecord := {
@@ -10620,14 +10620,14 @@ def threshold.BoundEpochRecord.Insts.CoreCmpPartialEqBoundEpochRecord :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::BoundEpochRecord}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 449:33-449:35
+    Source: 'src/threshold.rs', lines 448:33-448:35
     Visibility: public -/
 def threshold.BoundEpochRecord.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.BoundEpochRecord) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 449:33-449:35 -/
+    Source: 'src/threshold.rs', lines 448:33-448:35 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreCmpEq : core.cmp.Eq
   threshold.BoundEpochRecord := {
@@ -10638,14 +10638,14 @@ def threshold.BoundEpochRecord.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::LastBoundEpoch}::clone]:
-    Source: 'src/threshold.rs', lines 459:9-459:14
+    Source: 'src/threshold.rs', lines 458:9-458:14
     Visibility: public -/
 def threshold.LastBoundEpoch.Insts.CoreCloneClone.clone
   (self : threshold.LastBoundEpoch) : Result threshold.LastBoundEpoch := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 459:9-459:14 -/
+    Source: 'src/threshold.rs', lines 458:9-458:14 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreCloneClone : core.clone.Clone
   threshold.LastBoundEpoch := {
@@ -10653,7 +10653,7 @@ def threshold.LastBoundEpoch.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 459:16-459:20 -/
+    Source: 'src/threshold.rs', lines 458:16-458:20 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.LastBoundEpoch := {
@@ -10661,14 +10661,14 @@ def threshold.LastBoundEpoch.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 459:22-459:31 -/
+    Source: 'src/threshold.rs', lines 458:22-458:31 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.LastBoundEpoch := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::LastBoundEpoch> for qsag_verified::threshold::LastBoundEpoch}::eq]:
-    Source: 'src/threshold.rs', lines 459:22-459:31
+    Source: 'src/threshold.rs', lines 458:22-458:31
     Visibility: public -/
 def threshold.LastBoundEpoch.Insts.CoreCmpPartialEqLastBoundEpoch.eq
   (self : threshold.LastBoundEpoch) (other : threshold.LastBoundEpoch) :
@@ -10689,7 +10689,7 @@ def threshold.LastBoundEpoch.Insts.CoreCmpPartialEqLastBoundEpoch.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::LastBoundEpoch> for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 459:22-459:31 -/
+    Source: 'src/threshold.rs', lines 458:22-458:31 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreCmpPartialEqLastBoundEpoch :
   core.cmp.PartialEq threshold.LastBoundEpoch threshold.LastBoundEpoch := {
@@ -10697,14 +10697,14 @@ def threshold.LastBoundEpoch.Insts.CoreCmpPartialEqLastBoundEpoch :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::LastBoundEpoch}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 459:33-459:35
+    Source: 'src/threshold.rs', lines 458:33-458:35
     Visibility: public -/
 def threshold.LastBoundEpoch.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.LastBoundEpoch) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 459:33-459:35 -/
+    Source: 'src/threshold.rs', lines 458:33-458:35 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreCmpEq : core.cmp.Eq
   threshold.LastBoundEpoch := {
@@ -10715,14 +10715,14 @@ def threshold.LastBoundEpoch.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochSignRequest}::clone]:
-    Source: 'src/threshold.rs', lines 484:9-484:14
+    Source: 'src/threshold.rs', lines 483:9-483:14
     Visibility: public -/
 def threshold.EpochSignRequest.Insts.CoreCloneClone.clone
   (self : threshold.EpochSignRequest) : Result threshold.EpochSignRequest := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 484:9-484:14 -/
+    Source: 'src/threshold.rs', lines 483:9-483:14 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreCloneClone : core.clone.Clone
   threshold.EpochSignRequest := {
@@ -10730,7 +10730,7 @@ def threshold.EpochSignRequest.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 484:16-484:20 -/
+    Source: 'src/threshold.rs', lines 483:16-483:20 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.EpochSignRequest := {
@@ -10738,14 +10738,14 @@ def threshold.EpochSignRequest.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 484:22-484:31 -/
+    Source: 'src/threshold.rs', lines 483:22-483:31 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.EpochSignRequest := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochSignRequest> for qsag_verified::threshold::EpochSignRequest}::eq]:
-    Source: 'src/threshold.rs', lines 484:22-484:31
+    Source: 'src/threshold.rs', lines 483:22-483:31
     Visibility: public -/
 def threshold.EpochSignRequest.Insts.CoreCmpPartialEqEpochSignRequest.eq
   (self : threshold.EpochSignRequest) (other : threshold.EpochSignRequest) :
@@ -10770,7 +10770,7 @@ def threshold.EpochSignRequest.Insts.CoreCmpPartialEqEpochSignRequest.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochSignRequest> for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 484:22-484:31 -/
+    Source: 'src/threshold.rs', lines 483:22-483:31 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreCmpPartialEqEpochSignRequest :
   core.cmp.PartialEq threshold.EpochSignRequest threshold.EpochSignRequest := {
@@ -10778,14 +10778,14 @@ def threshold.EpochSignRequest.Insts.CoreCmpPartialEqEpochSignRequest :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochSignRequest}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 484:33-484:35
+    Source: 'src/threshold.rs', lines 483:33-483:35
     Visibility: public -/
 def threshold.EpochSignRequest.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.EpochSignRequest) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 484:33-484:35 -/
+    Source: 'src/threshold.rs', lines 483:33-483:35 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreCmpEq : core.cmp.Eq
   threshold.EpochSignRequest := {
@@ -10796,14 +10796,14 @@ def threshold.EpochSignRequest.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochAuthGrant}::clone]:
-    Source: 'src/threshold.rs', lines 499:9-499:14
+    Source: 'src/threshold.rs', lines 498:9-498:14
     Visibility: public -/
 def threshold.EpochAuthGrant.Insts.CoreCloneClone.clone
   (self : threshold.EpochAuthGrant) : Result threshold.EpochAuthGrant := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 499:9-499:14 -/
+    Source: 'src/threshold.rs', lines 498:9-498:14 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreCloneClone : core.clone.Clone
   threshold.EpochAuthGrant := {
@@ -10811,7 +10811,7 @@ def threshold.EpochAuthGrant.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 499:16-499:20 -/
+    Source: 'src/threshold.rs', lines 498:16-498:20 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.EpochAuthGrant := {
@@ -10819,14 +10819,14 @@ def threshold.EpochAuthGrant.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 499:22-499:31 -/
+    Source: 'src/threshold.rs', lines 498:22-498:31 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.EpochAuthGrant := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochAuthGrant> for qsag_verified::threshold::EpochAuthGrant}::eq]:
-    Source: 'src/threshold.rs', lines 499:22-499:31
+    Source: 'src/threshold.rs', lines 498:22-498:31
     Visibility: public -/
 def threshold.EpochAuthGrant.Insts.CoreCmpPartialEqEpochAuthGrant.eq
   (self : threshold.EpochAuthGrant) (other : threshold.EpochAuthGrant) :
@@ -10852,7 +10852,7 @@ def threshold.EpochAuthGrant.Insts.CoreCmpPartialEqEpochAuthGrant.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochAuthGrant> for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 499:22-499:31 -/
+    Source: 'src/threshold.rs', lines 498:22-498:31 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreCmpPartialEqEpochAuthGrant :
   core.cmp.PartialEq threshold.EpochAuthGrant threshold.EpochAuthGrant := {
@@ -10860,14 +10860,14 @@ def threshold.EpochAuthGrant.Insts.CoreCmpPartialEqEpochAuthGrant :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochAuthGrant}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 499:33-499:35
+    Source: 'src/threshold.rs', lines 498:33-498:35
     Visibility: public -/
 def threshold.EpochAuthGrant.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.EpochAuthGrant) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 499:33-499:35 -/
+    Source: 'src/threshold.rs', lines 498:33-498:35 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreCmpEq : core.cmp.Eq
   threshold.EpochAuthGrant := {
@@ -10878,14 +10878,14 @@ def threshold.EpochAuthGrant.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochRequest}::clone]:
-    Source: 'src/threshold.rs', lines 509:9-509:14
+    Source: 'src/threshold.rs', lines 508:9-508:14
     Visibility: public -/
 def threshold.EpochRequest.Insts.CoreCloneClone.clone
   (self : threshold.EpochRequest) : Result threshold.EpochRequest := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 509:9-509:14 -/
+    Source: 'src/threshold.rs', lines 508:9-508:14 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreCloneClone : core.clone.Clone
   threshold.EpochRequest := {
@@ -10893,7 +10893,7 @@ def threshold.EpochRequest.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 509:16-509:20 -/
+    Source: 'src/threshold.rs', lines 508:16-508:20 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.EpochRequest := {
@@ -10901,7 +10901,7 @@ def threshold.EpochRequest.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::threshold::{impl core::fmt::Debug for qsag_verified::threshold::EpochRequest}::fmt]:
-    Source: 'src/threshold.rs', lines 509:22-509:27
+    Source: 'src/threshold.rs', lines 508:22-508:27
     Visibility: public -/
 def threshold.EpochRequest.Insts.CoreFmtDebug.fmt
   (self : threshold.EpochRequest) (f : core.fmt.Formatter) :
@@ -10915,7 +10915,7 @@ def threshold.EpochRequest.Insts.CoreFmtDebug.fmt
     "requested_epoch") dyn (toStr "key_epoch_id") dyn1
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::fmt::Debug for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 509:22-509:27 -/
+    Source: 'src/threshold.rs', lines 508:22-508:27 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreFmtDebug : core.fmt.Debug
   threshold.EpochRequest := {
@@ -10923,14 +10923,14 @@ def threshold.EpochRequest.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 509:29-509:38 -/
+    Source: 'src/threshold.rs', lines 508:29-508:38 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.EpochRequest := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochRequest> for qsag_verified::threshold::EpochRequest}::eq]:
-    Source: 'src/threshold.rs', lines 509:29-509:38
+    Source: 'src/threshold.rs', lines 508:29-508:38
     Visibility: public -/
 def threshold.EpochRequest.Insts.CoreCmpPartialEqEpochRequest.eq
   (self : threshold.EpochRequest) (other : threshold.EpochRequest) :
@@ -10943,7 +10943,7 @@ def threshold.EpochRequest.Insts.CoreCmpPartialEqEpochRequest.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochRequest> for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 509:29-509:38 -/
+    Source: 'src/threshold.rs', lines 508:29-508:38 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreCmpPartialEqEpochRequest :
   core.cmp.PartialEq threshold.EpochRequest threshold.EpochRequest := {
@@ -10951,14 +10951,14 @@ def threshold.EpochRequest.Insts.CoreCmpPartialEqEpochRequest :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochRequest}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 509:40-509:42
+    Source: 'src/threshold.rs', lines 508:40-508:42
     Visibility: public -/
 def threshold.EpochRequest.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.EpochRequest) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 509:40-509:42 -/
+    Source: 'src/threshold.rs', lines 508:40-508:42 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreCmpEq : core.cmp.Eq threshold.EpochRequest
   := {
@@ -10968,14 +10968,14 @@ def threshold.EpochRequest.Insts.CoreCmpEq : core.cmp.Eq threshold.EpochRequest
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochLatchError}::clone]:
-    Source: 'src/threshold.rs', lines 516:9-516:14
+    Source: 'src/threshold.rs', lines 515:9-515:14
     Visibility: public -/
 def threshold.EpochLatchError.Insts.CoreCloneClone.clone
   (self : threshold.EpochLatchError) : Result threshold.EpochLatchError := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 516:9-516:14 -/
+    Source: 'src/threshold.rs', lines 515:9-515:14 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreCloneClone : core.clone.Clone
   threshold.EpochLatchError := {
@@ -10983,7 +10983,7 @@ def threshold.EpochLatchError.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 516:16-516:20 -/
+    Source: 'src/threshold.rs', lines 515:16-515:20 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.EpochLatchError := {
@@ -10991,7 +10991,7 @@ def threshold.EpochLatchError.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::threshold::{impl core::fmt::Debug for qsag_verified::threshold::EpochLatchError}::fmt]:
-    Source: 'src/threshold.rs', lines 516:22-516:27
+    Source: 'src/threshold.rs', lines 515:22-515:27
     Visibility: public -/
 def threshold.EpochLatchError.Insts.CoreFmtDebug.fmt
   (self : threshold.EpochLatchError) (f : core.fmt.Formatter) :
@@ -11022,7 +11022,7 @@ def threshold.EpochLatchError.Insts.CoreFmtDebug.fmt
       (toStr "max_epoch") __self_01
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::fmt::Debug for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 516:22-516:27 -/
+    Source: 'src/threshold.rs', lines 515:22-515:27 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreFmtDebug : core.fmt.Debug
   threshold.EpochLatchError := {
@@ -11030,14 +11030,14 @@ def threshold.EpochLatchError.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 516:29-516:38 -/
+    Source: 'src/threshold.rs', lines 515:29-515:38 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.EpochLatchError := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochLatchError> for qsag_verified::threshold::EpochLatchError}::eq]:
-    Source: 'src/threshold.rs', lines 516:29-516:38
+    Source: 'src/threshold.rs', lines 515:29-515:38
     Visibility: public -/
 def threshold.EpochLatchError.Insts.CoreCmpPartialEqEpochLatchError.eq
   (self : threshold.EpochLatchError) (other : threshold.EpochLatchError) :
@@ -11092,7 +11092,7 @@ def threshold.EpochLatchError.Insts.CoreCmpPartialEqEpochLatchError.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochLatchError> for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 516:29-516:38 -/
+    Source: 'src/threshold.rs', lines 515:29-515:38 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreCmpPartialEqEpochLatchError :
   core.cmp.PartialEq threshold.EpochLatchError threshold.EpochLatchError := {
@@ -11100,14 +11100,14 @@ def threshold.EpochLatchError.Insts.CoreCmpPartialEqEpochLatchError :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochLatchError}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 516:40-516:42
+    Source: 'src/threshold.rs', lines 515:40-515:42
     Visibility: public -/
 def threshold.EpochLatchError.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.EpochLatchError) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 516:40-516:42 -/
+    Source: 'src/threshold.rs', lines 515:40-515:42 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreCmpEq : core.cmp.Eq
   threshold.EpochLatchError := {
@@ -11117,94 +11117,36 @@ def threshold.EpochLatchError.Insts.CoreCmpEq : core.cmp.Eq
     threshold.EpochLatchError.Insts.CoreCmpEq.assert_fields_are_eq
 }
 
-/-- [qsag_verified::threshold::encode_be_u64]:
-    Source: 'src/threshold.rs', lines 527:0-538:1 -/
-def threshold.encode_be_u64 (v : Std.U64) : Result (Array Std.U8 8#usize) := do
-  let i ← v >>> 56#i32
-  let i1 ← lift (i &&& 255#u64)
-  let i2 ← lift (UScalar.cast .U8 i1)
-  let i3 ← v >>> 48#i32
-  let i4 ← lift (i3 &&& 255#u64)
-  let i5 ← lift (UScalar.cast .U8 i4)
-  let i6 ← v >>> 40#i32
-  let i7 ← lift (i6 &&& 255#u64)
-  let i8 ← lift (UScalar.cast .U8 i7)
-  let i9 ← v >>> 32#i32
-  let i10 ← lift (i9 &&& 255#u64)
-  let i11 ← lift (UScalar.cast .U8 i10)
-  let i12 ← v >>> 24#i32
-  let i13 ← lift (i12 &&& 255#u64)
-  let i14 ← lift (UScalar.cast .U8 i13)
-  let i15 ← v >>> 16#i32
-  let i16 ← lift (i15 &&& 255#u64)
-  let i17 ← lift (UScalar.cast .U8 i16)
-  let i18 ← v >>> 8#i32
-  let i19 ← lift (i18 &&& 255#u64)
-  let i20 ← lift (UScalar.cast .U8 i19)
-  let i21 ← lift (v &&& 255#u64)
-  let i22 ← lift (UScalar.cast .U8 i21)
-  ok (Array.make 8#usize [ i2, i5, i8, i11, i14, i17, i20, i22 ])
-
-/-- [qsag_verified::threshold::derive_jorts_legacy_v1_det_r_rand]:
-    Source: 'src/threshold.rs', lines 548:0-568:1
-    Visibility: public -/
-def threshold.derive_jorts_legacy_v1_det_r_rand
-  (sk_prf : Array Std.U8 32#usize) (key_epoch_id : Array Std.U8 32#usize)
-  (epoch : Std.U64) (msg_digest : Array Std.U8 32#usize) :
-  Result (Array Std.U8 32#usize)
-  := do
-  let ep_be ← threshold.encode_be_u64 epoch
-  let sp ← keccak.Shake256Sponge.new_shake256
-  let s ←
-    lift (Array.to_slice
-      (Array.make 16#usize [
-        81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 74#u8, 79#u8, 82#u8, 84#u8, 83#u8,
-        86#u8, 49#u8, 46#u8, 68#u8, 69#u8, 84#u8
-        ]))
-  let sp1 ← keccak.Shake256Sponge.absorb sp s
-  let s1 ← lift (Array.to_slice sk_prf)
-  let sp2 ← keccak.Shake256Sponge.absorb sp1 s1
-  let s2 ← lift (Array.to_slice key_epoch_id)
-  let sp3 ← keccak.Shake256Sponge.absorb sp2 s2
-  let s3 ← lift (Array.to_slice ep_be)
-  let sp4 ← keccak.Shake256Sponge.absorb sp3 s3
-  let s4 ← lift (Array.to_slice msg_digest)
-  let sp5 ← keccak.Shake256Sponge.absorb sp4 s4
-  let r_rand := Array.repeat 32#usize 0#u8
-  let (s5, to_slice_mut_back) ← lift (Array.to_slice_mut r_rand)
-  let (_, s6) ← keccak.Shake256Sponge.squeeze sp5 s5
-  ok (to_slice_mut_back s6)
-
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::next_epoch]:
-    Source: 'src/threshold.rs', lines 571:4-573:5
+    Source: 'src/threshold.rs', lines 526:4-528:5
     Visibility: public -/
 def threshold.EpochLatch.impl.next_epoch
   (self : threshold.EpochLatch) : Result Std.U64 := do
   ok self.next_epoch
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::max_epoch]:
-    Source: 'src/threshold.rs', lines 574:4-576:5
+    Source: 'src/threshold.rs', lines 529:4-531:5
     Visibility: public -/
 def threshold.EpochLatch.impl.max_epoch
   (self : threshold.EpochLatch) : Result Std.U64 := do
   ok self.max_epoch
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::key_epoch_id]:
-    Source: 'src/threshold.rs', lines 577:4-579:5
+    Source: 'src/threshold.rs', lines 532:4-534:5
     Visibility: public -/
 def threshold.EpochLatch.impl.key_epoch_id
   (self : threshold.EpochLatch) : Result (Array Std.U8 32#usize) := do
   ok self.key_epoch_id
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::last_bound]:
-    Source: 'src/threshold.rs', lines 580:4-582:5
+    Source: 'src/threshold.rs', lines 535:4-537:5
     Visibility: public -/
 def threshold.EpochLatch.impl.last_bound
   (self : threshold.EpochLatch) : Result threshold.LastBoundEpoch := do
   ok self.last_bound
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::new]:
-    Source: 'src/threshold.rs', lines 586:4-593:5
+    Source: 'src/threshold.rs', lines 541:4-548:5
     Visibility: public -/
 def threshold.EpochLatch.new
   (max_epoch : Std.U64) (key_epoch_id : Array Std.U8 32#usize) :
@@ -11219,7 +11161,7 @@ def threshold.EpochLatch.new
     }
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::acquire_or_retry]:
-    Source: 'src/threshold.rs', lines 605:4-673:5
+    Source: 'src/threshold.rs', lines 560:4-628:5
     Visibility: public -/
 def threshold.EpochLatch.acquire_or_retry
   (self : threshold.EpochLatch) (req : threshold.EpochSignRequest) :
@@ -11328,7 +11270,7 @@ def threshold.EpochLatch.acquire_or_retry
   else ok (core.result.Result.Err threshold.EpochLatchError.KeyBindingMismatch)
 
 /-- [qsag_verified::threshold::epoch_latch_advance]:
-    Source: 'src/threshold.rs', lines 678:0-712:1
+    Source: 'src/threshold.rs', lines 633:0-667:1
     Visibility: public -/
 def threshold.epoch_latch_advance
   (st : threshold.EpochLatch) (req : threshold.EpochRequest) :

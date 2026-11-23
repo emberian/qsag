@@ -7,7 +7,7 @@ use qsag_verified::{
     GOLDILOCKS_PRIME, Gf16, Gf256, Goldilocks, GoldilocksExt2, LastBoundEpoch, RssShare64,
     RssZeroSeeds64, Shake256Sponge, Tower128, Tower256, bdoz_commit_masked_tag,
     bdoz_fold_masked_value, cshake256_32, ct_eq_bytes32, decode_fips205_adrs,
-    derive_jorts_legacy_v1_det_r_rand, dkg_beaver_frobenius_eval_gf256,
+    dkg_beaver_frobenius_eval_gf256,
     dkg_beaver_frobenius_share_shamir_gf256, dkg_verify_key_shares_boolean_bdoz_gf256,
     dkg_verify_shamir_2of3_key_bit_gf256, embed_gf256_to_tower128, encode_fips205_adrs,
     epoch_latch_advance, fips205_f, fips205_wots_chain, fips205_wots_checksum, gf16_add, gf16_mul,
@@ -604,9 +604,18 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     bad_key[31] ^= 1;
     assert!(!ct_eq_bytes32(&key_id, &bad_key));
 
-    let r0 = derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 0, &msg_a);
-    assert_eq!(r0, derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 0, &msg_a));
-    assert_ne!(r0, derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 1, &msg_a));
+    let det_r_rand = |epoch: u64, msg_digest: &[u8; 32]| -> [u8; 32] {
+        let mut buf = [0u8; 104];
+        buf[0..32].copy_from_slice(&sk_prf);
+        buf[32..64].copy_from_slice(&key_id);
+        buf[64..72].copy_from_slice(&epoch.to_be_bytes());
+        buf[72..104].copy_from_slice(msg_digest);
+        cshake256_32(b"QSAG.PQ.BAGGYSIG.DET/v1", &buf)
+    };
+
+    let r0 = det_r_rand(0, &msg_a);
+    assert_eq!(r0, det_r_rand(0, &msg_a));
+    assert_ne!(r0, det_r_rand(1, &msg_a));
 
     let st0 = EpochLatch::new(2, key_id);
     // 1. Acquire epoch 0 fresh
@@ -658,7 +667,7 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     );
 
     // 4. Equivocation attempt on epoch 0 with msg_b MUST fail!
-    let r0_b = derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 0, &msg_b);
+    let r0_b = det_r_rand(0, &msg_b);
     assert_eq!(
         bound_epoch0()
             .acquire_or_retry(EpochSignRequest {
@@ -672,7 +681,7 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     );
 
     // 5. Advance to epoch 1 on msg_b
-    let r1 = derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 1, &msg_b);
+    let r1 = det_r_rand(1, &msg_b);
     let (st2, g1) = st1_retry
         .acquire_or_retry(EpochSignRequest {
             requested_epoch: 1,
@@ -707,7 +716,7 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     );
 
     // 7. Tree exhaustion at epoch 2 (max_epoch = 2)
-    let r2 = derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 2, &msg_a);
+    let r2 = det_r_rand(2, &msg_a);
     assert_eq!(
         bound_epoch1()
             .acquire_or_retry(EpochSignRequest {
