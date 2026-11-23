@@ -21,7 +21,7 @@ Invariant preservation:
 
 Rename rules are anchored so that data never moves with a crate name:
   - `qsag-<crate>` is a package name only when no further name character follows it, so
-    `qsag-cred-voprf-share-v1`, `qsag-policy-ledger-v2` or `qsag-aggregate-proof-v1` stay.
+    `qsag-cred-voprf-share-v1`, `qsag-policy-ledger-v2` or `qsag-hem-quintic-proof-v2` stay.
   - `qsag_<crate>` is a crate identifier only at the start of an identifier (one leading
     underscore is allowed for Mach-O symbols), so `spec_qsag_agg_x` stays.
   - the bare CLI word `qsag` is never rewritten inside a byte string (`b"qsag kat ..."`).

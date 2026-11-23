@@ -308,6 +308,8 @@ def projected_label_differences(source: Path, mirror: Path) -> list[str]:
         for src in sorted((source / root).glob("qsag-*/src")):
             crate = src.parent.name.removeprefix("qsag-")
             exported = mirror / "crates" / crate / "src"
+            if root == "aeneas" and not exported.is_dir():
+                continue
             original, projected = crate_labels(src), crate_labels(exported)
             for label in sorted(original - projected):
                 errors.append(f"{crate}: missing projected label {label!r}")

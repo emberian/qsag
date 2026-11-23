@@ -1,8 +1,5 @@
-# Swarm scratch: lane reports and handoffs are kept, the rest is not
-scratch
-scratch/*
-!scratch/lanes/
-!scratch/HANDOFF-*.md
+# Local scratch directories
+/scratch/
 # Spice and Synth result/report directories
 hardware/gf180mcu/spice/results/
 
@@ -101,8 +98,6 @@ hardware/asic/trace/*.bin
 hardware/asic/trace/*_trace.txt
 hardware/gf180mcu/gf180mcu/
 
-# Lane reports under scratch/lanes are tracked (overrides the *.last.md family above)
-!scratch/lanes/**
 
 # Simulation sweeps: partial checkpoints duplicate the final json; Magic extraction outputs
 **/*.partial.jsonl
@@ -118,7 +113,7 @@ hardware/gf180mcu/physics/**/*.ext
 **/*.stderr
 **/core.[0-9]*
 
-# Stray root-level search dumps and notes (lane reports belong in scratch/lanes)
+# Stray root-level search dumps and notes 
 /*.txt
 /*.out
 /*.json

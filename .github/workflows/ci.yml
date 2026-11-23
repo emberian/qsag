@@ -100,9 +100,10 @@ jobs:
       - name: Workspace-excluded extracted Rust crates and witness parity
         env:
           CARGO_BUILD_JOBS: "4"
-          SWARM_MEM_MAX: 8G
         run: |
           set -euo pipefail
+          python3 scripts/check_repo_hygiene.py --self-test
+          python3 scripts/check_repo_hygiene.py
           cargo fmt --manifest-path aeneas/qsag-whir-verified/Cargo.toml -- --check
           cargo clippy --manifest-path aeneas/qsag-whir-verified/Cargo.toml --all-targets --locked -- -D warnings
           cargo check --manifest-path aeneas/qsag-whir-verified/Cargo.toml --no-default-features --locked
@@ -288,7 +289,6 @@ jobs:
         if: matrix.workdir == 'lean'
         env:
           CARGO_BUILD_JOBS: "4"
-          SWARM_MEM_MAX: 8G
         run: |
           set -euo pipefail
           work="$(mktemp -d)"
@@ -300,7 +300,6 @@ jobs:
         if: matrix.workdir == 'lean'
         env:
           CARGO_BUILD_JOBS: "4"
-          SWARM_MEM_MAX: 8G
         run: |
           set -euo pipefail
           timeout --kill-after=10s 600s python3 scripts/spec_differential_fuzz.py --strict-all
@@ -310,7 +309,6 @@ jobs:
         if: matrix.workdir == 'lean'
         env:
           CARGO_BUILD_JOBS: "4"
-          SWARM_MEM_MAX: 8G
         run: |
           set -euo pipefail
           CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_STRIP=none \
@@ -452,7 +450,6 @@ jobs:
       - name: Run every ignored multi-party and aggregation soak
         env:
           CARGO_BUILD_JOBS: "4"
-          SWARM_MEM_MAX: 10G
         run: |
           set -euo pipefail
           timeout --kill-after=10s 3600s cargo test --release --locked -p qsag-core -- --ignored --test-threads=1
@@ -462,7 +459,6 @@ jobs:
       - name: Run both full distributed migration ceremonies
         env:
           CARGO_BUILD_JOBS: "4"
-          SWARM_MEM_MAX: 10G
         run: |
           set -euo pipefail
           timeout --kill-after=10s 1800s cargo test --release --locked -p qsag-migrate \

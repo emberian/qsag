@@ -154,6 +154,31 @@ if ghost_citations("/-- Proved by `citation_negative_control_missing`. -/") != [
 if ghost_citations("/-- Values tested by `z_ood` remain bounded. -/") != []:
     raise RuntimeError("docstring citation passive-variable control unexpectedly failed")
 
+strawman_verifier_patterns = (
+    re.compile(
+        r"(?:def|abbrev)\s+[A-Za-z_][A-Za-z0-9_'.]*[Vv]erif[A-Za-z0-9_'.]*[^:=\n]*:=\s*fun\b[^;\n]*=>\s*true\b"
+    ),
+    re.compile(r":\s*(?:[A-Za-z0-9_'.]+\.)?Verifier\s*:=\s*fun\b[^;\n]*=>\s*true\b"),
+    re.compile(r"\bverify\b[^:=\n]*:=\s*(?:fun\b[^;\n]*=>\s*)?true\b"),
+)
+
+
+def strawman_verifiers(clean_source):
+    hits = []
+    for pat in strawman_verifier_patterns:
+        for match in pat.finditer(clean_source):
+            line = clean_source[: match.start()].count("\n") + 1
+            hits.append((line, match[0].strip()))
+    return sorted(set(hits))
+
+
+if not strawman_verifiers("def brokenClassical : Verifier := fun _ _ _ => true"):
+    raise RuntimeError("strawman verifier negative control (Verifier := fun ... => true) unexpectedly passed")
+if not strawman_verifiers("def acceptAll : SigScheme Unit Unit Unit where\n  verify _ _ _ := true"):
+    raise RuntimeError("strawman verifier negative control (verify := true) unexpectedly passed")
+if strawman_verifiers("def realVerifier : Verifier := fun pk t sig => decide (sig = sign pk t)"):
+    raise RuntimeError("strawman verifier positive control unexpectedly failed")
+
 for path in files:
     raw = path.read_text()
     source = code(raw)
@@ -192,6 +217,8 @@ for path in files:
         errors.append(f"{relative}:{line}: {tok}")
     for line, citation in ghost_citations(raw):
         errors.append(f"{relative}:{line}: docstring cites missing declaration: {citation}")
+    for line, snippet in strawman_verifiers(source):
+        errors.append(f"{relative}:{line}: constant-true strawman verifier banned: {snippet}")
 
 for manifest, import_pattern, base_dir, prefix in (
     ("lean/Qsag.lean", r"(?:public )?import (Qsag\.[\w.]+)", "lean/Qsag", "Qsag"),
