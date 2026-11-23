@@ -2,7 +2,7 @@
 //   Shares ONE 64-bit `io_sr` shift register across RX word assembly and TX word streaming,
 //   and ONE 64-bit `rx_word_o` CDC launch register across header & payload words.
 module qsag_ass2_host (
-    input  logic        sck,
+    input  logic        clk, sck,
     input  logic        cs_n,
     input  logic        rst_n,
     input  logic        tamper_n,
@@ -34,8 +34,12 @@ module qsag_ass2_host (
     logic load_frame;
     logic        is_diag;
 
-    wire selected_n  = rst_n && tamper_n && !cs_n;
     wire req_reset_n = rst_n && tamper_n;
+
+    logic sck_q;
+    always_ff @(posedge clk) sck_q <= sck;
+    wire rise = sck && !sck_q;
+    wire fall = !sck && sck_q;
 
     logic [7:0] rx_byte;
     logic       byte_done;
@@ -62,13 +66,13 @@ module qsag_ass2_host (
     wire issue_tx   = (phase == P_DUMMY && sub_pos == 3'd7 && !is_diag)
                     || (phase == P_TX_WORDS && byte_done && byte_pos == 3'd7 && rem_words != 8'd0);
 
-    always_ff @(posedge sck or negedge req_reset_n) begin
+    always_ff @(posedge clk or negedge req_reset_n) begin
         if (!req_reset_n) begin
             rx_word_o        <= 64'd0;
             rx_hdr_toggle_o  <= 1'b0;
             rx_word_toggle_o <= 1'b0; rx_widx_o <= 8'd0;
             tx_next_toggle_o <= 1'b0; tx_widx_o <= 5'd0;
-        end else if (!cs_n) begin
+        end else if (!cs_n && rise) begin
             if (issue_hdr) rx_word_o <= assembled;
             if (issue_word) rx_word_o <= load_frame ? {32'd0, assembled[63:32]} : assembled;
             if (issue_hdr)  rx_hdr_toggle_o <= !rx_hdr_toggle_o;
@@ -83,12 +87,16 @@ module qsag_ass2_host (
         end
     end
 
-    always_ff @(posedge sck or negedge selected_n) begin
-        if (!selected_n) begin
+    always_ff @(posedge clk or negedge req_reset_n) begin
+        if (!req_reset_n) begin
             load_frame <= 1'b0; phase <= P_PREFIX; width_mode <= 2'd0; sub_pos <= 3'd0; byte_pos <= 3'd0;
             rx_shift <= 7'd0; io_sr <= 64'd0;
             diag_bit <= 6'd63; rem_words <= 8'd0; word_idx <= 8'd0; is_diag <= 1'b0;
-        end else case (phase)
+        end else if (cs_n) begin
+            load_frame <= 1'b0; phase <= P_PREFIX; width_mode <= 2'd0; sub_pos <= 3'd0; byte_pos <= 3'd0;
+            rx_shift <= 7'd0; io_sr <= 64'd0;
+            diag_bit <= 6'd63; rem_words <= 8'd0; word_idx <= 8'd0; is_diag <= 1'b0;
+        end else if (rise) case (phase)
             P_PREFIX: begin
                 rx_shift <= {rx_shift[5:0], dq_i[0]};
                 if (sub_pos == 3'd7) begin
@@ -195,17 +203,20 @@ module qsag_ass2_host (
         end
     end
 
-    always_ff @(negedge sck or negedge selected_n) begin
-        if (!selected_n) begin
+    always_ff @(posedge clk or negedge req_reset_n) begin
+        if (!req_reset_n) begin
             dq_o    <= 8'd0;
             driving <= 1'b0;
-        end else begin
+        end else if (cs_n) begin
+            dq_o    <= 8'd0;
+            driving <= 1'b0;
+        end else if (fall) begin
             dq_o    <= dq_next;
             driving <= (phase == P_TX_DIAG) || (phase == P_TX_WORDS);
         end
     end
 
-    assign dq_oe = (selected_n && driving)
+    assign dq_oe = driving
                  ? ((phase == P_TX_DIAG || width_mode == 2'd0) ? 8'h02
                   : (width_mode == 2'd1) ? 8'h0f : 8'hff)
                  : 8'h00;
