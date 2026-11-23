@@ -130,6 +130,8 @@ def decodeQuinticNat (n : Nat) : QuinticGoldilocks :=
 def decodeQuintic400 (c : Nat) : QuinticGoldilocks :=
   decodeQuinticNat (c % quinticGoldilocksCard)
 
+#export_eqns encodeQuinticNat decodeQuintic400
+
 private theorem mixed_radix_lt {p a b k : Nat} (ha : a < p) (hb : b < k) :
     a + p * b < p * k := by
   have h1 : b + 1 ≤ k := hb
@@ -747,6 +749,14 @@ def packedStagesRoundBounds (q : Nat) (hq : 0 < q) : List WhirStage → List Rat
   | [] => []
   | s :: rest => packedStageRoundBounds q hq s ++ packedStagesRoundBounds q hq rest
 
+theorem packedStagesRoundBounds_length (q : Nat) (hq : 0 < q) :
+    ∀ stages : List WhirStage, (packedStagesRoundBounds q hq stages).length = roundsOf stages
+  | [] => rfl
+  | s :: rest => by
+    simp only [packedStagesRoundBounds, packedStageRoundBounds, List.length_append,
+      List.length_replicate, List.length_cons, List.length_nil, packedStagesRoundBounds_length q hq rest,
+      roundsOf, stageRounds]
+
 def packedProdQromError (logCells Q : Nat) : RatBound :=
   RatBound.sumList
     ((packedStagesRoundBounds quinticGoldilocksCard quinticGoldilocksCard_pos
@@ -924,6 +934,18 @@ private theorem sumList_replicate_le_scale_p (b : RatBound) :
             simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
           rw [e1, e2]
 
+theorem packedProdQromError_eq (n Q : Nat) : packedProdQromError n Q =
+    RatBound.sumList ((packedStagesRoundBounds quinticGoldilocksCard quinticGoldilocksCard_pos
+      (packedProdStages n)).map (dfmRoundScale Q)) := by unfold packedProdQromError; rfl
+
+/-- The one-query, 16-log-cell budget covers two guesses from a 512-bit sample. -/
+theorem packedProdQromError_16_covers_two_guesses :
+    RatBound.le ⟨2, 2^512, Nat.two_pow_pos _⟩ (packedProdQromError 16 1) := by
+  let st := (packedProdStages 16)[0]'(by decide)
+  apply RatBound.le_trans (b := dfmRoundScale 1 (st.foldBound quinticGoldilocksCard quinticGoldilocksCard_pos))
+  · rw [WhirStage.foldBound_eq]; decide +kernel
+  · apply RatBound.le_add_left
+
 /-- **All 13 Deployed Packed-Fiber Schedules (`16 ≤ logCells ≤ 28`) Clear `< 2^{-128}` at `Q ≤ 2^{64}`:**
     Replaces the `< 2^{-400}` OOD bound with the realizable `< 2^{-277}` `singleOodSeedBound` and supports
     both `.turboShake400` and `.poseidon2Gl24` commitment profiles. -/
@@ -1045,54 +1067,67 @@ private theorem rec_stage_covers_285 (s : WhirStage)
 /-- **Deployment-Scale Recursive Margin Schedule `< 2^{-128}` Bound (`zkHemV2RecursiveMargin_tree_lt_128`):**
     For all tree depths `d ≤ 16` (`≤ 65,536` regional leaf shards, `≤ 131,071` tree nodes) and
     `Q ≤ 2^{64}` quantum oracle queries, `(2^{d+1} - 1) · ε_step + ε_qromColl(Q) < 2^{-128}`. -/
+private theorem recMargin_covAll :
+    RBoundsLeP
+      (stagesRoundBounds quinticGoldilocksCard quinticGoldilocksCard_pos zkHemV2RecursiveMarginStages)
+      (List.replicate 18 (RatBound.invPow2 285)) := by
+  unfold zkHemV2RecursiveMarginStages
+  rw [stagesRoundBounds_cons, stagesRoundBounds_cons, stagesRoundBounds_cons, stagesRoundBounds_nil,
+      List.append_nil]
+  have h18 : List.replicate 18 (RatBound.invPow2 285) =
+      List.replicate 7 (RatBound.invPow2 285) ++
+      (List.replicate 5 (RatBound.invPow2 285) ++ List.replicate 6 (RatBound.invPow2 285)) := rfl
+  rw [h18]
+  exact RBoundsLeP.append (rec_stage_covers_285 _ List.mem_cons_self)
+    (RBoundsLeP.append (rec_stage_covers_285 _ (List.mem_cons_of_mem _ List.mem_cons_self))
+      (rec_stage_covers_285 _ (List.mem_cons_of_mem _ (List.mem_cons_of_mem _ List.mem_cons_self))))
+
+private theorem recMargin_schedLe {Q : Nat} (hQ : Q ≤ 2 ^ 64) :
+    let b285 := dfmRoundScale (2 ^ 64) (RatBound.invPow2 285)
+    RatBound.le (scheduleQromError zkHemV2RecursiveMarginSched Q)
+      ⟨18 * b285.num, b285.den, b285.h_pos⟩ := by
+  intro b285
+  refine RatBound.le_trans (scheduleQromError_mono zkHemV2RecursiveMarginSched hQ) ?_
+  refine RatBound.le_trans ?_ (sumList_replicate_le_scale_p b285 18)
+  rw [← List.map_replicate, scheduleQromError_eq, WhirVerifierSchedule.roundBounds_eq]
+  exact scaled_sum_mono_packed (2 ^ 64) recMargin_covAll
+
+private theorem recMargin_top :
+    let b285 := dfmRoundScale (2 ^ 64) (RatBound.invPow2 285)
+    RatBound.lt
+      (RatBound.add ⟨131071 * (18 * b285.num), b285.den, b285.h_pos⟩ (merkle400QromBound (2 ^ 64)))
+      (RatBound.invPow2 128) := by
+  intro b285
+  dsimp only [b285]; decide +kernel
+
+private theorem ratBound_scale_le_of_le {n m k : Nat} (e b : RatBound)
+    (hn : n ≤ m) (he : RatBound.le e ⟨k * b.num, b.den, b.h_pos⟩) :
+    RatBound.le (RatBound.scale n e) ⟨m * (k * b.num), b.den, b.h_pos⟩ := by
+  show n * e.num * b.den ≤ m * (k * b.num) * e.den
+  calc n * e.num * b.den
+      ≤ m * e.num * b.den := Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _ hn)
+    _ = m * (e.num * b.den) := Nat.mul_assoc _ _ _
+    _ ≤ m * (k * b.num * e.den) := Nat.mul_le_mul_left _ he
+    _ = m * (k * b.num) * e.den := (Nat.mul_assoc _ _ _).symm
+
+private theorem pow2_17_sub1_le {d : Nat} (hd : d ≤ 16) : 2 ^ (d + 1) - 1 ≤ 131071 := by
+  have h17 : 2 ^ 17 - 1 = 131071 := by decide +kernel
+  rw [← h17]
+  exact Nat.sub_le_sub_right (Nat.pow_le_pow_right (by decide) (Nat.succ_le_succ hd)) 1
+
 theorem zkHemV2RecursiveMargin_tree_lt_128
     (prof : WhirCommitmentProfile) {d Q : Nat} (hd : d ≤ 16) (hQ : Q ≤ 2 ^ 64) :
     RatBound.lt
       (RatBound.add
         (RatBound.scale (2 ^ (d + 1) - 1) (scheduleQromError zkHemV2RecursiveMarginSched Q))
         (merkleProfileQromBound prof Q))
-      (RatBound.invPow2 128) := by
-  have hNodesLe : 2 ^ (d + 1) - 1 ≤ 131071 := by
-    have hPow : 2 ^ (d + 1) ≤ 2 ^ 17 := Nat.pow_le_pow_right (by decide) (by omega)
-    omega
-  have hCovAll : RBoundsLeP
-      (stagesRoundBounds quinticGoldilocksCard quinticGoldilocksCard_pos zkHemV2RecursiveMarginStages)
-      (List.replicate 18 (RatBound.invPow2 285)) := by
-    unfold zkHemV2RecursiveMarginStages
-    rw [stagesRoundBounds_cons, stagesRoundBounds_cons, stagesRoundBounds_cons, stagesRoundBounds_nil,
-        List.append_nil]
-    have h18 : List.replicate 18 (RatBound.invPow2 285) =
-        List.replicate 7 (RatBound.invPow2 285) ++
-        (List.replicate 5 (RatBound.invPow2 285) ++ List.replicate 6 (RatBound.invPow2 285)) := rfl
-    rw [h18]
-    exact RBoundsLeP.append (rec_stage_covers_285 _ List.mem_cons_self)
-      (RBoundsLeP.append (rec_stage_covers_285 _ (List.mem_cons_of_mem _ List.mem_cons_self))
-        (rec_stage_covers_285 _ (List.mem_cons_of_mem _ (List.mem_cons_of_mem _ List.mem_cons_self))))
-  let b285 := dfmRoundScale (2 ^ 64) (RatBound.invPow2 285)
-  have hSchedLe : RatBound.le (scheduleQromError zkHemV2RecursiveMarginSched Q)
-      ⟨18 * b285.num, b285.den, b285.h_pos⟩ := by
-    refine RatBound.le_trans (scheduleQromError_mono zkHemV2RecursiveMarginSched hQ) ?_
-    refine RatBound.le_trans ?_ (sumList_replicate_le_scale_p b285 18)
-    rw [← List.map_replicate, scheduleQromError_eq, WhirVerifierSchedule.roundBounds_eq]
-    exact scaled_sum_mono_packed (2 ^ 64) hCovAll
-  have hScaleLe : RatBound.le
-      (RatBound.scale (2 ^ (d + 1) - 1) (scheduleQromError zkHemV2RecursiveMarginSched Q))
-      ⟨131071 * (18 * b285.num), b285.den, b285.h_pos⟩ := by
-    let e := scheduleQromError zkHemV2RecursiveMarginSched Q
-    show (2 ^ (d + 1) - 1) * e.num * b285.den ≤ 131071 * (18 * b285.num) * e.den
-    calc (2 ^ (d + 1) - 1) * e.num * b285.den
-        ≤ 131071 * e.num * b285.den :=
-          Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _ hNodesLe)
-      _ = 131071 * (e.num * b285.den) := Nat.mul_assoc _ _ _
-      _ ≤ 131071 * (18 * b285.num * e.den) := Nat.mul_le_mul_left _ hSchedLe
-      _ = 131071 * (18 * b285.num) * e.den := (Nat.mul_assoc _ _ _).symm
-  have hMerkleLe := RatBound.le_trans (merkleProfileQromBound_mono prof hQ)
-    (merkleProfileQromBound_le_400 prof (2 ^ 64))
-  have hTop : RatBound.lt
-      (RatBound.add ⟨131071 * (18 * b285.num), b285.den, b285.h_pos⟩ (merkle400QromBound (2 ^ 64)))
-      (RatBound.invPow2 128) := by
-    dsimp only [b285]; decide +kernel
-  exact ratBound_lt_of_le_of_lt_packed (RatBound.add_le_add hScaleLe hMerkleLe) hTop
+      (RatBound.invPow2 128) :=
+  ratBound_lt_of_le_of_lt_packed
+    (RatBound.add_le_add
+      (ratBound_scale_le_of_le (scheduleQromError zkHemV2RecursiveMarginSched Q)
+        (dfmRoundScale (2 ^ 64) (RatBound.invPow2 285)) (pow2_17_sub1_le hd) (recMargin_schedLe hQ))
+      (RatBound.le_trans (merkleProfileQromBound_mono prof hQ) (merkleProfileQromBound_le_400 prof (2 ^ 64))))
+    recMargin_top
 
 def unadjustedStage20 : WhirStage :=
   ⟨5, 17, 2, 5, 267, 32769, 65603, 1, 2048, 2048, 20, 188194534092434⟩
@@ -1156,6 +1191,9 @@ theorem inhabited_recursiveMargin_tree :
   Qsag.ZkHemV2Packed.encodeQuinticNat_lt
   Qsag.ZkHemV2Packed.encodeQuinticNat_decodeQuinticNat
   Qsag.ZkHemV2Packed.decodeQuinticNat_encodeQuinticNat
+  Qsag.ZkHemV2Packed.packedProdQromError_16_covers_two_guesses
+  Qsag.ZkHemV2Packed.packedProdQromError_eq
+  Qsag.ZkHemV2Packed.packedStagesRoundBounds_length
   Qsag.ZkHemV2Packed.decodeQuintic400_preimage_le
   Qsag.ZkHemV2Packed.gsList_single_ood_bad_seeds_le
   Qsag.ZkHemV2Packed.packedProdSched_johnsonOk

@@ -1591,6 +1591,10 @@ def fpow {F : Type} [CommRingOps F] (x : F) : Nat → F
   | 0 => one
   | n + 1 => mul x (fpow x n)
 
+theorem fpow_zero {F : Type} [CommRingOps F] (x : F) : fpow x 0 = one := by rw [fpow]
+theorem fpow_succ {F : Type} [CommRingOps F] (x : F) (n : Nat) :
+    fpow x (n + 1) = mul x (fpow x n) := by rw [fpow]
+
 theorem fpow_add {F : Type} [LawfulCommRing F] (x : F) :
     ∀ a b : Nat, fpow x (a + b) = mul (fpow x a) (fpow x b)
   | 0, b => by
@@ -1652,6 +1656,9 @@ def pow2Iter {F : Type} [CommRingOps F] : Nat → F → F
   | k + 1, x =>
     let y := pow2Iter k x
     mul y y
+
+theorem pow2Iter_zero {F : Type} [CommRingOps F] (x : F) : pow2Iter 0 x = x := by rw [pow2Iter]
+theorem pow2Iter_one {F : Type} [CommRingOps F] (x : F) : pow2Iter 1 x = mul x x := by simp only [pow2Iter]
 
 theorem pow2Iter_add {F : Type} [CommRingOps F] :
     ∀ (a b : Nat) (x : F), pow2Iter (a + b) x = pow2Iter a (pow2Iter b x)
@@ -1910,6 +1917,9 @@ private theorem twoAdicElem_exp_inj :
 /-- Subgroup of `2^s`-th roots of unity in `Goldilocks` (`s ≤ 32`). -/
 def twoAdicCoset (s : Nat) : List Goldilocks :=
   (List.range (2 ^ s)).map (fpow (twoAdicElem s))
+
+theorem twoAdicCoset_eq_map (s : Nat) :
+    twoAdicCoset s = (List.range (2 ^ s)).map (fpow (twoAdicElem s)) := by unfold twoAdicCoset; rfl
 
 theorem twoAdicCoset_length (s : Nat) : (twoAdicCoset s).length = 2 ^ s := by
   unfold twoAdicCoset
@@ -2888,6 +2898,11 @@ theorem blindCells_eq_blinding_count (s q : Nat) (qs : List Goldilocks)
   Qsag.ZkHemV2.tooth_blinding_conjugate_points_not_surjective
   Qsag.ZkHemV2.evalCoeffs_divModBinomial
   Qsag.ZkHemV2.evalCoeffs_divModBinomial_at_root
+  Qsag.ZkHemV2.fpow_zero
+  Qsag.ZkHemV2.fpow_succ
+  Qsag.ZkHemV2.pow2Iter_zero
+  Qsag.ZkHemV2.pow2Iter_one
+  Qsag.ZkHemV2.twoAdicCoset_eq_map
   Qsag.ZkHemV2.twoAdicCoset_nodup
   Qsag.ZkHemV2.blindPoints_fiberRoots_nodup
   Qsag.ZkHemV2.v2_blinding_residue_ring_bijective

@@ -4636,7 +4636,7 @@ theorem squeezed_budget_exceeds_two_pow_neg_210 :
 
 /-! ## 11. Genuine Reed–Solomon + Degree-7 S-Box `RowArithmetization.Lawful` Instance -/
 
-private def decodeLeb128 : List UInt8 → Option (Nat × List UInt8)
+def decodeLeb128 : List UInt8 → Option (Nat × List UInt8)
   | [] => none
   | b :: rest =>
     if b.toNat < 128 then some (b.toNat, rest)
@@ -4687,7 +4687,7 @@ private theorem decodeLeb128_leb128Aux :
       simp only [hlt, ↓reduceIte, List.cons_append, decodeLeb128, hb, hNotLt, ih]
       congr 1; congr 1; omega
 
-private theorem decodeLeb128_leb128 (n : Nat) (rest : List UInt8) :
+theorem decodeLeb128_leb128 (n : Nat) (rest : List UInt8) :
     decodeLeb128 (leb128 n ++ rest) = some (n, rest) :=
   decodeLeb128_leb128Aux n n rest (Nat.le_refl n)
 
@@ -6847,7 +6847,7 @@ theorem stage_pow_fixture_rejects_zero :
   have hx := (verifyWhirStagePow_16_iff _ _ (stagePowDigest_length _) (by decide)).mp h
   have hf := cshake_stage_pow_fixture_0
   exact Bool.false_ne_true (hf.symm.trans hx)
-#verify_constructive squeezed_event_count_le whirRegime_positive_slack
+#verify_constructive decodeLeb128_leb128 squeezed_event_count_le whirRegime_positive_slack
   whirRegime_bounded_query_profiles whirRegime_bounded_query_search_accounting
   verifyWhirStagePow_16_iff stage_pow_fixture_accepts stage_pow_fixture_rejects_zero
 end Qsag.Aggregation

@@ -402,12 +402,14 @@ structure WhirEnv (F : Type) where
   foldClaimStep : Option (Nat → F → List F → Nat → Option F) := none
   foldBlockRaw : Option (Nat → List (WhirPub F × Nat) → Nat → Nat → List F → F) := none
   finalClaimViews : Option (List (StageView F) → List F → F) := none
+  /-- Point of pair j in a fiber of order 2^k with representative x. -/
+  fiberPoint : Option (Nat → F → Nat → F) := none
 
 section Verifier
 variable {F : Type} [CommRingOps F] [DecidableEq F]
 
 /-- Split the public transcript into per-stage views. -/
-def splitStages : List WhirStage → List (WhirPub F × Nat) → Option (List (StageView F))
+@[expose] def splitStages : List WhirStage → List (WhirPub F × Nat) → Option (List (StageView F))
   | [], [] => some []
   | [], _ :: _ => none
   | st :: rest, rounds =>
@@ -434,9 +436,17 @@ def foldLayer (env : WhirEnv F) (x α : F) (block : List F) : List F :=
     (fun ab => env.fold2 x α ab.1 ab.2)
 
 /-- Fold a `2^k` block with the `k` round challenges. -/
-def foldBlock (env : WhirEnv F) : List F → F → List F → F
+@[expose] def foldBlock (env : WhirEnv F) : List F → F → List F → F
   | [], _, block => block.headD CommRingOps.zero
-  | α :: rest, x, block => foldBlock env rest (CommRingOps.mul x x) (foldLayer env x α block)
+  | α :: rest, x, block =>
+    let layer := match env.fiberPoint with
+      | none => foldLayer env x α block
+      | some point =>
+        let half := block.length / 2
+        (List.range half).map fun j =>
+          env.fold2 (point (rest.length + 1) x j) α
+            (block.getD j CommRingOps.zero) (block.getD (half + j) CommRingOps.zero)
+    foldBlock env rest (CommRingOps.mul x x) layer
 
 /-- `claim + Σ_l γ^(l+1) v_l`. -/
 def combineClaim (claim γ : F) (vs : List F) : F :=
@@ -472,7 +482,7 @@ def stageFoldRun (env : WhirEnv F) (i deg : Nat) (claim : F)
 
 /-- Stage-by-stage verifier helper retaining the full `StageView` list `allVs` for optional
     multi-stage terminal kernel evaluation (`env.finalClaimViews`). -/
-def whirCheckStagesAux (env : WhirEnv F) (allVs : List (StageView F)) :
+@[expose] def whirCheckStagesAux (env : WhirEnv F) (allVs : List (StageView F)) :
     Nat → List WhirStage → List (StageView F) → F → List F → Bool
   | i, st :: rest, v :: vs, claim, vals =>
     match stageFoldRun env i st.sumcheckDeg claim v.folds with
@@ -1961,12 +1971,12 @@ private theorem qsumNat_even_odd_split :
     rw [h1, h2, g0, g1]
     omega
 
-private theorem qsum_mul_div_mod_eq (A B : Nat) (hB : 0 < B) (g : Nat → Nat → Nat) :
+theorem qsum_mul_div_mod_eq (A B : Nat) (hB : 0 < B) (g : Nat → Nat → Nat) :
     qsum (A * B) (fun c => g (c.1 / B) (c.1 % B)) =
       qsum A (fun i => qsum B (fun j => g i.1 j.1)) :=
   qsumNat_mul_div_mod A B hB g
 
-private theorem qsum_mul_mod_eq {N F M : Nat} (hN : N = F * M) (hM : 0 < M)
+theorem qsum_mul_mod_eq {N F M : Nat} (hN : N = F * M) (hM : 0 < M)
     (f : Fin N → Nat) (g : Nat → Nat) (hfg : ∀ c : Fin N, f c = g (c.1 % M)) :
     qsum N f = F * qsum M (fun j => g j.1) := by
   rw [qsum_congr hfg]
@@ -1981,6 +1991,10 @@ private theorem filter_range_eq_qsum (p : Nat → Bool) :
         qsumNat_add_split n 1, qsumNat_succ, qsumNat_zero, Nat.add_zero, Nat.add_zero]
     dsimp only [List.filter, List.length]
     cases p n <;> simp
+
+theorem filter_range_length_qsum (p : Nat → Bool) (n : Nat) :
+    ((List.range n).filter p).length = qsum n (fun i => if p i.val then 1 else 0) :=
+  filter_range_eq_qsum p n
 
 private theorem agreeCount_flatHem_eq (table P : List QuarticGoldilocks) :
     agreeCount flatHemSlicedEnv 64 table P =
@@ -2226,7 +2240,7 @@ private theorem ood_pair_collision_le {d : Nat} {P Q : GsUniPoly QuarticGoldiloc
   exact Nat.le_trans (qsum_le_qsum hRow)
     (by rw [qsum_mul_right]; exact Nat.mul_le_mul_right d h1)
 
-private theorem qsum_any_le_mul {α : Type} (B M : Nat) (pred : α → Fin M → Bool) :
+theorem qsum_any_le_mul {α : Type} (B M : Nat) (pred : α → Fin M → Bool) :
     ∀ (xs : List α),
       (∀ x ∈ xs, qsum M (fun i => if pred x i = true then 1 else 0) ≤ B) →
       qsum M (fun i => if xs.any (fun x => pred x i) = true then 1 else 0) ≤ xs.length * B
@@ -2353,6 +2367,12 @@ private theorem combineClaim_foldl_eq {F : Type} [LawfulCommRing F] (γ : F) :
   | v :: rest, acc, wt => by
     simp only [List.foldl_cons, RoundPoly.evalCoeffs_cons, combineClaim_foldl_eq γ rest]
     constructive_ring
+
+/-- The shift/OOD batch is evaluation in γ of the vector of claimed readings,
+    with the previous claim as its constant coefficient. -/
+theorem combineClaim_eq_eval {F : Type} [LawfulCommRing F] (claim γ : F) (vs : List F) :
+    combineClaim claim γ vs = RoundPoly.evalCoeffs (claim :: vs) γ := by
+  exact combineClaim_foldl_eq γ vs claim γ
 
 private theorem ringDot_evalVec6 (P : List QuarticGoldilocks) (hP : P.length ≤ 4)
     (x : QuarticGoldilocks) :
@@ -2532,6 +2552,15 @@ private theorem qsum_allGoodDigits_le (n B : Nat) (hn : 0 < n) (good : Nat → B
     rw [qsum_mul_right] at hSum
     rw [Nat.pow_succ]
     exact Nat.le_trans hSum (Nat.mul_le_mul_right B (qsum_allGoodDigits_le n B hn good hGood t))
+
+/-- Independent base-n digits hit a set of size at most B in every draw with
+    numerator at most B^t over the n^t possible seeds. -/
+theorem qsum_good_digits_le (n t B : Nat) (hn : 0 < n) (good : Nat → Bool)
+    (hgood : qsum n (fun p => if good p.val then 1 else 0) ≤ B) :
+    qsum (n^t) (fun c => if (List.range t).all (fun j => good ((c.val / n^j) % n))
+      then 1 else 0) ≤ B^t := by
+  simp only [allGoodDigits_eq_range n hn]
+  exact qsum_allGoodDigits_le n B hn good hgood t
 
 private theorem poly_roots_in_flatHemPool_le {k : Nat} (Δ : List QuarticGoldilocks)
     (hLen : Δ.length ≤ k + 1) (hNz : ∃ c ∈ Δ, c ≠ CommRingOps.zero) :
@@ -4648,5 +4677,8 @@ end
 public section
 namespace Qsag.ClosedWhir
 #export_eqns stageDepth whirSuccinctRootsOf whirQueries commitRoundIdx
+#verify_constructive filter_range_length_qsum combineClaim_eq_eval qsum_mul_mod_eq qsum_mul_div_mod_eq qsum_any_le_mul qsum_good_digits_le
+#export_eqns whirVerdict whirCheckStages stageFoldRun sumcheckRun
+#export_eqns combineClaim allStageQueries stageQueries whirTable
 end Qsag.ClosedWhir
 end

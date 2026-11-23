@@ -1465,6 +1465,7 @@ end
 
 public section
 namespace Qsag.ClosedFs
+#export_eqns fsAux succinctFsAccept framedSetup
 #export_eqns openingOk fsTranscript treeNode MerkleSetup.root MerkleSetup.oracleLeaves
 end Qsag.ClosedFs
 end
