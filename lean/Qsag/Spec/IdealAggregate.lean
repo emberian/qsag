@@ -396,6 +396,42 @@ def aggregateRun {PK Proof : Type} {w : Nat} (H : Bytes → Bytes) (q : Nat)
     (AggregateStatement PK w × Proof) × List (Bytes × Bytes) :=
   Code.play (recordingOracle H q) prover []
 
+/-- A single funded call records exactly its input and the answer used to construct the output. -/
+theorem aggregateRun_one_call {PK Proof : Type} {w Q : Nat} (hQ : 1 ≤ Q)
+    (H : Bytes → Bytes) (x : Bytes) (finish : Bytes → AggregateStatement PK w × Proof) :
+    aggregateRun H Q (.call x (fun y => .ret (finish y))) = (finish (H x), [(x, H x)]) := by
+  unfold aggregateRun
+  rw [Code.play_call, Code.play_ret]
+  simp [recordingOracle, show 0 < Q from hQ]
+
+private theorem play_after_budget {R : Type} (H H' : Bytes → Bytes) (Q : Nat)
+    (log : List (Bytes × Bytes)) (full : Q ≤ log.length) (prog : Code byteOracleIface R) :
+    Code.play (recordingOracle H Q) prog log = Code.play (recordingOracle H' Q) prog log := by
+  induction prog with
+  | ret v => rw [Code.play_ret, Code.play_ret]
+  | call q k ih =>
+    simp only [Code.play_call, recordingOracle, Nat.not_lt.mpr full, ↓reduceIte]
+    exact ih []
+
+/-- With budget one, a two-valued oracle produces one of the two constant-oracle runs,
+    even for an adaptive program that keeps calling after exhausting its budget. -/
+theorem aggregateRun_one_two_answers {PK Proof : Type} {w : Nat} (H : Bytes → Bytes) (x y : Bytes)
+    (range : ∀ q, H q = x ∨ H q = y) (prog : Code byteOracleIface (AggregateStatement PK w × Proof)) :
+    aggregateRun H 1 prog = aggregateRun (fun _ => x) 1 prog ∨
+    aggregateRun H 1 prog = aggregateRun (fun _ => y) 1 prog := by
+  cases prog with
+  | ret v => exact .inl (by simp [aggregateRun, Code.play_ret])
+  | call q k =>
+    have agree (v : Bytes) (hv : H q = v) :
+        aggregateRun H 1 (.call q k) = aggregateRun (fun _ => v) 1 (.call q k) := by
+      simp only [aggregateRun, Code.play_call, recordingOracle, List.length_nil,
+        Nat.zero_lt_succ, ↓reduceIte, List.nil_append, hv]
+      exact play_after_budget H _ 1 [(q, v)] (Nat.le_refl 1) (k v)
+    exact (range q).imp (agree x) (agree y)
+
+theorem transcriptCollision_singleton (x y : Bytes) : transcriptCollision [(x, y)] = false := by
+  simp [transcriptCollision]
+
 /-- Every transcript entry is a query with the answer of `H`, and at most `q` are recorded. -/
 theorem aggregateRun_log {PK Proof : Type} {w : Nat} (H : Bytes → Bytes) (q : Nat)
     (prover : Code byteOracleIface (AggregateStatement PK w × Proof)) :
@@ -445,6 +481,23 @@ def aggregateSoundnessGame {PK Sig Proof : Type} {w n : Nat} (hPos : 0 < n)
     (prover : Fin n → Code byteOracleIface (AggregateStatement PK w × Proof)) : FinGame n :=
   ⟨hPos, fun ω => aggregateFailure verifySingle verifyAgg extract (oracle ω)
     (aggregateRun (oracle ω) q (prover ω))⟩
+
+/-- A winning coin gives an accepted statement and an invalid extracted witness. -/
+theorem aggregateSoundnessGame_win_invalid {PK Sig Proof : Type} {w n : Nat} (hPos : 0 < n)
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (q : Nat) (oracle : Fin n → Bytes → Bytes)
+    (prover : Fin n → Code byteOracleIface (AggregateStatement PK w × Proof)) (ω : Fin n)
+    (h : (aggregateSoundnessGame hPos verifySingle verifyAgg extract q oracle prover).win ω = true) :
+    let r := aggregateRun (oracle ω) q (prover ω)
+    verifyAgg (oracle ω) r.1.1 r.1.2 = true ∧
+      ¬ ValidAggregateWitness verifySingle r.1.1 (extract r.2 r.1.1 r.1.2) := by
+  simp only [aggregateSoundnessGame, aggregateFailure, Bool.and_eq_true] at h
+  exact ⟨h.1, fun hw => by
+    have hf := h.2.1
+    rw [aggregateWitnessCheck_complete verifySingle _ _ hw] at hf
+    contradiction⟩
 
 /-- On a run the prover does not win and the verifier accepts, the outcome holds: the
     extracted witness map is valid or the transcript contains a collision of the oracle. -/
@@ -823,6 +876,15 @@ def idealAggregateMachine {PK Sig : Type} {w : Nat}
       none
   errStep log _ := log
 
+theorem idealAggregateMachine_accepts_witness {PK Sig : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool) (log : List (AggregateStatement PK w))
+    (stmt : AggregateStatement PK w) (sigs : Fin w → Option Sig)
+    (h : ValidAggregateWitness verifySingle stmt sigs) :
+    (idealAggregateMachine verifySingle).step log (stmt, sigs) = some (log ++ [stmt], ()) := by
+  simp [idealAggregateMachine, aggregateWitnessCheck_complete verifySingle stmt sigs h]
+
+#verify_constructive idealAggregateMachine_accepts_witness
+
 /-- **Reachable-Trace Soundness of `idealAggregateMachine` (`idealAggregateMachine_all_certified_valid`)**:
     Along every multi-turn trace from the empty log, every certified statement recorded in the ideal
     state possesses a valid witness map supplying individual signatures for all active validators. -/
@@ -1060,7 +1122,9 @@ theorem tooth_unsound_verifier_breaks_idealAggregate :
 #verify_constructive Qsag.Spec.mergeSoundnessOutcome
 #verify_constructive Qsag.Spec.aggregateWitnessCheck_sound
 #verify_constructive Qsag.Spec.aggregateWitnessCheck_complete
+#verify_constructive aggregateRun_one_call play_after_budget aggregateRun_one_two_answers transcriptCollision_singleton
 #verify_constructive Qsag.Spec.aggregateRun_log
+#verify_constructive Qsag.Spec.aggregateSoundnessGame_win_invalid
 #verify_constructive Qsag.Spec.aggregateFailure_false_outcome
 #verify_constructive Qsag.Spec.aggregateFailure_of_no_outcome
 #verify_constructive Qsag.Spec.AggregateExtractorSound.failure_bound
