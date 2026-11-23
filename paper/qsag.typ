@@ -46,13 +46,12 @@
 #let theorem(name, body, src: none) = stmt("Theorem", name, body, src: src)
 #let definition(name, body, src: none) = stmt("Definition", name, body, src: src)
 #let protocol(name, body, src: none) = stmt("Protocol", name, body, src: src)
-#let model(body) = text(size: 7pt, fill: luma(60))[#body]
 
 #place(top + center, float: true, scope: "parent", clearance: 14pt)[
   #align(center)[
     #set par(justify: false)
     #set text(hyphenate: false)
-    #text(size: 16.5pt, weight: "bold")[QSAG: Quorum-Switching Threshold Hash Signatures and Succinct Post-Quantum Aggregation, from Three-Party Vaults to Million-Validator Certificates]
+    #text(size: 16.5pt, weight: "bold")[QSAG: Quorum-Switching Threshold Hash Signatures and Succinct Post-Quantum Aggregation]
     #v(7pt)
     #text(size: 11pt)[ember arlynx]
     #v(2pt)
@@ -61,7 +60,7 @@
   #v(9pt)
   #block(inset: (x: 16pt))[
     #set par(justify: true, leading: 0.46em)
-    *Abstract.* QSAG is a post-quantum replacement for the elliptic-curve layer beneath wallets, custodians and validators: threshold signing (the role of FROST [KG20]), hierarchical derivation (BIP-32), signature aggregation (BLS [BLS01]), key migration, and delegable capabilities. Its security rests on hash functions, with lattices only where a standard demands them. Three ideas carry the design. _Cut-the-Hash_ observes that a hash-based signature publishes almost every digest its signer computes, so custodians evaluate only four secret operations under multiparty computation and build the tree in the clear; secret depth is then independent of tree height, and the output for FIPS 205 is byte-identical to a single signer's, whether run on a bitsliced three-party engine, an isolated per-custodian CNF engine for honest-majority thresholds [CGH+18], or an authenticated dishonest-majority engine with 31 µs pooled blinded MAC checks. _Quorum switching_ lets any authorized set of custodians sign with a stateful key without ever spending a one-time leaf twice; we state its safety for arbitrary asymmetric quorum systems and monotone access structures, of which $(t,n)$ thresholds are one case. _Hem_ proves that $K$ signatures verify, using sumcheck over Goldilocks extensions and Johnson-radius WHIR polynomial commitments with affine Reed–Solomon combiners [CWYZ26] and quintic 400/448-bit schedules [DKT26] sustaining $< 2^(-128)$ QROM error through $Q <= 2^64$ queries; holographic, contractive split, and constant-byte-size `QSAGIVC1` recursion fold trees of any depth into fixed-size certificates checked against a 32-byte roster root, with arbitrary-depth straight-line QROM knowledge extraction. We give a complete custody lifecycle (hardware anti-rollback anchors and anchored threshold key migration across 19 chain/Zcash kinds), a GPU prover, a scaling model from 1,500 to 1,048,576 validators and $88 times 10^9$ principals, a constructive Lean 4.35 library of 331 modules (496,915 lines; 136,585 declarations) welded to extracted Rust MIR, universal SPIR-V semantics and 28 assembly kernels across six replay kernels, a stateful verifier coprocessor (_QSAG-NI v2_), 180 nm 5 V custody enclaves (_Dregg-180_ and _ASS2-0P5 / Dregg-64_), and an AWS EC2 F2 (`VU47P`) multi-enclave shell (_CL\_QSAG\_F2_).
+    *Abstract.* QSAG lets a changing quorum of custodians sign with one hash-based key and lets a verifier check a committee’s signatures in one proof. Cut-the-Hash evaluates four secret oracle families inside multiparty computation and builds the public Merkle layers in the clear. On matched inputs, threshold SLH-DSA produces the single signer’s FIPS 205 signature bytes. Durable reservations and quorum intersection prevent a stateful key from spending the same leaf twice. Hem aggregates signatures with sumcheck and Johnson-radius WHIR over the quintic Goldilocks field. For a four-key committee with three active signers, the public proof occupies 360,391 B with TurboSHAKE256 or 381,661 B with Poseidon2. The binary recursive construction fixes the [DKT26] root at 639,673 B independent of depth. Lean also bounds straight-line tree extraction for a recursive margin schedule through depth 16 at $Q <= 2^64$ quantum queries. We describe the migration and credential protocols, the Lean and extracted Rust assurance evidence, and autonomous proof verification in RTL, with mapped area on two 130 nm libraries and routed timing on an ECP5 FPGA.
   ]
 ]
 
@@ -81,19 +80,19 @@ Hash-based signatures are the conservative foundation, since they assume only wh
 
 Stateful signing is made safe by a durable latch, hardware anti-rollback anchors, and a quorum rule. We state the rule in its general form: any two quorums that can certify the same leaf must intersect in a custodian outside every admissible fault set. Symmetric thresholds, weighted and tree-composed policies, and asymmetric or personal quorum systems [CT19, LGM19] are instances, and their custody shares are instances of one monotone span program released over an encrypted wire ceremony that never exposes one custodian's lanes to another.
 
-_Hem_ (§4) proves $K$ signature verifications in a 256-column trace. Its polynomial commitment is WHIR [ACFY25] across both quartic 256-bit wire profiles and quintic 400/448-bit 128-bit-QROM profiles (`HemQuintic128` and `zk-Hem v2` [DKT26])—spanning `cSHAKE256`, 12-round `TurboSHAKE256` [RFC9861], and width-12 / width-24 Poseidon2 outer commitments—with affine Reed–Solomon combiners [CWYZ26] and query counts set from the Johnson radius; the capacity conjectures many deployed systems rely on were refuted in 2025–26 [CS25, KKH26]. Holographic verification and public-matrix folding support full in-circuit subtree merges, contractive binary split recursion (`SplitSubtreeAggregate`, $<= 2^20$ rows per merge), and constant-byte-size depth-independent recursion (`QSAGIVC1`, 26,185 B diagnostic / 639,673 B production root at every depth). The same prover has a hiding mode for credentials, private multisignatures and unlinkable capabilities.
+_Hem_ (§4) encodes signature verification in a 256-column trace. Sumcheck reduces the constraints to an evaluation claim, which WHIR [ACFY25] opens over the quintic extension of Goldilocks. Regional verifiers can check each public shard against their registry. A verifier of a contiguous binary tree of Jorts shards can instead check one fixed-size recursive root. Hiding relations use zk-Hem v2 for credentials, private multisignatures, capabilities and migration.
 
-§5 covers the lifecycle around signing (derivation, addresses, policy and capabilities, TPM 2.0 and hypervisor anti-rollback anchors, local and hardware-anchored threshold key migration across 19 chain/Zcash kinds, threshold ML-DSA, oblivious PRFs) and the GPU prover. §6 describes the formal development. §7 evaluates the system, models its scaling to 1,048,576 validators and $88 times 10^9$ principals, and presents the silicon family: the stateful _QSAG-NI v2_ verifier coprocessor across four ASIC PDKs and two FPGA families, the _Dregg-180_ and _ASS2-0P5 / Dregg-64_ physical custody enclaves in 180 nm 5 V CMOS, and the _CL\_QSAG\_F2_ multi-enclave custom logic shell for AWS EC2 F2 (`VU47P`). §8 states the trusted base.
+§5 describes the custody lifecycle and GPU primitives. §6 gives the scope of the protocol proofs, extracted Rust kernels and machine-code checks. §7 reports signing measurements, validator-set proof sizes, and the evidence for each hardware target. §8 states the assumptions needed to apply these results.
 
-*Contributions.*
+#block(sticky: true)[*Contributions.*]
 - *Cut-the-Hash and Pants (§2).* A four-oracle boundary giving height-independent secret depth; byte-identical threshold SLH-DSA; stateless Baggy with a pruned PORS few-time layer; stateful Jorts with $2^6$ to $2^20$ signatures per key; 1,122-byte single-use signatures; and a four-hop full-adversary EUF-CMA reduction (`< 2^(-128)` classical and QROM).
 - *Isolated CNF, dealerless personal release, and general access structures (§2.4–2.5, §3.1).* Leaf uniqueness from pairwise honest intersection, isolated per-custodian honest-majority signing over deployment-bound wire channels, dealerless personal MSP enrollment and release with no coordinator, and self-contained blocklace equivocation evidence.
 - *Active-sacrifice pooled blinded MAC openings and `SoftSpokenOT` (§3.2–3.3).* Subfield VOLE OT extension (`k = 2`, 512 Ring-LWE base OTs [Roy22]) and a zero test on $w = (sum r_i)(sum d_j)$ backed by Beaver-sacrificed single-use OLE blinding triples that keeps a persistent authentication key information-theoretically hidden on abort at 31 µs per online check.
-- *Hem, `HemQuintic128`, and `QSAGIVC1` (§4).* Johnson-radius WHIR with [CWYZ26] and [DKT26] folding, kernel-certified 128-bit QROM schedules across all 13 table sizes ($2^16..2^28$), holographic/split and constant-byte-size depth-independent recursion (`QSAGIVC1`) with arbitrary-depth straight-line QROM extraction, and hiding relations for credentials and unlinkable capabilities.
-- *Assurance (§6).* A 331-module Lean 4.35 library (496,915 lines; 136,585 declarations, 73,117 theorems) with no `sorry`, no `Classical.choice` and no `import all`; Aeneas MIR proofs (`8,801` declarations; `312` theorems and `32` definitions accepted by all six replay kernels); universal decoded `poseidon2_perm12.spv` equivalence; and machine-code noninterference and `ELF ≃ Math ≃ MIR` triangles across 28 assembly kernels.
-- *Scaling and silicon (§7).* Measurements on Zen 5 and an RX 6750 XT, scaling models to $2^20$ validators and $88 times 10^9$ principals, stateful _QSAG-NI v2_ RTL (live 258,104-byte hardware proof verification, `105+` LEC miters, 0-DRC `Nangate45` route), _Dregg-180_ and _ASS2-0P5 / Dregg-64_ 180 nm 5 V custody enclaves, and _CL\_QSAG\_F2_ (`VU47P`).
+- *Aggregation (§4).* Across 13 schedules, the public and hiding proof systems have modeled QROM soundness error below $2^(-128)$ for $Q <= 2^64$. Binary recursion uses a degree-two sumcheck to carry a fixed public-matrix evaluation claim between levels.
+- *Formalization (§6).* Lean 4.35 and two Aeneas MIR packages contain 148,052 audited declarations. Six kernels replay 326 challenge theorems and 35 definitions across the three packages.
+- *Hardware (§7).* QSAG-NI v2 autonomously verifies serialized public and hiding proofs. We report its open-foundry logic area and routed FPGA frequencies, the physical custody boundary of ASS2-0P5, and the AWS F2 shell’s end-to-end cosimulation.
 
-*Related work.* PRAWNS [BBD+26] thresholdizes hash-based signatures through lattice-based threshold PRFs, placing a lattice assumption on the signing path; QSAG keeps leaf derivation inside symmetric MPC [FLNW17, CGH+18, BGIN19, BDOZ11, DPSZ12] and emits standard FIPS 205 signatures. Lifetime-capped SPHINCS variants trade signature size for a bound on signatures per key; QSAG instead enforces anchored reservation before release. LaBRADOR [BS23] attains smaller proofs from Module-SIS; Hem assumes only hash functions. Recent XMSS aggregators adopt capacity-regime parameters and Poseidon2 modes exposed to [MRG26, BTA26]; Hem refuses capacity tags and deploys one hardened Poseidon2 profile alongside standard byte sponges [FIPS202, SP800-185, RFC9861]. For consensus, distributed quorum signatures [KSW26] and QUASI [IM26] study post-quantum attestations that avoid signer bitmaps; our dual-path design (§7.4) is complementary. Asymmetric trust [CT19, ACTZ21, ACKV26], personal quorum systems [LGM19] and the blocklace [KLST26] supply the quorum and ordering models we instantiate. Migration and credentials build on MPC-in-the-head [IKOS07, GMO16].
+*Related work.* PRAWNS [BBD+26] thresholdizes hash-based signatures through lattice-based threshold PRFs, placing a lattice assumption on the signing path; QSAG keeps leaf derivation inside symmetric MPC [FLNW17, CGH+18, BGIN19, BDOZ11, DPSZ12] and emits standard FIPS 205 signatures. Lifetime-capped SPHINCS variants trade signature size for a bound on signatures per key; QSAG instead enforces anchored reservation before release. LaBRADOR [BS23] attains smaller proofs from Module-SIS; Hem assumes only hash functions. Recent XMSS aggregators adopt capacity-regime parameters and Poseidon2 modes exposed to [MRG26, BTA26]; Hem uses Johnson-radius query schedules and distinct commitment profiles for public and hiding proofs. For consensus, distributed quorum signatures [KSW26] and QUASI [IM26] study post-quantum attestations that avoid signer bitmaps; our dual-path design (§7.4) is complementary. Asymmetric trust [CT19, ACTZ21, ACKV26], personal quorum systems [LGM19] and the blocklace [KLST26] supply the quorum and ordering models we instantiate. Blind credential issuance builds on MPC-in-the-head [IKOS07, GMO16].
 
 = Cut-the-Hash, Pants, and Quorum Switching
 
@@ -330,102 +329,59 @@ The proof is one line: for $d != 0$, $r |-> r d$ is a bijection of $FF$. Without
 
 All engines enforce the order _commit, verify, open_ in the type of their opening functions: an opening requires a token that only a successful check mints, so a faulted value cannot leak ahead of its MAC (`mac_before_open_blocks_faulted_cut_leakage`).
 
-= Hem: Johnson-Radius WHIR and Holographic Recursion
+= Hem: Johnson-Radius Quintic WHIR and Depth-Independent Recursion
 
-== Arithmetization
+== Signature traces and the challenge field
 
-Hem proves that $K$ signatures verify. The witness is a multilinear table over Goldilocks with 256 columns. Each row holds one width-12 Poseidon2 permutation (its inputs and 118 S-box outputs), a 44-limb machine state, and selectors for digest unpacking, chain steps, endpoint compression and Merkle steps. Row constraints have degree 8 and are reduced by one sumcheck [LFKN92] coupled with a shift claim between consecutive rows. All challenges come from the quartic extension
-$ E = FF_p [v] slash (v^4 - 7), quad abs(E) = p^4 > 2^(255.99), $
-because a quadratic extension caps Grover-amplified error at 64 bits (`ext2_error_denominator_cliff`).
+The public trace encodes `JortsPoseidon2` or `CorduroyPoseidon2` verification over Goldilocks. Each row has 256 columns, including the 118 S-box outputs of a width-12 Poseidon2 permutation. A public bitmap identifies the signing slots. In `hem_quintic/rows.rs` the verifier pins all 138 non-S-box columns of each inactive padding slot to canonical zero. The permutation equations then determine its S-box outputs. Padding therefore gives the prover no free state at the boundary between signers.
 
-A Jorts signer occupies 512 rows. Its program is 8 message rows, $1 + 64 dot 7 + 1$ chain rows, and two rows per tree level: $470 + 2(h - 6)$.
+Base-field rows keep the witness compact. Sumcheck and WHIR draw challenges from the extension
+$ E = FF_(p^5) = FF_p[X] slash (X^5 - 3), quad p = 2^64 - 2^32 + 1. $
+Its size exceeds $2^(319.99)$. In the power basis, Frobenius scales coefficient $i$ by $zeta_5^i$, since $X^p = zeta_5 X$. Here $zeta_5 = 3^((p-1)/5) mod p$ equals 1,041,288,259,238,279,555. A canonical `Fp5` value has five base-field limbs.
 
-#theorem("height at no cost", src: [`test_jorts_configurable_heights_7_and_20_shard_aggregation`])[
-  For every $6 <= h <= 20$ the signer program has at most $498 < 512$ rows and fits the existing columns. A key of $2^20$ one-time leaves is aggregated in the same trace cells, prover time and memory as a key of $2^6$.
+== Public committee aggregation
+
+`prove_hem_quintic_128` proves the active signatures for the committee keys and signing mode. `verify_hem_quintic_128` takes those public inputs and checks the `HemQuintic128` proof (`QSAGHQM2`). Sumcheck [LFKN92] reduces the trace constraints to an opening. WHIR folds the resulting Reed–Solomon words using affine challenges [CWYZ26]. For a domain point $z$ and words $f, g$, the combiner is
+$ g(z) + (alpha + beta z)(f(z) + theta g(z)). $
+The verifier checks sampled fibers against their Canopy commitments. The two `HemQuinticProfile` variants differ in their digest representation (@publicprofiles).
+
+#figure(tbl((1.15fr, 1.4fr, 1fr),
+  [Profile], [Canopy digest], [Proof bytes], table.hline(),
+  [`TurboShake400`], [TurboSHAKE256, 50 bytes], [360,391],
+  [`Poseidon2Gl24`], [Poseidon2-GL-w24, 7 limbs], [381,661],
+), caption: [Serialized public proofs for the same four Jorts keys, shared message and active slots 0, 2 and 3. The digests are 400 and 448 bits, respectively.]) <publicprofiles>
+
+#theorem("public committee soundness", src: [`PublicHemQuintic128.lean`, `publicHemQuintic_qrom_soundness_128`])[
+  For each of the 13 schedules with $16 <= "logCells" <= 28$ and $Q <= 2^64$, the public profile’s QROM soundness error under the [CDHZ25] reduction and ideal-hash model is below $2^(-128)$. Stage 0 takes 267 queries for $2^16$ through $2^23$ cells and 266 for $2^24$ through $2^28$ cells under the [DKT26] schedule.
 ]
 
-*Corduroy in the trace.* The stateless format ($k = 32$ few-time trees of height 8 under 16 layers of height-4 subtrees, 76,896 bytes) verifies in 8,192 rows: its signers need no state and no rotation, at sixteen times the trace of a Jorts signer.
+== Regional composition and binary recursive IVC
 
-A shard of $2^24$ cells holds 128 Jorts signers or 8 Corduroy signers (8,192 rows each); the commitment admits up to $2^28$ cells.
+`HierarchicalHemAggregate` (`QSAGHEM\x04`) carries one `QSAGHQM2` proof per regional shard. `prove_hierarchical_hem_prepared` binds the shards to a `PreparedPolicyRegistry`. The verifier, `verify_hierarchical_hem_prepared`, checks the regional policies and proofs against an independently supplied registry. Adding a region adds its proof and framing to the wire.
 
-*One Poseidon2.* Width-12 Poseidon2 [GKS23] over Goldilocks has 8 external and 22 internal rounds. Two 2026 analyses matter. With the external matrix $P_3 times.o M_4$ and a one-sided feed-forward, inputs in ${(X, -X, 0)}$ cancel across the linear layer and skip rounds [MRG26]; and subspace restriction skips internal S-boxes [BTA26]. QSAG deploys one profile everywhere (signatures, MPC, prover, shaders, silicon, and the Lean specification): external layer $M_4 times.o P_3$, which removes the cancellation (`poseidon2_kronecker_swap_kills_subspace_skip`); internal layer $M_I = J + "diag"(-64, 1, 2, 4, dots, 1024)$, for which the characteristic polynomial of $M_I^k$ is irreducible for $1 <= k <= 32$, so no power has an invariant subspace; and a compression that binds all twelve input lanes,
-$ H(x_0, x_1, tau) = pi(x_0 || x_1 || tau)_(0..4) + x_0 + 2 x_1 + 4 tau. $
+The binary IVC API in `crates/qsag-agg/src/zk_hem/recursive_ivc/` proves a power-of-two run of contiguous Jorts shards. `prove_ivc_tree` returns a `SuccinctIvcProof`. Its public statement names the policy registry root, message digest, half-open shard interval and total quorum count. A parent must join adjacent child intervals under the same registry and message.
 
-== WHIR with affine combiners
-
-The table is committed and opened with WHIR [ACFY25] in stages. Stage $i$ folds up to six variables and re-encodes on a base-field coset $cal(D)_i subset FF_p$ at rate $rho_i in {1/4, 1/16, 1/64, 1/256}$. Each stage oracle is pinned at two out-of-domain points and committed in a salted Merkle tree (_Canopy_), opened by multiproofs with shared paths.
-
-A scalar combination $f + alpha g$ of two Reed–Solomon words has proximity error $Omega(n slash q)$ over a field of size $q$, and a Johnson-regime analysis loses a further $n^2 L^7$ factor. Hem folds with the affine combiner of [CWYZ26],
-$ w_(theta, alpha, beta)(z) = g(z) + (alpha + beta z)(f(z) + theta g(z)), $
-whose error has no linear term in $n slash q$. Two properties make it cheap here. Since $z in FF_p$, the factor $alpha + beta z$ costs four base multiplications, not sixteen. And the degree map $d |-> floor(d slash 2) + 1$ has the fixed point $d_s <= 2^(ell - s) + 1$ (`affine_fold_degree_le_pow2_add_one`), so folding accumulates at most two overflow monomials; in monomial basis, multiplication by $z^2$ is a shift, and stage sizes stay powers of two.
-
-*Eight wire regimes.* `WhirSecurityRegime` decodes eight wire tags (@regimes) across three outer hash functions: 24-round `cSHAKE256` [SP800-185], Role-1 12-round `TurboSHAKE256` [RFC9861] from precomputed customization midstates (`QSAG.PCS.TURBOCANOPY/v1`), and algebraic width-12 Poseidon2 for in-circuit recursion. Nothing is assumed beyond the Johnson radius $1 - sqrt(rho_i) - eta_i$: correlated agreement up to capacity is false [CS25], and proximity gaps fail arbitrarily close to it [KKH26]. Retired capacity-regime tags (`0, 1, 3`) do not deserialize, and classical-only `BciksJohnsonClassical128` (tag `2`, 72 nominal Grover bits) is confined to lower-level PCS tests and refused for aggregates.
-
-#figure(tbl((2.55fr, 1.3fr, 0.45fr, 1.05fr, 1.15fr),
-  [Regime (wire tag)], [Queries at rates $1/4$–$1/256$], [PoW], [Tree hash], [Oracle queries $Q$], table.hline(),
-  [`BciksJohnsonQrom128` (4, default)], [258, 130, 88, 66], [16], [cSHAKE256], [unbounded (136b)],
-  [`Cdhz25JohnsonQrom128` (5)], [202, 102, 70, 52], [16], [cSHAKE256], [$Q <= 2^38$ (108b)],
-  [`Cdhz25ZeroPowQrom128` (6)], [216, 109, 74, 56], [0], [cSHAKE256], [$Q + 1 <= 2^40$ (107b)],
-  [`Poseidon2Cdhz25JohnsonQrom128` (7)], [202, 102, 70, 52], [16], [Poseidon2], [$Q <= 2^38$ (108b)],
-  [`Poseidon2Cdhz25ZeroPowQrom128` (8)], [216, 109, 74, 56], [0], [Poseidon2], [$Q + 1 <= 2^40$ (107b)],
-  [`TurboShakeBciksJohnsonQrom128` (9)], [258, 130, 88, 66], [16], [TurboSHAKE256], [unbounded (136b)],
-  [`TurboShakeCdhz25JohnsonQrom128` (10)], [202, 102, 70, 52], [16], [TurboSHAKE256], [$Q <= 2^38$ (108b)],
-), placement: top, scope: "parent", caption: [Authorized WHIR aggregate regimes (7 of the 8 wire-decodable tags; classical tag 2 is test-only, and capacity tags 0, 1, 3 are rejected). Tags 4 and 9 use $ceil(512 slash log_2 (1 slash rho)) + 2$ queries per stage, giving 136 nominal bits of per-round Grover work with no bound on $Q$ (`meets_unconditional_grover_128_floor`). Tags 5–8 and 10 open 16–21% fewer positions (107–108 nominal per-round Grover bits) and achieve 128-bit security under [CDHZ25] salted-Merkle state restoration up to the stated $Q$; verifiers accept a bounded-query regime only when the caller names it.]) <regimes>
-
-#theorem("constructive Johnson certificates", src: [`hemCwyz26JohnsonCert_sliced`, `HemSlicedFoldBudget.dfm184_budget_at_2pow27`])[
-  For each of the 46 non-exhaustive stages of the default regime with $2 <= n_v <= 24$ variables, a binary affine fold of two words, at least one outside the Johnson radius, yields a word inside it with probability at most $2^(-184)$ over the challenges; the worst stage is $n_v = 22$, and the bound reaches $2^(-235)$ at small stages. Under measure-and-reprogram accounting [DFM20] this sustains error below $2^(-128)$ for $Q + 1 <= 2^27$ oracle queries.
+#protocol("binary recursive step", src: [`IvcTreeStepRelation`, `FixedPathWhirW24` (`QSAGIW24`)])[
+  Each internal step checks both child WHIR openings and their row and column sumchecks over $FF_(p^5)$ using Poseidon2-GL-w24. A degree-two sumcheck folds the public-matrix evaluation claims to one claim for the parent. `verify_ivc_tree` discharges the final claim against the fixed matrices at the root.
 ]
 
-The certificate is obtained by slicing the trivariate interpolant of [CWYZ26] along cylinders, which bounds non-excluded roots by a term linear in the agreement set plus a persistent term below $1906 slash p^4$. The sharper constant of [CWYZ26, Claim 4.8], below $2000 slash p^4$ per fold in total, would extend the same accounting to $Q + 1 <= 2^40$ over five Merkle roots; the schedules for $25 <= n_v <= 28$ are certified by finite witness tables checked in Rust. With salted trees, compressed-oracle state restoration [Zha19, CDHZ25] loses a factor linear in $Q$ in place of quadratic, which is what the bounded-query profiles account for.
+The Lean native $x^7$ census gives 315,150 rows including closing padding, within $2^19$. The production [DKT26] two-child step uses 7,652,354 rows before closing and fits within $2^23$. At this fixed geometry the canonical `QSAGIVC1` root occupies *639,673 B* with strict profile tag `0x00`, independent of depth (`ivcRootProof_byteSize_independent_of_depth`).
 
-*Three accountings, kept apart, and quintic 128-bit QROM schedules.* A round-by-round error $epsilon$ becomes a non-interactive bound differently in each quantum model, and conflating them is the usual source of overclaimed parameters. Under a single-round search bound [BBBV97, AHU19] the loss is $8(Q+1)^2 epsilon$. Under multi-round measure-and-reprogram [DFM20] it is $(2Q+1)^2$ per round. Under compressed-oracle state restoration for salted Merkle commitments [CDHZ25, DKT26] the round term is linear in $Q$, while 256-bit Merkle/transcript digests contribute an $O(Q^3 slash 2^256)$ collision term that caps the composed QROM level of the legacy 256-bit quartic wire tags (`4–10`) at 81 bits (127 bits classically). To clear a full 128-bit composed QROM floor through $Q <= 2^64$ queries without external assumptions, QSAG deploys public `HemQuintic128` (`QSAGHQM2`: 362,391 B under 50-byte `TurboSHAKE256`, 381,045 B under 7-limb 448-bit `Poseidon2-GL-w24`) and committed-mask `zk-Hem v2` (`QSAGZKH2`, tags `16–19`, 32-byte per-tree `tree_nonce` and per-leaf salts) over $FF_(p^5)$ ($p^5 approx 2^320$) with 267/266 Stage-0 fiber queries (`publicHemQuintic_qrom_soundness_128`, `zkHemV2_packed_all13_qrom_lt_128_at_2pow64`: all 13 schedules $16 <= "logCells" <= 28$ certified $< 2^(-128)$ at $Q <= 2^64$ in Lean).
-
-The supporting mathematics is formalized constructively over the fraction field of univariate polynomials: Sylvester resultants and Gauss's lemma, division-free Hensel lifting, trivariate Guruswami–Sudan interpolation, Hasse-derivative stratification, the Johnson set-system bound, and a Welch–Berlekamp decoder that is sound without hypotheses, complete for $k + 2e <= n$, and runs in at most $2(n+2)^3 + 5(n+2)^2$ field operations (`WelchBerlekampDecoder`). Unique factorization, which is not constructive over a function field, is replaced by gcd splitting on demand.
-
-== Holographic verification and recursion
-
-A Hem verifier evaluates the multilinear extension of its constraint system at a random point. For a signature shard that system is uniform and the evaluation is cheap. For a relation that _verifies another proof_ it is millions of irregular entries, so the verifier is linear in the relation and cannot economically be placed inside itself.
-
-#definition("shape hologram", src: [`ShapeHologram`, `ShapeVerifierKey`])[
-  For a relation with sparse constraint matrices, the _hologram_ is a commitment to their row, column and value tables. Its _verifier key_ is the commitment roots and dimensions, under 256 bytes. A proof for the relation carries, in addition to its sumchecks, a lookup argument (LogUp with a GKR evaluation) that the matrix evaluation it used is consistent with the committed tables. Poseidon2 blocks, which dominate a recursive verifier, are not committed at all: their contribution has a closed form evaluated in $O(log)$ time.
+#theorem("recursive extraction budget", src: [`MultiDepthRecursiveQromExtractor.lean`, `multidepth_recursive_qrom_lt_2_neg_128`])[
+  Straight-line extraction uses the recorded oracle transcript for both children. The node errors compose over the tree without a $2^d$ rewinding loss in the query budget. For $d <= 16$ (up to 65,536 shards) and $Q <= 2^64$, the tree bound for the three-stage recursive margin schedule is below $2^(-128)$.
 ]
 
-Verification then depends on the relation only through its key: 11.5 ms on one core for the relations below, against 190–820 ms for direct evaluation.
-
-#protocol("subtree recursion", src: [`SubtreeLeafMergeRelation`, `SubtreeInternalMergeRelation`, `SuccinctSubtreeAggregate`])[
-  Fix an arity $b in {2, 4, 8, 16}$.
-  - A _recursive shard_ is a signature shard proved with a Poseidon2 transcript and fixed-path openings, so that its verifier is a circuit of fixed shape.
-  - A _leaf merge_ verifies up to $b$ recursive shards: their sumchecks, the row constraints at the opened point, and the openings. It checks that the witnessed keys hash to the shard's roster subtree, that each signer bit is Boolean, and that every signer signed the bound message.
-  - An _internal merge_ verifies up to $b$ merge proofs against the fixed verifier key of the child relation.
-  Every merge exposes the same public statement of 14 field elements:
-  $ ("root"_(0..4), "epoch", "msg"_(0..5), k_min, k_max, "count", "weight"), $
-  and an internal merge requires $k_max$ of each child to be less than $k_min$ of the next, sums counts and weights, and equates epochs and messages.
-]
-
-#theorem("interval disjointness")[
-  In any merge tree, the key-index intervals $[k_min, k_max]$ of the leaves are pairwise disjoint. Hence no signer is counted twice, at any depth, without a bitmap.
-]
-
-_Proof._ Each leaf's interval contains its signers' indices. An internal node's interval is the hull of its children's, which are strictly ordered; induct on depth. $square$
-
-In `SuccinctSubtreeAggregate`, the root is one proof for a relation of fixed size, so its length depends on $b$ alone: about 312 KiB at $b = 2$ and 340 KiB at $b = 16$. Separating the algebraic IOP from the commitment cascade yields `SplitSubtreeAggregate`, while folding public-matrix evaluation claims over width-24 Poseidon2 yields a single fixed-shape step circuit (`QSAGIVC1`) whose root wire size is strictly independent of tree depth.
-
-#protocol("contractive split and depth-independent IVC recursion", src: [`SplitSubtreeAggregate`, `SuccinctIvcProof`, `MultiDepthRecursiveQromExtractor`])[
-  - _Contractive split (`SplitSubtreeAggregate`):_ Each binary internal circuit ($<= 1,048,576$ padded rows; `524,288` at depth 3) verifies both children's Spark/LogUp-GKR hologram sumchecks and commits child `DeferredPcsClaim` digests into `accumulator_root`, folding all $M_ell$ homogeneous claims at level $ell$ into one `FoldedLevelWhirProof` per level.
-  - _Constant-byte depth-independent IVC (`QSAGIVC1`):_ Each binary merge checks two child width-24 Poseidon2 / $FF_(p^5)$ WHIR openings in-circuit (`315,150 <= 2^19` native $x^7$ rows; `7,652,354 <= 2^23` in the full [DKT26] schedule) and folds their inherited and fresh public-matrix evaluation claims via a degree-2 sumcheck into one deferred evaluation discharged locally at the root: serialized root length is identically *26,185 B* across depths 1, 2 and 3 (2, 4 and 8 shards; *639,673 B* in the [DKT26] production geometry, `ivcRootProof_byteSize_independent_of_depth`). Straight-line inspection of the adversary's recorded QROM query table extracts valid native quorum signatures for all $2^d$ leaves without $2^d$ rewinding blowup (`multidepth_recursive_qrom_lt_2_neg_128`: $< 2^(-128)$ for $d <= 16$ and $Q <= 2^64$).
-]
-
-The verifier's entire state is the 32-byte roster root, the epoch, the message, and a verifier key; the common roster-root verifier (`verify_succinct_subtree_aggregate_against_roster_root`) accepts either carrier through a sealed trait. In _dense_ mode a leaf merge hashes its shard's contiguous keys into a subtree root and internal merges hash upward. In _sparse_ mode each signer's path to a directory root of height up to 40 is opened inside the leaf merge, in the structured Poseidon2 region, and every merge carries the same root; a few hundred signers scattered through a directory of $2^37$ keys are certified in the same proof shape.
-
-A merge has no private witness, so it is proved in _public_ mode: one committed table in place of five, no masking, and a public-input check weighted by powers of a challenge, with error at most $(m+1) slash p^4$ for $m$ public values. Its prover exploits structure: the selector is a prefix indicator carried as three words of state, the first sumcheck round runs on base-field tables, and S-box inputs are affine along a row pair, so the weighted S-box residual is a degree-7 polynomial costing about 24 extension multiplications per S-box where the direct form costs 34.
+The margin schedule uses $2^20$ cells and query counts 304, 148 and 100. The Rust root fixes its schedule to `IvcStepConfig::dkt26(23)`, with 267 Stage-0 queries. The numerical tree theorem applies to the former schedule. A depth-16 bound for the serialized root still requires composition for its own parameters.
 
 == Hiding relations
 
-The same prover has a zero-knowledge mode (_zk-Hem_): five committed tables in place of one, sumcheck masking polynomials, and blinded openings. Three relations use it.
+In zk-Hem v2 the single prover serializes `QSAGZKH2` and collaborative provers serialize the split-share form `QSAGZKS2`. Both decoders accept tag 16 (cSHAKE256) or 17 (TurboSHAKE256) with 400-bit digests. Stage 0 commits the packed base-field assignment table $Z$ and a folded-domain mask word $R$ over $E$. Five out-of-domain points mask the fold scalars. Each tree uses a 32-byte `tree_nonce` and each Stage-0 leaf has a fresh 32-byte salt. Relations with lookups add a helper commitment and a `LookupV2Proof` whose openings are jointly masked with the assignment over $E$.
 
-- *Credential presentation.* The holder's commitment lies under an accumulator root, the presented commitment rerandomizes it, the scope tag is well formed, and disclosed attributes and range predicates hold. For 32 attributes the proof is 239 kB.
+The affine folds [CWYZ26] and the line-folding bound of [DKT26, Theorem 5.12] give the packed-fiber schedule certified in `ZkHemV2PackedFiberCerts.lean`. The theorem `zkHemV2_packed_all13_qrom_lt_128_at_2pow64` bounds QROM error below $2^(-128)$ across all 13 sizes $2^16$ through $2^28$ at $Q <= 2^64$.
+
+- *Credential presentation.* A `BlindVC` holder proves accumulator membership, selective disclosure and the requested predicates while hiding the remaining attributes.
 - *Private multisignature.* For a policy address and a message, enough members signed. A hidden activity bit per slot, a prefix rule, increasing member indices and a range check on $sum "active" - t$ make the statement identical for every threshold, member count and signing subset.
-- *Capabilities.* A bearer capability is $("id", "audience", "tag"_0, c_1, dots, c_n)$ with tags chained by $"tag"_(k+1) = H("tag"_k, c_k, k)$. A batch of up to 32 presentations proves for each: every caveat (expiry, not-before, resource, actions, amount) is satisfied by the public request; the capability's leaf, which binds $n$ and the final tag, lies under the issuer's root; a per-context presentation tag is correctly derived; and the identifier is not revoked.
+- *Capabilities.* The `QSAGCAU1` unlinkable presentation hides its witness. A bearer capability is $("id", "audience", "tag"_0, c_1, dots, c_n)$ with tags chained by $"tag"_(k+1) = H("tag"_k, c_k, k)$. A batch of up to 32 presentations proves for each: every caveat (expiry, not-before, resource, actions, amount) is satisfied by the public request; the capability's leaf, which binds $n$ and the final tag, lies under the issuer's root; a per-context presentation tag is correctly derived; and the identifier is not revoked.
 
 #theorem("sorted-tree non-revocation", src: [`capability.rs`: `slot_gadget`, `enforce_gated_cmp_limbs32`])[
   Let the revocation tree hold strictly sorted identifiers between two sentinels. If adjacent leaves $r_"lo", r_"hi"$ at indices $(i, i+1)$ open under the epoch-bound root and $r_"lo" < "id" < r_"hi"$ as 256-bit integers on canonical limbs, then the identifier is not in the tree. The relation enforces canonicity of every limb and decomposes both indices into bits with $i_"hi" = i_"lo" + 1$, so neither comparison nor increment can wrap modulo $p$.
@@ -434,7 +390,7 @@ The same prover has a zero-knowledge mode (_zk-Hem_): five committed tables in p
 A holder cannot drop or alter a caveat (the result is a leaf that does not exist) and cannot open an ancestor's leaf (attenuation replaces the root tag by a one-way image). In _registered_ mode the issuer enrolls each attenuated leaf. In _delegated_ mode each attenuation is authenticated by a one-time target-sum signature under an ephemeral key carried in the chain, and the relation verifies the whole chain and possession of the terminal secret; only the first key is enrolled, and later hops need no contact with the issuer. Revocation is per identifier and covers a lineage.
 
 
-= The Custody Lifecycle and the GPU Prover
+= The Custody Lifecycle and GPU Primitives
 
 == Derivation, addresses, policy and capabilities
 
@@ -450,7 +406,7 @@ A holder cannot drop or alter a caveat (the result is a leaf that does not exist
   [Capability], [Size], [Verifier holds], [Offline hop], [Hidden], table.hline(),
   [SpongeMacaroon, 3 caveats], [161 B], [secret key], [yes], [no],
   [PqBiscuit], [1,154 B per hop], [public key], [yes], [no],
-  [zk capability, registered], [239 kB per batch], [two roots], [no], [yes],
+  [zk capability, registered], [one proof per batch], [two roots], [no], [yes],
   [zk capability, delegated], [one proof], [two roots], [yes], [yes],
 ), caption: [Capability forms. All share one caveat language.]) <caps>
 
@@ -464,16 +420,11 @@ The journals of §2.4 are crash-safe but cannot notice that their whole volume w
 
 The command-line tool refuses to create or use stateful custody without an anchor unless the key is declared ephemeral, and a key enrolled with an anchor cannot later be used without it. After a committee is reshared, the old vault is retired at the anchor, so a restored copy of it is permanently refused. All records go through `LockedRecord`, which takes its lock on the held open-file description, refuses files with group or world permission bits, and opens without following links.
 
-== Collaborative ZKBoo migration from elliptic-curve keys
+== Anchored Collaborative Key Migration across 19 Classical Ecosystems
 
-To move an existing account to a post-quantum address, its owner must prove knowledge of the old spending scalar, bound to the new address and a Poseidon2 nullifier, in a way a quantum adversary cannot forge before the legacy public key is exposed. `qsag-migrate` provides both a succinct 9-triple Toom-3 $FF_(p^5)$ `zk-Hem v2` collaborative MPC prover (`hem::collab::Engine::new_anchored`, burning `tape_id()` against an `ExternalMonotoneAnchor` before round 1 across 19 CLI kinds including Zcash NU7 Sapling, Orchard, ZIP-2005 Ironwood, and ZIP-2007 Transparent) and a 438-repetition collaborative ZKBoo (`CoZK`) prover (`CoZkCustodianShare`, $(2 slash 3)^438 < 2^(-256)$ classically) without reconstructing the legacy key on any host. Two actively secure outer MPC backends serve all four curve ecosystems: replicated 2-of-3 sharing (`outer_mpc`, no preprocessing, tolerating one malicious custodian) and MAC-authenticated $(t, n)$ Shamir or $n$-of-$n$ additive custody (`threshold_mpc`, `< 2^(-126)` batch MAC check on witness-independent `threshold_prep` material).
+A migration statement binds a source commitment, the destination post-quantum address and a nullifier. The 19 CLI kinds cover Bitcoin, including Taproot, and Ethereum on secp256k1, Solana Ed25519, BLS12-381 withdrawal credentials, and Zcash NU7 Sapling, Orchard, ZIP-2005 Ironwood and ZIP-2007 Transparent. Each kind selects an ownership relation and specifies which source data may be public. `ClassicalCommitmentKind` and `ClassicalOwnershipWitness` in `crates/qsag-migrate/src/classical.rs` implement the classical commitment and witness primitives.
 
-- *secp256k1*: Bitcoin P2PKH and P2WPKH, Taproot keys with pinned even-$y$ parity, and Ethereum `keccak256` accounts;
-- *Ed25519*: Solana keys under SLIP-0010;
-- *Pallas*: Zcash Orchard spend-authorizing keys, direct and rerandomized;
-- *BLS12-381*: Ethereum `0x00` validator withdrawal credentials, proving ownership of the G1 scalar without publishing the public key.
-
-When a chain has only ever seen a hash of the public key, the proof keeps that key hidden from Shor's algorithm. Prover throughput comes from batched XOR sub-seed clear tape expansion, zero-reallocation arena buffers, and 12-round `TurboSHAKE256` view-tree commitments (`COZK_VIEW_MAGIC_V4`). Before any wire or challenged ZKBoo view opens, every multiplication and Boolean-arithmetic conversion is checked by transcript-bound coin-flipped sacrifices: two-challenge Boolean checks with error below $(63 slash (2^128 - 1))^2 < 2^(-244)$ per flush, curve-field checks below $2^(-249)$, and cubic-Goldilocks checks below $2^(-186)$. Opening a residual early would recover the spending key (`tooth_premature_residual_open_recovers_spending_key`). Field tapes are sampled by rejection with zero modular bias.
+A single holder proves the relation locally with zk-Hem v2 (`QSAGZKH2`). Distributed custodians evaluate it on authenticated shares through `hem::collab` and emit `QSAGZKS2`. To multiply two quintic shared elements, the engine uses nine base-field Beaver triples in a Toom-3 product. Before round 1, `Engine::new_anchored` burns the preprocessing `tape_id()` against an `ExternalMonotoneAnchor`. A stale tape therefore fails before a custodian transmits a round message. The Ironwood recovery branch without a spending scalar uses an external randomized signature to establish spend authority.
 
 == Threshold ML-DSA and oblivious PRFs
 
@@ -487,78 +438,37 @@ Every attempt burns a nonce durably before it starts. The nonce ledger stores ea
 
 *Oblivious PRF and credentials.* A $(t,n)$ threshold oblivious PRF over Poseidon2 serves rate-limited derivation and blind credential issuance. A 2-of-5 replicated form corrects one malicious server by unique decoding when all five servers participate online (`toprf_2of5_byzantine_unique_decoding`). The general SPDZ form, $2 <= t <= n <= 64$ with $t$ servers online, runs on the authenticated engine of §3.2 from a non-cloneable reservoir of preprocessed power tuples; a cursor advances before a range is returned, so no tuple is used twice. Input binding, one batched check over every S-box opening, and the output are each MAC-checked in that order through the blinded test of §3.3, and outputs are padded by client masks no server knows. A malformed client request costs one reservation; a failed MAC check poisons the reservoir. With the OT mesh retained, a $(2,3)$ evaluation takes 4.3 ms online. The reservation logic is modelled as a state machine whose counters ratchet on every server before any state changes and never recycle after a partial failure (`ToprfMachine.partial_reserve_burns_without_recycle`).
 
-Blind issuance proves the blinded commitment with 438 repetitions of three-party ZKBoo over Goldilocks; soundness below $2^(-128)$ holds for $Q <= 2^60$ quantum queries (`blindVc_quantum128_qrom_fs_soundness`), with a constructive extractor that returns a witness or an explicit commitment collision. Selective-disclosure presentation is proved either as a 33-repetition, 256-party seed-tree MPC-in-the-head protocol over $FF_(p^5)$ ($256^(-33) = 2^(-264)$ classical soundness) or succinctly through the zk-Hem relation of §4.4 (239,507 B).
+Blind issuance uses 438 repetitions of three-party Goldilocks MPC-in-the-head [IKOS07, GMO16] in `crates/qsag-cred/src/blind_vc.rs`. A `BlindVC` holder subsequently proves selective disclosure with the zk-Hem v2 presentation relation (§4.4).
 
-== GPU prover
+== GPU primitives
 
-The prover's cost is dominated by Reed–Solomon encoding, Merkle hashing and the row sumcheck, all data-parallel. A Vulkan compute backend with no external dependencies runs ten SPIR-V 1.5 shaders: six primitives (Keccak-f[1600], Poseidon2, Goldilocks NTT, coset extension, Poseidon2 Merkle layers, binary-field inner products) and four prover stages (two for row evaluation, one for encoding and tree commitment, one for folding and sumcheck). Prover stages keep the witness resident in VRAM across the whole proof; the host stages it in 32 MiB chunks and holds under 1 GiB.
-
-*Twenty-six variables in 12 GiB.* A single storage buffer is limited to 4 GiB. The arena is split so that the largest buffer at $2^26$ cells is exactly 3.00 GiB: work buffers alternate between a full and a half extent, and stage buffers are indexed by parity. Kronecker tables for evaluation points use four byte-indexed factors, covering $2^32$ positions. A shard of 256 or 512 signers is then committed entirely on a 12 GiB card (5.3 and 9.9 GiB).
-
-*One Merkle shader, four modes.* The Poseidon2 Merkle shader builds the signature scheme's weighted-compression trees, its two-block node sponge, the commitment's Canopy trees, and the fixed-tweak compression of the recursive verifier, each in one submission, so every tree in §4 has a device path.
-
-*Admission.* Provers are admitted against a memory budget, so sixteen subnets of 128 signers queue through one device with about 3 GiB of host memory where an unconstrained CPU run needs 67 GiB. A batch too large for the arena falls back to the CPU prover and reports that it did; proof bytes are the same either way.
-
-*Receipts and determinism.* CPU and GPU provers emit identical bytes. Every one of the ten shader slots can return a keyed receipt binding the pinned SPIR-V 1.5 digest, hardware pipeline audit digest, job descriptor, and digests of its inputs and outputs under cSHAKE256; the digest of a committed witness is independent of how the upload was chunked. A receipt is evidence for the party holding the key that a specific module ran, not hardware attestation. The compiled pipelines use no scratch memory and spill no registers on the measured driver, and session buffers are scrubbed between jobs. On Apple portability drivers (`MoltenVK`) lacking executable-property inspection, witness-bearing prover arenas remain gated until audited.
+The Vulkan backend has six compute shaders for Keccak-f[1600], Poseidon2, Goldilocks NTT, coset extension, Poseidon2 Merkle layers and binary-field inner products. A dispatch receipt binds the job descriptor, module digest and input and output digests. The planted-fault audit compares results on a Radeon RX 6750 XT with the CPU reference and checks the pinned shader identity. §7.3 reports primitive timings.
 
 = End-to-End Constructive Formalization
 
-The claims above are supported at four levels, each covering what the others cannot: protocol models, the Rust source, compiled machine code, and execution on hardware and silicon (@pillars).
-
-#figure(kind: image, supplement: [Figure], {
-  set text(size: 8pt)
-  set par(justify: false)
-  stack(dir: ttb, spacing: 5.5pt,
-    panel([#smallcaps[Specification and protocol (`lean/Qsag/`, 331 modules, 136,585 decls)]\
-      ideal functionalities · 4-hop EUF-CMA · 13-schedule WHIR & multi-depth QROM extraction]),
-    align(center)[#sym.arrow.b refinement (`ErrSyncDataRefines`, `GuardedMachineSim`) #sym.arrow.b],
-    grid(columns: (1fr, 1fr), gutter: 7pt,
-      panel([#smallcaps[Extracted Rust MIR (`aeneas/`)]\
-        8,801 audited decls · 312 6-kernel theorems · sponge, WHIR & release guards]),
-      panel([#smallcaps[Machine code, SPIR-V & RTL (`Machine/`, `hardware/`)]\
-        28 ELF kernels · universal `poseidon2.spv` · 105+ ASIC LEC miters + Obend Lean 4]),
-    ),
-    align(center)[#sym.arrow.t differential and physical checks #sym.arrow.t],
-    panel([#smallcaps[Execution]\
-      Zen 5 ISA cosim · 86 differential/Zcash suites · live 258 KiB RTL proof · GF180 & VU47P]),
-  )
-}, caption: [Four levels of assurance and the direction of the links between them.]) <pillars>
-
 == The Lean library
 
-The protocol library is in Lean 4.35 [MU21] and comprises 331 modules (496,915 lines; 136,585 declarations and 73,117 theorems across `Tactic`, `Spec`, `Math`, `Coding`, `Oracle`, `Protocol`, `Custody`, `Exec`, `Machine`, `Top` and `Tests`). Three invariants are enforced mechanically by `scripts/check_lean_policy.py` and `audit-axioms`.
+Lean 4.35 [MU21] checks the protocol models in `lean/`. The library contains 340 layered `Qsag` modules. The axiom audit accepts all 139,005 declarations, including 74,363 theorems, with dependencies confined to `propext` and `Quot.sound`. There are zero occurrences of `Classical.choice`, `sorry` or `import all` in the library. Across 432 source files, `scripts/check_lean_policy.py` checks layering and proof policy, rejects constant-true verifier definitions, and checks coverage of all 54 extracted WHIR symbols.
 
-- *No `sorry` and no axioms beyond `propext` and `Quot.sound`.* An audit walks every declaration, public and private (`setExporting false`), and rejects anything else (`0` rejected across all 136,585 declarations; negative control rejects `Classical.choice`), including `native_decide` and `bv_decide`. Excluded middle is unavailable, so an existence proof is a program: a reduction _computes_ the collision or forgery it promises, and a decoder _is_ the algorithm.
-- *No `import all` and strict layering.* Every module begins with `module`, exposes at most 12 definitions (`LAW-M1`), and obeys a strict rank order from `Tactic` and `Spec` up to `Top` and `Tests` with zero `import all` edges anywhere in the library. Proofs cannot depend on another module's private representation.
-- *Teeth.* Guards are paired across 48 `Tests/` modules with counterexample theorems (`#tooth` / `#tooth_pair`) exhibiting the attack that appears when a check is removed, alongside inhabitedness checks ensuring hypotheses are non-vacuous.
+The signing reduction in `HulsingMultiHopReduction.lean` connects an adaptive signature forgery to the primitive games. The quantitative bounds depend on their query and hardness assumptions. For custody, `productionLatchedRandomizedSigner_refines_idealSign` relates the latched signer to the ideal signing machine across retries. The distributed model in `Top/DistributedAuthRunBound.lean` accounts for deployment-authenticated frames and durable reservations.
 
-Six independent kernels (`lean`, `leanchecker-paranoid`, `lean4lean`, `nanoda_bin`, `con-leche`, and `con-ron`) replay 127 top-level theorems in `lean/comparator.json` (`13,650–13,653` exported declarations) alongside 71 custody-MIR and 114 WHIR-MIR theorems (18/18 kernel runs accepted).
-
-*Ideal functionalities and simulation kit.* `Spec/` defines five ideal state machines: `IdealSign`, `IdealCustody`, `IdealMigrate`, `IdealCred`, and `IdealAggregate`. `Exec/RefinesBridges.lean` introduces `ErrSyncDataRefines`, an error-synchronizing forward simulation that keeps state burned on failure in lockstep between concrete and ideal machines, while `Exec/GuardedMachineSim.lean` provides `GuardedMachine` combinators (`zoom`, `seq`, `prod`) composing the release guards.
-
-#theorem("refinement of signing and deployment-bound distributed custody", src: [`productionLatchedRandomizedSigner_refines_idealSign`, `distributed_authRun_adaptive_unsafe_release_bound`])[
-  The latched randomized signer refines `IdealSign` unconditionally across arbitrary crashes and retries, and the deployment-bound distributed custody network (`Top/DistributedAuthRunBound.lean`: per-custodian WALs, `deployment_id`-authenticated frames, and adaptive corruption below threshold) bounds any unlatched release by $n B (epsilon_"PRF" + 256^(-ell) + epsilon_"digest") + epsilon_"WAL"$, paired with 3-of-5 and 4-of-5 `CommitteeHandoffJorts` lease safety and dealerless MSP secret-fiber privacy (`CommitteeHandoffAndDealerlessDkg.lean`).
-]
-
-*Query-bounded assumptions, 4-hop EUF-CMA, and QROM aggregation.* Each game is built from a primitive, a sampler and an adversary with separated coins, quantified over adversaries `Within` $q$ oracle queries.
-
-#theorem("4-hop EUF-CMA and multi-depth QROM extraction", src: [`hulsing_full_multihop_euf_cma_bound`, `zkHemV2_packed_all13_qrom_lt_128_at_2pow64`, `multidepth_recursive_qrom_lt_2_neg_128`])[
-  1. _Full-adversary 4-hop EUF-CMA:_ Removing the offline `pk`-independence restriction (`FullAdaptiveEufCma.lean`), the 4-hop Hülsing reduction (`PRF_msg -> PRF -> SM-DT-UD -> ITSR / SM-DT-TCR / SM-DT-PRE`) discharges concrete $< 2^(-128)$ classical and QROM bounds for `Jorts` ($q_s <= 2^16$), `Baggy`, `Corduroy`, and NIST `SLH-DSA-SHAKE-128s/128f` ($q_s = 2^64$), with probability-1 `#tooth_pair` forgers when `BeltLatch`, `checkTargetSum`, or `HashAdrs` tweak separation is disabled.
-  2. _All-13 packed-fiber WHIR & recursive QROM extraction:_ All 13 deployed quintic schedules ($16 <= "logCells" <= 28$, 45 stage entries) satisfy $< 2^(-277)$ single-OOD Guruswami–Sudan collision bounds and $< 2^(-128)$ QROM soundness through $Q <= 2^64$ across both `TurboShake400` and `Poseidon2-GL-w24`; `succinctWhirAggregate_refines_idealAggregate_128` and `multidepth_recursive_refines_idealAggregate` instantiate straight-line QROM extractors refining `IdealAggregate` through depth $d <= 16$ (`65,536` shards) with zero $2^d$ rewinding loss.
-]
-
-*Coding theory, bijective permutations, and storage.* `Oracle/LazyPermutationUniformEquiv.lean` constructs an explicit bijection between `Fin (N!)` and permutations on `Fin N`, proving exact adaptive two-way transcript equivalence between lazy without-replacement sampling and a uniform permutation and transferring the 1600-bit sponge indifferentiability bound to $< 2^(-431)$ (`byte_full_permutation_431_bits`). `Protocol/Aggregation/ZkHemV2ComposedZkAndCerts.lean` mechanizes the LogUp joint-masking retry bijection and Stage-0 four-view algebraic simulator (`all_fold_projected_four_view_sim`), while `Custody/IsolatedCnfTraceAndCoinBinding.lean` proves fixed-width 15-step CNF wire-shape noninterference and schedule-bound prover coin separation. `Exec/PosixCrashWal.lean` and `TwoSlotHwmCrashModel.lean` prove multi-crash epoch uniqueness (`reserve_before_sign_multi_crash_epoch_uniqueness`) at the deployed page offsets.
+For aggregation, `QuinticMultiStageWhir.lean` relates quintic folding on cosets to coefficient evaluation and supplies an inhabited three-stage, 256-point round-by-round proof. `ConcreteIvcWhir.lean` executes the recursive WHIR checks alongside R1CS sumcheck verification. The extraction argument follows accepted child statements using the recorded query table. The numerical bounds for the 13 deployed schedules and for the recursive tree appear in §4. Their application to serialized Rust proofs also depends on decoding, transcript framing and correspondence with the modeled verifier.
 
 == Extracted Rust
 
-The checks on which secret release and WHIR verification depend live in two `#![no_std]`, `#![forbid(unsafe_code)]` crates translated from MIR to Lean by Charon and Aeneas [HP22] with zero `FunsExternal` axioms.
+Charon and Aeneas [HP22] translate Rust MIR into Lean. The custody package includes `QsagCustodyWeld` and verifies field arithmetic, sponge framing and release guards. Its `extraction-coverage.json` classifies all 238 public functions. Of the 87 on production call paths, 57 are direct calls, 16 are classified as direct by lexical analysis and 14 are reached transitively. The other 151 serve standalone library, specification, proof or test uses. All 238 have extractions.
 
-- *`aeneas/qsag-verified` #sym.arrow.r `aeneas/lean` (52 modules, 6,890 audited declarations, 2,918 theorems, 0 rejected; 71 comparator theorems + 25 definitions):* Weakest-precondition rules over the Aeneas `Result` monad (`MirWpKit.lean`) discharge Goldilocks and Wiedemann-tower arithmetic (`RealSpecFieldWeld`, `RealSpecTowerWeld`), Keccak-f[1600] (`RealSpecKeccakWeld`), byte-level sponge framing, and the session guards (`BeltLatchKernel`, `BdozOpeningGuard2Lane`, `VerifiedBeltQuorumGuard`, `MlDsaReleaseGate`, `StatefulVelocityGuard`). `aeneas/qsag-verified/extraction-coverage.json` classifies all 235 public functions: 63 lie on production call paths (the session guards and sponge), while 172 are `spec-welded`, `proof-only`, `test-only`, or unreferenced library items.
-- *`aeneas/qsag-whir-verified` #sym.arrow.r `aeneas/lean-whir` (9 modules, 1,911 audited declarations, 1,025 theorems, 0 rejected; 114/114 comparator theorems + 7 definitions):* Covers all 37 `Funs.lean` definitions called by `qsag-agg` for canonical `Goldilocks`/`Ext4` decoding, `[CWYZ26]` affine and bridge folding, Horner evaluation, OOD pins, PoW masks, Merkle pair ordering, and quorum summation, welded to `Qsag.Exec.WhirKernels` and `Exec/WhirFullDriverConnection.lean` and accepted by all six paranoid comparator kernels.
+The pure-quintic WHIR package connects its extracted `Funs.lean` definitions to the canonical `Qsag` specification through `QsagWhirSpecWeld`. Its 173 anchored theorems cover all 54 definitions with zero external model files. This checks the extracted arithmetic and verifier operations used by Rust. The callers that assemble the full wire transcript are a separate implementation boundary.
 
-#theorem("sponge framing and phase safety", src: [`SpongeFraming.lean`: `absorbBlocks_append_block`, `cshake256_32_refines`, `cshake256_squeeze_refines`; `RealSpecKeccakWeld.lean`: `shake256_absorb_after_squeezing_fails`])[
-  For every nonempty customization string and every chunked input split, the extracted `Shake256Sponge` emits bytes identical to `Qsag.shake256Xof` and `Qsag.cshake256Xof` across arbitrary multi-block squeezes, and calling `absorb` after `finalize` deterministically fails with `.assertionFailure`.
-]
+#figure(tbl((1fr, 0.7fr, 1fr, 0.95fr),
+  [Package], [Modules], [Declarations], [Theorems], table.hline(),
+  [Qsag], [340], [139,005], [74,363],
+  [Custody MIR], [52], [6,887], [2,917],
+  [WHIR MIR], [9], [2,160], [1,185], table.hline(),
+  [Total], [401], [148,052], [78,465],
+), caption: [Axiom census for the protocol and two MIR packages. All three audits recorded zero rejected declarations.]) <census>
+
+Six kernels replay each package’s comparator challenge. For `lean/comparator.json` the export has 16,829 declarations and the challenge selects 152 `Qsag.Top` theorems. For `aeneas/lean/comparator.json` the export has 4,145 declarations and the challenge selects 71 theorems and 25 definitions. For `aeneas/lean-whir/comparator.json` the corresponding counts are 4,154, 103 and 10. All 18 package/kernel runs accepted, covering 326 challenge theorems and 35 definitions across the three packages in @census.
 
 == Machine code
 
@@ -572,25 +482,13 @@ A binary dataflow screen (`scripts/audit_elf_ct.py`) checks the linked `target/r
 
 == Execution
 
-Models are checked against hardware in both directions. The x86-64 kernels are single-stepped under `ptrace` on an AMD Zen 5 processor and compared register by register against the Lean ISA semantics: 59 cases and 7,184 vectors with zero mismatches. Executable Lean specifications match Rust across 277 shared known-answer vectors (`ExternalSpecOracle.lean`), `1,729+` workspace release tests and 86 standalone differential and Zcash NU7 validation suites (`79 + 7`, `0` failed) cross-check the workspace against independent implementations, `E12` planted-fault audits verify that output corruption in any of the 10 RX 6750 XT Vulkan kernels is rejected before downstream acceptance, empirical `dudect` timing tests [RBV17] stay within $abs(t) < 4.5$ against $> 1,600$ on a leaky control, and five sanitizer fuzz harnesses exercise wire decoders (@matrix).
+The Lean–Rust runner checks 317 cross-language known-answer vectors and rejects 319 mutations. A separate test removes clauses from the compiled implementation and catches all 18 mutants. The domain-label inventory contains 952 labels across 14 crates, with 13 shared and zero drift. These gates exercise encodings, rejection and domain separation at implementation boundaries where the formal results depend on correct inputs.
 
-#figure(tbl((2.05fr, 1.95fr),
-  [Gate], [Result], table.hline(),
-  [`lean/Qsag` policy & axiom audit], [331 modules, 496,915 lines, 136,585 decls, 0 rejected],
-  [Extracted-MIR axiom audits (`lean` + `lean-whir`)], [6,890 + 1,911 decls, 0 rejected],
-  [Six-kernel paranoid comparator (`Top` / MIR / WHIR)], [127 + 71 + 114 = 312 thms + 32 defs (18/18 Accept)],
-  [Lean–Rust KATs & domain label sync], [277 vectors, 279 mutations; 994 labels (14 crates), 0 drift],
-  [Workspace & differential/Zcash validation], [1,729+ workspace + 86 validation passed, 0 failed],
-  [Compiled ELF & `.rlib` DIT / CT screen], [linked `qsag` + 28 asm + 25 SIMD kernels, 175/175 `#tooth`, 0 errors],
-  [Zen 5 single-step ISA cosimulation], [59 cases, 7,184 vectors, 0 mismatches],
-  [Statistical timing (`dudect`) & fuzzing], [0 leak flags; 5 harnesses, 0 crashes],
-  [SPIR-V 1.5 universal proof & RX 6750 XT fault audit], [`poseidon2.spv` proved; 10/10 planted GPU faults caught],
-  [Silicon: `QSAG-NI v2`, `ASS2-0P5`, `Dregg-180`, `F2`], [258 KiB live RTL proof, 105+ miters, 0-DRC route, HDK cosim],
-), caption: [Assurance gates. Sampled tests refute implementation bugs; they do not extend formal theorems.]) <matrix>
+The Zen 5 single-step harness compared 7,184 register-state vectors against the modeled ISA. The Vulkan suite `vulkan_planted_fault_audit.rs`, enabled by `fault-injection-audit`, checks corrupted shader binaries and executes planted semantic faults against CPU references. §7.5 gives the serialized proof fixtures exercised by autonomous RTL.
 
 = Evaluation and Scaling
 
-Measurements are single release runs on named hardware: an AMD Ryzen AI 9 HX PRO 370 (Zen 5), an AMD Ryzen 9 9950X, an Intel Core i9-12900, an AMD EPYC Milan (Zen 3), and an AMD Radeon RX 6750 XT (12 GiB, Mesa RADV). Consensus scaling projections are marked #model[model] and reproduced by `scripts/quorum_and_consensus_scaling.py`, whose self-test fails if any figure drifts. Silicon synthesis and formal-equivalence figures come from Yosys 0.71 / ABC, Z3, Bitwuzla, `nextpnr-ecp5`, and `ngspice` 45 (`sm141064.ngspice`) runs on `bb2` and `persvati`.
+The signing and arithmetic measurements below use AMD Zen 5, AMD EPYC Milan (Zen 3) and a Radeon RX 6750 XT with Mesa RADV. The hardware tables distinguish resident RTL simulation cycles, mapped ASIC logic area and routed FPGA clock estimates.
 
 == Kernels
 
@@ -623,17 +521,9 @@ The eight-way Keccak keeps all 25 lanes and its temporaries in registers, with n
   [Threshold few-time ceremony], [height 3, 418,560 tuples, 3 parties], [153 s],
   [Oblivious PRF, 2-of-3 / 3-of-5 ($q=3$)], [4 evaluations: offline / online each], [7.4 s, 4.3 ms / 21.6 s, 11.7 ms],
   [SpongeMacaroon, 3 caveats], [161 B], [1.8 µs verify], table.hline(),
-  [Hem shard, 128 signers, CPU], [445,566 B; i9-12900 / 9950X], [3.67 s / 2.94 s; verify 3.0 ms],
-  [Hem shard, 128 signers, GPU], [445,566 B, identical bytes], [1.33–1.56 s],
-  [Hem shard, 256 / 512 signers, CPU], [480,342 B / 556,830 B], [5.68 s / 11.08 s],
-  [Recursive shard, 128 / 512 signers], [9950X, child of a merge], [4.44 s / 17.02 s],
-  [Hologram root proof], [one core], [11.5 ms verify],
-  [zk credential, 32 attributes], [239,507 B (tag 7)], [0.28 s; verify 19.6 ms (one core)],
-  [zk multisignature, 4 / 16 slots], [424,675 B / 700,491 B], [1.12 s / 3.48 s],
-  [zk capability, batch 1 / 4], [238,747 B / 396,491 B], [0.26 s / 0.39 s; verify 4.0 / 8.7 ms],
-), caption: [Protocol measurements. Hem shards use default tag 4; zk rows use tag 7. Pooled `OtMesh` blinding cuts the retained-mesh online MAC check from 13.75 ms to 31 µs.]) <protobench>
+), caption: [Protocol measurements. The offline refill and online check are timed separately for the three-party blinding pool.]) <protobench>
 
-Signing with a prepared stateful key is one round, and its cost on durable media is the synced write (@protobench). Stateless signing runs either in 256-lane bitsliced waves or across isolated per-custodian CNF parties over encrypted channels. Proving is linear in signers, 15–23 ms each on a 16-core CPU and about 8 ms on the GPU, and a batch of 128-signer shards is cheaper in time and memory than one large polynomial.
+A prepared stateful signature takes one online round. On durable media the synchronized journal write contributes to latency (@protobench).
 
 == GPU
 
@@ -644,14 +534,10 @@ Signing with a prepared stateful key is one round, and its cost on durable media
   [Goldilocks NTT, $2^20$], [21.4], [246], [11.5×],
   [Coset extension, $2^18 -> 2^20$], [16.0], [820], [51×],
   [Two-block Merkle tree, $2^18$ leaves], [23.3], [2,315], [99×],
-  [Canopy tree, $2^20$ leaves], [81.6], [4,712], [58×],
   [Binary-field inner product, 262,144], [6.3], [68.9], [11×], table.hline(),
-  [Round-0 commit, $2^25$ cells (256 signers)], [1,649], [—], [5.3 GiB],
-  [Round-0 commit, $2^26$ cells (512 signers)], [3,401], [—], [9.9 GiB],
-  [Four fold rounds, $2^25$ cells, 12 receipts], [191], [—], [—],
-), caption: [RX 6750 XT, transfers included, against one CPU thread. The last column of the lower rows is VRAM in use.]) <gpubench>
+), caption: [Primitive timings on a Radeon RX 6750 XT, including transfers, against one CPU thread.]) <gpubench>
 
-Tree building gains two orders of magnitude and is where recursion spends its time (@gpubench). At $n_v = 25$ and $26$, native GPU openings complete in 624 ms and 1,098 ms after 1.14 s and 2.61 s commits (2.89 ms and 3.18 ms verify, zero CPU fallback). A 128-signer shard proves in 1.33 s with 0.2 GiB of host memory; for a subnet of 2,048 validators with one aggregator per 128-signer shard, the slowest stage completes in 1.14 s.
+The largest speedup in @gpubench is for a two-block Merkle tree, where many independent nodes can be hashed in parallel. The unit of measurement in this table is a single primitive workload.
 
 == Consensus scaling
 
@@ -667,124 +553,64 @@ A consensus protocol needs two things from signatures that pull in opposite dire
   [1,048,576], [131,168], [no], [1,500], [1.54 s],
 ), caption: [Live path. Left: a bitmap certificate against the 1,232-byte limit (exact). Right: verifying a sampled quorum of 1,218-byte `Compact1122` votes with SIMD batching (measured rate).]) <live>
 
-*Finality path.* Each validator also signs the checkpoint with a `JortsPoseidon2` key, whose $2^20$ leaves last a year of 30-second checkpoints, and aggregators fold the signatures into one certificate by the recursion of §4.3. The certificate is transferable: a bridge, light client or archive verifies it in 11.5 ms against the roster root.
+*Finality path.* Regional committees sign the checkpoint message. With `HierarchicalHemAggregate`, a new verifier checks the included `QSAGHQM2` shards against its prepared registry. For $s$ regions the payload includes the sum of the $s$ serialized shard lengths, plus registry, commitment and shard framing. The 360,391 B and 381,661 B examples in @publicprofiles give two concrete lengths for the same sparse committee. Committee size, signer activity and proof profile matter when sizing other shards.
 
-#figure(tbl((0.95fr, 0.85fr, 0.85fr, 0.55fr, 0.75fr, 0.7fr, 0.65fr, 0.75fr, 0.75fr, 0.7fr, 0.65fr),
-  table.cell(rowspan: 2)[Validators], table.cell(rowspan: 2)[Raw sigs.], table.cell(rowspan: 2)[Direct proofs],
-  table.cell(colspan: 4)[LAN: 128-signer shards, arity 4], table.cell(colspan: 4)[WAN: 512-signer shards, arity ≤ 16],
-  [Shards], [Levels], [Root], [Path], [Shards], [Schedule], [Root], [Path], table.hline(),
-  [1,500], [6.8 MiB], [5.1 MiB], [12], [2], [321 KiB], [2.38 s], [3], [4], [321 KiB], [6.73 s],
-  [2,048], [9.3 MiB], [6.8 MiB], [16], [2], [321 KiB], [2.38 s], [4], [4], [321 KiB], [6.73 s],
-  [8,192], [37.3 MiB], [27.2 MiB], [64], [3], [321 KiB], [2.76 s], [16], [16], [340 KiB], [7.60 s],
-  [16,384], [74.6 MiB], [54.4 MiB], [128], [4], [321 KiB], [3.14 s], [32], [8 · 4], [321 KiB], [7.41 s],
-  [100,000], [455.5 MiB], [332.3 MiB], [782], [5], [321 KiB], [3.52 s], [196], [16 · 16], [340 KiB], [8.85 s],
-  [1,048,576], [4.66 GiB], [3.40 GiB], [8,192], [7], [321 KiB], [4.28 s], [2,048], [16 · 16 · 8], [331 KiB], [9.53 s],
-), placement: top, scope: "parent", caption: [One certificate for a validator set. Raw signatures and direct shard proofs are exact and measured; root sizes and critical paths are #model[model] (`SuccinctSubtreeAggregate`, one GPU per tree node, no network transfer). Verification is 11.5 ms (measured) in every row.]) <planetary>
+For a power-of-two sequence of contiguous Jorts shards, `QSAGIVC1` verifies one 639,673 B root against the public interval, quorum count, message and registry root. Doubling the shard count adds one level of proving work while leaving the root length fixed. The current leaf circuit admits at most two active signers per shard. The depth-16 margin-schedule theorem counts 65,536 shards. Neither the fixed wire size nor this modeled bound measures network latency.
 
-@planetary gives the cost model for full in-circuit subtree merges. Its inputs are the measured shard and commit times of @protobench and @gpubench, a per-node merge time linear in the padded size of the merge relation (0.22, 0.38, 0.68, 1.25 s on a GPU at arity 2, 4, 8, 16), and a root size that is an exact count of sumcheck and lookup elements plus a fitted term for three openings. Two conclusions do not depend on the fitted constants.
+== QSAG-NI v2: autonomous verifier silicon across 130 nm CMOS, ECP5, and AWS F2
 
-_Arity is a latency–hop trade._ Root size grows by under 10 KiB when arity doubles while merge time doubles, so two quaternary levels (0.76 s) beat one 16-ary level (1.25 s). On a local network the fastest tree is narrow and deep: a million validators in seven levels, 4.28 s. Across a wide-area network each level is a round trip, and the best tree has 512-signer shards and three levels: 9.53 s, with a quarter as many leaf provers.
+After loading a proof and its public descriptor into SRAM, the host issues `OP_VERIFY_PROOF_AUTO` (`0x50`). The hardware parses the proof and executes the quintic WHIR and sumcheck verifier from a synchronous $4096 times 64$-bit (32 KiB) ROM. For a windowed upload, `OP_PAGE_CONTINUE` (`0x51`) resumes at the requested offset. In public committee mode the engine computes `compute_message_mu` on chip with Poseidon2-12 for each active key and message. The autonomous ABI supports the non-lookup tag-17 hiding fixture and the tag-1 public profile. The descriptor’s row program is trusted verification-key material. A streaming micro-command port also exposes the datapath.
 
-_Verifier cost is constant._ Without recursion, a certificate for $2^20$ validators is 8,192 shard proofs: 3.40 GiB and 51 core-seconds. The root proof is four orders of magnitude smaller and its verifier holds 32 bytes of roster. Building the roster tree is linear, 0.66 s for $2^20$ keys #model[model], and happens once per epoch. On the contractive binary split path (`SplitSubtreeAggregate`), depth-2 and depth-3 trees over dense and depth-37 sparse rosters execute end to end within $2^20$ internal rows (`524,288` at the depth-3 root) on both CPU and RX 6750 XT Vulkan.
+#figure(tbl((1.55fr, 1fr, 1fr),
+  [Resident proof fixture], [Bytes], [RTL cycles], table.hline(),
+  [`QSAGZKH2`], [258,104], [54.91 M],
+  [`QSAGHQM2`, one signer], [307,531], [89.63 M],
+  [`QSAGHQM2`, multiple signers], [331,221], [94.42 M],
+), caption: [Autonomous Verilator runs after preload. The first two fixtures rejected 288/288 and 300/300 proof-bit mutations respectively.]) <autoverify>
 
-The first row is the size of Solana's Alpenglow validator set, the next three are Ethereum Beam subnets and attester windows. For a four-second slot the model gives 3.83 s at 2,048 validators with 256-signer shards and one 8-ary merge, GPUs at every node; larger sets pipeline across slots.
+The streaming port rejected 194/194 injected faults. The RTL verification suite includes 105+ Z3/Bitwuzla equivalence miters (UNSAT for mismatches) and the Obend Lean 4 checks (zero `sorryAx`). These component checks complement the complete proof replays in @autoverify.
 
-== A certified causal web
+#figure(tbl((1.25fr, 1fr, 1fr),
+  [130 nm library], [Autonomous], [`AUTO_VERIFY=0`], table.hline(),
+  [IHP SG13G2], [709.61 kGE], [661.00 kGE],
+  [Sky130 HD], [784.54 kGE], [734.23 kGE],
+), caption: [Yosys mapped logic area in thousands of library NAND2 equivalents. Four 128 KiB SRAM banks are black boxes.]) <foundry>
 
-The same statement extends from validator sets, which are dense and agreed in advance, to agreements among arbitrary subsets of a very large population. Consider $8 times 10^9$ people and $8 times 10^10$ software agents: $88 times 10^9 approx 2^(36.36)$ principals entering bilateral and multilateral agreements. Four costs rule out a global ledger at this scale: a total order over all agreements; signer bitmaps (16 GiB at $2^37$ bits) or key lists; a global revocation list, which requires agreement among all its verifiers; and delegation that needs the issuer online. The design that follows is a sizing exercise on components that exist, not a deployed system.
+Across the unbuffered pre-layout OpenSTA runs, worst slack against the 100 ns reference clock ranges from −202.93 ns to −645.59 ns. Tapeout requires physical buffering, clock-tree synthesis, characterized SRAM Liberty models, extracted interconnect and multi-corner signoff. The area measurements in @foundry and the corresponding timing configurations are documented in `hardware/asic/synth/RESULTS.md`.
 
-- *No global order.* Agreements are vertices of a blocklace [KLST26], each naming the causal tips of its participants, and each participant's safety rests on its own quorum system (§2.5). A _cut_ is certified by a merge proof whose statement adds the digest of the cut's tips to the roster and revocation roots. Proofs for cuts compose exactly as merges do, so a cut carries one constant-size certificate for its entire causal past.
-- *No bitmap.* A directory of height 37 holds $1.37 times 10^11$ keys (@depths). A signer's membership path is 1,184 bytes of witness inside a sparse leaf merge and adds nothing to the proof.
-- *Scoped revocation.* Each issuer keeps its own sorted revocation tree at its own tip. Non-membership at depth 37 is 74 permutations, and since $2^37 + 1 < p$ the index increment cannot wrap.
-- *Offline delegation.* A PqBiscuit hop or a delegated zero-knowledge capability (§4.4) attenuates without contacting the issuer.
+*ECP5-85F.* All eight routed `.pnr.bit` bitstreams on `LFE5U-85F-6BG381C` meet their respective constraints with zero overused wires. The six primitive wrappers reach 34.72–71.34 MHz. Both full cores meet a 20 MHz target (@ecp5). The synchronous ROM infers 16 `DP16KD` blocks with zero LUTs. The FPGA regression records 461 formal/ANF obligations and over 1.90 million Verilator checks.
 
-#figure(tbl((0.6fr, 1fr, 0.9fr, 0.9fr, 1.2fr),
-  [Depth], [Capacity], [Bitmap], [Path B], [Non-membership], table.hline(),
-  [20], [$1.05 times 10^6$], [128 KiB], [640], [40 perm.],
-  [37], [$1.37 times 10^11$], [16 GiB], [1,184], [74 perm.],
-  [40], [$1.10 times 10^12$], [128 GiB], [1,280], [80 perm.],
-), caption: [Directory and revocation trees. A permutation is 118 S-box constraints in the relation.]) <depths>
+#figure(tbl((1fr, 1fr, 1fr, 0.7fr, 0.7fr),
+  [Core], [MHz], [LUT4], [DSP], [BRAM], table.hline(),
+  [Compact], [33.62], [23,576], [18], [79],
+  [Full rate], [29.86], [35,153], [81], [77],
+), caption: [Routed tops in `hardware/fpga/RESULTS.md`, `fmax_compact_top.pnr.bit` and `fmax_ecp5_fullrate_top.pnr.bit`.]) <ecp5>
 
-Checkpoints of 320 KiB are too heavy for a stream of small agreements between two agents, so the design has three tiers (@tiers). The middle tier folds each step into a running claim with the affine combiner and defers the opening: 16 sumcheck rounds, a running commitment, a folded point and the cut statement, 3,104 bytes per step. Its folding relation exists in the prover; the streaming accumulator around it does not, and it is sized, not measured.
+*AWS EC2 F2.* The `CL_QSAG_F2` HDK 2.3.5 wrapper targets `xcvu47p-fsvh2892-2-e`. It integrates two verifier engines, each with eight `RAMB36E2` autonomous ROM blocks, and three isolated ASS2 vats. The mapped HDK wrapper uses 314,047 LUT1–6, 290 `DSP48E2` and 315 `RAMB36E2`. Strongly connected component checks found zero combinational loops before and after mapping. A `BUFGCE_DIV` divides the vat clock by two. The design mixes `DNA_PORTE2` identity and `SYSMONE4` entropy with RCT/APT health checks for per-session sealing. Cloud AFI deployment requires AWS-supported replacements for customer `DNA_PORT` and `SYSMON`. Rust-to-Verilator OCL and PCIS cosimulation exercises `verify_proof_auto` on the 258,104 B `QSAGZKH2` fixture and function-level reset zeroization over 32,768 cycles.
 
-#figure(tbl((0.9fr, 1.9fr, 1.2fr, 1.1fr),
-  [Tier], [Object], [Bytes], [Verify], table.hline(),
-  [Session], [SpongeMacaroon; Compact1122 with key], [161; 1,218], [1.8 µs; 1.0 ms],
-  [Edge], [deferred-opening affine fold #model[model]], [3,104 per step], [—],
-  [Checkpoint], [root proof over a causal cut], [312–340 KiB], [11.5 ms],
-), caption: [Three accumulation tiers for a causal web.]) <tiers>
+== ASS2-0P5 / Dregg-64: Two-Ring W^X physical custody enclave in 180 nm 5 V CMOS
 
-== QSAG-NI: verified verifier silicon across ASIC and FPGA
+The 64-bit GF180MCU-D design targets the wafer.space `SLOT_0P5X0P5` shuttle slot. Its 1,936 × 2,531 µm die has 56 pads and a 1,052 × 1,647 µm core (1.733 mm²). Ring 0 executes from an immutable 4 KiB instruction ROM. Ring 3 executes owner WOTS+C-signed SRAM applets of at most 64 instructions. A hardware fence checks the privilege of `SYS_MMIO` accesses, including after an applet branches into resident code. The design uses foundry `gf180mcu_fd_ip_sram__sram512x8m8wm1` memory.
 
-Every verification in this paper (signatures, capabilities, and the recursive proof) reduces to five primitives on 64-bit words: Goldilocks arithmetic, where reduction is shifts and adds since $2^64 equiv 2^32 - 1$ and $2^96 equiv -1$; its quartic extension; width-12 Poseidon2; Keccak-p[1600]; and carry-less multiplication in $FF_(2^128)$. There are no pairings, no multi-precision multipliers, no Gaussian samplers and no division. That is the profile of an instruction-set extension, not an accelerator card.
+The PUF pairs 512 ring oscillators into 256 disjoint pairs. Four BCH(63,36,5) blocks use 252 pairs, yielding a modeled 144 bits of post-helper entropy. The CoSO TRNG implements the SP 800-90B repetition-count and adaptive-proportion health tests. `LC_PROVISIONED` locks out debug and BIST access. Gate-level simulation clears the secret latches in 0.60 ns with the clock stopped. BSIM4 decks run in ngspice 45.
 
-#figure(tbl((2.6fr, 0.6fr, 0.6fr),
-  [Block], [kGE], [Share], table.hline(),
-  [Four-lane extension-field array, 36 multipliers], [524], [54.9%],
-  [Poseidon2, 30-stage pipeline, one permutation per clock], [245], [25.7%],
-  [Keccak-f[1600], two rounds per clock], [82], [8.6%],
-  [Decode, canonical-range checks, transcript control], [65], [6.8%],
-  [Carry-less multiplier and tower map], [38], [4.0%], table.hline(),
-  [Total logic], [954], [],
-), caption: [Analytical QSAG-NI unrolled logic budget #model[model], from published cores [CDK+26] and multiplier counts.]) <silicon>
-
-#figure(tbl((0.7fr, 1.1fr, 0.6fr, 0.6fr, 1fr, 1fr, 0.7fr),
-  [Node], [Area mm#super[2]], [GHz], [mW], [Verify µs], [Energy µJ], [Fold µs], table.hline(),
-  [28 nm], [0.89 / 1.52], [1.0], [185], [34.0 / 15.0], [6.29 / 2.77], [180],
-  [7 nm], [0.17 / 0.30], [1.6], [110], [21.2 / 9.4], [2.34 / 1.03], [112],
-  [5 nm], [0.11 / 0.19], [2.0], [85], [17.0 / 7.5], [1.45 / 0.64], [90],
-  [3 nm], [0.08 / 0.14], [2.2], [72], [15.5 / 6.8], [1.11 / 0.49], [82],
-), caption: [Analytical 30-stage pipelined projection by node #model[model]: area with 128 / 512 KiB SRAM; root verify (Keccak / Poseidon2); $2^16$-row edge fold.]) <nodes>
-
-@silicon and @nodes size an unrolled 30-stage pipeline (954 kGE, 15,000–34,000 cycles per root proof). To test that budget against real cell libraries and equivalence solvers, we implemented synthesizable SystemVerilog RTL for both standard-cell ASICs (`qsag_ni_asic_top` in `hardware/asic/`) and FPGAs (`qsag_ni_fpga_top` in `hardware/fpga/`).
-
-*Synthesized ASIC (`hardware/asic/`).* Rather than 36 separate multipliers, `qsag_ni_asic_top` shares twelve 64×64 Dadda trees (with carry-save `2^64` and `2^96` Goldilocks folding and compound canonicalizers) across all twelve lanes of a Poseidon2 full round, a 4-way C-slowed Canopy batch engine (`P2_CANOPY4_BATCH`), and a single-cycle 9-product tower Karatsuba `GoldilocksExt4` multiply-add (`EMULADD`), paired with a 2-round/clock Keccak/`TurboSHAKE256` Canopy engine (`TS_CANOPY_BATCH`), single-cycle Karatsuba `GF(2^128)` and Wiedemann $cal(T)_7$ multipliers, and a 4-bank dual-port SRAM interface. Under delay-driven hierarchical Liberty synthesis (`synth/run_hier.py`, SRAM black-boxed), mapped logic stays below the 954 kGE budget across all four open PDKs (@asicsynth): *832.0 kGE* on `ASAP7` (7 nm predictive RVT), *832.6 kGE* on `IHP SG13G2` (130 nm), *862.9 kGE* on `Nangate45`, and *908.7 kGE* on `Sky130 HD`. Sharing multipliers trades single-chain latency (a serial permutation is iterated rather than 1 perm/clock) for area below 910 kGE while keeping parallel Canopy batches saturated.
-
-#figure(tbl((1.35fr, 0.85fr, 1.45fr, 1.55fr),
-  [Target], [Logic / LUT], [Multipliers / FFs], [Verification], table.hline(),
-  [`ASAP7` 7 nm RVT], [832.0 kGE], [12 shared Dadda CSA], [99/99 LEC, 8/8 `QSAGSTA1`],
-  [`IHP SG13G2` 130 nm], [832.6 kGE], [12 shared Dadda CSA], [99/99 LEC, 32 CSA certs],
-  [`Nangate45` 45 nm], [862.9 kGE], [12 shared Dadda CSA], [99/99 LEC, 5 ANF certs],
-  [`Sky130 HD` 130 nm], [908.7 kGE], [12 shared Dadda CSA], [Obend Lean 4 (`0 sorryAx`)], table.hline(),
-  [UltraScale+ (`XCUP_RING`)], [86,496 LUT], [768 `DSP48E2`, 88.8k FF], [Z3 tiled DSP + ANF `GF(2^128)`],
-  [Lattice `ECP5-85F`], [compact fit], [80 `MULT18X18D` (16 in P2)], [1.70M Verilator checks],
-), caption: [Synthesized QSAG-NI silicon (`hardware/asic/`, `hardware/fpga/`). ASIC kGE excludes SRAM macros.]) <asicsynth>
-
-*Formal hardware verification and stateful `zk-Hem v2` (`hardware/asic/`, `hardware/aws_f2/`).* Decomposing the datapath along carry-save boundaries yields *99/99 baseline + 6 `QSAG-NI v2` shared/quintic Z3 & Bitwuzla equivalence miters* (`0` undecided, `0` failed), *32 carry-save adder certificates*, *5 exact ANF certificates*, and a read-only *Obend Lean 4* hardware proof (`QsagNi.lean`, `0 sorryAx`). Extending `qsag_ni_asic_top` with stateful `Fp5` (`MULADD`, `HORNER`, `FOLD`, `SUMCHECK_STEP`), 400-bit `TurboSHAKE256` / 7-limb `GL24` comparators, and 32-byte `tree_nonce` leaf framing adds `+4.76%` flat `Nangate45` area (`659,473 -> 690,845` µm#super[2]) and verifies a live *258,104-byte tag-17 `zk-Hem v2` proof* over the streaming hardware command port (`2,448,220` commands across valid and negative runs; `194/194` injected faults caught, including bit 399 and `tree_nonce` bit 0). In OpenROAD (`Nangate45`), the full 437,178-instance hierarchical macro-placed chip completes global and detailed routing across `metal2–metal10` (`19.17` m wirelength, `3,438,384` vias, `37.07%` 3D usage) with *0 DRC violations*.
-
-*Synthesized FPGA and AWS EC2 F2 (`hardware/fpga/`, `hardware/aws_f2/`).* `qsag_ni_fpga_top` spans `VU9P_TURBO`, `XCUP_RING` (`86,496` LUT, `768` `DSP48E2`), and `ECP5_COMPACT` (with `nextpnr-ecp5` + `ecppack` `.bit` bitstreams on `LFE5U-85F`). For cloud deployment, `cl_qsag_f2_top` (`hardware/aws_f2/`, AWS HDK 2.3.5, `xcvu47p-fsvh2892-2-e`) integrates *two `QSAG-NI v2` engines and three isolated `ASS2` custody vats* behind `OCL` (`BAR0`) and 512-bit `PCIS` (`BAR4`) (`32,825` `LUT6` = `2.52%` of `VU47P`, `290` `DSP48E2` = `3.21%`, `299` `RAMB36E2` = `14.83%`), passing live Rust-to-Verilator `OCL`+`PCIS` cosimulation (`qsag_accel::aws_f2`) and 32,768-clock FLR BRAM zeroization (`0` Verilator `-Wall` warnings).
-
-== Dregg-180 and ASS2-0P5 / Dregg-64: physical custody enclaves in 180 nm 5 V CMOS
-
-Software journals and TPM counters still trust the host CPU assembling a signing request. Two standalone 5.0 V `GF180MCU-D` CMOS enclaves (`gf180mcu_fd_sc_mcu7t5v0` cells and `gf180mcu_fd_io` pads, `SLOT_0P5X0P5`: `1,936 × 2,531 µm` die, 56 pads) move Cut-the-Hash custody, capability gating, and physical zeroization onto dedicated silicon: _Dregg-180_ (`hardware/gf180mcu/`, zero hard SRAM macros) and programmable _ASS2-0P5 / Dregg-64_ (`hardware/ass2/`, `crates/qsag-ass2/`, dual 512×64 `gf180mcu_fd_ip_sram__sram512x8m8wm1` macros, registered-readbank 64-bit capability ISA closing `26.49 ns` / `37.75 MHz` at worst-case `125 °C` `SS` and `18.37 ns` / `54.44 MHz` at `TT`, `512`-RO `252`-pair `144`-bit post-helper `BCH(63,36,5)` PUF, zero-factory-trust PQ owner `I-ROM` bootstrap, `2,560/2,560` async latch wipe in `0.60 ns` with `0` clock edges, and a 4-layer KiCad 8 carrier PCB).
-
-*Dregg-180 GALS shell and five capability organs.* The core clocks from an external pad or a 32-tap DCRO behind a glitch-free mux, speaking `QSAG-Wire v1` over x1/x4/x8 SPI, dual-simplex lanes, and a clockless Sutherland micropipeline (`aoi222_1` Muller C-element), sharing a folded-octet 25-lane sponge file across five organs:
-
-1. *CapTP `SpongeMacaroon` vat (`dregg_captp_vat`).* Root $K_"vat"$ never signs raw host digests. Capabilities bind rights, guard flags, epoch window, spend ceiling, proximity ceiling, and a 256-bit key or ZK root under `TurboSHAKE256` (gated on `vk_ok`). Asynchronous-clear `latrnq_1` latches wipe metadata in zero clocks on tamper even if `clk_core` stops; sequencing uses 125 punctured `[12,7,4]` Hamming codewords plus non-bricking `OP_BIST`.
-2. *RO-PUF and `BCH(63,36,t=5)` (`dregg_ro_puf_bch`).* `nand2_1` rings behind isolation buffers reconstruct $K_"vat"$ at boot via margin screening and a serial `GF(2^6)` Berlekamp–Massey/Chien decoder (zero nonvolatile secret bits on die).
-3. *13.56 MHz HF-NFC and Direct-RF `NCO` (`dregg_nfc_nco`).* Hardware `÷16` (`847.5 kHz`) ISO/IEC 14443 subcarrier prescaler ahead of CDC, decoding CRC-16 Manchester co-approval frames and synthesizing CW/2-FSK/chirp beacons.
-4. *Sub-5 ns `Brands–Chaum` responder and Vernier TDC (`dregg_distance_tdc`).* Shift-out 64-round $(r_0, r_1)$ masks feed one `mux2_4` (`~2.9 ns` TT, `~4.6 ns` SS), while `.IE=1` `PAD2CORE` loopback cancels outbound pad delay into a 32-tap Vernier TDC.
-5. *Staggered `WOTS+C` self-check, `Metal5` shield, BSIM4 SPICE, and NFC PCB.* Before releasing $Y_j = F^(d_j)(X_j)$, the enclave verifies $F^(w-1-d_j)(Y_j) = "PK"_("end", j)$ across two staggered cycles, zeroizing on mismatch; turnaround, TDC resolution, and 4-pad ground bounce are simulated in `ngspice` 45 (`sm141064.ngspice`) alongside a 4-layer `JLC04161H-7628` coil model ($L_2 = 1.47$ µH, $Q_"loaded" = 17.9$).
-
-#set page(columns: 1)
+The four-layer KiCad 8 carrier has zero schematic ERC violations and zero footprint-fixture DRC violations. Its planar NFC coil model gives 1.47 µH and loaded $Q = 17.9$. Wafer entropy measurements, board routing checks and populated-coil measurements remain physical qualification steps.
 
 = Trusted Base and Scope
 
 *Cryptographic assumptions.* (i) Keccak-p[1600] in its SHAKE256, cSHAKE256 and 12-round TurboSHAKE256 modes, and width-12 / width-24 Poseidon2 in their hardened profiles, behave as random oracles within the adversary's query budget (PRF, target-collision, preimage, undetectable-distribution and interleaved-subset resistance, plus absence of sub-generic algebraic attacks on Poseidon2). (ii) For dealerless SPDZ / `SoftSpokenOT` preprocessing only: Ring-LWE at dimension 1,024 and modulus 12,289, the Euclidean Ring-SIS relation extracted by the 24-challenge base-OT proof, correlation-robust OT pad hashing [Roy22], and regular dual-LPN at the kernel-bracketed bias. (iii) For FIPS 204 compatibility only: the assumptions of ML-DSA. Three-party bitsliced signing, isolated honest-majority CNF signing, and Hem / `HemQuintic128` / `QSAGIVC1` aggregation use (i) alone.
 
-*Proof-system soundness.* Legacy quartic 256-bit `WhirSecurityRegime` tags (`4–10`) follow from the Johnson bound (`127` bits classical / `81` bits composed QROM due to 256-bit digest collision terms). Public `HemQuintic128` (`QSAGHQM2`) and committed-mask `zk-Hem v2` (`QSAGZKH2`, tags `16–19`) over $FF_(p^5)$ with 400-bit `TurboSHAKE256` or 448-bit `Poseidon2-GL-w24` commitments have kernel-checked `< 2^(-128)` QROM certificates across all 13 deployed schedules ($16 <= "logCells" <= 28$) through $Q <= 2^64$ (`publicHemQuintic_qrom_soundness_128`, `zkHemV2_packed_all13_qrom_lt_128_at_2pow64`), LogUp joint-masking and Stage-0 four-view simulation bijections (`ZkHemV2ComposedZkAndCerts.lean`), and arbitrary-depth straight-line QROM knowledge extraction refining `IdealAggregate` (`succinctWhirAggregate_refines_idealAggregate_128`, `multidepth_recursive_qrom_lt_2_neg_128`). Byte-level equivalence between the Lean `SuccinctWhirAggregate` / `FixedShapeWhirProof` verifiers and the unextracted Rust multiproof/R1CS wire parser remains outside Aeneas extraction.
+*Proof systems.* For public and hiding proofs the modeled QROM bound applies through $Q <= 2^64$ at each of 13 deployed table sizes. For the recursive construction, the 639,673 B wire size is independent of depth, while the stated depth-16 tree bound uses its own $2^20$-cell margin schedule. The public-matrix, WHIR and R1CS verification steps have executable Lean models. Applying their theorems to arbitrary bytes also requires the Rust callers and parsers to enforce canonical decoding and bind the same transcript and statement.
 
-*Protocol and custody models.* Threshold engines provide active security with abort: honest-majority engines (`Rss256Engine`, `IsolatedCnfParty`) tolerate $t - 1$ corruptions with $2(t-1) < n$, and SPDZ engines tolerate $n - 1$ with active Beaver companion sacrifices (`< 2^(-255)`) on pooled blinding triples. `PersonalReleaseParty` supports both dealer and dealerless wire MSP enrollment (`CommitteeHandoffAndDealerlessDkg.lean`). `IdealSign` (including 4-hop `< 2^(-128)` EUF-CMA), deployment-bound `IdealCustody` (`Top/DistributedAuthRunBound.lean`), `IdealCred` (`piToprfRealSpdz_joint_false_release_bound`, `<= 373 Q slash p^2`), checked-assignment `IdealMigrate` (`checkedAssignment_refines_idealMigrate` across 19 kinds; Zcash Ironwood `ask: None` recovery uses an external randomized signature), and `IdealAggregate` are refined in Lean at the protocol-machine level rather than whole-binary MIR.
+*Custody and migration.* Release safety depends on the assumed corruption threshold, authenticated channels, and persistence of the reservation before a signature share or migration message is sent. The migration refinement starts from a checked R1CS assignment. Receipt of a serialized proof requires a sound verifier, and Ironwood recovery without the spending scalar additionally checks an external randomized signature. The operating system, entropy sources, storage synchronization and external monotone anchor are part of the deployment’s trusted base.
 
-*Software and silicon artifacts.* The software TCB comprises the Lean 4.35 kernel (`{propext, Quot.sound}`, cross-checked on 312 theorems and 32 definitions across six independent replay kernels), Charon/Aeneas and their 64-bit prelude semantics (63 of 235 `qsag-verified` functions on live production call paths), `rustc`/LLVM outside extracted MIR and the 28 certified `.rlib` assembly kernels, single-codegen-unit compilation for `audit_elf_ct.py`, OS entropy, and host `fsync`/TPM/hypervisor hardware semantics. Silicon verification covers RTL, `105+` Z3/Bitwuzla LEC miters, `Obend` Lean 4 (`0 sorryAx`), live 258,104-byte `QSAG-NI v2` hardware-port proof replay, OpenROAD `Nangate45` 0-DRC detailed routing, `ECP5-85F` bitstreams, `ASS2-0P5` & `Dregg-180` `GF180MCU-D` physical signoff and 4-state GL/SPICE simulation, and `CL_QSAG_F2` HDK 2.3.5 cosimulation; fabricated-wafer characterization, silicon PUF min-entropy across lots, and Vivado AWS F2 AFI timing signoff remain post-tapeout / cloud-instance gates.
+*Software.* The Lean kernel and allowed axioms, the Charon/Aeneas MIR translation and its preludes, and the semantics used for the ISA and SPIR-V proofs enter at different boundaries. Six-kernel replay checks the exported challenges. Rust callers of extracted kernels, the remaining compiler and linker pipeline, and the host GPU driver still require assurance.
 
-*Measured, synthesized, modelled.* All single-host software timings (§7.1–7.3), `QSAGIVC1` and split subtree recursion runs through depth 3, ASIC/FPGA/F2 synthesis, routing and LEC counts (§7.6), and `Dregg-180` / `ASS2-0P5` RTL/GL/SPICE/PCB figures (§7.7) are measured on the named artifacts. Multi-node WAN/LAN critical paths in @planetary, the streaming edge tier of §7.5, and the 30-stage pipelined 3–28 nm projection of @silicon–@nodes are reproducible analytical models (`scripts/quorum_and_consensus_scaling.py`). QSAG is a research prototype and has had no external audit.
-
-#set page(columns: 2)
+*Hardware.* Autonomous RTL replay assumes an authentic public descriptor. ASIC tapeout timing and ASS2 routing and physical qualification remain open. The ECP5 results are routed bitstream timings. F2 cosimulation checks the host interface and scrub sequence, while deployment needs supported identity and entropy sources and a timed AFI. QSAG is a research prototype with no external audit.
 
 = Conclusion
 
-Hash-based signatures publish nearly everything their signer computes, and QSAG is what follows from taking that seriously: threshold signing whose secret depth ignores tree height, stateful keys that any quorum system with honest intersections can use safely, and an aggregation proof whose verifier is small enough to verify itself—and small enough to synthesize below 910 thousand gates—so that a certificate for a million signers has the size and verification cost of a certificate for a hundred. Around these it supplies the unglamorous parts a custody system needs, from hardware-anchored journals and four-curve key migration down to a 180 nm capability enclave, and holds each of them either to a constructive, machine-checked statement or to an explicit accounting of where the proof stops.
+Cut-the-Hash keeps the secret portion of threshold signing independent of tree height. Quorum intersection and durable leaf reservations let committees change while preserving the stateful signing key. Public quintic Hem proofs let regions verify committees independently. Where a verifier needs one certificate for a contiguous tree of shards, the binary IVC fixes the root at 639,673 B. The distinction between format size, modeled extraction error and physical implementation evidence determines which guarantee each verifier can rely on.
 
 #heading(numbering: none)[References]
 #{
@@ -809,7 +635,6 @@ Hash-based signatures publish nearly everything their signer computes, and QSAG 
     [[BTA26] A. S. Bhati, S. Tariq, T. Ashur, "From Round Skipping to S-Box Skipping: Attacking Poseidon's Partial Layer via Subspace Restriction", IACR ePrint 2026/1692, 2026.],
     [[Can01] R. Canetti, "Universally Composable Security: A New Paradigm for Cryptographic Protocols", FOCS 2001.],
     [[CDHZ25] A. Chiesa, Z. Di, Z. Hu, Y. Zheng, "How to Prove Post-Quantum Security for Succinct Non-Interactive Reductions", IACR ePrint 2025/2166, 2025.],
-    [[CDK+26] L. Campa, T. De Cnudde, A. Kindi, A. Roy, F. Schmid, M. Schofnegger, S. Trevisani, "BenX: Resource-Sharing Permutations for Computational Integrity", arXiv:2609.31087, 2026.],
     [[CGH+18] K. Chida, D. Genkin, K. Hamada, D. Ikarashi, R. Kikuchi, Y. Lindell, A. Nof, "Fast Large-Scale Honest-Majority MPC for Malicious Adversaries", CRYPTO 2018.],
     [[CS25] E. Crites, A. Stewart, "On Reed–Solomon Proximity Gaps Conjectures", IACR ePrint 2025/2046, 2025.],
     [[CT19] C. Cachin, B. Tackmann, "Asymmetric Distributed Trust", OPODIS 2019; extended version with O. Alpos and L. Zanolini, arXiv:1906.09314.],
