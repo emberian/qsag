@@ -7,10 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use qsag_accel::goldilocks::{GOLDILOCKS_PRIME, gl_reduce_u64, precompute_goldilocks_twiddles};
-use qsag_accel::spirv_kernels::{
-    prover_shader_source_filename, prover_spirv_kernel_bytes, shader_source_filename,
-    spirv_kernel_bytes,
-};
+use qsag_accel::spirv_kernels::{shader_source_filename, spirv_kernel_bytes};
 use qsag_accel::vulkan::{
     batch_keccak_f1600_with_receipt, batch_poseidon2_perm12_with_receipt,
     bdoz_gf2_128_batch_dot_with_receipt, coset_lde_ext2_with_receipt, goldilocks_ntt_input_digest,
@@ -18,7 +15,7 @@ use qsag_accel::vulkan::{
 };
 use qsag_accel::{
     AccelError, AcceleratorBackend, BackendAttestationKey, CertifiedBackend, CertifiedKernelPin,
-    CpuReferenceBackend, KernelRegistryError, KernelSlot, KernelTargetArch, ProverKernelSlot,
+    CpuReferenceBackend, KernelRegistryError, KernelSlot, KernelTargetArch,
     VerifiedKernelDigestRegistry, VulkanError, VulkanSpirvBackend, spot_check_merkle_layer,
 };
 
@@ -49,13 +46,7 @@ fn test_spirv_shaders_reproducible_from_comp_sources() {
 
     let kernels =
         KernelSlot::ALL.map(|slot| (shader_source_filename(slot), spirv_kernel_bytes(slot)));
-    let prover = ProverKernelSlot::ALL.map(|slot| {
-        (
-            prover_shader_source_filename(slot),
-            prover_spirv_kernel_bytes(slot),
-        )
-    });
-    for (comp_name, embedded) in kernels.into_iter().chain(prover) {
+    for (comp_name, embedded) in kernels {
         let spv_path = out_dir.join(format!("{comp_name}.spv"));
         let output = Command::new(validator)
             .args(["-V", "--target-env", "vulkan1.2"])

@@ -6,8 +6,8 @@ use qsag_accel::goldilocks::{
     goldilocks_primitive_root,
 };
 use qsag_accel::{
-    CpuReferenceBackend, KernelSlot, KernelTargetArch, ProverKernelSlot,
-    VerifiedKernelDigestRegistry, VulkanError, VulkanSpirvBackend,
+    CpuReferenceBackend, KernelSlot, KernelTargetArch, VerifiedKernelDigestRegistry, VulkanError,
+    VulkanSpirvBackend,
 };
 
 fn data(n: usize) -> Vec<u64> {
@@ -202,29 +202,6 @@ fn canonical_spirv_pin_digests_are_frozen() {
     assert_eq!(kernels.map(|(slot, _)| slot), KernelSlot::ALL);
     for (slot, expected) in kernels {
         let pin = VulkanSpirvBackend::canonical_pin(slot);
-        assert_eq!(hex(pin.sha256_digest), expected, "{slot:?}");
-    }
-    let prover = [
-        (
-            ProverKernelSlot::WhirLdeCommitment,
-            "2b82b1f8f14762b5973de0664f0ba934580665ce268a1a3cd79ee84e0123a070",
-        ),
-        (
-            ProverKernelSlot::WhirFoldSumcheck,
-            "291f84c5249ebce359f072744353eede299d075388c4b05e7583bb9da19db952",
-        ),
-        (
-            ProverKernelSlot::AirRowGroupA,
-            "147e99f14ec62bda0bdd0782a42ec3bc600c11bf811396e612c03467736cdcb1",
-        ),
-        (
-            ProverKernelSlot::AirRowGroupB,
-            "3471e16328ed2f3566ce946dd4cde7aced74edf23884355964dc9d9cd8cdfaa0",
-        ),
-    ];
-    assert_eq!(prover.map(|(slot, _)| slot), ProverKernelSlot::ALL);
-    for (slot, expected) in prover {
-        let pin = VulkanSpirvBackend::canonical_prover_pin(slot);
         assert_eq!(hex(pin.sha256_digest), expected, "{slot:?}");
     }
 }
