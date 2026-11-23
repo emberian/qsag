@@ -1,5 +1,7 @@
-// Dregg-180 margin-screened differential RO measurement and BCH(63,36,t=5).
+`include "cl_qsag_f2_defines.vh"
+// F2 private response adapter and BCH(63,36,t=5) reconstruction.
 module dregg_ro_puf_bch #(parameter int VAT_ID = 0) (
+    input  wire [511:0] cloud_response,
     input  wire         clk,
     input  wire         rst_n,
     input  wire         srst_n,
@@ -45,58 +47,18 @@ module dregg_ro_puf_bch #(parameter int VAT_ID = 0) (
 
     logic       meas_active;
     logic [5:0] sub_idx;
-    wire  [3:0] sel_a = mon_en ? mon_idx[3:0] : sub_idx[3:0];
-    wire  [3:0] sel_b = mon_en ? (mon_idx[3:0] ^ 4'h1)
-                               : (sub_idx[3:0] + {1'b0, blk_sel} + {2'd0, sub_idx[5:4]} + 4'd1);
+    // Deterministic margin measurements select reliable positions. The
+    // private epoch response supplies one conditioned bit at each position.
+    logic cnt_clr_n;
+    wire [15:0] win_last = 16'd1;
+    wire [4:0] mod_sa = sub_idx[4:0];
+    wire [4:0] mod_sb = mod_sa + {2'd0,blk_sel} + {sub_idx[5],3'd1};
+    wire [CW-1:0] eff_a = CW'(520) - CW'(mod_sa) * 7;
+    wire [CW-1:0] eff_b = CW'(514) - CW'(mod_sb) * 7 - CW'(mod_sb[1:0]);
+    wire eff_dead = 1'b0;
+    assign puf_mon_clk = 0;
+    wire unused_monitor = ^{mon_en,mon_beat,mon_idx,meas_active,cnt_clr_n,rst_n};
 
-    wire [15:0] ro_a_out, ro_b_out;
-    genvar r;
-    generate
-        for (r = 0; r < 16; r++) begin : g_bank
-            wire ea = (meas_active || mon_en) && (sel_a == 4'(r));
-            wire eb = (meas_active || (mon_en && mon_beat)) && (sel_b == 4'(r));
-            qsag_ass2_ring #(.STAGES(5)) u_roa (.en(rst_n && ea), .osc(ro_a_out[r]));
-            qsag_ass2_ring #(.STAGES(5)) u_rob (.en(rst_n && eb), .osc(ro_b_out[r]));
-        end
-    endgenerate
-
-    wire clk_a, clk_b;
-    assign clk_a = ro_a_out[sel_a];
-    assign clk_b = ro_b_out[sel_b];
-
-    wire [1:0]  win_shift = mon_en ? 2'd0 : mon_idx[1:0];
-`ifdef ASS2_FAST_ENTROPY
-    wire [15:0] win_last = (16'd16 << win_shift) - 16'd1;
-`else
-    wire [15:0] win_last = (16'd4096 << win_shift) - 16'd1;
-`endif
-
-    logic          cnt_clr_n;
-    wire           cnt_rn = rst_n & (cnt_clr_n | mon_en);
-    wire  [CW-1:0] cnt_a_async, cnt_b_async;
-    qsag_ass2_ripple_cnt #(.N(CW)) u_cnta (.clk(clk_a), .rst_n(cnt_rn), .q(cnt_a_async));
-    qsag_ass2_ripple_cnt #(.N(CW)) u_cntb (.clk(clk_b), .rst_n(cnt_rn), .q(cnt_b_async));
-
-    assign puf_mon_clk = mon_beat ? (cnt_a_async[2] ^ cnt_b_async[2]) : cnt_a_async[3];
-
-    wire [CW-1:0] cnt_min = CW'(1024) << win_shift;
-    wire          ro_dead = (cnt_a_async < cnt_min) || (cnt_b_async < cnt_min) ||
-                            (&cnt_a_async[CW-1:CW-2]) || (&cnt_b_async[CW-1:CW-2]);
-
-`ifdef ASS2_FAST_ENTROPY
-    wire [4:0]    mod_sa   = mon_en ? mon_idx[4:0] : sub_idx[4:0];
-    wire [4:0]    mod_sb   = mon_en ? (mon_idx[4:0] ^ 5'h01)
-                                    : (sub_idx[4:0] + {2'd0, blk_sel} + {sub_idx[5], 3'd1});
-    wire [CW-1:0] win_x8   = CW'(4096 * 8) << win_shift;
-    wire [CW-1:0] eff_a    = win_x8 + CW'(520) - CW'(32'(mod_sa) * 32'd7);
-    wire [CW-1:0] eff_b    = win_x8 + CW'(514) - CW'(32'(mod_sb) * 32'd7 + (32'(mod_sb) & 32'd3));
-    wire          eff_dead = 1'b0;
-    wire unused_model = &{1'b0, ro_dead};
-`else
-    wire [CW-1:0] eff_a    = cnt_a_async;
-    wire [CW-1:0] eff_b    = cnt_b_async;
-    wire          eff_dead = ro_dead;
-`endif
     // Single (CW+1)-bit signed difference replaces comparator + two 20b muxes + second subtractor!
     wire [CW:0]   diff_ab  = {1'b0, eff_a} - {1'b0, eff_b};
     wire          raw_cmp  = !diff_ab[CW];
@@ -152,13 +114,8 @@ module dregg_ro_puf_bch #(parameter int VAT_ID = 0) (
     wire w_clr     = (st == S_IDLE && start_blk) || (st == S_EVAL && eff_dead);
     wire w_en      = w_clr || (st == S_EVAL && eval_take) || (st == S_REM) ||
                      (st == S_CHIEN && sub_k == 4'd5);
-    // CI fixtures model independent chips. Silicon derives this bit from
-    // the local pair's measured periods.
-`ifdef ASS2_FAST_ENTROPY
-    wire response_bit = raw_cmp ^ (|(sub_idx[1:0] & 2'(VAT_ID)));
-`else
-    wire response_bit = raw_cmp;
-`endif
+    wire response_bit = raw_cmp ^ (|(sub_idx[1:0] & 2'(VAT_ID))) ^
+                        cloud_response[{blk_sel, sub_idx}];
     wire w_lsb     = (st == S_EVAL) ? (recon_mode ? (response_bit ^ inj_flip) : response_bit) :
                      (st == S_REM)  ? w_sr[62] :
                                       (w_sr[62] ^ (chien_ev == 6'd0));

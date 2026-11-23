@@ -1,3 +1,4 @@
+`include "cl_qsag_f2_defines.vh"
 // One resettable inverting feedback path. Each stage is a distinct foundry cell.
 module qsag_ass2_ring #(parameter int STAGES = 17) (
     input wire en, output wire osc
@@ -9,7 +10,7 @@ module qsag_ass2_ring #(parameter int STAGES = 17) (
     wire unused = en ^ (STAGES == 0);
     assign osc = 1'b0;
 `else
-`ifdef QSAG_F2_CLOUD_BRINGUP
+`ifdef QSAG_F2_CLOUD_CUSTODY
     wire unused = en ^ (STAGES == 0);
     assign osc = 1'b0;
 `else
