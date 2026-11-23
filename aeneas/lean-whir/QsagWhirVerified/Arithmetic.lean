@@ -1,6 +1,5 @@
 module
 import Qsag.Tactic.AssuranceKit
-public import QsagWhirVerified.Funs
 public import QsagWhirVerified.Types
 public import QsagWhirVerified.Funs
 public import Aeneas
@@ -13,39 +12,100 @@ set_option linter.unusedSimpArgs false
 namespace qsag_whir_verified
 
 @[ext]
-theorem Ext4.ext {x y : Ext4}
-    (ha : x.a = y.a) (hb : x.b = y.b) (hc : x.c = y.c) (hd : x.d = y.d) : x = y := by
-  cases x; cases y; subst ha hb hc hd; rfl
+theorem Fp5.ext {x y : Fp5}
+    (h0 : x.c0 = y.c0) (h1 : x.c1 = y.c1) (h2 : x.c2 = y.c2)
+    (h3 : x.c3 = y.c3) (h4 : x.c4 = y.c4) : x = y := by
+  cases x; cases y; subst h0 h1 h2 h3 h4; rfl
 
-instance : DecidableEq Ext4 := fun x y =>
-  match decEq x.a y.a with
-  | isFalse h => isFalse (fun e => h (congrArg Ext4.a e))
-  | isTrue ha =>
-    match decEq x.b y.b with
-    | isFalse h => isFalse (fun e => h (congrArg Ext4.b e))
-    | isTrue hb =>
-      match decEq x.c y.c with
-      | isFalse h => isFalse (fun e => h (congrArg Ext4.c e))
-      | isTrue hc =>
-        match decEq x.d y.d with
-        | isFalse h => isFalse (fun e => h (congrArg Ext4.d e))
-        | isTrue hd => isTrue (Ext4.ext ha hb hc hd)
+instance : DecidableEq Fp5 := fun x y =>
+  match decEq x.c0 y.c0 with
+  | isFalse h => isFalse (fun e => h (congrArg Fp5.c0 e))
+  | isTrue h0 =>
+    match decEq x.c1 y.c1 with
+    | isFalse h => isFalse (fun e => h (congrArg Fp5.c1 e))
+    | isTrue h1 =>
+      match decEq x.c2 y.c2 with
+      | isFalse h => isFalse (fun e => h (congrArg Fp5.c2 e))
+      | isTrue h2 =>
+        match decEq x.c3 y.c3 with
+        | isFalse h => isFalse (fun e => h (congrArg Fp5.c3 e))
+        | isTrue h3 =>
+          match decEq x.c4 y.c4 with
+          | isFalse h => isFalse (fun e => h (congrArg Fp5.c4 e))
+          | isTrue h4 => isTrue (Fp5.ext h0 h1 h2 h3 h4)
 
 @[ext]
-theorem MerklePair.ext {x y : MerklePair}
-    (ht : x.tag = y.tag) (hl : x.left = y.left) (hr : x.right = y.right) : x = y := by
-  cases x; cases y; subst ht hl hr; rfl
+theorem MerklePair400.ext {x y : MerklePair400}
+    (hl : x.left = y.left) (hr : x.right = y.right) : x = y := by
+  cases x; cases y; subst hl hr; rfl
 
-instance : DecidableEq MerklePair := fun x y =>
-  match decEq x.tag y.tag with
-  | isFalse h => isFalse (fun e => h (congrArg MerklePair.tag e))
-  | isTrue ht =>
-    match decEq x.left y.left with
-    | isFalse h => isFalse (fun e => h (congrArg MerklePair.left e))
-    | isTrue hl =>
-      match decEq x.right y.right with
-      | isFalse h => isFalse (fun e => h (congrArg MerklePair.right e))
-      | isTrue hr => isTrue (MerklePair.ext ht hl hr)
+instance : DecidableEq MerklePair400 := fun x y =>
+  match decEq x.left y.left with
+  | isFalse h => isFalse (fun e => h (congrArg MerklePair400.left e))
+  | isTrue hl =>
+    match decEq x.right y.right with
+    | isFalse h => isFalse (fun e => h (congrArg MerklePair400.right e))
+    | isTrue hr => isTrue (MerklePair400.ext hl hr)
+
+@[ext]
+theorem Gl24Digest.ext {x y : Gl24Digest}
+    (h0 : x.l0 = y.l0) (h1 : x.l1 = y.l1) (h2 : x.l2 = y.l2) (h3 : x.l3 = y.l3)
+    (h4 : x.l4 = y.l4) (h5 : x.l5 = y.l5) (h6 : x.l6 = y.l6) : x = y := by
+  cases x; cases y; subst h0 h1 h2 h3 h4 h5 h6; rfl
+
+instance : DecidableEq Gl24Digest := fun x y =>
+  match decEq x.l0 y.l0 with
+  | isFalse h => isFalse (fun e => h (congrArg Gl24Digest.l0 e))
+  | isTrue h0 =>
+    match decEq x.l1 y.l1 with
+    | isFalse h => isFalse (fun e => h (congrArg Gl24Digest.l1 e))
+    | isTrue h1 =>
+      match decEq x.l2 y.l2 with
+      | isFalse h => isFalse (fun e => h (congrArg Gl24Digest.l2 e))
+      | isTrue h2 =>
+        match decEq x.l3 y.l3 with
+        | isFalse h => isFalse (fun e => h (congrArg Gl24Digest.l3 e))
+        | isTrue h3 =>
+          match decEq x.l4 y.l4 with
+          | isFalse h => isFalse (fun e => h (congrArg Gl24Digest.l4 e))
+          | isTrue h4 =>
+            match decEq x.l5 y.l5 with
+            | isFalse h => isFalse (fun e => h (congrArg Gl24Digest.l5 e))
+            | isTrue h5 =>
+              match decEq x.l6 y.l6 with
+              | isFalse h => isFalse (fun e => h (congrArg Gl24Digest.l6 e))
+              | isTrue h6 => isTrue (Gl24Digest.ext h0 h1 h2 h3 h4 h5 h6)
+
+@[ext]
+theorem MerklePairGl24.ext {x y : MerklePairGl24}
+    (hl : x.left = y.left) (hr : x.right = y.right) : x = y := by
+  cases x; cases y; subst hl hr; rfl
+
+instance : DecidableEq MerklePairGl24 := fun x y =>
+  match decEq x.left y.left with
+  | isFalse h => isFalse (fun e => h (congrArg MerklePairGl24.left e))
+  | isTrue hl =>
+    match decEq x.right y.right with
+    | isFalse h => isFalse (fun e => h (congrArg MerklePairGl24.right e))
+    | isTrue hr => isTrue (MerklePairGl24.ext hl hr)
+
+@[ext]
+theorem Qsaghqm2Header.ext {x y : Qsaghqm2Header}
+    (hp : x.profile_tag = y.profile_tag)
+    (ha : x.active_signers = y.active_signers)
+    (hl : x.payload_len = y.payload_len) : x = y := by
+  cases x; cases y; subst hp ha hl; rfl
+
+instance : DecidableEq Qsaghqm2Header := fun x y =>
+  match decEq x.profile_tag y.profile_tag with
+  | isFalse h => isFalse (fun e => h (congrArg Qsaghqm2Header.profile_tag e))
+  | isTrue hp =>
+    match decEq x.active_signers y.active_signers with
+    | isFalse h => isFalse (fun e => h (congrArg Qsaghqm2Header.active_signers e))
+    | isTrue ha =>
+      match decEq x.payload_len y.payload_len with
+      | isFalse h => isFalse (fun e => h (congrArg Qsaghqm2Header.payload_len e))
+      | isTrue hl => isTrue (Qsaghqm2Header.ext hp ha hl)
 
 end qsag_whir_verified
 
@@ -61,13 +121,58 @@ theorem max_u64_word_val : MAX_U64_WORD.val = 18446744073709551615 := by
   simp only [MAX_U64_WORD.public_eqs]
   rfl
 
-theorem tag_canopy_merkle_internal_eq : TAG_CANOPY_MERKLE_INTERNAL = 0#u8 := by
-  simp only [TAG_CANOPY_MERKLE_INTERNAL.public_eqs]
+theorem fp5_nonresidue_w_val : FP5_NONRESIDUE_W = 3#u64 := by
+  simp only [FP5_NONRESIDUE_W.public_eqs]
+
+theorem frobenius_zeta5_1_val : FROBENIUS_ZETA5_1 = 1041288259238279555#u64 := by
+  simp only [FROBENIUS_ZETA5_1.public_eqs]
+
+theorem frobenius_zeta5_2_val : FROBENIUS_ZETA5_2 = 15820824984080659046#u64 := by
+  simp only [FROBENIUS_ZETA5_2.public_eqs]
+
+theorem frobenius_zeta5_3_val : FROBENIUS_ZETA5_3 = 211587555138949697#u64 := by
+  simp only [FROBENIUS_ZETA5_3.public_eqs]
+
+theorem frobenius_zeta5_4_val : FROBENIUS_ZETA5_4 = 1373043270956696022#u64 := by
+  simp only [FROBENIUS_ZETA5_4.public_eqs]
+
+theorem qsaghqm2_profile_turbo400_val : QSAGHQM2_PROFILE_TURBO400 = 1#u8 := by
+  simp only [QSAGHQM2_PROFILE_TURBO400.public_eqs]
+
+theorem qsaghqm2_profile_gl24_val : QSAGHQM2_PROFILE_GL24 = 2#u8 := by
+  simp only [QSAGHQM2_PROFILE_GL24.public_eqs]
+
+theorem min_quintic_log_cells_val : MIN_QUINTIC_LOG_CELLS = 16#u32 := by
+  simp only [MIN_QUINTIC_LOG_CELLS.public_eqs]
+
+theorem max_quintic_log_cells_val : MAX_QUINTIC_LOG_CELLS = 28#u32 := by
+  simp only [MAX_QUINTIC_LOG_CELLS.public_eqs]
+
+theorem max_canopy_log_leaves_val : MAX_CANOPY_LOG_LEAVES = 28#u32 := by
+  simp only [MAX_CANOPY_LOG_LEAVES.public_eqs]
+
+theorem copy_fp5_spec (x : Fp5) : copy_fp5 x = .ok x := by
+  simp only [copy_fp5.public_eqs]
 
 abbrev IsCanonical (x : U64) : Prop := x.val < 18446744069414584321
 
-abbrev IsCanonicalExt4 (x : Ext4) : Prop :=
-  IsCanonical x.a ∧ IsCanonical x.b ∧ IsCanonical x.c ∧ IsCanonical x.d
+abbrev IsCanonicalFp5 (x : Fp5) : Prop :=
+  IsCanonical x.c0 ∧ IsCanonical x.c1 ∧ IsCanonical x.c2 ∧ IsCanonical x.c3 ∧ IsCanonical x.c4
+
+abbrev IsCanonicalGl24 (d : Gl24Digest) : Prop :=
+  IsCanonical d.l0 ∧ IsCanonical d.l1 ∧ IsCanonical d.l2 ∧ IsCanonical d.l3 ∧
+  IsCanonical d.l4 ∧ IsCanonical d.l5 ∧ IsCanonical d.l6
+
+/-- Pure little-endian 8-byte word assembly at byte offset `off`. -/
+@[expose] def lePackU64At (bs : List U8) (off : Nat) : U64 :=
+  ⟨(UScalar.cast .U64 (bs.getD off 0#u8)).bv |||
+    ((UScalar.cast .U64 (bs.getD (off + 1) 0#u8)).bv <<< 8) |||
+    ((UScalar.cast .U64 (bs.getD (off + 2) 0#u8)).bv <<< 16) |||
+    ((UScalar.cast .U64 (bs.getD (off + 3) 0#u8)).bv <<< 24) |||
+    ((UScalar.cast .U64 (bs.getD (off + 4) 0#u8)).bv <<< 32) |||
+    ((UScalar.cast .U64 (bs.getD (off + 5) 0#u8)).bv <<< 40) |||
+    ((UScalar.cast .U64 (bs.getD (off + 6) 0#u8)).bv <<< 48) |||
+    ((UScalar.cast .U64 (bs.getD (off + 7) 0#u8)).bv <<< 56)⟩
 
 /-! ## Scalar Width-Cast and Checked `U128` Arithmetic Lemmas -/
 
@@ -144,22 +249,23 @@ theorem mul_modular_spec (a b : U64) :
   obtain ⟨hs, hv⟩ := u128_mul_ok (a := UScalar.cast .U128 a) (b := UScalar.cast .U128 b)
     (by
       rw [ha, hb]
-      have hh := Nat.mul_lt_mul'' (show a.val < 2^64 from a.bv.isLt) (show b.val < 2^64 from b.bv.isLt)
-      exact hh)
+      exact Nat.lt_of_lt_of_eq (Nat.mul_lt_mul'' a.bv.isLt b.bv.isLt) (by decide))
   obtain ⟨r, hr, hrv⟩ := reduce_wide ⟨(UScalar.cast .U128 a).bv * (UScalar.cast .U128 b).bv⟩
   refine ⟨UScalar.cast .U64 r, ?_, ?_⟩
   · simp only [mul.public_eqs, lift_eq_ok, bind_eq_result_bind, Result.bind, hs, hr]
   · rw [hrv, hv, ha, hb]
 
 private theorem reduce_limb (b : U64) :
-    ∃ bm : U64, (b % GOLDILOCKS_P : Result U64) = .ok bm ∧
-      bm.val = b.val % 18446744069414584321 := by
+    (b % GOLDILOCKS_P : Result U64) = .ok (UScalar.ofNat .U64 (b.val % 18446744069414584321)) := by
   have hp : GOLDILOCKS_P.val = 18446744069414584321 := goldilocks_p_val
-  refine ⟨⟨b.bv % GOLDILOCKS_P.bv⟩, ?_, ?_⟩
-  · simp only [hMod_uscalar_eq, hp]; rfl
-  · change (b.bv % GOLDILOCKS_P.bv).toNat = _
-    rw [BitVec.toNat_umod]
-    exact congrArg (b.val % ·) hp
+  have hne : ¬(18446744069414584321 = 0) := by decide
+  simp only [hMod_uscalar_eq, hp, hne, ↓reduceIte, Result.ok.injEq]
+  apply UScalar.eq_of_val_eq
+  change (b.bv % GOLDILOCKS_P.bv).toNat = _
+  rw [BitVec.toNat_umod]
+  change b.val % GOLDILOCKS_P.val = _
+  rw [hp, UScalar.val_ofNat]
+  exact (Nat.mod_eq_of_lt (Nat.lt_trans (Nat.mod_lt _ (by decide)) (by decide))).symm
 
 private theorem subtract_limb (a b : U64) (h : b.val ≤ a.val) :
     ∃ r, (a - b : Result U64) = .ok r ∧ r.val = a.val - b.val := by
@@ -171,7 +277,11 @@ theorem sub_modular_spec (a b : U64) :
     ∃ r, sub a b = .ok r ∧ r.val =
       (a.val + (18446744069414584321 - b.val % 18446744069414584321)) % 18446744069414584321 := by
   have hp : GOLDILOCKS_P.val = 18446744069414584321 := goldilocks_p_val
-  obtain ⟨bm, hr, hbm⟩ := reduce_limb b
+  let bm : U64 := UScalar.ofNat .U64 (b.val % 18446744069414584321)
+  have hr : (b % GOLDILOCKS_P : Result U64) = .ok bm := reduce_limb b
+  have hbm : bm.val = b.val % 18446744069414584321 := by
+    dsimp only [bm]; rw [UScalar.val_ofNat]
+    exact Nat.mod_eq_of_lt (Nat.lt_trans (Nat.mod_lt _ (by decide)) (by decide))
   obtain ⟨neg, hn, hnv⟩ := subtract_limb GOLDILOCKS_P bm (by
     rw [hp, hbm]
     exact Nat.le_of_lt (Nat.mod_lt _ (by decide)))
@@ -262,7 +372,6 @@ private theorem modP_val (z : Int) :
     (modP z).val = (z % (18446744069414584321 : Int)).toNat := by
   unfold modP
   rw [UScalar.val_ofNat]
-  have hnn : 0 ≤ z % (18446744069414584321 : Int) := Int.emod_nonneg z (by decide)
   have hlt : z % (18446744069414584321 : Int) < 18446744069414584321 :=
     Int.emod_lt_of_pos z (by decide)
   have hnat : (z % (18446744069414584321 : Int)).toNat < 2 ^ 64 := by omega
@@ -363,7 +472,7 @@ private theorem modP_mul_right (x y : Int) :
 
 /-- Constructive sorted sum-of-monomials (`SOP`) normalizer over `Int` using strictly
     single-argument structural recursion on `List` so `FExpr.norm` reduces by kernel WHNF (`rfl`)
-    with `0 Classical.choice` and `0 WellFounded.fix`. -/
+    with `0` choice and `0` well-founded recursion. -/
 private abbrev Mono := List Nat
 
 private def evalMono (env : Nat → Int) : Mono → Int
@@ -443,8 +552,7 @@ private theorem evalSOP_sopInsert (env : Nat → Int) (c : Int) (m : Mono) :
           omega
       · simp only [hmn, ↓reduceIte]
         cases hlt : monoLt m n with
-        | true =>
-          simp only [↓reduceIte, evalSOP]
+        | true => simp only [↓reduceIte, evalSOP]
         | false =>
           simp only [Bool.false_eq_true, ↓reduceIte, evalSOP, evalSOP_sopInsert env c m rest]
           omega
@@ -506,15 +614,15 @@ private theorem modP_emod (z : Int) :
   apply UScalar.eq_of_val_eq
   rw [modP_val, modP_val, Int.emod_emod]
 
-/-- Small canonical field constants (`0`, `1`, `2`, `7`) so `FExpr.norm` never touches `BitVec`. -/
+/-- Small canonical field constants (`0`, `1`, `2`, `3`) for `F_p[X]/(X^5 - 3)`. -/
 private inductive FConst where
-  | c0 | c1 | c2 | c7
+  | c0 | c1 | c2 | c3
 
 private def FConst.toU64 : FConst → U64
-  | .c0 => 0#u64 | .c1 => 1#u64 | .c2 => 2#u64 | .c7 => 7#u64
+  | .c0 => 0#u64 | .c1 => 1#u64 | .c2 => 2#u64 | .c3 => 3#u64
 
 private def FConst.toInt : FConst → Int
-  | .c0 => 0 | .c1 => 1 | .c2 => 2 | .c7 => 7
+  | .c0 => 0 | .c1 => 1 | .c2 => 2 | .c3 => 3
 
 private theorem FConst.toZ_toU64 (k : FConst) : toZ k.toU64 = k.toInt := by
   cases k <;> rfl
@@ -523,7 +631,6 @@ private theorem FConst.canonical (k : FConst) : IsCanonical k.toU64 := by
   unfold FConst.toU64 IsCanonical
   cases k <;> decide
 
-/-- Syntactic ring expressions over `U64` variables evaluated directly in `fieldAdd/Sub/Mul` and `Int`. -/
 private inductive FExpr where
   | const : FConst → FExpr
   | var : Nat → FExpr
@@ -614,20 +721,9 @@ private theorem FExpr.evalF_eq_of_norm (env : Nat → U64) (lhs rhs : FExpr)
   rw [FExpr.evalF_eq_modP env lhs hl, FExpr.evalF_eq_modP env rhs hr,
       ← FExpr.evalSOP_norm env lhs, ← FExpr.evalSOP_norm env rhs, h]
 
-/-! ### Simp Normalization of `fieldAdd` / `fieldSub` / `fieldMul` into `modP` -/
-
 private theorem toZ_zero : toZ 0#u64 = 0 := rfl
 private theorem toZ_one : toZ 1#u64 = 1 := rfl
-private theorem toZ_two : toZ 2#u64 = 2 := rfl
-private theorem toZ_seven : toZ 7#u64 = 7 := rfl
-
 private theorem modP_zero : modP 0 = 0#u64 := by
-  apply UScalar.eq_of_val_eq; rw [modP_val]; rfl
-
-private theorem modP_one : modP 1 = 1#u64 := by
-  apply UScalar.eq_of_val_eq; rw [modP_val]; rfl
-
-private theorem modP_seven : modP 7 = 7#u64 := by
   apply UScalar.eq_of_val_eq; rw [modP_val]; rfl
 
 private theorem fieldAdd_modP_left (x : Int) (b : U64) :
@@ -662,11 +758,7 @@ private theorem fieldMul_modP_right (a : U64) (y : Int) :
     fieldMul a (modP y) = modP (toZ a * y) := by
   rw [fieldMul_eq_modP, toZ_modP, modP_mul_right]
 
-private theorem fieldMul_modP_both (x y : Int) :
-    fieldMul (modP x) (modP y) = modP (x * y) := by
-  rw [fieldMul_eq_modP, toZ_modP, toZ_modP, modP_mul_left, modP_mul_right]
-
-/-! ### Exported Goldilocks Commutative Ring Theorems -/
+/-! ### Exported Goldilocks Commutative Ring & Frobenius Root Theorems -/
 
 theorem fieldAdd_comm (a b : U64) : fieldAdd a b = fieldAdd b a := by
   rw [fieldAdd_eq_modP, fieldAdd_eq_modP, Int.add_comm]
@@ -731,334 +823,376 @@ theorem sub_fieldMul (a b c : U64) :
     fieldMul (fieldSub a b) c = fieldSub (fieldMul a c) (fieldMul b c) := by
   rw [fieldSub_eq_modP, fieldMul_modP_left, fieldMul_eq_modP, fieldMul_eq_modP, fieldSub_modP_both, Int.sub_mul]
 
+private theorem eval_fieldMul_const (a b c : U64)
+    (h : (a.val * b.val) % 18446744069414584321 = c.val) : fieldMul a b = c :=
+  UScalar.eq_of_val_eq ((fieldMul_val a b).trans h)
+
+/-- Exact multiplicative fifth-root-of-unity relations among `FROBENIUS_ZETA5_1..4`. -/
+theorem zeta5_powers_spec :
+    fieldMul FROBENIUS_ZETA5_1 FROBENIUS_ZETA5_1 = FROBENIUS_ZETA5_2 ∧
+    fieldMul FROBENIUS_ZETA5_2 FROBENIUS_ZETA5_1 = FROBENIUS_ZETA5_3 ∧
+    fieldMul FROBENIUS_ZETA5_3 FROBENIUS_ZETA5_1 = FROBENIUS_ZETA5_4 ∧
+    fieldMul FROBENIUS_ZETA5_4 FROBENIUS_ZETA5_1 = 1#u64 := by
+  rw [frobenius_zeta5_1_val, frobenius_zeta5_2_val, frobenius_zeta5_3_val, frobenius_zeta5_4_val]
+  exact ⟨eval_fieldMul_const _ _ _ (by decide),
+         eval_fieldMul_const _ _ _ (by decide),
+         eval_fieldMul_const _ _ _ (by decide),
+         eval_fieldMul_const _ _ _ (by decide)⟩
+
 attribute [irreducible] fieldAdd fieldSub fieldMul
 
-/-! ## Quartic Extension Ring `Ext4 = F_p[u] / (u^4 - 7)` -/
+/-! ## Quintic Extension Ring `Fp5 = F_p[X] / (X^5 - 3)` -/
 
-@[expose] def extZero : Ext4 := ⟨0#u64, 0#u64, 0#u64, 0#u64⟩
-@[expose] def extOne : Ext4 := ⟨1#u64, 0#u64, 0#u64, 0#u64⟩
-def extU : Ext4 := ⟨0#u64, 1#u64, 0#u64, 0#u64⟩
-def extSeven : Ext4 := ⟨7#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5Zero : Fp5 := ⟨0#u64, 0#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5One : Fp5 := ⟨1#u64, 0#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5FromBase (x : U64) : Fp5 :=
+  ⟨UScalar.ofNat .U64 (x.val % 18446744069414584321), 0#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5X : Fp5 := ⟨0#u64, 1#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5Three : Fp5 := ⟨3#u64, 0#u64, 0#u64, 0#u64, 0#u64⟩
 
-@[expose] def extAdd (x y : Ext4) : Ext4 :=
-  ⟨fieldAdd x.a y.a, fieldAdd x.b y.b, fieldAdd x.c y.c, fieldAdd x.d y.d⟩
+@[expose] def fp5Add (x y : Fp5) : Fp5 :=
+  ⟨fieldAdd x.c0 y.c0, fieldAdd x.c1 y.c1, fieldAdd x.c2 y.c2, fieldAdd x.c3 y.c3, fieldAdd x.c4 y.c4⟩
 
-@[expose] def extSub (x y : Ext4) : Ext4 :=
-  ⟨fieldSub x.a y.a, fieldSub x.b y.b, fieldSub x.c y.c, fieldSub x.d y.d⟩
+@[expose] def fp5Sub (x y : Fp5) : Fp5 :=
+  ⟨fieldSub x.c0 y.c0, fieldSub x.c1 y.c1, fieldSub x.c2 y.c2, fieldSub x.c3 y.c3, fieldSub x.c4 y.c4⟩
 
-@[expose] def extScale (x : Ext4) (s : U64) : Ext4 :=
-  ⟨fieldMul x.a s, fieldMul x.b s, fieldMul x.c s, fieldMul x.d s⟩
+abbrev fp5Neg (x : Fp5) : Fp5 := fp5Sub fp5Zero x
 
-/-- Multiplication in polynomial basis `[1, u, u^2, u^3]` modulo `u^4 - 7`. -/
-@[expose] def extMul (x y : Ext4) : Ext4 :=
-  ⟨fieldAdd (fieldMul x.a y.a) (fieldMul 7#u64 (fieldAdd (fieldAdd (fieldMul x.b y.d) (fieldMul x.c y.c)) (fieldMul x.d y.b))),
-   fieldAdd (fieldAdd (fieldMul x.a y.b) (fieldMul x.b y.a)) (fieldMul 7#u64 (fieldAdd (fieldMul x.c y.d) (fieldMul x.d y.c))),
-   fieldAdd (fieldAdd (fieldAdd (fieldMul x.a y.c) (fieldMul x.b y.b)) (fieldMul x.c y.a)) (fieldMul 7#u64 (fieldMul x.d y.d)),
-   fieldAdd (fieldAdd (fieldMul x.a y.d) (fieldMul x.b y.c)) (fieldAdd (fieldMul x.c y.b) (fieldMul x.d y.a))⟩
+@[expose] def fp5Scale (x : Fp5) (s : U64) : Fp5 :=
+  ⟨fieldMul x.c0 s, fieldMul x.c1 s, fieldMul x.c2 s, fieldMul x.c3 s, fieldMul x.c4 s⟩
 
-theorem ext_add_refines (x y : Ext4) : ext_add x y = .ok (extAdd x y) := by
-  simp [ext_add.public_eqs, extAdd, add_refines, Result.bind]
+/-- Multiplication in power basis `[1, X, X^2, X^3, X^4]` modulo `X^5 - 3`. -/
+@[expose] def fp5Mul (x y : Fp5) : Fp5 :=
+  ⟨fieldAdd (fieldMul x.c0 y.c0)
+     (fieldMul 3#u64
+       (fieldAdd (fieldAdd (fieldMul x.c1 y.c4) (fieldMul x.c2 y.c3))
+                 (fieldAdd (fieldMul x.c3 y.c2) (fieldMul x.c4 y.c1)))),
+   fieldAdd (fieldAdd (fieldMul x.c0 y.c1) (fieldMul x.c1 y.c0))
+     (fieldMul 3#u64
+       (fieldAdd (fieldAdd (fieldMul x.c2 y.c4) (fieldMul x.c3 y.c3))
+                 (fieldMul x.c4 y.c2))),
+   fieldAdd (fieldAdd (fieldAdd (fieldMul x.c0 y.c2) (fieldMul x.c1 y.c1)) (fieldMul x.c2 y.c0))
+     (fieldMul 3#u64 (fieldAdd (fieldMul x.c3 y.c4) (fieldMul x.c4 y.c3))),
+   fieldAdd (fieldAdd (fieldAdd (fieldMul x.c0 y.c3) (fieldMul x.c1 y.c2))
+                      (fieldAdd (fieldMul x.c2 y.c1) (fieldMul x.c3 y.c0)))
+     (fieldMul 3#u64 (fieldMul x.c4 y.c4)),
+   fieldAdd (fieldAdd (fieldAdd (fieldMul x.c0 y.c4) (fieldMul x.c1 y.c3))
+                      (fieldAdd (fieldMul x.c2 y.c2) (fieldMul x.c3 y.c1)))
+     (fieldMul x.c4 y.c0)⟩
 
-theorem ext_sub_refines (x y : Ext4) : ext_sub x y = .ok (extSub x y) := by
-  simp [ext_sub.public_eqs, extSub, sub_refines, Result.bind]
+/-- Pure Frobenius endomorphism `x ↦ x^p` (`c_i ↦ ζ_5^i · c_i mod p`). -/
+@[expose] def fp5Frob (x : Fp5) : Fp5 :=
+  ⟨UScalar.ofNat .U64 (x.c0.val % 18446744069414584321),
+   fieldMul x.c1 1041288259238279555#u64,
+   fieldMul x.c2 15820824984080659046#u64,
+   fieldMul x.c3 211587555138949697#u64,
+   fieldMul x.c4 1373043270956696022#u64⟩
 
-theorem ext_scale_refines (x : Ext4) (y : U64) : ext_scale x y = .ok (extScale x y) := by
-  simp [ext_scale.public_eqs, extScale, mul_refines, Result.bind]
+theorem fp5_zero_refines : fp5_zero = .ok fp5Zero := by
+  simp only [fp5_zero.public_eqs]
 
-theorem ext_mul_refines (x y : Ext4) : ext_mul x y = .ok (extMul x y) := by
-  simp [ext_mul.public_eqs, extMul, mul_refines, add_refines, Result.bind]
+theorem fp5_one_refines : fp5_one = .ok fp5One := by
+  simp only [fp5_one.public_eqs]
 
-theorem affine_combine_refines (even odd alpha : Ext4) :
-    affine_combine even odd alpha = .ok (extAdd odd (extMul alpha even)) := by
-  simp [affine_combine.public_eqs, ext_mul_refines, ext_add_refines, Result.bind]
+theorem fp5_from_base_refines (x : U64) : fp5_from_base x = .ok (fp5FromBase x) := by
+  simp only [fp5_from_base.public_eqs, reduce_limb, bind_eq_result_bind, result_bind_ok]
 
-theorem extAdd_canonical (x y : Ext4) : IsCanonicalExt4 (extAdd x y) :=
-  ⟨fieldAdd_canonical _ _, fieldAdd_canonical _ _, fieldAdd_canonical _ _, fieldAdd_canonical _ _⟩
+theorem fp5_add_refines (x y : Fp5) : fp5_add x y = .ok (fp5Add x y) := by
+  simp [fp5_add.public_eqs, fp5Add, add_refines, Result.bind]
 
-theorem extSub_canonical (x y : Ext4) : IsCanonicalExt4 (extSub x y) :=
-  ⟨fieldSub_canonical _ _, fieldSub_canonical _ _, fieldSub_canonical _ _, fieldSub_canonical _ _⟩
+theorem fp5_sub_refines (x y : Fp5) : fp5_sub x y = .ok (fp5Sub x y) := by
+  simp [fp5_sub.public_eqs, fp5Sub, sub_refines, Result.bind]
 
-theorem extScale_canonical (x : Ext4) (s : U64) : IsCanonicalExt4 (extScale x s) :=
-  ⟨fieldMul_canonical _ _, fieldMul_canonical _ _, fieldMul_canonical _ _, fieldMul_canonical _ _⟩
+theorem fp5_neg_refines (x : Fp5) : fp5_neg x = .ok (fp5Neg x) := by
+  simp [fp5_neg.public_eqs, fp5_zero_refines, fp5_sub_refines, Result.bind]
 
-theorem extMul_canonical (x y : Ext4) : IsCanonicalExt4 (extMul x y) :=
-  ⟨fieldAdd_canonical _ _, fieldAdd_canonical _ _, fieldAdd_canonical _ _, fieldAdd_canonical _ _⟩
+theorem fp5_scale_refines (x : Fp5) (s : U64) : fp5_scale x s = .ok (fp5Scale x s) := by
+  simp [fp5_scale.public_eqs, fp5Scale, mul_refines, Result.bind]
 
-/-! ### Syntactic Lifting of `Ext4` Expressions into 4-Tuple `FExpr` -/
+theorem fp5_mul_refines (x y : Fp5) : fp5_mul x y = .ok (fp5Mul x y) := by
+  simp [fp5_mul.public_eqs, fp5_nonresidue_w_val, fp5Mul, mul_refines, add_refines, Result.bind]
 
-private structure Ext4Expr where
-  a : FExpr
-  b : FExpr
-  c : FExpr
-  d : FExpr
+theorem fp5_frobenius_refines (x : Fp5) : fp5_frobenius x = .ok (fp5Frob x) := by
+  simp only [fp5_frobenius.public_eqs, reduce_limb, frobenius_zeta5_1_val, frobenius_zeta5_2_val,
+    frobenius_zeta5_3_val, frobenius_zeta5_4_val, fp5Frob, mul_refines, bind_eq_result_bind, Result.bind]
 
-private def Ext4Expr.var4 (base : Nat) : Ext4Expr :=
-  ⟨.var base, .var (base + 1), .var (base + 2), .var (base + 3)⟩
+theorem affine_combine_fp5_refines (even odd alpha : Fp5) :
+    affine_combine_fp5 even odd alpha = .ok (fp5Add odd (fp5Mul alpha even)) := by
+  simp [affine_combine_fp5.public_eqs, fp5_mul_refines, fp5_add_refines, Result.bind]
 
-private def Ext4Expr.add (x y : Ext4Expr) : Ext4Expr :=
-  ⟨.add x.a y.a, .add x.b y.b, .add x.c y.c, .add x.d y.d⟩
+theorem fp5Add_canonical (x y : Fp5) : IsCanonicalFp5 (fp5Add x y) :=
+  ⟨fieldAdd_canonical _ _, fieldAdd_canonical _ _, fieldAdd_canonical _ _,
+   fieldAdd_canonical _ _, fieldAdd_canonical _ _⟩
 
-private def Ext4Expr.sub (x y : Ext4Expr) : Ext4Expr :=
-  ⟨.sub x.a y.a, .sub x.b y.b, .sub x.c y.c, .sub x.d y.d⟩
+theorem fp5Sub_canonical (x y : Fp5) : IsCanonicalFp5 (fp5Sub x y) :=
+  ⟨fieldSub_canonical _ _, fieldSub_canonical _ _, fieldSub_canonical _ _,
+   fieldSub_canonical _ _, fieldSub_canonical _ _⟩
 
-private def Ext4Expr.mul (x y : Ext4Expr) : Ext4Expr :=
-  let seven := FExpr.const .c7
-  ⟨.add (.mul x.a y.a) (.mul seven (.add (.add (.mul x.b y.d) (.mul x.c y.c)) (.mul x.d y.b))),
-   .add (.add (.mul x.a y.b) (.mul x.b y.a)) (.mul seven (.add (.mul x.c y.d) (.mul x.d y.c))),
-   .add (.add (.add (.mul x.a y.c) (.mul x.b y.b)) (.mul x.c y.a)) (.mul seven (.mul x.d y.d)),
-   .add (.add (.mul x.a y.d) (.mul x.b y.c)) (.add (.mul x.c y.b) (.mul x.d y.a))⟩
+theorem fp5Scale_canonical (x : Fp5) (s : U64) : IsCanonicalFp5 (fp5Scale x s) :=
+  ⟨fieldMul_canonical _ _, fieldMul_canonical _ _, fieldMul_canonical _ _,
+   fieldMul_canonical _ _, fieldMul_canonical _ _⟩
 
-private def Ext4Expr.evalF (env : Nat → U64) (e : Ext4Expr) : Ext4 :=
-  ⟨e.a.evalF env, e.b.evalF env, e.c.evalF env, e.d.evalF env⟩
+theorem fp5Mul_canonical (x y : Fp5) : IsCanonicalFp5 (fp5Mul x y) :=
+  ⟨fieldAdd_canonical _ _, fieldAdd_canonical _ _, fieldAdd_canonical _ _,
+   fieldAdd_canonical _ _, fieldAdd_canonical _ _⟩
 
-private def Ext4Expr.wf (env : Nat → U64) (e : Ext4Expr) : Prop :=
-  e.a.wf env ∧ e.b.wf env ∧ e.c.wf env ∧ e.d.wf env
+theorem fp5Frob_canonical (x : Fp5) : IsCanonicalFp5 (fp5Frob x) := by
+  refine ⟨?_, fieldMul_canonical _ _, fieldMul_canonical _ _,
+    fieldMul_canonical _ _, fieldMul_canonical _ _⟩
+  dsimp only [fp5Frob]
+  rw [IsCanonical, canonical_ofNat]
+  exact Nat.mod_lt _ (by decide)
 
-private theorem Ext4Expr.eq_of_norm (env : Nat → U64) (lhs rhs : Ext4Expr)
+theorem fp5Frob_pow5_id {x : Fp5} (hx : IsCanonicalFp5 x) :
+    fp5Frob (fp5Frob (fp5Frob (fp5Frob (fp5Frob x)))) = x := by
+  rcases hx with ⟨h0, h1, h2, h3, h4⟩
+  have hc0 : ∀ {u : U64}, IsCanonical u → UScalar.ofNat .U64 (u.val % 18446744069414584321) = u := by
+    intro u hu
+    apply UScalar.eq_of_val_eq
+    rw [canonical_ofNat, Nat.mod_eq_of_lt hu]
+  have hp1 : fieldMul (fieldMul (fieldMul (fieldMul 1041288259238279555#u64 1041288259238279555#u64)
+      1041288259238279555#u64) 1041288259238279555#u64) 1041288259238279555#u64 = 1#u64 := by
+    rw [eval_fieldMul_const 1041288259238279555#u64 1041288259238279555#u64 15820824984080659046#u64 (by decide)]
+    rw [eval_fieldMul_const 15820824984080659046#u64 1041288259238279555#u64 211587555138949697#u64 (by decide)]
+    rw [eval_fieldMul_const 211587555138949697#u64 1041288259238279555#u64 1373043270956696022#u64 (by decide)]
+    exact eval_fieldMul_const 1373043270956696022#u64 1041288259238279555#u64 1#u64 (by decide)
+  have hp2 : fieldMul (fieldMul (fieldMul (fieldMul 15820824984080659046#u64 15820824984080659046#u64)
+      15820824984080659046#u64) 15820824984080659046#u64) 15820824984080659046#u64 = 1#u64 := by
+    rw [eval_fieldMul_const 15820824984080659046#u64 15820824984080659046#u64 1373043270956696022#u64 (by decide)]
+    rw [eval_fieldMul_const 1373043270956696022#u64 15820824984080659046#u64 1041288259238279555#u64 (by decide)]
+    rw [eval_fieldMul_const 1041288259238279555#u64 15820824984080659046#u64 211587555138949697#u64 (by decide)]
+    exact eval_fieldMul_const 211587555138949697#u64 15820824984080659046#u64 1#u64 (by decide)
+  have hp3 : fieldMul (fieldMul (fieldMul (fieldMul 211587555138949697#u64 211587555138949697#u64)
+      211587555138949697#u64) 211587555138949697#u64) 211587555138949697#u64 = 1#u64 := by
+    rw [eval_fieldMul_const 211587555138949697#u64 211587555138949697#u64 1041288259238279555#u64 (by decide)]
+    rw [eval_fieldMul_const 1041288259238279555#u64 211587555138949697#u64 1373043270956696022#u64 (by decide)]
+    rw [eval_fieldMul_const 1373043270956696022#u64 211587555138949697#u64 15820824984080659046#u64 (by decide)]
+    exact eval_fieldMul_const 15820824984080659046#u64 211587555138949697#u64 1#u64 (by decide)
+  have hp4 : fieldMul (fieldMul (fieldMul (fieldMul 1373043270956696022#u64 1373043270956696022#u64)
+      1373043270956696022#u64) 1373043270956696022#u64) 1373043270956696022#u64 = 1#u64 := by
+    rw [eval_fieldMul_const 1373043270956696022#u64 1373043270956696022#u64 211587555138949697#u64 (by decide)]
+    rw [eval_fieldMul_const 211587555138949697#u64 1373043270956696022#u64 15820824984080659046#u64 (by decide)]
+    rw [eval_fieldMul_const 15820824984080659046#u64 1373043270956696022#u64 1041288259238279555#u64 (by decide)]
+    exact eval_fieldMul_const 1041288259238279555#u64 1373043270956696022#u64 1#u64 (by decide)
+  have fold5 : ∀ (c z : U64), IsCanonical c →
+      fieldMul (fieldMul (fieldMul (fieldMul z z) z) z) z = 1#u64 →
+      fieldMul (fieldMul (fieldMul (fieldMul (fieldMul c z) z) z) z) z = c := by
+    intro c z hc hz
+    rw [fieldMul_assoc c z z, fieldMul_assoc c _ z, fieldMul_assoc c _ z, fieldMul_assoc c _ z,
+        hz, fieldMul_one hc]
+  unfold fp5Frob
+  refine Fp5.ext ?_ (fold5 _ _ h1 hp1) (fold5 _ _ h2 hp2) (fold5 _ _ h3 hp3) (fold5 _ _ h4 hp4)
+  rw [hc0 h0, hc0 h0, hc0 h0, hc0 h0, hc0 h0]
+
+/-! ### Syntactic Lifting of `Fp5` Expressions into 5-Tuple `FExpr` -/
+
+private structure Fp5Expr where
+  c0 : FExpr
+  c1 : FExpr
+  c2 : FExpr
+  c3 : FExpr
+  c4 : FExpr
+
+private def Fp5Expr.var5 (base : Nat) : Fp5Expr :=
+  ⟨.var base, .var (base + 1), .var (base + 2), .var (base + 3), .var (base + 4)⟩
+
+private def Fp5Expr.add (x y : Fp5Expr) : Fp5Expr :=
+  ⟨.add x.c0 y.c0, .add x.c1 y.c1, .add x.c2 y.c2, .add x.c3 y.c3, .add x.c4 y.c4⟩
+
+private def Fp5Expr.sub (x y : Fp5Expr) : Fp5Expr :=
+  ⟨.sub x.c0 y.c0, .sub x.c1 y.c1, .sub x.c2 y.c2, .sub x.c3 y.c3, .sub x.c4 y.c4⟩
+
+private def Fp5Expr.mul (x y : Fp5Expr) : Fp5Expr :=
+  let three := FExpr.const .c3
+  ⟨.add (.mul x.c0 y.c0)
+     (.mul three (.add (.add (.mul x.c1 y.c4) (.mul x.c2 y.c3))
+                       (.add (.mul x.c3 y.c2) (.mul x.c4 y.c1)))),
+   .add (.add (.mul x.c0 y.c1) (.mul x.c1 y.c0))
+     (.mul three (.add (.add (.mul x.c2 y.c4) (.mul x.c3 y.c3)) (.mul x.c4 y.c2))),
+   .add (.add (.add (.mul x.c0 y.c2) (.mul x.c1 y.c1)) (.mul x.c2 y.c0))
+     (.mul three (.add (.mul x.c3 y.c4) (.mul x.c4 y.c3))),
+   .add (.add (.add (.mul x.c0 y.c3) (.mul x.c1 y.c2))
+              (.add (.mul x.c2 y.c1) (.mul x.c3 y.c0)))
+     (.mul three (.mul x.c4 y.c4)),
+   .add (.add (.add (.mul x.c0 y.c4) (.mul x.c1 y.c3))
+              (.add (.mul x.c2 y.c2) (.mul x.c3 y.c1)))
+     (.mul x.c4 y.c0)⟩
+
+private def Fp5Expr.evalF (env : Nat → U64) (e : Fp5Expr) : Fp5 :=
+  ⟨e.c0.evalF env, e.c1.evalF env, e.c2.evalF env, e.c3.evalF env, e.c4.evalF env⟩
+
+private def Fp5Expr.wf (env : Nat → U64) (e : Fp5Expr) : Prop :=
+  e.c0.wf env ∧ e.c1.wf env ∧ e.c2.wf env ∧ e.c3.wf env ∧ e.c4.wf env
+
+private theorem Fp5Expr.eq_of_norm (env : Nat → U64) (lhs rhs : Fp5Expr)
     (hl : lhs.wf env) (hr : rhs.wf env)
-    (ha : lhs.a.norm = rhs.a.norm) (hb : lhs.b.norm = rhs.b.norm)
-    (hc : lhs.c.norm = rhs.c.norm) (hd : lhs.d.norm = rhs.d.norm) :
+    (h0 : lhs.c0.norm = rhs.c0.norm) (h1 : lhs.c1.norm = rhs.c1.norm)
+    (h2 : lhs.c2.norm = rhs.c2.norm) (h3 : lhs.c3.norm = rhs.c3.norm)
+    (h4 : lhs.c4.norm = rhs.c4.norm) :
     lhs.evalF env = rhs.evalF env :=
-  Ext4.ext
-    (FExpr.evalF_eq_of_norm env lhs.a rhs.a hl.1 hr.1 ha)
-    (FExpr.evalF_eq_of_norm env lhs.b rhs.b hl.2.1 hr.2.1 hb)
-    (FExpr.evalF_eq_of_norm env lhs.c rhs.c hl.2.2.1 hr.2.2.1 hc)
-    (FExpr.evalF_eq_of_norm env lhs.d rhs.d hl.2.2.2 hr.2.2.2 hd)
+  Fp5.ext
+    (FExpr.evalF_eq_of_norm env lhs.c0 rhs.c0 hl.1 hr.1 h0)
+    (FExpr.evalF_eq_of_norm env lhs.c1 rhs.c1 hl.2.1 hr.2.1 h1)
+    (FExpr.evalF_eq_of_norm env lhs.c2 rhs.c2 hl.2.2.1 hr.2.2.1 h2)
+    (FExpr.evalF_eq_of_norm env lhs.c3 rhs.c3 hl.2.2.2.1 hr.2.2.2.1 h3)
+    (FExpr.evalF_eq_of_norm env lhs.c4 rhs.c4 hl.2.2.2.2 hr.2.2.2.2 h4)
 
-private def envExt3 (x y z : Ext4) : Nat → U64
-  | 0 => x.a | 1 => x.b | 2 => x.c | 3 => x.d
-  | 4 => y.a | 5 => y.b | 6 => y.c | 7 => y.d
-  | 8 => z.a | 9 => z.b | 10 => z.c | 11 => z.d
+private def envFp5_3 (x y z : Fp5) : Nat → U64
+  | 0 => x.c0 | 1 => x.c1 | 2 => x.c2 | 3 => x.c3 | 4 => x.c4
+  | 5 => y.c0 | 6 => y.c1 | 7 => y.c2 | 8 => y.c3 | 9 => y.c4
+  | 10 => z.c0 | 11 => z.c1 | 12 => z.c2 | 13 => z.c3 | 14 => z.c4
   | _ => 0#u64
 
-/-! ### Full `Ext4` Commutative Ring Laws & Defining `u^4 = 7` Identity -/
+/-! ### Full `Fp5` Commutative Ring Laws & Defining `X^5 = 3` Identity -/
 
-theorem extAdd_comm (x y : Ext4) : extAdd x y = extAdd y x := by
+theorem fp5Add_comm (x y : Fp5) : fp5Add x y = fp5Add y x := by
   ext <;> exact fieldAdd_comm _ _
 
-theorem extAdd_assoc (x y z : Ext4) :
-    extAdd (extAdd x y) z = extAdd x (extAdd y z) := by
+theorem fp5Add_assoc (x y z : Fp5) :
+    fp5Add (fp5Add x y) z = fp5Add x (fp5Add y z) := by
   ext <;> exact fieldAdd_assoc _ _ _
 
-theorem extAdd_zero {x : Ext4} (hx : IsCanonicalExt4 x) : extAdd x extZero = x := by
-  rcases hx with ⟨ha, hb, hc, hd⟩
-  exact Ext4.ext (fieldAdd_zero ha) (fieldAdd_zero hb) (fieldAdd_zero hc) (fieldAdd_zero hd)
+theorem fp5Add_zero {x : Fp5} (hx : IsCanonicalFp5 x) : fp5Add x fp5Zero = x := by
+  rcases hx with ⟨h0, h1, h2, h3, h4⟩
+  exact Fp5.ext (fieldAdd_zero h0) (fieldAdd_zero h1) (fieldAdd_zero h2)
+    (fieldAdd_zero h3) (fieldAdd_zero h4)
 
-theorem zero_extAdd {x : Ext4} (hx : IsCanonicalExt4 x) : extAdd extZero x = x := by
-  rw [extAdd_comm, extAdd_zero hx]
+theorem zero_fp5Add {x : Fp5} (hx : IsCanonicalFp5 x) : fp5Add fp5Zero x = x := by
+  rw [fp5Add_comm, fp5Add_zero hx]
 
-theorem extSub_self (x : Ext4) : extSub x x = extZero := by
+theorem fp5Sub_self (x : Fp5) : fp5Sub x x = fp5Zero := by
   ext <;> exact fieldSub_self _
 
-theorem extAdd_sub_cancel {x : Ext4} (hx : IsCanonicalExt4 x) (y : Ext4) :
-    extSub (extAdd x y) y = x := by
-  rcases hx with ⟨ha, hb, hc, hd⟩
-  exact Ext4.ext (fieldAdd_sub_cancel ha _) (fieldAdd_sub_cancel hb _)
-    (fieldAdd_sub_cancel hc _) (fieldAdd_sub_cancel hd _)
+theorem fp5Add_sub_cancel {x : Fp5} (hx : IsCanonicalFp5 x) (y : Fp5) :
+    fp5Sub (fp5Add x y) y = x := by
+  rcases hx with ⟨h0, h1, h2, h3, h4⟩
+  exact Fp5.ext (fieldAdd_sub_cancel h0 _) (fieldAdd_sub_cancel h1 _)
+    (fieldAdd_sub_cancel h2 _) (fieldAdd_sub_cancel h3 _) (fieldAdd_sub_cancel h4 _)
 
-theorem extSub_add_cancel {x : Ext4} (hx : IsCanonicalExt4 x) (y : Ext4) :
-    extAdd (extSub x y) y = x := by
-  rcases hx with ⟨ha, hb, hc, hd⟩
-  exact Ext4.ext (fieldSub_add_cancel ha _) (fieldSub_add_cancel hb _)
-    (fieldSub_add_cancel hc _) (fieldSub_add_cancel hd _)
+theorem fp5Sub_add_cancel {x : Fp5} (hx : IsCanonicalFp5 x) (y : Fp5) :
+    fp5Add (fp5Sub x y) y = x := by
+  rcases hx with ⟨h0, h1, h2, h3, h4⟩
+  exact Fp5.ext (fieldSub_add_cancel h0 _) (fieldSub_add_cancel h1 _)
+    (fieldSub_add_cancel h2 _) (fieldSub_add_cancel h3 _) (fieldSub_add_cancel h4 _)
 
-theorem extMul_comm (x y : Ext4) : extMul x y = extMul y x :=
-  Ext4Expr.eq_of_norm (envExt3 x y extZero)
-    (Ext4Expr.mul (.var4 0) (.var4 4))
-    (Ext4Expr.mul (.var4 4) (.var4 0))
-    ⟨trivial, trivial, trivial, trivial⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    rfl rfl rfl rfl
+theorem fp5Mul_comm (x y : Fp5) : fp5Mul x y = fp5Mul y x :=
+  Fp5Expr.eq_of_norm (envFp5_3 x y fp5Zero)
+    (Fp5Expr.mul (.var5 0) (.var5 5))
+    (Fp5Expr.mul (.var5 5) (.var5 0))
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    rfl rfl rfl rfl rfl
 
-theorem extMul_assoc (x y z : Ext4) :
-    extMul (extMul x y) z = extMul x (extMul y z) :=
-  Ext4Expr.eq_of_norm (envExt3 x y z)
-    (Ext4Expr.mul (Ext4Expr.mul (.var4 0) (.var4 4)) (.var4 8))
-    (Ext4Expr.mul (.var4 0) (Ext4Expr.mul (.var4 4) (.var4 8)))
-    ⟨trivial, trivial, trivial, trivial⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    rfl rfl rfl rfl
+theorem fp5Mul_assoc (x y z : Fp5) :
+    fp5Mul (fp5Mul x y) z = fp5Mul x (fp5Mul y z) :=
+  Fp5Expr.eq_of_norm (envFp5_3 x y z)
+    (Fp5Expr.mul (Fp5Expr.mul (.var5 0) (.var5 5)) (.var5 10))
+    (Fp5Expr.mul (.var5 0) (Fp5Expr.mul (.var5 5) (.var5 10)))
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    rfl rfl rfl rfl rfl
 
-theorem extMul_add (x y z : Ext4) :
-    extMul x (extAdd y z) = extAdd (extMul x y) (extMul x z) :=
-  Ext4Expr.eq_of_norm (envExt3 x y z)
-    (Ext4Expr.mul (.var4 0) (Ext4Expr.add (.var4 4) (.var4 8)))
-    (Ext4Expr.add (Ext4Expr.mul (.var4 0) (.var4 4)) (Ext4Expr.mul (.var4 0) (.var4 8)))
-    ⟨trivial, trivial, trivial, trivial⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    rfl rfl rfl rfl
+theorem fp5Mul_add (x y z : Fp5) :
+    fp5Mul x (fp5Add y z) = fp5Add (fp5Mul x y) (fp5Mul x z) :=
+  Fp5Expr.eq_of_norm (envFp5_3 x y z)
+    (Fp5Expr.mul (.var5 0) (Fp5Expr.add (.var5 5) (.var5 10)))
+    (Fp5Expr.add (Fp5Expr.mul (.var5 0) (.var5 5)) (Fp5Expr.mul (.var5 0) (.var5 10)))
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    rfl rfl rfl rfl rfl
 
-theorem add_extMul (x y z : Ext4) :
-    extMul (extAdd x y) z = extAdd (extMul x z) (extMul y z) := by
-  rw [extMul_comm, extMul_add, extMul_comm z x, extMul_comm z y]
+theorem add_fp5Mul (x y z : Fp5) :
+    fp5Mul (fp5Add x y) z = fp5Add (fp5Mul x z) (fp5Mul y z) := by
+  rw [fp5Mul_comm, fp5Mul_add, fp5Mul_comm z x, fp5Mul_comm z y]
 
-theorem extMul_sub (x y z : Ext4) :
-    extMul x (extSub y z) = extSub (extMul x y) (extMul x z) :=
-  Ext4Expr.eq_of_norm (envExt3 x y z)
-    (Ext4Expr.mul (.var4 0) (Ext4Expr.sub (.var4 4) (.var4 8)))
-    (Ext4Expr.sub (Ext4Expr.mul (.var4 0) (.var4 4)) (Ext4Expr.mul (.var4 0) (.var4 8)))
-    ⟨trivial, trivial, trivial, trivial⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    rfl rfl rfl rfl
+theorem fp5Mul_sub (x y z : Fp5) :
+    fp5Mul x (fp5Sub y z) = fp5Sub (fp5Mul x y) (fp5Mul x z) :=
+  Fp5Expr.eq_of_norm (envFp5_3 x y z)
+    (Fp5Expr.mul (.var5 0) (Fp5Expr.sub (.var5 5) (.var5 10)))
+    (Fp5Expr.sub (Fp5Expr.mul (.var5 0) (.var5 5)) (Fp5Expr.mul (.var5 0) (.var5 10)))
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    rfl rfl rfl rfl rfl
 
-theorem sub_extMul (x y z : Ext4) :
-    extMul (extSub x y) z = extSub (extMul x z) (extMul y z) := by
-  rw [extMul_comm, extMul_sub, extMul_comm z x, extMul_comm z y]
+theorem sub_fp5Mul (x y z : Fp5) :
+    fp5Mul (fp5Sub x y) z = fp5Sub (fp5Mul x z) (fp5Mul y z) := by
+  rw [fp5Mul_comm, fp5Mul_sub, fp5Mul_comm z x, fp5Mul_comm z y]
 
-theorem extMul_one {x : Ext4} (hx : IsCanonicalExt4 x) : extMul x extOne = x :=
-  Ext4Expr.eq_of_norm (envExt3 x extZero extZero)
-    (Ext4Expr.mul (.var4 0) ⟨.const .c1, .const .c0, .const .c0, .const .c0⟩)
-    (.var4 0)
-    ⟨trivial, trivial, trivial, trivial⟩
-    hx rfl rfl rfl rfl
+theorem fp5Mul_one {x : Fp5} (hx : IsCanonicalFp5 x) : fp5Mul x fp5One = x :=
+  Fp5Expr.eq_of_norm (envFp5_3 x fp5Zero fp5Zero)
+    (Fp5Expr.mul (.var5 0) ⟨.const .c1, .const .c0, .const .c0, .const .c0, .const .c0⟩)
+    (.var5 0)
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    hx rfl rfl rfl rfl rfl
 
-theorem one_extMul {x : Ext4} (hx : IsCanonicalExt4 x) : extMul extOne x = x := by
-  rw [extMul_comm, extMul_one hx]
+theorem one_fp5Mul {x : Fp5} (hx : IsCanonicalFp5 x) : fp5Mul fp5One x = x := by
+  rw [fp5Mul_comm, fp5Mul_one hx]
 
-theorem extMul_zero (x : Ext4) : extMul x extZero = extZero :=
-  Ext4Expr.eq_of_norm (envExt3 x extZero extZero)
-    (Ext4Expr.mul (.var4 0) ⟨.const .c0, .const .c0, .const .c0, .const .c0⟩)
-    ⟨.const .c0, .const .c0, .const .c0, .const .c0⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    rfl rfl rfl rfl
+theorem fp5Mul_zero (x : Fp5) : fp5Mul x fp5Zero = fp5Zero :=
+  Fp5Expr.eq_of_norm (envFp5_3 x fp5Zero fp5Zero)
+    (Fp5Expr.mul (.var5 0) ⟨.const .c0, .const .c0, .const .c0, .const .c0, .const .c0⟩)
+    ⟨.const .c0, .const .c0, .const .c0, .const .c0, .const .c0⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    rfl rfl rfl rfl rfl
 
-theorem zero_extMul (x : Ext4) : extMul extZero x = extZero := by
-  rw [extMul_comm, extMul_zero]
+theorem zero_fp5Mul (x : Fp5) : fp5Mul fp5Zero x = fp5Zero := by
+  rw [fp5Mul_comm, fp5Mul_zero]
 
-/-- Defining quartic field relation `u^4 = 7` in `Ext4`. -/
-theorem extU_pow4_eq_seven :
-    extMul (extMul extU extU) (extMul extU extU) = extSeven :=
-  let uE : Ext4Expr := ⟨.const .c0, .const .c1, .const .c0, .const .c0⟩
-  Ext4Expr.eq_of_norm (envExt3 extZero extZero extZero)
-    (Ext4Expr.mul (Ext4Expr.mul uE uE) (Ext4Expr.mul uE uE))
-    ⟨.const .c7, .const .c0, .const .c0, .const .c0⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    rfl rfl rfl rfl
+/-- Defining quintic field relation `X^5 = 3` in `Fp5`. -/
+theorem fp5X_pow5_eq_three :
+    fp5Mul (fp5Mul (fp5Mul fp5X fp5X) (fp5Mul fp5X fp5X)) fp5X = fp5Three := by
+  have hx2 : fp5Mul fp5X fp5X = ⟨0#u64, 0#u64, 1#u64, 0#u64, 0#u64⟩ :=
+    Fp5Expr.eq_of_norm (envFp5_3 fp5Zero fp5Zero fp5Zero)
+      (Fp5Expr.mul ⟨.const .c0, .const .c1, .const .c0, .const .c0, .const .c0⟩
+                   ⟨.const .c0, .const .c1, .const .c0, .const .c0, .const .c0⟩)
+      ⟨.const .c0, .const .c0, .const .c1, .const .c0, .const .c0⟩
+      ⟨trivial, trivial, trivial, trivial, trivial⟩
+      ⟨trivial, trivial, trivial, trivial, trivial⟩
+      rfl rfl rfl rfl rfl
+  have hx4 : fp5Mul ⟨0#u64, 0#u64, 1#u64, 0#u64, 0#u64⟩ ⟨0#u64, 0#u64, 1#u64, 0#u64, 0#u64⟩ =
+      ⟨0#u64, 0#u64, 0#u64, 0#u64, 1#u64⟩ :=
+    Fp5Expr.eq_of_norm (envFp5_3 fp5Zero fp5Zero fp5Zero)
+      (Fp5Expr.mul ⟨.const .c0, .const .c0, .const .c1, .const .c0, .const .c0⟩
+                   ⟨.const .c0, .const .c0, .const .c1, .const .c0, .const .c0⟩)
+      ⟨.const .c0, .const .c0, .const .c0, .const .c0, .const .c1⟩
+      ⟨trivial, trivial, trivial, trivial, trivial⟩
+      ⟨trivial, trivial, trivial, trivial, trivial⟩
+      rfl rfl rfl rfl rfl
+  rw [hx2, hx4]
+  exact Fp5Expr.eq_of_norm (envFp5_3 fp5Zero fp5Zero fp5Zero)
+    (Fp5Expr.mul ⟨.const .c0, .const .c0, .const .c0, .const .c0, .const .c1⟩
+                 ⟨.const .c0, .const .c1, .const .c0, .const .c0, .const .c0⟩)
+    ⟨.const .c3, .const .c0, .const .c0, .const .c0, .const .c0⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    rfl rfl rfl rfl rfl
 
-/-! ### Karatsuba Quadratic-Over-Quadratic Tower `[1, u^2, u, u^3]` Isomorphism -/
-
-/-- Maps production `GoldilocksExt4` tower coordinates `(c00, c01, c10, c11)` (`[1, u^2, u, u^3]`)
-    into `qsag_whir_verified::Ext4` polynomial coordinates `[1, u, u^2, u^3]`. -/
-def towerToPoly (t : Ext4) : Ext4 := ⟨t.a, t.c, t.b, t.d⟩
-
-/-- Production Karatsuba tower multiplication in `F_{p^2}[v]/(v^2 - w)` where `w^2 = 7`. -/
-def towerMul (x y : Ext4) : Ext4 :=
-  let a0b0_0 := fieldAdd (fieldMul x.a y.a) (fieldMul 7#u64 (fieldMul x.b y.b))
-  let a0b0_1 := fieldSub (fieldMul (fieldAdd x.a x.b) (fieldAdd y.a y.b))
-                  (fieldAdd (fieldMul x.a y.a) (fieldMul x.b y.b))
-  let a1b1_0 := fieldAdd (fieldMul x.c y.c) (fieldMul 7#u64 (fieldMul x.d y.d))
-  let a1b1_1 := fieldSub (fieldMul (fieldAdd x.c x.d) (fieldAdd y.c y.d))
-                  (fieldAdd (fieldMul x.c y.c) (fieldMul x.d y.d))
-  let c0_0 := fieldAdd a0b0_0 (fieldMul 7#u64 a1b1_1)
-  let c0_1 := fieldAdd a0b0_1 a1b1_0
-  let s0 := fieldAdd x.a x.c
-  let s1 := fieldAdd x.b x.d
-  let t0 := fieldAdd y.a y.c
-  let t1 := fieldAdd y.b y.d
-  let st_0 := fieldAdd (fieldMul s0 t0) (fieldMul 7#u64 (fieldMul s1 t1))
-  let st_1 := fieldSub (fieldMul (fieldAdd s0 s1) (fieldAdd t0 t1))
-                (fieldAdd (fieldMul s0 t0) (fieldMul s1 t1))
-  let c1_0 := fieldSub st_0 (fieldAdd a0b0_0 a1b1_0)
-  let c1_1 := fieldSub st_1 (fieldAdd a0b0_1 a1b1_1)
-  ⟨c0_0, c0_1, c1_0, c1_1⟩
-
-private theorem karatsuba_cross (a0 a1 b0 b1 : U64) :
-    fieldSub (fieldMul (fieldAdd a0 a1) (fieldAdd b0 b1))
-             (fieldAdd (fieldMul a0 b0) (fieldMul a1 b1)) =
-      fieldAdd (fieldMul a0 b1) (fieldMul a1 b0) :=
-  let env : Nat → U64 := fun | 0 => a0 | 1 => a1 | 2 => b0 | 3 => b1 | _ => 0#u64
-  FExpr.evalF_eq_of_norm env
-    (.sub (.mul (.add (.var 0) (.var 1)) (.add (.var 2) (.var 3)))
-          (.add (.mul (.var 0) (.var 2)) (.mul (.var 1) (.var 3))))
-    (.add (.mul (.var 0) (.var 3)) (.mul (.var 1) (.var 2)))
-    trivial trivial rfl
-
-private theorem karatsuba_expand (a0 a1 b0 b1 : U64) :
-    fieldMul (fieldAdd a0 a1) (fieldAdd b0 b1) =
-      fieldAdd (fieldAdd (fieldMul a0 b0) (fieldMul a1 b1))
-               (fieldAdd (fieldMul a0 b1) (fieldMul a1 b0)) :=
-  let env : Nat → U64 := fun | 0 => a0 | 1 => a1 | 2 => b0 | 3 => b1 | _ => 0#u64
-  FExpr.evalF_eq_of_norm env
-    (.mul (.add (.var 0) (.var 1)) (.add (.var 2) (.var 3)))
-    (.add (.add (.mul (.var 0) (.var 2)) (.mul (.var 1) (.var 3)))
-          (.add (.mul (.var 0) (.var 3)) (.mul (.var 1) (.var 2))))
-    trivial trivial rfl
-
-/-- Exact ring isomorphism between production Karatsuba tower multiplication and `extMul`. -/
-theorem towerToPoly_mul_hom (x y : Ext4) :
-    towerToPoly (towerMul x y) = extMul (towerToPoly x) (towerToPoly y) := by
-  dsimp only [towerToPoly, towerMul, extMul]
-  refine Ext4.ext ?_ ?_ ?_ ?_
-  · rw [karatsuba_cross x.c x.d y.c y.d]
-    let env : Nat → U64 := fun
-      | 0 => fieldMul x.a y.a | 1 => fieldMul x.b y.b
-      | 2 => fieldMul x.c y.d | 3 => fieldMul x.d y.c | _ => 0#u64
-    exact FExpr.evalF_eq_of_norm env
-      (.add (.add (.var 0) (.mul (.const .c7) (.var 1))) (.mul (.const .c7) (.add (.var 2) (.var 3))))
-      (.add (.var 0) (.mul (.const .c7) (.add (.add (.var 2) (.var 1)) (.var 3))))
-      trivial trivial rfl
-  · rw [karatsuba_expand x.a x.c y.a y.c, karatsuba_expand x.b x.d y.b y.d]
-    let env : Nat → U64 := fun
-      | 0 => fieldMul x.a y.a | 1 => fieldMul x.c y.c
-      | 2 => fieldMul x.a y.c | 3 => fieldMul x.c y.a
-      | 4 => fieldMul x.b y.b | 5 => fieldMul x.d y.d
-      | 6 => fieldMul x.b y.d | 7 => fieldMul x.d y.b | _ => 0#u64
-    exact FExpr.evalF_eq_of_norm env
-      (.sub (.add (.add (.add (.var 0) (.var 1)) (.add (.var 2) (.var 3)))
-                  (.mul (.const .c7) (.add (.add (.var 4) (.var 5)) (.add (.var 6) (.var 7)))))
-            (.add (.add (.var 0) (.mul (.const .c7) (.var 4)))
-                  (.add (.var 1) (.mul (.const .c7) (.var 5)))))
-      (.add (.add (.var 2) (.var 3)) (.mul (.const .c7) (.add (.var 6) (.var 7))))
-      trivial trivial rfl
-  · rw [karatsuba_cross x.a x.b y.a y.b]
-    let env : Nat → U64 := fun
-      | 0 => fieldMul x.a y.b | 1 => fieldMul x.b y.a
-      | 2 => fieldMul x.c y.c | 3 => fieldMul x.d y.d | _ => 0#u64
-    exact FExpr.evalF_eq_of_norm env
-      (.add (.add (.var 0) (.var 1)) (.add (.var 2) (.mul (.const .c7) (.var 3))))
-      (.add (.add (.add (.var 0) (.var 2)) (.var 1)) (.mul (.const .c7) (.var 3)))
-      trivial trivial rfl
-  · rw [karatsuba_cross (fieldAdd x.a x.c) (fieldAdd x.b x.d) (fieldAdd y.a y.c) (fieldAdd y.b y.d),
-        karatsuba_expand x.a x.c y.b y.d, karatsuba_expand x.b x.d y.a y.c,
-        karatsuba_cross x.a x.b y.a y.b, karatsuba_cross x.c x.d y.c y.d]
-    let env : Nat → U64 := fun
-      | 0 => fieldMul x.a y.b | 1 => fieldMul x.c y.d
-      | 2 => fieldMul x.a y.d | 3 => fieldMul x.c y.b
-      | 4 => fieldMul x.b y.a | 5 => fieldMul x.d y.c
-      | 6 => fieldMul x.b y.c | 7 => fieldMul x.d y.a | _ => 0#u64
-    exact FExpr.evalF_eq_of_norm env
-      (.sub (.add (.add (.add (.var 0) (.var 1)) (.add (.var 2) (.var 3)))
-                  (.add (.add (.var 4) (.var 5)) (.add (.var 6) (.var 7))))
-            (.add (.add (.var 0) (.var 4)) (.add (.var 1) (.var 5))))
-      (.add (.add (.var 2) (.var 3)) (.add (.var 6) (.var 7)))
-      trivial trivial rfl
-
-/-! ## Duet Fold, CWYZ Fold, Bridge, Quadratic Sumcheck Wire, Cascade, & Horner Refinements -/
+/-! ## Duet Fold, CWYZ Fold, Bridge, Quadratic Sumcheck Wire, & Horner Refinements -/
 
 /-- Total mathematical duet expression `odd + alpha * even`. -/
-def duetValue (v0 v1 : Ext4) (iy it : U64) (alpha : Ext4) : Ext4 :=
-  extAdd (extScale (extSub v0 v1) iy) (extMul alpha (extScale (extAdd v0 v1) it))
+def duetFp5Value (v0 v1 : Fp5) (iy it : U64) (alpha : Fp5) : Fp5 :=
+  fp5Add (fp5Scale (fp5Sub v0 v1) iy) (fp5Mul alpha (fp5Scale (fp5Add v0 v1) it))
 
-theorem duet_refines (v0 v1 : Ext4) (iy it : U64) (alpha : Ext4) :
-    duet_fold v0 v1 iy it alpha = .ok (duetValue v0 v1 iy it alpha) := by
-  simp only [duet_fold.public_eqs, duetValue, affine_combine_refines,
-    ext_sub_refines, ext_scale_refines, ext_mul_refines, ext_add_refines, bind_eq_result_bind, Result.bind]
+theorem duet_fold_fp5_refines (v0 v1 : Fp5) (iy it : U64) (alpha : Fp5) :
+    duet_fold_fp5 v0 v1 iy it alpha = .ok (duetFp5Value v0 v1 iy it alpha) := by
+  simp only [duet_fold_fp5.public_eqs, duetFp5Value, copy_fp5_spec, affine_combine_fp5_refines,
+    fp5_sub_refines, fp5_scale_refines, fp5_mul_refines, fp5_add_refines, bind_eq_result_bind, Result.bind]
 
-def cwyzValue (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta : Ext4) : Ext4 :=
-  let even := extScale (extAdd v0 v1) it
-  let odd := extScale (extSub v0 v1) iy
-  extAdd odd (extMul (extAdd alpha (extScale beta yy)) (extAdd even (extMul theta odd)))
+def cwyzFp5Value (v0 v1 : Fp5) (iy it yy : U64) (theta alpha beta : Fp5) : Fp5 :=
+  let even := fp5Scale (fp5Add v0 v1) it
+  let odd := fp5Scale (fp5Sub v0 v1) iy
+  fp5Add odd (fp5Mul (fp5Add alpha (fp5Scale beta yy)) (fp5Add even (fp5Mul theta odd)))
 
-theorem cwyz_duet_refines (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta : Ext4) :
-    cwyz_duet_fold v0 v1 iy it yy theta alpha beta = .ok (cwyzValue v0 v1 iy it yy theta alpha beta) := by
-  simp only [cwyz_duet_fold.public_eqs, cwyzValue, affine_combine_refines,
-    ext_sub_refines, ext_scale_refines, ext_mul_refines, ext_add_refines, bind_eq_result_bind, Result.bind]
+theorem cwyz_duet_fold_fp5_refines (v0 v1 : Fp5) (iy it yy : U64) (theta alpha beta : Fp5) :
+    cwyz_duet_fold_fp5 v0 v1 iy it yy theta alpha beta =
+      .ok (cwyzFp5Value v0 v1 iy it yy theta alpha beta) := by
+  simp only [cwyz_duet_fold_fp5.public_eqs, cwyzFp5Value, copy_fp5_spec, affine_combine_fp5_refines,
+    fp5_sub_refines, fp5_scale_refines, fp5_mul_refines, fp5_add_refines, bind_eq_result_bind, Result.bind]
 
-private theorem scale_add_sub_even {even odd : Ext4} {y0 it : U64}
-    (he : IsCanonicalExt4 even) (hit : fieldMul 2#u64 it = 1#u64) :
-    extScale (extAdd (extAdd even (extScale odd y0)) (extSub even (extScale odd y0))) it = even := by
+private theorem scale_add_sub_even_fp5 {even odd : Fp5} {y0 it : U64}
+    (he : IsCanonicalFp5 even) (hit : fieldMul 2#u64 it = 1#u64) :
+    fp5Scale (fp5Add (fp5Add even (fp5Scale odd y0)) (fp5Sub even (fp5Scale odd y0))) it = even := by
   have limb_recover : ∀ (e o : U64), IsCanonical e →
       fieldMul (fieldAdd (fieldAdd e (fieldMul o y0)) (fieldSub e (fieldMul o y0))) it = e := by
     intro e o he_c
@@ -1069,13 +1203,14 @@ private theorem scale_add_sub_even {even odd : Ext4} {y0 it : U64}
         (.mul (.const .c2) (.var 0))
         trivial trivial rfl
     rw [hsum, fieldMul_comm 2#u64 e, fieldMul_assoc, hit, fieldMul_one he_c]
-  rcases he with ⟨ha, hb, hc, hd⟩
-  unfold extScale extAdd extSub
-  exact Ext4.ext (limb_recover _ _ ha) (limb_recover _ _ hb) (limb_recover _ _ hc) (limb_recover _ _ hd)
+  rcases he with ⟨h0, h1, h2, h3, h4⟩
+  unfold fp5Scale fp5Add fp5Sub
+  exact Fp5.ext (limb_recover _ _ h0) (limb_recover _ _ h1) (limb_recover _ _ h2)
+    (limb_recover _ _ h3) (limb_recover _ _ h4)
 
-private theorem scale_add_sub_odd {even odd : Ext4} {y0 iy : U64}
-    (ho : IsCanonicalExt4 odd) (hiy : fieldMul (fieldMul 2#u64 y0) iy = 1#u64) :
-    extScale (extSub (extAdd even (extScale odd y0)) (extSub even (extScale odd y0))) iy = odd := by
+private theorem scale_add_sub_odd_fp5 {even odd : Fp5} {y0 iy : U64}
+    (ho : IsCanonicalFp5 odd) (hiy : fieldMul (fieldMul 2#u64 y0) iy = 1#u64) :
+    fp5Scale (fp5Sub (fp5Add even (fp5Scale odd y0)) (fp5Sub even (fp5Scale odd y0))) iy = odd := by
   have limb_recover : ∀ (e o : U64), IsCanonical o →
       fieldMul (fieldSub (fieldAdd e (fieldMul o y0)) (fieldSub e (fieldMul o y0))) iy = o := by
     intro e o ho_c
@@ -1087,104 +1222,102 @@ private theorem scale_add_sub_odd {even odd : Ext4} {y0 iy : U64}
         (.mul (.var 1) (.mul (.const .c2) (.var 2)))
         trivial trivial rfl
     rw [hdiff, fieldMul_assoc, hiy, fieldMul_one ho_c]
-  rcases ho with ⟨ha, hb, hc, hd⟩
-  unfold extScale extAdd extSub
-  exact Ext4.ext (limb_recover _ _ ha) (limb_recover _ _ hb) (limb_recover _ _ hc) (limb_recover _ _ hd)
+  rcases ho with ⟨h0, h1, h2, h3, h4⟩
+  unfold fp5Scale fp5Add fp5Sub
+  exact Fp5.ext (limb_recover _ _ h0) (limb_recover _ _ h1) (limb_recover _ _ h2)
+    (limb_recover _ _ h3) (limb_recover _ _ h4)
 
-/-- Algebraic coset soundness of `duet_fold`: on `v0 = E + y0 * O`, `v1 = E - y0 * O`,
-    `duetValue` recovers `O + alpha * E`. -/
-theorem duet_fold_algebraic_sound
-    {even odd : Ext4} {y0 iy it : U64} (alpha : Ext4)
-    (he : IsCanonicalExt4 even) (ho : IsCanonicalExt4 odd)
+/-- Algebraic coset soundness of `duet_fold_fp5`: on `v0 = E + y0 * O`, `v1 = E - y0 * O`,
+    `duetFp5Value` recovers `O + alpha * E`. -/
+theorem duet_fold_fp5_algebraic_sound
+    {even odd : Fp5} {y0 iy it : U64} (alpha : Fp5)
+    (he : IsCanonicalFp5 even) (ho : IsCanonicalFp5 odd)
     (hit : fieldMul 2#u64 it = 1#u64)
     (hiy : fieldMul (fieldMul 2#u64 y0) iy = 1#u64) :
-    duetValue (extAdd even (extScale odd y0)) (extSub even (extScale odd y0)) iy it alpha =
-      extAdd odd (extMul alpha even) := by
-  unfold duetValue
-  rw [scale_add_sub_even he hit, scale_add_sub_odd ho hiy]
+    duetFp5Value (fp5Add even (fp5Scale odd y0)) (fp5Sub even (fp5Scale odd y0)) iy it alpha =
+      fp5Add odd (fp5Mul alpha even) := by
+  unfold duetFp5Value
+  rw [scale_add_sub_even_fp5 he hit, scale_add_sub_odd_fp5 ho hiy]
 
-/-- Algebraic coset soundness of `cwyz_duet_fold`: on `v0 = E + y0 * O`, `v1 = E - y0 * O`,
-    `cwyzValue` recovers `O + (alpha + beta * y0^2) * (E + theta * O)`. -/
-theorem cwyz_duet_fold_algebraic_sound
-    {even odd : Ext4} {y0 iy it : U64} (theta alpha beta : Ext4)
-    (he : IsCanonicalExt4 even) (ho : IsCanonicalExt4 odd)
+/-- Algebraic coset soundness of `cwyz_duet_fold_fp5`: on `v0 = E + y0 * O`, `v1 = E - y0 * O`,
+    `cwyzFp5Value` recovers `O + (alpha + beta * y0^2) * (E + theta * O)`. -/
+theorem cwyz_duet_fold_fp5_algebraic_sound
+    {even odd : Fp5} {y0 iy it : U64} (theta alpha beta : Fp5)
+    (he : IsCanonicalFp5 even) (ho : IsCanonicalFp5 odd)
     (hit : fieldMul 2#u64 it = 1#u64)
     (hiy : fieldMul (fieldMul 2#u64 y0) iy = 1#u64) :
-    cwyzValue (extAdd even (extScale odd y0)) (extSub even (extScale odd y0))
+    cwyzFp5Value (fp5Add even (fp5Scale odd y0)) (fp5Sub even (fp5Scale odd y0))
         iy it (fieldMul y0 y0) theta alpha beta =
-      extAdd odd (extMul (extAdd alpha (extScale beta (fieldMul y0 y0))) (extAdd even (extMul theta odd))) := by
-  unfold cwyzValue
-  rw [scale_add_sub_even he hit, scale_add_sub_odd ho hiy]
+      fp5Add odd (fp5Mul (fp5Add alpha (fp5Scale beta (fieldMul y0 y0))) (fp5Add even (fp5Mul theta odd))) := by
+  unfold cwyzFp5Value
+  rw [scale_add_sub_even_fp5 he hit, scale_add_sub_odd_fp5 ho hiy]
 
-/-- Pure CWYZ dual linear-functional bridge expression. -/
-def cwyzBridgeValue (w0 w1 w2 w3 w4 claim phi theta alpha beta : Ext4) : Ext4 :=
-  let f := extAdd w0 (extMul phi w1)
-  let g := extAdd w2 (extMul phi (extSub claim w0))
-  let core := extAdd g (extMul alpha (extAdd f (extMul theta g)))
-  let shift := extMul beta (extAdd w3 (extMul theta w4))
-  extAdd core shift
+/-- Pure CWYZ dual linear-functional bridge expression over `Fp5`. -/
+def cwyzBridgeFp5Value (w0 w1 w2 w3 w4 claim phi theta alpha beta : Fp5) : Fp5 :=
+  let f := fp5Add w0 (fp5Mul phi w1)
+  let g := fp5Add w2 (fp5Mul phi (fp5Sub claim w0))
+  let core := fp5Add g (fp5Mul alpha (fp5Add f (fp5Mul theta g)))
+  let shift := fp5Mul beta (fp5Add w3 (fp5Mul theta w4))
+  fp5Add core shift
 
-theorem cwyz_bridge_claim_step_refines
-    (w0 w1 w2 w3 w4 claim phi theta alpha beta : Ext4) :
-    cwyz_bridge_claim_step w0 w1 w2 w3 w4 claim phi theta alpha beta =
-      .ok (cwyzBridgeValue w0 w1 w2 w3 w4 claim phi theta alpha beta) := by
-  simp only [cwyz_bridge_claim_step.public_eqs, cwyzBridgeValue,
-    ext_mul_refines, ext_add_refines, ext_sub_refines, bind_eq_result_bind, Result.bind]
+theorem cwyz_bridge_claim_step_fp5_refines
+    (w0 w1 w2 w3 w4 claim phi theta alpha beta : Fp5) :
+    cwyz_bridge_claim_step_fp5 w0 w1 w2 w3 w4 claim phi theta alpha beta =
+      .ok (cwyzBridgeFp5Value w0 w1 w2 w3 w4 claim phi theta alpha beta) := by
+  simp only [cwyz_bridge_claim_step_fp5.public_eqs, cwyzBridgeFp5Value, copy_fp5_spec,
+    fp5_mul_refines, fp5_add_refines, fp5_sub_refines, bind_eq_result_bind, Result.bind]
 
-/-- Dual-functional soundness of `cwyz_bridge_claim_step`: on honest cross-terms
-    `w0 = a0*b0`, `w1 = a0*b1`, `w2 = a1*b0`, `claim = a0*b0 + a1*b1`, `w3 = a0*kn`, `w4 = a1*kn`,
-    `cwyzBridgeValue` equals `c0' * k0' + c1' * kn` where
-    `c0' = a1 + alpha*(a0 + theta*a1)`, `c1' = beta*(a0 + theta*a1)`, `k0' = b0 + phi*b1`. -/
-theorem cwyz_bridge_claim_step_dual_sound
-    (a0 a1 b0 b1 kn phi theta alpha beta : Ext4) :
-    cwyzBridgeValue
-        (extMul a0 b0) (extMul a0 b1) (extMul a1 b0) (extMul a0 kn) (extMul a1 kn)
-        (extAdd (extMul a0 b0) (extMul a1 b1)) phi theta alpha beta =
-      extAdd
-        (extMul (extAdd a1 (extMul alpha (extAdd a0 (extMul theta a1)))) (extAdd b0 (extMul phi b1)))
-        (extMul (extMul beta (extAdd a0 (extMul theta a1))) kn) := by
-  let k0' := extAdd b0 (extMul phi b1)
-  have hf : extAdd (extMul a0 b0) (extMul phi (extMul a0 b1)) = extMul a0 k0' := by
-    rw [← extMul_assoc phi a0 b1, extMul_comm phi a0, extMul_assoc a0 phi b1, ← extMul_add]
-  have hsub : extSub (extAdd (extMul a0 b0) (extMul a1 b1)) (extMul a0 b0) = extMul a1 b1 := by
-    rw [extAdd_comm (extMul a0 b0) (extMul a1 b1), extAdd_sub_cancel (extMul_canonical a1 b1)]
-  have hg : extAdd (extMul a1 b0) (extMul phi (extSub (extAdd (extMul a0 b0) (extMul a1 b1)) (extMul a0 b0))) =
-      extMul a1 k0' := by
-    rw [hsub, ← extMul_assoc phi a1 b1, extMul_comm phi a1, extMul_assoc a1 phi b1, ← extMul_add]
-  have hcore : extAdd (extMul a1 k0') (extMul alpha (extAdd (extMul a0 k0') (extMul theta (extMul a1 k0')))) =
-      extMul (extAdd a1 (extMul alpha (extAdd a0 (extMul theta a1)))) k0' := by
-    rw [← extMul_assoc theta a1 k0',
-        ← add_extMul a0 (extMul theta a1) k0',
-        ← extMul_assoc alpha (extAdd a0 (extMul theta a1)) k0',
-        ← add_extMul a1 (extMul alpha (extAdd a0 (extMul theta a1))) k0']
-  have hshift : extMul beta (extAdd (extMul a0 kn) (extMul theta (extMul a1 kn))) =
-      extMul (extMul beta (extAdd a0 (extMul theta a1))) kn := by
-    rw [← extMul_assoc theta a1 kn,
-        ← add_extMul a0 (extMul theta a1) kn,
-        ← extMul_assoc beta (extAdd a0 (extMul theta a1)) kn]
-  dsimp only [cwyzBridgeValue]
+/-- Dual-functional soundness of `cwyz_bridge_claim_step_fp5`. -/
+theorem cwyz_bridge_claim_step_fp5_dual_sound
+    (a0 a1 b0 b1 kn phi theta alpha beta : Fp5) :
+    cwyzBridgeFp5Value
+        (fp5Mul a0 b0) (fp5Mul a0 b1) (fp5Mul a1 b0) (fp5Mul a0 kn) (fp5Mul a1 kn)
+        (fp5Add (fp5Mul a0 b0) (fp5Mul a1 b1)) phi theta alpha beta =
+      fp5Add
+        (fp5Mul (fp5Add a1 (fp5Mul alpha (fp5Add a0 (fp5Mul theta a1)))) (fp5Add b0 (fp5Mul phi b1)))
+        (fp5Mul (fp5Mul beta (fp5Add a0 (fp5Mul theta a1))) kn) := by
+  let k0' := fp5Add b0 (fp5Mul phi b1)
+  have hf : fp5Add (fp5Mul a0 b0) (fp5Mul phi (fp5Mul a0 b1)) = fp5Mul a0 k0' := by
+    rw [← fp5Mul_assoc phi a0 b1, fp5Mul_comm phi a0, fp5Mul_assoc a0 phi b1, ← fp5Mul_add]
+  have hsub : fp5Sub (fp5Add (fp5Mul a0 b0) (fp5Mul a1 b1)) (fp5Mul a0 b0) = fp5Mul a1 b1 := by
+    rw [fp5Add_comm (fp5Mul a0 b0) (fp5Mul a1 b1), fp5Add_sub_cancel (fp5Mul_canonical a1 b1)]
+  have hg : fp5Add (fp5Mul a1 b0) (fp5Mul phi (fp5Sub (fp5Add (fp5Mul a0 b0) (fp5Mul a1 b1)) (fp5Mul a0 b0))) =
+      fp5Mul a1 k0' := by
+    rw [hsub, ← fp5Mul_assoc phi a1 b1, fp5Mul_comm phi a1, fp5Mul_assoc a1 phi b1, ← fp5Mul_add]
+  have hcore : fp5Add (fp5Mul a1 k0') (fp5Mul alpha (fp5Add (fp5Mul a0 k0') (fp5Mul theta (fp5Mul a1 k0')))) =
+      fp5Mul (fp5Add a1 (fp5Mul alpha (fp5Add a0 (fp5Mul theta a1)))) k0' := by
+    rw [← fp5Mul_assoc theta a1 k0',
+        ← add_fp5Mul a0 (fp5Mul theta a1) k0',
+        ← fp5Mul_assoc alpha (fp5Add a0 (fp5Mul theta a1)) k0',
+        ← add_fp5Mul a1 (fp5Mul alpha (fp5Add a0 (fp5Mul theta a1))) k0']
+  have hshift : fp5Mul beta (fp5Add (fp5Mul a0 kn) (fp5Mul theta (fp5Mul a1 kn))) =
+      fp5Mul (fp5Mul beta (fp5Add a0 (fp5Mul theta a1))) kn := by
+    rw [← fp5Mul_assoc theta a1 kn,
+        ← add_fp5Mul a0 (fp5Mul theta a1) kn,
+        ← fp5Mul_assoc beta (fp5Add a0 (fp5Mul theta a1)) kn]
+  dsimp only [cwyzBridgeFp5Value]
   rw [hf, hg, hcore, hshift]
 
-/-- Pure quadratic wire reconstruction `c0 + r * ((sum_claim - 2*c0 - c2) + c2 * r)`. -/
-def quadraticWireValue (c0 c2 sum_claim r : Ext4) : Ext4 :=
-  let c1 := extSub (extSub sum_claim (extAdd c0 c0)) c2
-  extAdd (extMul (extAdd (extMul c2 r) c1) r) c0
+/-- Pure quadratic wire reconstruction `c0 + r * ((sum_claim - 2*c0 - c2) + c2 * r)` over `Fp5`. -/
+def quadraticWireFp5Value (c0 c2 sum_claim r : Fp5) : Fp5 :=
+  let c1 := fp5Sub (fp5Sub sum_claim (fp5Add c0 c0)) c2
+  fp5Add (fp5Mul (fp5Add (fp5Mul c2 r) c1) r) c0
 
-theorem eval_quadratic_sumcheck_wire_refines (c0 c2 sum_claim r : Ext4) :
-    eval_quadratic_sumcheck_wire c0 c2 sum_claim r =
-      .ok (quadraticWireValue c0 c2 sum_claim r) := by
-  simp only [eval_quadratic_sumcheck_wire.public_eqs, quadraticWireValue,
-    ext_add_refines, ext_sub_refines, ext_mul_refines, bind_eq_result_bind, Result.bind]
+theorem eval_quadratic_sumcheck_wire_fp5_refines (c0 c2 sum_claim r : Fp5) :
+    eval_quadratic_sumcheck_wire_fp5 c0 c2 sum_claim r =
+      .ok (quadraticWireFp5Value c0 c2 sum_claim r) := by
+  simp only [eval_quadratic_sumcheck_wire_fp5.public_eqs, quadraticWireFp5Value, copy_fp5_spec,
+    fp5_add_refines, fp5_sub_refines, fp5_mul_refines, bind_eq_result_bind, Result.bind]
 
-private theorem extMul_extOne_eq_scale_one (x : Ext4) :
-    extMul x extOne = extScale x 1#u64 :=
-  Ext4Expr.eq_of_norm (envExt3 x extZero extZero)
-    (Ext4Expr.mul (.var4 0) ⟨.const .c1, .const .c0, .const .c0, .const .c0⟩)
+private theorem fp5Mul_fp5One_eq_scale_one (x : Fp5) :
+    fp5Mul x fp5One = fp5Scale x 1#u64 :=
+  Fp5Expr.eq_of_norm (envFp5_3 x fp5Zero fp5Zero)
+    (Fp5Expr.mul (.var5 0) ⟨.const .c1, .const .c0, .const .c0, .const .c0, .const .c0⟩)
     ⟨.mul (.var 0) (.const .c1), .mul (.var 1) (.const .c1),
-     .mul (.var 2) (.const .c1), .mul (.var 3) (.const .c1)⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    ⟨trivial, trivial, trivial, trivial⟩
-    rfl rfl rfl rfl
+     .mul (.var 2) (.const .c1), .mul (.var 3) (.const .c1), .mul (.var 4) (.const .c1)⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    ⟨trivial, trivial, trivial, trivial, trivial⟩
+    rfl rfl rfl rfl rfl
 
 private theorem quadratic_limb_sum (a0 a2 s : U64) (hs : IsCanonical s) :
     fieldAdd (fieldAdd 0#u64 a0)
@@ -1199,72 +1332,62 @@ private theorem quadratic_limb_sum (a0 a2 s : U64) (hs : IsCanonical s) :
     trivial hs rfl
 
 /-- Boolean hypercube sum guarantee: `eval(0) + eval(1) = sum_claim` unconditionally for canonical `sum_claim`. -/
-theorem eval_quadratic_sumcheck_wire_hypercube_sum
-    (c0 c2 sum_claim : Ext4) (hs : IsCanonicalExt4 sum_claim) :
-    extAdd (quadraticWireValue c0 c2 sum_claim extZero)
-           (quadraticWireValue c0 c2 sum_claim extOne) = sum_claim := by
-  rcases hs with ⟨hsa, hsb, hsc, hsd⟩
-  dsimp only [quadraticWireValue]
-  rw [extMul_zero, extMul_one (extAdd_canonical _ _), extMul_extOne_eq_scale_one]
-  unfold extAdd extSub extScale extZero
-  exact Ext4.ext
-    (quadratic_limb_sum c0.a c2.a sum_claim.a hsa)
-    (quadratic_limb_sum c0.b c2.b sum_claim.b hsb)
-    (quadratic_limb_sum c0.c c2.c sum_claim.c hsc)
-    (quadratic_limb_sum c0.d c2.d sum_claim.d hsd)
+theorem eval_quadratic_sumcheck_wire_fp5_hypercube_sum
+    (c0 c2 sum_claim : Fp5) (hs : IsCanonicalFp5 sum_claim) :
+    fp5Add (quadraticWireFp5Value c0 c2 sum_claim fp5Zero)
+           (quadraticWireFp5Value c0 c2 sum_claim fp5One) = sum_claim := by
+  rcases hs with ⟨hs0, hs1, hs2, hs3, hs4⟩
+  dsimp only [quadraticWireFp5Value]
+  rw [fp5Mul_zero, fp5Mul_one (fp5Add_canonical _ _), fp5Mul_fp5One_eq_scale_one]
+  unfold fp5Add fp5Sub fp5Scale fp5Zero
+  exact Fp5.ext
+    (quadratic_limb_sum c0.c0 c2.c0 sum_claim.c0 hs0)
+    (quadratic_limb_sum c0.c1 c2.c1 sum_claim.c1 hs1)
+    (quadratic_limb_sum c0.c2 c2.c2 sum_claim.c2 hs2)
+    (quadratic_limb_sum c0.c3 c2.c3 sum_claim.c3 hs3)
+    (quadratic_limb_sum c0.c4 c2.c4 sum_claim.c4 hs4)
 
-/-- Pure affine cascade claim step `acc + w0 * eval_at_point + w1 * shifted_eval`. -/
-def affineCascadeStepValue (acc w0 w1 eval_at_point shifted_eval : Ext4) : Ext4 :=
-  extAdd (extAdd acc (extMul w0 eval_at_point)) (extMul w1 shifted_eval)
+attribute [irreducible] fp5Add fp5Sub fp5Scale fp5Mul
 
-theorem affine_cascade_claim_step_refines
-    (acc w0 w1 eval_at_point shifted_eval : Ext4) :
-    affine_cascade_claim_step acc w0 w1 eval_at_point shifted_eval =
-      .ok (affineCascadeStepValue acc w0 w1 eval_at_point shifted_eval) := by
-  simp only [affine_cascade_claim_step.public_eqs, affineCascadeStepValue,
-    ext_mul_refines, ext_add_refines, bind_eq_result_bind, Result.bind]
+/-! ## Arbitrary-Length Horner Evaluation over `Fp5` at Base Point `z : U64` -/
 
-attribute [irreducible] extAdd extSub extScale extMul
-
-/-! ## Arbitrary-Length Horner Evaluation over `Ext4` at Base Point `z : U64` -/
-
-/-- Exact descending-index Horner fold matching `eval_ext4_univariate_at_base_loop`. -/
-@[expose] def hornerSpec (coeffs : List Ext4) (z : U64) (init : Ext4 := extZero) : Ext4 :=
-  coeffs.foldr (fun c acc => extAdd (extScale acc z) c) init
+/-- Exact descending-index Horner fold matching `eval_fp5_univariate_at_base_loop`. -/
+@[expose] def hornerSpec (coeffs : List Fp5) (z : U64) (init : Fp5 := fp5Zero) : Fp5 :=
+  coeffs.foldr (fun c acc => fp5Add (fp5Scale acc z) c) init
 
 /-- Textbook ascending-degree polynomial evaluation `c_0 + z * (c_1 + z * ...)`. -/
-@[expose] def evalPolyAscending : List Ext4 → U64 → Ext4
-  | [], _ => extZero
-  | c :: rest, z => extAdd c (extScale (evalPolyAscending rest z) z)
+@[expose] def evalPolyAscending : List Fp5 → U64 → Fp5
+  | [], _ => fp5Zero
+  | c :: rest, z => fp5Add c (fp5Scale (evalPolyAscending rest z) z)
 
-theorem hornerSpec_nil (z : U64) (init : Ext4) : hornerSpec [] z init = init := rfl
+theorem hornerSpec_nil (z : U64) (init : Fp5) : hornerSpec [] z init = init := rfl
 
-theorem hornerSpec_cons (c : Ext4) (rest : List Ext4) (z : U64) (init : Ext4) :
-    hornerSpec (c :: rest) z init = extAdd (extScale (hornerSpec rest z init) z) c := rfl
+theorem hornerSpec_cons (c : Fp5) (rest : List Fp5) (z : U64) (init : Fp5) :
+    hornerSpec (c :: rest) z init = fp5Add (fp5Scale (hornerSpec rest z init) z) c := rfl
 
-theorem hornerSpec_canonical (coeffs : List Ext4) (z : U64) :
-    IsCanonicalExt4 (hornerSpec coeffs z extZero) := by
+theorem hornerSpec_canonical (coeffs : List Fp5) (z : U64) :
+    IsCanonicalFp5 (hornerSpec coeffs z fp5Zero) := by
   induction coeffs with
   | nil =>
     rw [hornerSpec_nil]
-    unfold extZero IsCanonicalExt4 IsCanonical
-    exact ⟨by decide, by decide, by decide, by decide⟩
-  | cons c rest _ => exact extAdd_canonical _ _
+    unfold fp5Zero IsCanonicalFp5 IsCanonical
+    exact ⟨by decide, by decide, by decide, by decide, by decide⟩
+  | cons _ _ _ => exact fp5Add_canonical _ _
 
-/-- For canonical coefficients, `hornerSpec coeffs z extZero` coincides with `evalPolyAscending coeffs z`. -/
-theorem hornerSpec_eq_evalPolyAscending (coeffs : List Ext4) (z : U64)
-    (_hcan : ∀ c ∈ coeffs, IsCanonicalExt4 c) :
-    hornerSpec coeffs z extZero = evalPolyAscending coeffs z := by
+/-- For canonical coefficients, `hornerSpec coeffs z fp5Zero` coincides with `evalPolyAscending coeffs z`. -/
+theorem hornerSpec_eq_evalPolyAscending (coeffs : List Fp5) (z : U64)
+    (_hcan : ∀ c ∈ coeffs, IsCanonicalFp5 c) :
+    hornerSpec coeffs z fp5Zero = evalPolyAscending coeffs z := by
   induction coeffs with
   | nil => rfl
   | cons c rest ih =>
-    have hrest : ∀ x ∈ rest, IsCanonicalExt4 x := fun x hx => _hcan x (List.mem_cons_of_mem c hx)
-    simp only [hornerSpec_cons, evalPolyAscending, ih hrest, extAdd_comm]
+    have hrest : ∀ x ∈ rest, IsCanonicalFp5 x := fun x hx => _hcan x (List.mem_cons_of_mem c hx)
+    simp only [hornerSpec_cons, evalPolyAscending, ih hrest, fp5Add_comm]
 
 end qsag_whir_verified.proofs
 
 public section
 namespace qsag_whir_verified.proofs
-#export_eqns duetValue cwyzValue cwyzBridgeValue quadraticWireValue affineCascadeStepValue
+#export_eqns duetFp5Value cwyzFp5Value cwyzBridgeFp5Value quadraticWireFp5Value
 end qsag_whir_verified.proofs
 end
