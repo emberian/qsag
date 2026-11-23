@@ -52,9 +52,6 @@ impl Backend for Counter {
     fn equal(&mut self, _: &F, _: &F) {
         self.products += 1;
     }
-    fn perm(&mut self, _: &mut [F; 12]) {
-        unreachable!("width-24 opening")
-    }
 }
 impl Wide for Counter {
     fn perm_w24(&mut self, state: &mut [F; 24]) {

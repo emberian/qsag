@@ -217,14 +217,23 @@ pub(super) fn verify<B: Wide>(
     let mut weights = weights;
     let l = weights.len().next_power_of_two().trailing_zeros() as usize;
     weights.resize(1 << l, Quint::constant(E::ZERO));
-    for r in &ry[..l] {
+    let fold_vars = l.min(ry.len());
+    for r in &ry[..fold_vars] {
         weights = weights
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| p[0].add(&r.mul(b, &p[1].sub(&p[0]))))
             .collect();
     }
+    if weights.len() > 1 {
+        // Witness domain `2^log_cells` is smaller than `1 + public.len()` (`ry.len() < l`):
+        // emit an unsatisfiable constraint rather than panicking on `&ry[..l]`.
+        b.equal(&B::W::constant(F::ONE), &B::W::constant(F::ZERO));
+        weights.truncate(1);
+    }
     let mut public_col = weights.pop().unwrap();
-    for r in &ry[l..] {
+    for r in &ry[fold_vars..] {
         public_col = public_col.mul(b, &Quint::constant(E::ONE).sub(r));
     }
     let matrix = Quint::alloc(b, proof.matrix);

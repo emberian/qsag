@@ -171,8 +171,8 @@ pub(super) fn populate(
             .enumerate()
             .fold(Lc::zero(), |a, (i, b)| a.plus(&b.scaled(f(1 << i))))
     };
-    for (x, pair) in cur.iter().zip(s[..8].chunks_exact(2)) {
-        let bs = bits(cs, x, 64);
+    for (x, pair) in cur.iter().zip(s[..8].as_chunks::<2>().0) {
+        let bs = bits_canonical_u64(cs, x);
         cs.enforce_equal(&pack(&bs[..32]), &pair[0]);
         cs.enforce_equal(&pack(&bs[32..]), &pair[1]);
     }
@@ -180,9 +180,11 @@ pub(super) fn populate(
     let mut bytes: Vec<_> = sig_words
         .iter()
         .flat_map(|v| {
-            bits(cs, v, 64)
-                .chunks_exact(8)
-                .map(pack)
+            bits_canonical_u64(cs, v)
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| pack(c))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -191,7 +193,9 @@ pub(super) fn populate(
     bytes.splice(..0, [Lc::zero(), Lc::zero()]);
     bytes.push(Lc::zero());
     let mu: Vec<_> = bytes
-        .chunks_exact(7)
+        .as_chunks::<7>()
+        .0
+        .iter()
         .map(|c| c.iter().fold(Lc::zero(), |a, x| a.scaled(f(256)).plus(x)))
         .collect();
     let count = multisig::check_slots(cs, COMMITTEE, &addr, &mu, w.threshold, &w.slots);

@@ -119,7 +119,7 @@ pub(super) fn route<B: Wide, const N: usize>(
     }
     let mut halves = [Vec::new(), Vec::new()];
     let mut positions = [Vec::new(), Vec::new()];
-    for (i, pair) in wires.chunks_exact(2).enumerate() {
+    for (i, pair) in wires.as_chunks::<2>().0.iter().enumerate() {
         let j = 2 * i;
         let swap = lower[j].unwrap();
         let (a, c) = switch(b, pair, swap);
@@ -198,7 +198,9 @@ pub(super) fn verify<B: Wide>(
             route(b, packets, &dest)
         };
         packets = sorted
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 b.equal(&pair[1][0], &pair[0][0].plus(&B::W::constant(F::ONE)));
                 let digest = compress(

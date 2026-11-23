@@ -104,7 +104,7 @@ fn phase(
     while tables[0].0.len() > 1 {
         let (mut constant, mut quadratic) = (E::ZERO, E::ZERO);
         for (v, w) in tables.iter() {
-            for (v, w) in v.chunks_exact(2).zip(w.chunks_exact(2)) {
+            for (v, w) in v.as_chunks::<2>().0.iter().zip(w.as_chunks::<2>().0) {
                 constant += v[0] * w[0];
                 quadratic += (v[1] - v[0]) * (w[1] - w[0]);
             }
