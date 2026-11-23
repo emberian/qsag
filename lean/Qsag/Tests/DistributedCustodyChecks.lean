@@ -4,6 +4,7 @@ public import Qsag.Spec.Encoding
 public import Qsag.Spec.IdealSign
 public import Qsag.Spec.Refines
 public import Qsag.Oracle.Keccak
+public import Qsag.Oracle.Sponge
 /-
 # Qsag.Tests.DistributedCustodyChecks — 2-of-3 runs of the distributed custody machine
 
@@ -554,72 +555,70 @@ theorem reconstruct_dealt_shares_audited (dep : Deployment F257 F257 Unit ToyDig
 
 /-! ## Share-Opening Custody over Real Compressing 256-Bit Sponge (`BitVec 256`) and Real `Spec.SigScheme` -/
 
-/-- 512-bit (8 × `UInt64`, 256-bit rate + 256-bit capacity) ARX sponge state. -/
-structure ArxState512 where
-  w0 : UInt64
-  w1 : UInt64
-  w2 : UInt64
-  w3 : UInt64
-  w4 : UInt64
-  w5 : UInt64
-  w6 : UInt64
-  w7 : UInt64
-  deriving DecidableEq, Repr
+/-! ### Real 24-Round `Keccak-f[1600]` Sponge (`cSHAKE256` `"QSAG.DIST.SPONGE/v1"`) -/
+set_option maxRecDepth 65536
+set_option maxHeartbeats 800000
 
-def zeroArx512 : ArxState512 := ⟨0, 0, 0, 0, 0, 0, 0, 0⟩
+private def kZeroState : KState :=
+  ⟨0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩
 
-def rotl64 (x : UInt64) (s : UInt64) : UInt64 :=
-  (x <<< s) ||| (x >>> (64 - s))
+private def kLoadLe64 (block : List UInt8) (laneIdx : Nat) : UInt64 :=
+  let base := 8 * laneIdx
+  (block.getD base 0).toUInt64 |||
+  ((block.getD (base + 1) 0).toUInt64 <<< 8) |||
+  ((block.getD (base + 2) 0).toUInt64 <<< 16) |||
+  ((block.getD (base + 3) 0).toUInt64 <<< 24) |||
+  ((block.getD (base + 4) 0).toUInt64 <<< 32) |||
+  ((block.getD (base + 5) 0).toUInt64 <<< 40) |||
+  ((block.getD (base + 6) 0).toUInt64 <<< 48) |||
+  ((block.getD (base + 7) 0).toUInt64 <<< 56)
 
-def arxQuarterRound (a b c d : UInt64) : UInt64 × UInt64 × UInt64 × UInt64 :=
-  let a1 := a + b
-  let d1 := rotl64 (d ^^^ a1) 16
-  let c1 := c + d1
-  let b1 := rotl64 (b ^^^ c1) 12
-  let a2 := a1 + b1
-  let d2 := rotl64 (d1 ^^^ a2) 8
-  let c2 := c1 + d2
-  let b2 := rotl64 (b1 ^^^ c2) 7
-  (a2, b2, c2, d2)
+private def kXorRate136 (s : KState) (block : List UInt8) : KState :=
+  { s with
+    a0  := s.a0  ^^^ kLoadLe64 block 0,  a1  := s.a1  ^^^ kLoadLe64 block 1,
+    a2  := s.a2  ^^^ kLoadLe64 block 2,  a3  := s.a3  ^^^ kLoadLe64 block 3,
+    a4  := s.a4  ^^^ kLoadLe64 block 4,  a5  := s.a5  ^^^ kLoadLe64 block 5,
+    a6  := s.a6  ^^^ kLoadLe64 block 6,  a7  := s.a7  ^^^ kLoadLe64 block 7,
+    a8  := s.a8  ^^^ kLoadLe64 block 8,  a9  := s.a9  ^^^ kLoadLe64 block 9,
+    a10 := s.a10 ^^^ kLoadLe64 block 10, a11 := s.a11 ^^^ kLoadLe64 block 11,
+    a12 := s.a12 ^^^ kLoadLe64 block 12, a13 := s.a13 ^^^ kLoadLe64 block 13,
+    a14 := s.a14 ^^^ kLoadLe64 block 14, a15 := s.a15 ^^^ kLoadLe64 block 15,
+    a16 := s.a16 ^^^ kLoadLe64 block 16 }
 
-def arxDoubleRound512 (rc : UInt64) (s : ArxState512) : ArxState512 :=
-  let (a0, b0, c0, d0) := arxQuarterRound (s.w0 ^^^ rc) s.w2 s.w4 s.w6
-  let (a1, b1, c1, d1) := arxQuarterRound s.w1 s.w3 s.w5 s.w7
-  let (e0, f1, g0, h1) := arxQuarterRound a0 b1 c0 d1
-  let (e1, f0, g1, h0) := arxQuarterRound a1 b0 c1 d0
-  ⟨e0, e1, f0, f1, g0, g1, h0, h1⟩
+private def kLaneBytesLE (w : UInt64) : List UInt8 :=
+  [UInt8.ofNat (w.toNat % 256),
+   UInt8.ofNat ((w.toNat / 256) % 256),
+   UInt8.ofNat ((w.toNat / 65536) % 256),
+   UInt8.ofNat ((w.toNat / 16777216) % 256),
+   UInt8.ofNat ((w.toNat / 4294967296) % 256),
+   UInt8.ofNat ((w.toNat / 1099511627776) % 256),
+   UInt8.ofNat ((w.toNat / 281474976710656) % 256),
+   UInt8.ofNat ((w.toNat / 72057594037927936) % 256)]
 
-def arxPerm512 (s : ArxState512) : ArxState512 :=
-  let s1 := arxDoubleRound512 0x9E3779B97F4A7C15 s
-  let s2 := arxDoubleRound512 0xBF58476D1CE4E5B9 s1
-  let s3 := arxDoubleRound512 0x94D049BB133111EB s2
-  arxDoubleRound512 0xD6E8FEB86659FD93 s3
+private def kRateBlockBytes (s : KState) : List UInt8 :=
+  kLaneBytesLE s.a0 ++ kLaneBytesLE s.a1 ++ kLaneBytesLE s.a2 ++ kLaneBytesLE s.a3 ++
+  kLaneBytesLE s.a4 ++ kLaneBytesLE s.a5 ++ kLaneBytesLE s.a6 ++ kLaneBytesLE s.a7 ++
+  kLaneBytesLE s.a8 ++ kLaneBytesLE s.a9 ++ kLaneBytesLE s.a10 ++ kLaneBytesLE s.a11 ++
+  kLaneBytesLE s.a12 ++ kLaneBytesLE s.a13 ++ kLaneBytesLE s.a14 ++ kLaneBytesLE s.a15 ++
+  kLaneBytesLE s.a16
 
-def xorBlk512 (s : ArxState512) (blk : Bytes) : ArxState512 :=
-  let m0 := UInt64.ofNat (ofBE (blk.take 8))
-  let m1 := UInt64.ofNat (ofBE ((blk.drop 8).take 8))
-  let m2 := UInt64.ofNat (ofBE ((blk.drop 16).take 8))
-  let m3 := UInt64.ofNat (ofBE ((blk.drop 24).take 8))
-  { s with w0 := s.w0 ^^^ m0, w1 := s.w1 ^^^ m1, w2 := s.w2 ^^^ m2, w3 := s.w3 ^^^ m3 }
+/-- Precomputed 136-byte SP 800-185 `bytepad(encodeString("") || encodeString("QSAG.DIST.SPONGE/v1"), 136)`. -/
+private def distSpongePrefix136 : Bytes :=
+  [
+   0x01, 0x88, 0x01, 0x00, 0x01, 0x98, 0x51, 0x53, 0x41, 0x47, 0x2E, 0x44, 0x49, 0x53, 0x54, 0x2E, 0x53,
+   0x50, 0x4F, 0x4E, 0x47, 0x45, 0x2F, 0x76, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
 
-def extractRate512 (s : ArxState512) : Bytes :=
-  be 8 s.w0.toNat ++ be 8 s.w1.toNat ++ be 8 s.w2.toNat ++ be 8 s.w3.toNat
-
-def pad10star1_32 (domByte : UInt8) (msg : Bytes) : Bytes :=
-  let rem := 32 - msg.length % 32
-  if rem = 1 then msg ++ [domByte ^^^ (0x80 : UInt8)]
-  else msg ++ [domByte] ++ List.replicate (rem - 2) 0 ++ [0x80]
-
-def absorb512Blocks : Nat → Bytes → ArxState512 → ArxState512
-  | 0, _, s => s
-  | k + 1, bs, s => absorb512Blocks k (bs.drop 32) (arxPerm512 (xorBlk512 s (bs.take 32)))
-
-/-- Real compressing 256-bit sponge hash (`Bytes → BitVec 256`) with 256-bit rate (`r = 32`),
-    256-bit capacity (`c = 32`), `pad10*1` domain byte `0x1F`, and 8-round 512-bit ARX permutation. -/
+/-- Real compressing 256-bit sponge hash (`Bytes → BitVec 256`) over 24-round `keccakF1600`
+    (`r = 136` bytes, `c = 64` bytes, NIST SP 800-185 `cSHAKE256` domain `0x04`, `"QSAG.DIST.SPONGE/v1"`). -/
 def spongeCommit256 (msg : Bytes) : BitVec 256 :=
-  let padded := pad10star1_32 0x1F msg
-  let finalSt := absorb512Blocks (padded.length / 32) padded zeroArx512
-  BitVec.ofNat 256 (ofBE (extractRate512 finalSt))
+  BitVec.ofNat 256 (ofBE (evalSponge 136 0x04 keccakF1600 kZeroState kXorRate136 kRateBlockBytes
+    (distSpongePrefix136 ++ msg) 32))
 
 /-- Domain tag `"QSAG.DIST.COMMIT/v1"` for NIST SP 800-185 `cSHAKE256` share-opening commitments. -/
 def cshakeShareCommitDomain : Bytes :=
@@ -901,7 +900,7 @@ def mkRssShareDep (H : Bytes → BitVec 256) :
 /-- Concrete 2-of-3 share-opening deployment over NIST SP 800-185 `cSHAKE256` (`BitVec 256`). -/
 def cshakeShareDep := mkRssShareDep cshakeCommit256
 
-/-- Concrete kernel-executable 2-of-3 share-opening deployment over 512-bit ARX sponge `spongeCommit256` (`BitVec 256`). -/
+/-- Concrete kernel-executable 2-of-3 share-opening deployment over 24-round `keccakF1600` sponge `spongeCommit256` (`BitVec 256`). -/
 def spongeShareDep := mkRssShareDep spongeCommit256
 
 /-- Non-binding mutant with a constant 256-bit commitment hash (`fun _ => 0#256`) to trigger the
@@ -1049,17 +1048,20 @@ theorem mkRssShareDep_wellFormed (H : Bytes → BitVec 256) : (mkRssShareDep H).
       have h1 : ¬ (i.epoch = 1) := fun h => hEp (.inr h)
       simp [h0, h1]
 
+section SymbolicShareWellFormed
+attribute [local irreducible] spongeCommit256 cshakeCommit256
+
 theorem cshakeShareDep_wellFormed : cshakeShareDep.WellFormed :=
   mkRssShareDep_wellFormed cshakeCommit256
 
 theorem spongeShareDep_wellFormed : spongeShareDep.WellFormed :=
   mkRssShareDep_wellFormed spongeCommit256
 
-theorem spongeShareDepConstCommit_wellFormed : spongeShareDepConstCommit.WellFormed where
-  epoch_digest := spongeShareDep_wellFormed.epoch_digest
-  preimage_framed := spongeShareDep_wellFormed.preimage_framed
-  commitments_dealt _ _ _ := rfl
-  assemble_dealt := spongeShareDep_wellFormed.assemble_dealt
+theorem spongeShareDepConstCommit_wellFormed : spongeShareDepConstCommit.WellFormed :=
+  ⟨fun _ => rfl, encodeSharePreimage_framed, fun _ _ _ => rfl,
+   (mkRssShareDep_wellFormed spongeCommit256).assemble_dealt⟩
+
+end SymbolicShareWellFormed
 
 def runShareOutputs
     (dep : ShareOpeningDeployment RssCustodianShare RssShareContrib Bytes
@@ -1096,17 +1098,16 @@ theorem sponge_share_opening_honest_release_and_wal_replay :
       expectedSpongeSig0 = true := by
   decide +kernel
 
-/-- Concrete inhabited `ValidTrace` witness for `distCustody_dataRefines_or_collision` over real
-    256-bit sponge commitments (`Bytes → BitVec 256`) and `rssWotsSigScheme`. -/
-theorem inhabited_sponge_share_opening_validTrace :
-    ∃ (dep : ShareOpeningDeployment RssCustodianShare RssShareContrib Bytes
-        RssWotsPk RssWotsSk ToyDigest RssWotsSig)
-      (stFinal : ShareState RssCustodianShare RssShareContrib RssWotsPk ToyDigest RssWotsSig)
-      (tr : List (ShareTurn RssShareContrib × ShareEvent RssCustodianShare RssWotsSig)),
-      dep.WellFormed ∧
-      (shareOpeningMachine dep).ValidTrace (ShareState.init dep) tr stFinal ∧
-      tr.length = 3 ∧
-      InjOnPreimages dep.commit (observedSharePreimages dep tr) := by
+private theorem sponge_share_steps_exist :
+    ∃ (s3 : ShareState RssCustodianShare RssShareContrib RssWotsPk ToyDigest RssWotsSig)
+      (e1 e2 e3 : ShareEvent RssCustodianShare RssWotsSig),
+      (shareOpeningMachine spongeShareDep).ValidTrace (ShareState.init spongeShareDep)
+        [(.approve 0 7 toyIntent, e1), (.approve 1 7 toyIntent, e2),
+         (.execute 7 [0, 1] toyIntent false, e3)] s3 ∧
+      InjOnPreimages spongeShareDep.commit
+        (observedSharePreimages spongeShareDep
+          [(.approve 0 7 toyIntent, e1), (.approve 1 7 toyIntent, e2),
+           (.execute 7 [0, 1] toyIntent false, e3)]) := by
   let s0 := ShareState.init spongeShareDep
   have h1 : ∃ p1, shareOpeningStep spongeShareDep s0 (.approve 0 7 toyIntent) = some p1 := by
     cases h : shareOpeningStep spongeShareDep s0 (.approve 0 7 toyIntent) with
@@ -1156,6 +1157,20 @@ theorem inhabited_sponge_share_opening_validTrace :
     rw [observedSharePreimages_cons, observedSharePreimages_cons,
         observedSharePreimages_cons, observedSharePreimages_nil]
     decide +kernel
+  exact ⟨s3, e1, e2, e3, hTr, hInj⟩
+
+/-- Concrete inhabited `ValidTrace` witness for `distCustody_dataRefines_or_collision` over real
+    256-bit sponge commitments (`Bytes → BitVec 256`) and `rssWotsSigScheme`. -/
+theorem inhabited_sponge_share_opening_validTrace :
+    ∃ (dep : ShareOpeningDeployment RssCustodianShare RssShareContrib Bytes
+        RssWotsPk RssWotsSk ToyDigest RssWotsSig)
+      (stFinal : ShareState RssCustodianShare RssShareContrib RssWotsPk ToyDigest RssWotsSig)
+      (tr : List (ShareTurn RssShareContrib × ShareEvent RssCustodianShare RssWotsSig)),
+      dep.WellFormed ∧
+      (shareOpeningMachine dep).ValidTrace (ShareState.init dep) tr stFinal ∧
+      tr.length = 3 ∧
+      InjOnPreimages dep.commit (observedSharePreimages dep tr) := by
+  obtain ⟨s3, e1, e2, e3, hTr, hInj⟩ := sponge_share_steps_exist
   exact ⟨spongeShareDep, s3, _, spongeShareDep_wellFormed, hTr, rfl, hInj⟩
 
 def distCustody_injOn_dataRefines_ideal_audited
@@ -1255,6 +1270,9 @@ theorem tooth_forged_contrib_rejected_under_sponge_commit :
       [some (.corrupted (spongeShareDep.dealShare 2) []), some .approved, some .injected, none] := by
   decide +kernel
 
+section AuditSpongeShare
+attribute [local irreducible] spongeCommit256 cshakeCommit256
+
 #verify_constructive
   Qsag.DistCustody.Checks.cshakeShareDep_wellFormed
   Qsag.DistCustody.Checks.spongeShareDep_wellFormed
@@ -1273,7 +1291,12 @@ theorem tooth_forged_contrib_rejected_under_sponge_commit :
 #tooth_pair Qsag.DistCustody.Checks.verifyContrib_dealt_or_collision_audited vs
   Qsag.DistCustody.Checks.tooth_const_commit256_refutes_naive_binding
 
+end AuditSpongeShare
+
 /-! ## Multi-Epoch (`h = 3`, `8` Epochs `0..7`) Wire-Serialized Base-4 WOTS+C (`target_sum = 12`) Share-Opening Checks (`E4a`) -/
+
+section MultiEpochSymbolic
+attribute [local irreducible] spongeCommit256 cshakeCommit256
 
 def sampleBase4MasterSk : Base4WotsCMasterSk :=
   { s0 := 0x111122223333444455556666777788889999AAAABBBBCCCCDDDDEEEEFFFF0001#256
@@ -1285,7 +1308,7 @@ def sampleBase4MasterSk : Base4WotsCMasterSk :=
 def cshakeMultiEpochDep := mkBase4WotsCShareDep 3 cshakeCommit256 sampleBase4MasterSk 7 100
 
 /-- Concrete height-`3` (`8` epochs `0..7`) wire-serialized base-4 WOTS+C (`target_sum = 12`)
-    share-opening deployment over 512-bit ARX sponge `spongeCommit256` (`BitVec 256`). -/
+    share-opening deployment over 24-round `keccakF1600` sponge `spongeCommit256` (`BitVec 256`). -/
 def spongeMultiEpochDep := mkBase4WotsCShareDep 3 spongeCommit256 sampleBase4MasterSk 7 100
 
 theorem cshakeMultiEpochDep_wellFormed : cshakeMultiEpochDep.WellFormed :=
@@ -1424,5 +1447,7 @@ theorem tooth_spongeMultiEpoch_epoch_8_rejected :
   Qsag.DistCustody.Checks.tooth_spongeMultiEpoch_bad_targetSum_rejected
 #tooth_pair Qsag.DistCustody.Checks.multi_epoch_base4_wotsC_releases_epochs_5_and_7 vs
   Qsag.DistCustody.Checks.tooth_spongeMultiEpoch_epoch_8_rejected
+
+end MultiEpochSymbolic
 
 end Qsag.DistCustody.Checks

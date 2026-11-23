@@ -41,7 +41,7 @@ def opening : RoundOpening :=
   ⟨7, 0, ⟨0, towerOne 7, towerZero 7, towerZero 7⟩⟩
 def burn : Burn := ⟨request, roundCommitment dep request, [opening]⟩
 
-/-! ### Deployment binding (BACKLOG-62)
+/-! ### Deployment binding
 
 `legacyPayload` is `Custody.payload` with the deployment frame removed and nothing else changed
 (same `"QSAG.CUSTODY.APPROVAL/v3"` tag): the shape the approval bytes had before the deployment
