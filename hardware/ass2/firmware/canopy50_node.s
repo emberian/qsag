@@ -1,7 +1,6 @@
 ; Compact constant-time 50-byte Canopy TurboSHAKE256 node for Resident I-ROM:
 ;   Entry: R4=cur, R5=sib, R6=dir, R7=node_idx, R9=out.
 canopy50_node:
-    ADDI R1, RA, 0
     ADDI R10, R5, 0
     ADDI R14, R6, 0
     MOVZ20 R5, 0x10000
@@ -46,4 +45,4 @@ canopy_byte_loop:
     ANDI R8, R8, 0xffff
     ST64 [R9+48], R8
     SZERO
-    JALR ZERO, R1, 0
+    J success

@@ -1,4 +1,4 @@
-; Zero-Factory-Trust Post-Quantum Owner Authority & Dual-Slot Lifecycle (`ASS2-0P5` Rev. 2.0):
+; Zero-Factory-Trust Post-Quantum Owner Authority, Dual-Slot Lifecycle & Two-Ring W^X Loader (`ASS2-0P5` Rev. 2.3):
 ;   Uses ONLY explicit R0..R15 registers (`R3 == RA`!).
 ;   R2 = 0x10000, R12 = 0xFFFF_0000, R14 = 0x10100, R15 = 0x10180.
 lifecycle:
@@ -166,15 +166,206 @@ gate:
     XOR R4, R4, R5
     BNEZ R4, reject
     CALL bump_gen
-    SHRI R7, R7, 32
-    SHLI R7, R7, 32
+    XOR R7, R7, R5
     BEXTU R9, R9, 0, 4
     OR R7, R7, R9
     CALL persist_journal
     J success
 
+; ---- 0x30 CMD_LOAD_CODE (Two-Ring Hardware W^X Applet Loader & Ring-3 Drop) ----
+load_code:
+    SPUT S[20], R1
+    SPUT S[21], R6
+    SPUT S[22], R7
+    SPUT S[23], R9
+    SPUT S[24], R10
+    OR R1, R6, R7
+    OR R1, R1, R9
+    OR R1, R1, R10
+    LD64 R8, [R12+16]
+    SHRI R13, R8, 8
+    ANDI R13, R13, 127
+    SHRI R11, R8, 26
+    ANDI R11, R11, 3
+    LD64 R6, [R12+96]
+    SHRI R4, R6, 17
+    ANDI R4, R4, 1
+    BNEZ R4, locked_error
+    SHRI R6, R6, 8
+    ANDI R6, R6, 7
+    MOVZ20 R2, 0x10000
+    MOVZ20 R14, 0x10100
+    MOVZ20 R15, 0x10180
+    SHLI R4, R13, 2
+    MOVZ20 R7, 256
+    ADDI R5, R6, -1
+    BNEZ R5, pad_code_loop
+    BNEZ R11, reject
+    MOVZ20 R7, 512
+pad_code_loop:
+    SUB R5, R4, R7
+    BEQZ R5, pad_code_done
+    ADD R5, R2, R4
+    STB [R5], ZERO
+    ADDI R4, R4, 1
+    J pad_code_loop
+pad_code_done:
+    ADDI R4, R6, -1
+    BNEZ R4, load_code_prov
+    MOVZ20 R1, 0
+    MOVZ20 R2, 0
+    J drop_ring3
+
+load_code_prov:
+    ADDI R4, R11, -2
+    BNEZ R4, reject
+    BEQZ R1, keyset_error
+    CALL prep_fram_chains
+    CALL fram_write
+    SST64 [R14+104], S[20]
+    SST64 [R14+112], S[21]
+    SST64 [R14+120], S[22]
+    SST64 [R15+112], S[23]
+    SST64 [R15+120], S[24]
+    ADDI R5, R14, 56
+    CALL consume_nonce
+    ST64 [R14+40], R13
+    CALL get_record
+    ST64 [R14+48], R7
+    MOVZ20 R8, 0x574d2
+    ST64 [R14+0], R8
+    CALL calc_code_hash
+    ADDI R5, R14, 72
+    CALL sst_s0_s3
+    CALL load_anchor_eid
+    ADDI R5, R14, 8
+    CALL sst_s0_s3
+    SZERO
+    ADDI R4, R14, 0
+    CALL sxor_16
+    SLD64 S[16], [R15+112]
+    KECCAK.F1600 12
+    LD64 R8, [R15+120]
+    SXOR S[0], R8
+    MOVZ20 R8, 31
+    SXOR S[1], R8
+    CALL padded_keccak12
+    LD64 R1, [R14+112]
+    LD64 R2, [R14+120]
+    LD64 R7, [R15+112]
+    LD64 R13, [R15+120]
+    CALL prep_fram_chains
+    CALL fram_read
+    ADDI R5, R7, 0
+    ADDI R7, R13, 0
+    ADDI R13, R14, 0
+    CALL wots_run_chains
+    ADDI R4, R2, 0
+    MOVZ20 R2, 0x10100
+    ST64 [R2+0x60], R1
+    ST64 [R2+0x68], R4
+    ST64 [R2+0x70], R5
+    ST64 [R2+0x78], R7
+    ST64 [R2+48], ZERO
+    CALL wots_check_journal
+    CALL bump_persist_nonce
+    ADDI R14, R2, 0
+    MOVZ20 R2, 0x10000
+    LD64 R13, [R12+16]
+    SHRI R13, R13, 8
+    ANDI R13, R13, 127
+    CALL calc_code_hash
+    SST64 [R12+8], S[0]
+    SST64 [R12+48], S[1]
+    ADDI R5, R14, 96
+    CALL sst_s0_s3
+    ADDI R5, R14, 0
+    MOVZ20 R6, 12
+    CALL zero_words
+    LD64 R8, [ZERO+@K_APP_DOM0]
+    ST64 [R14+32], R8
+    MOVZ20 R8, 0x54454
+    SHLI R8, R8, 4
+    ORI R8, R8, 12
+    ST64 [R14+40], R8
+    ADDI R4, R14, 96
+    ADDI R5, R14, 43
+    MOVZ20 R6, 32
+app_ch_copy:
+    LDBU R8, [R4]
+    STB [R5], R8
+    ADDI R4, R4, 1
+    ADDI R5, R5, 1
+    ADDI R6, R6, -1
+    BNEZ R6, app_ch_copy
+    MOVZ20 R8, 4
+    STB [R14+75], R8
+    SZERO
+    SLD64 S[0], [ZERO+@K_CS_APP0]
+    SLD64 S[1], [ZERO+@K_CS_APP1]
+    MOVZ20 R8, 0x54
+    SPUT S[2], R8
+    KECCAK.F1600 24
+    ADDI R4, R14, 0
+    CALL sxor_10
+    LD64 R8, [R12+80]
+    SXOR S[0], R8
+    LD64 R8, [R12+88]
+    SXOR S[1], R8
+    CALL padded_keccak24
+    SGET R1, S[0]
+    SGET R2, S[1]
+    ADDI R5, R14, 0
+    MOVZ20 R6, 16
+    CALL zero_words
+    ADDI R5, R15, 24
+    MOVZ20 R6, 13
+    CALL zero_words
+drop_ring3:
+    MOVZ20 R8, 1
+    STB [R12+99], R8
+    HALT
+
+; Compute `cSHAKE256("ASS2.CODE", u_dsram[0..4*n-1])` (`R2 = 0x10000`, `R14 = 0x10100`, `R13 = n` in `1..64`) -> `S[0..3]`.
+calc_code_hash:
+    ADDI R9, RA, 0
+    LD64 R6, [R14+0]
+    ST64 [R14+0], ZERO
+    SZERO
+    SLD64 S[0], [ZERO+@K_CS_CODE0]
+    SLD64 S[1], [ZERO+@K_CS_CODE1]
+    KECCAK.F1600 24
+    SHLI R5, R13, 2
+    ADD R10, R2, R5
+    MOVZ20 R8, 4
+    STB [R10], R8
+    ADDI R4, R2, 0
+    CALL sxor_16
+    LD64 R8, [R2+128]
+    SXOR S[16], R8
+    MOVZ20 R4, 136
+    CMP R8, R5, R4, LTU
+    BNEZ R8, csh_finish
+    KECCAK.F1600 24
+    ADDI R4, R2, 136
+    CALL sxor_16
+csh_finish:
+    STB [R10], ZERO
+    ST64 [R14+0], R6
+    CALL padded_keccak24
+    JALR ZERO, R9, 0
+
+padded_keccak24:
+    MOVZ20 R8, 128
+    SHLI R8, R8, 56
+    SXOR S[16], R8
+    KECCAK.F1600 24
+    RET
+
+bump_persist_done:
+    MOVZ20 RA, 0
 bump_persist_nonce:
-    ST64 [R2+0x88], RA
+    ST64 [R2+0x98], RA
     CALL get_record
     CALL bump_gen
     J persist_body
@@ -183,15 +374,33 @@ bump_gen:
     MOVZ20 R4, 1
     SHLI R4, R4, 32
     ADD R7, R7, R4
-    SHRI R5, R7, 32
-    BEQZ R5, reject
+    SHRI R4, R7, 32
+    BEQZ R4, reject
+    RET
+
+consume_nonce:
+    LD64 R8, [R12+24]
+    LD64 R9, [R12+120]
+    ST64 [R5], R8
+    ST64 [R5+8], R9
+    OR R8, R8, R9
+    BEQZ R8, no_key
+    ST64 [R12+24], ZERO
+    ST64 [R12+120], ZERO
+    RET
+
+prep_fram_chains:
+    MOVZ20 R4, 0x200
+    ADDI R5, R14, 0
+    MOVZ20 R6, 256
     RET
 
 ; Measure/reconstruct 4 disjoint `BCH(63,36,5)` blocks (`R10 = 0` enrol, `8` recon); helpers at `[R15+0..63]`.
+; Stages raw PUF words strictly inside `latrnq_1` sponge lanes `S[0..3]` (`0` D-SRAM CSP spills!).
 measure_puf:
     ST64 [R2+248], RA
+    SZERO
     ADDI R4, R15, 0
-    ADDI R5, R2, 128
     MOVZ20 R6, 0
 measure_blk:
     BEQZ R10, puf_go
@@ -210,7 +419,13 @@ puf_wait:
     ANDI R8, R7, 4
     BNEZ R8, puf_error
     LD64 R8, [R12+48]
-    ST64 [R5], R8
+    SGET R7, S[1]
+    SPUT S[0], R7
+    SGET R7, S[2]
+    SPUT S[1], R7
+    SGET R7, S[3]
+    SPUT S[2], R7
+    SPUT S[3], R8
     BNEZ R10, puf_next
     LD64 R8, [R12+32]
     ST64 [R4], R8
@@ -218,19 +433,13 @@ puf_wait:
     ST64 [R4+8], R8
 puf_next:
     ADDI R4, R4, 16
-    ADDI R5, R5, 8
     ADDI R6, R6, 1
     ADDI R8, R6, -4
     BNEZ R8, measure_blk
-    SZERO
-    ADDI R4, R2, 128
-    CALL sxor_4
-    SPUT S[5], R8
-    ADDI R5, R2, 128
-    MOVZ20 R6, 4
-    CALL zero_words
     MOVZ20 R8, 0x5254
     SPUT S[4], R8
+    MOVZ20 R8, 31
+    SPUT S[5], R8
     CALL padded_keccak12
     SST64 [R12+80], S[0]
     SST64 [R12+88], S[1]
@@ -242,17 +451,12 @@ puf_next:
 verify_wotsc:
     ST64 [R15+112], RA
     ST64 [R15+120], R4
-    LD64 R4, [R12+24]
-    LD64 R5, [R12+120]
-    ST64 [R2+48], R4
-    ST64 [R2+56], R5
-    OR R4, R4, R5
-    BEQZ R4, no_key
+    ADDI R5, R2, 48
+    CALL consume_nonce
     ADDI R4, R2, 0x60
     ADDI R5, R2, 0x60
     CALL copy_or_4
     BEQZ R7, keyset_error
-
     CALL load_anchor_eid
     ADDI R5, R2, 8
     CALL sst_s0_s3
@@ -266,22 +470,56 @@ verify_wotsc:
     ADDI R4, R2, 0
     CALL sxor_16
     CALL turbo_perm12
-    ADDI R5, R2, 0
-    CALL sst_s0_s1
     LD64 RA, [R15+112]
     ST64 [R2+56], RA
     LD64 R8, [R15+120]
     ST64 [R2+48], R8
-    ST64 [R12+24], ZERO
-    ST64 [R12+120], ZERO
+    ADDI R13, R2, 0x80
+    CALL wots_run_chains
+    CALL wots_check_journal
+    LD64 R8, [R2+0x40]
+    ST64 [R12+8], R8
+    LD64 R8, [R2+0x48]
+    ST64 [R12+48], R8
+    LD64 RA, [R2+56]
+    RET
 
+wots_check_journal:
+    ST64 [R2+0x20], RA
+    MOVZ20 R15, 0x10180
+    ADDI R5, R2, 0x80
+    CALL sst_s0_s3
+    LD64 R8, [R2+48]
+    ADDI R8, R8, -18
+    BNEZ R8, wots_chk_slot
+    ADDI R5, R15, 64
+    J wots_cmp_pk
+wots_chk_slot:
+    CALL read_active_slot
+    ADDI R5, R2, 0xb0
+wots_cmp_pk:
+    ADDI R4, R2, 0x80
+    CALL xor_diff_4
+    BNEZ R7, bad_mac
+    CALL clear_tx_all
+    LD64 RA, [R2+0x20]
+    RET
+
+; Shared 16-chain base-256 `WOTS+C` (`sum == 2040`) verifier (`S[0..1]` = digits, `R13` = chains_base).
+; Preserves R1, R2, R5, R7 and restores R12 = 0xFFFF_0000; returns `recovered_pk` in `S[0..3]`.
+wots_run_chains:
+    ADDI R12, RA, 0
+    SGET R14, S[0]
+    SGET R15, S[1]
     MOVZ20 R10, 0
     MOVZ20 R11, 0
-    ADDI R13, R2, 0x80
-    MOVZ20 R7, 0x57531
 wots_chain_loop:
-    ADD R4, R2, R10
-    LDBU R6, [R4]
+    ANDI R6, R14, 255
+    SHRI R14, R14, 8
+    ADDI R4, R10, -7
+    BNEZ R4, wots_got_d
+    ADDI R14, R15, 0
+wots_got_d:
     ADD R11, R11, R6
     LD64 R8, [R13]
     LD64 R9, [R13+8]
@@ -289,7 +527,8 @@ wots_step_loop:
     ADDI R4, R6, -255
     BEQZ R4, wots_chain_done
     SZERO
-    SPUT S[0], R7
+    MOVZ20 R4, 0x57531
+    SPUT S[0], R4
     SPUT S[1], R8
     SPUT S[2], R9
     SHLI R4, R10, 8
@@ -313,45 +552,24 @@ wots_chain_done:
     ADDI R4, R11, -2040
     BNEZ R4, bad_mac
 
+    ADDI R13, R13, -256
     SZERO
-    ADDI R4, R2, 0x80
+    ADDI R4, R13, 0
     CALL sxor_16
-    SLD64 S[16], [R2+0x100]
+    SLD64 S[16], [R13+128]
     KECCAK.F1600 12
-    ADDI R4, R2, 0x108
+    ADDI R4, R13, 136
     CALL sxor_15
     MOVZ20 R8, 0x57501
     SXOR S[15], R8
     CALL turbo_perm12
-    ADDI R5, R2, 0x80
-    CALL sst_s0_s3
-
-    LD64 R8, [R2+48]
-    ADDI R8, R8, -18
-    BNEZ R8, wots_chk_journal
-    ADDI R5, R15, 64
-    J wots_cmp_pk
-wots_chk_journal:
-    CALL read_active_slot
-    ADDI R5, R2, 0xb0
-wots_cmp_pk:
-    ADDI R4, R2, 0x80
-    CALL xor_diff_4
-    BNEZ R7, bad_mac
-    CALL clear_tx_all
-    LD64 R8, [R2+48]
-    ADDI R8, R8, -48
-    BEQZ R8, wots_ret
-    LD64 R8, [R2+0x40]
-    ST64 [R12+8], R8
-    LD64 R8, [R2+0x48]
-    ST64 [R12+48], R8
-wots_ret:
-    LD64 RA, [R2+56]
+    ADDI RA, R12, 0
+    MOVZ20 R12, 0xffff
+    SHLI R12, R12, 16
     RET
 
 persist_journal:
-    ST64 [R2+0x88], RA
+    ST64 [R2+0x98], RA
 persist_body:
     ST64 [R2+8], R7
     ADDI R4, R2, 0x60
@@ -362,18 +580,17 @@ persist_body:
     ADDI R5, R2, 48
     CALL sst_s0_s1
     LD64 R7, [R2+8]
-    SHRI R6, R7, 32
-    ANDI R6, R6, 1
-    SHLI R6, R6, 6
-    ST64 [R2+0xf8], R6
+    SHRI R13, R7, 32
+    ANDI R13, R13, 1
+    SHLI R13, R13, 6
     ST64 [R2], ZERO
-    ADDI R4, R6, 0
+    ADDI R4, R13, 0
     ADDI R5, R2, 0
     MOVZ20 R6, 64
     CALL fram_write
     MOVZ20 R8, 0x4a4e2
     ST64 [R2], R8
-    LD64 R4, [R2+0xf8]
+    ADDI R4, R13, 0
     ADDI R5, R2, 0
     MOVZ20 R6, 8
     CALL fram_write
@@ -384,8 +601,10 @@ persist_body:
     LD64 R7, [R2+8]
     XOR R7, R7, R10
     BNEZ R7, anchor_error
+    LD64 RA, [R2+0x98]
+    BEQZ RA, success
     CALL nonce
-    LD64 RA, [R2+0x88]
+    LD64 RA, [R2+0x98]
     RET
 
 prep_anchor_args:
@@ -403,24 +622,25 @@ verify_anchor_eid:
     ADDI R1, RA, 0
 verify_anchor_body:
     ADDI R5, R15, 0
-    CALL check_anchor_seal
-    ADDI R5, R15, 64
-    CALL compute_enclave_id
-    JALR ZERO, R1, 0
-
-check_anchor_seal:
-    ADDI R11, RA, 0
-    ADDI R9, R5, 0
     CALL seal_hash_calc
-    SGET R8, S[0]
-    LD64 R7, [R9+96]
-    XOR R8, R8, R7
-    SGET R7, S[1]
-    LD64 R4, [R9+104]
-    XOR R7, R7, R4
-    OR R8, R8, R7
-    BNEZ R8, anchor_error
-    JALR ZERO, R11, 0
+    ADDI R5, R15, 0
+    CALL sst_s0_s1
+    ADDI R4, R15, 0
+    ADDI R5, R15, 96
+    CALL xor_diff_2
+    BNEZ R7, anchor_error
+    SZERO
+    SLD64 S[0], [ZERO+@K_PUBID]
+    SLD64 S[1], [R12+80]
+    SLD64 S[2], [R12+88]
+    SLD64 S[3], [R15+64]
+    SLD64 S[4], [R15+72]
+    SLD64 S[5], [R15+80]
+    SLD64 S[6], [R15+88]
+    MOVZ20 R8, 31
+    SPUT S[7], R8
+    CALL padded_keccak12
+    JALR ZERO, R1, 0
 
 seal_hash_calc:
     ADDI R10, RA, 0
@@ -448,50 +668,6 @@ journal_mac_calc:
     CALL padded_keccak12
     JALR ZERO, R9, 0
 
-compute_enclave_id:
-    SZERO
-    SLD64 S[0], [ZERO+@K_PUBID]
-    SLD64 S[1], [R12+80]
-    SLD64 S[2], [R12+88]
-    SLD64 S[3], [R5+0]
-    SLD64 S[4], [R5+8]
-    SLD64 S[5], [R5+16]
-    SLD64 S[6], [R5+24]
-    MOVZ20 R8, 31
-    SPUT S[7], R8
-    J padded_keccak12
-
-; Verify Merkle capability: `S[0..1]` = `leaf_id`, `[R4+0..8]` = `sibling`, `R9` = `tag` (`0x43500` or `0x43501`).
-verify_cap_tok:
-    ADDI R1, RA, 0
-    SGET R6, S[0]
-    SGET R7, S[1]
-    SZERO
-    SPUT S[0], R9
-    SPUT S[1], R6
-    SPUT S[2], R7
-    SLD64 S[3], [R4+0]
-    SLD64 S[4], [R4+8]
-    MOVZ20 R8, 31
-    SPUT S[5], R8
-    CALL padded_keccak12
-    LD64 R8, [R12+96]
-    MOVZ20 R9, 0x10000
-    OR R9, R8, R9
-    ST64 [R12+96], R9
-    LD64 R4, [R12+80]
-    LD64 R5, [R12+88]
-    ST64 [R12+96], R8
-    OR R9, R4, R5
-    BEQZ R9, bad_mac
-    SGET R6, S[0]
-    SGET R7, S[1]
-    XOR R4, R4, R6
-    XOR R5, R5, R7
-    OR R4, R4, R5
-    BNEZ R4, bad_mac
-    JALR ZERO, R1, 0
-
 clear_tx_all:
     ADDI R5, R15, 0
     MOVZ20 R6, 16
@@ -504,7 +680,6 @@ zero_words:
 
 copy_or_4:
     MOVZ20 R6, 4
-copy_or_n:
     MOVZ20 R7, 0
 copy_or_loop:
     LD64 R8, [R4]
@@ -534,12 +709,6 @@ xor_diff_loop:
     BNEZ R6, xor_diff_loop
     RET
 
-sst_s0_s6:
-    SST64 [R5+48], S[6]
-sst_s0_s5:
-    SST64 [R5+40], S[5]
-sst_s0_s4:
-    SST64 [R5+32], S[4]
 sst_s0_s3:
     SST64 [R5+24], S[3]
     SST64 [R5+16], S[2]
@@ -571,10 +740,8 @@ sxor_16:
 sxor_15:
     LD64 R8, [R4+112]
     SXOR S[14], R8
-sxor_14:
     LD64 R8, [R4+104]
     SXOR S[13], R8
-sxor_13:
     LD64 R8, [R4+96]
     SXOR S[12], R8
 sxor_12:
@@ -599,7 +766,6 @@ sxor_6:
 sxor_5:
     LD64 R8, [R4+32]
     SXOR S[4], R8
-sxor_4:
     LD64 R8, [R4+24]
     SXOR S[3], R8
     LD64 R8, [R4+16]
@@ -678,4 +844,7 @@ trng_error:
     HALT
 puf_error:
     MOVZ20 R4, 12
+    HALT
+locked_error:
+    MOVZ20 R4, 14
     HALT

@@ -1,6 +1,5 @@
 ; QSAG seven-limb Merkle compression (`POSEIDON2.GL24` Jive):
 p2gl24_jive:
-    ADDI    R1, RA, 0
     ADDI    R10, A0, 0
     ADDI    R11, A4, 0
     SZERO
@@ -34,4 +33,4 @@ p2gl24_jive:
     ADDI    R5, A2, 0
     CALL    sst_s0_s6
     SZERO
-    JALR    ZERO, R1, 0
+    J       success
