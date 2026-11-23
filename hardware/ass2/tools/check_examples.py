@@ -5,8 +5,8 @@ polynomial arithmetic). Check cycle counts and listing parity. --listings writes
 
     python3 -B -I hardware/ass2/tools/check_examples.py [--listings DIR]
 
-Every routine runs inside the ASS2-0P5 memory map: code in I_ROM or I_SRAM, operands in RX_MBOX or
-the scratch half of D_SRAM, results in TX_MBOX, constants in I_ROM.
+Every routine runs inside the ASS2-0P5 single-SRAM W^X memory map: code and constants in immutable
+4 KiB mask I_ROM, operands in RX_MBOX or the scratch half of the 512 B D_SRAM, results in TX_MBOX.
 """
 import hashlib
 import os
@@ -85,8 +85,8 @@ ok("Fp5: u^4 * u == 3", A.fp5_mul([0, 0, 0, 0, 1], [0, 1, 0, 0, 0]) == [3, 0, 0,
 print("fp5_horner.s")
 text = src("fp5_horner.s")
 # Degrees 0..2 fit RX_MBOX (three 40-byte coefficients); degree 5 uses the 256-byte scratch half.
-for d, buf, base in ((0, RX, CODE), (1, RX, CODE), (2, RX, A.I_SRAM), (5, DATA, CODE)):
-    vm, labels, listing, nins = fresh(text, base)
+for d, buf in ((0, RX), (1, RX), (2, RX), (5, DATA)):
+    vm, labels, listing, nins = fresh(text, CODE)
     coeffs = [[rnd.randrange(P) for _ in range(5)] for _ in range(d + 1)]
     r = [rnd.randrange(P) for _ in range(5)]
     for i, c in enumerate(coeffs):
@@ -171,7 +171,7 @@ NODE = (listing, nins, cycles_seen.pop())
 print("p2gl24_jive.s")
 text = src("p2gl24_jive.s")
 for known in (True, False):
-    vm, labels, listing, nins = fresh(text, CODE if known else A.I_SRAM)
+    vm, labels, listing, nins = fresh(text, CODE)
     left = list(range(1, 8)) if known else [rnd.randrange(P) for _ in range(7)]
     right = list(range(8, 15)) if known else [rnd.randrange(P) for _ in range(7)]
     tw = [100, 200] if known else [P-1, P-2]
@@ -202,9 +202,9 @@ print("cth_dualmac.s")
 text = src("cth_dualmac.s")
 seen = set()
 # Two 48-byte records fit RX_MBOX; five fit the scratch half.
-for n, tamper, buf, base in ((1, False, RX, CODE), (2, False, RX, A.I_SRAM), (2, True, RX, CODE),
-                             (5, False, DATA, CODE), (5, True, DATA, A.I_SRAM)):
-    vm, labels, listing, nins = fresh(text, base)
+for n, tamper, buf in ((1, False, RX), (2, False, RX), (2, True, RX),
+                       (5, False, DATA), (5, True, DATA)):
+    vm, labels, listing, nins = fresh(text, CODE)
     r = rnd.getrandbits(128)
     recs = []
     for k in range(n):
@@ -291,20 +291,19 @@ LI_MMIO = "MOVZ20 T0, 0xFFFF\nSHLI T0, T0, 16\n"       # T0 = 0xFFFF_0000
 vm = run(LI_MMIO + "LD64 A0, [T0+0x70]\nMOVZ20 A1, 1\nST64 [T0+0x60], A1\nLD64 A2, [T0+0x60]\nHALT")
 ok("I_ROM code reads DBG_UART_DIV = 25 and writes VERDICT_CTRL",
    (vm.R[4], vm.R[6], vm.ecause) == (25, 1, 0))
-vm = run(LI_MMIO + "LD64 A0, [T0+0x70]\nHALT", A.I_SRAM)
-ok("I_SRAM applet: SYS_MMIO read is fenced, MemFault", (vm.halted, vm.ecause, vm.R[4]) == (True, 5, 0))
-vm = run(LI_MMIO + "ST64 [T0+0x00], T0\nHALT", A.I_SRAM)
-ok("I_SRAM applet: FRAM_XFER write is fenced, MemFault",
-   vm.ecause == 5 and vm.r64(A.SYS_MMIO) == 0)
-vm = run(LI_MMIO + "LD64 A0, [T0+0x20]\nHALT", setup=lambda v: setattr(v, "applet", True))
-ok("resident callback inherits applet access rights", vm.ecause == 5)
+vm = run(LI_MMIO + "LD64 A0, [T0+0x70]\nHALT", setup=lambda v: setattr(v, "post_running", True))
+ok("cold-boot POST KAT: SYS_MMIO read is fenced, MemFault", (vm.halted, vm.ecause, vm.R[4]) == (True, 5, 0))
+vm = run("MOVZ20 T0, 0x10000\nLD64 A0, [T0+0]\nHALT", setup=lambda v: setattr(v, "post_running", True))
+ok("cold-boot POST KAT: D_SRAM access is fenced while scrub runs, MemFault", (vm.halted, vm.ecause) == (True, 5))
+vm = run("MOVZ20 T0, 0x1000\nJALR ZERO, T0, 0")
+ok("fetch from retired 0x0000_1000 (former I_SRAM): MemFault", (vm.ecause, vm.pc) == (5, A.RETIRED_I_SRAM))
 vm = run("MOVZ20 T0, 0x1000\nST64 [T0+0], T0\nHALT")
-ok("store to I_SRAM from the core: MemFault", vm.ecause == 5 and vm.r64(A.I_SRAM) == 0)
+ok("store to retired 0x0000_1000: MemFault", vm.ecause == 5)
 vm = run("ST64 [ZERO+0x800], SP\nHALT")
 ok("store to I_ROM: MemFault", vm.ecause == 5)
 vm = run("MOVZ20 T0, 0x10000\nJALR ZERO, T0, 0")
-ok("fetch from D_SRAM: MemFault", (vm.ecause, vm.pc) == (5, A.D_SRAM))
-for name, addr in (("above D_SRAM", A.D_SRAM + 0x200), ("above I_SRAM", A.I_SRAM + 0x200),
+ok("fetch from D_SRAM: MemFault (strict hardware W^X)", (vm.ecause, vm.pc) == (5, A.D_SRAM))
+for name, addr in (("above D_SRAM", A.D_SRAM + 0x200), ("above I_ROM", A.I_ROM + 0x1000),
                    ("above SYS_MMIO", A.SYS_MMIO + 0x80), ("old mailbox window", 0x20000)):
     vm = run("LD64 A0, [T0+0]\nHALT", setup=lambda v: v.R.__setitem__(10, addr))
     ok(f"unmapped load, {name}: MemFault", vm.ecause == 5)
@@ -320,21 +319,22 @@ ok("48-word sweep clears scratch and RX_MBOX, keeps TX_MBOX",
    all(vm.r64(a) == 0 for a in range(DATA, TX, 8)) and all(vm.r64(a) == M64 for a in range(TX, TX + 0x80, 8)))
 vm.zeroize_sram()
 ok("64-word sweep clears all of D_SRAM", all(vm.r64(a) == 0 for a in range(DATA, DATA + 0x200, 8)))
-many = "MOVZ20 A0, 0x41\n" + "CSRW A0, DBG_OUT\n" * 18 + "CSRR A1, DBG_IN\nCSRR A2, DBG_IN\nHALT"
+many = "MOVZ20 A0, 0x41\n" + "CSRW A0, DBG_OUT\n" * 4 + "CSRR A1, DBG_IN\nCSRR A2, DBG_IN\nHALT"
 vm = run(many, setup=lambda v: setattr(v, "dbg_in", 0x155))
-ok("DBG_OUT: 16-byte FIFO, drop on full with overflow flag, 18 cycles for 18 writes",
-   (bytes(vm.dbg), vm.dbg_overflow, vm.cycles) == (b"A" * 16, True, 22))
+ok("DBG_OUT: shift+1-byte hold buffer accepts 2 back-to-back bytes, sets overflow on 3rd",
+   (bytes(vm.dbg), vm.dbg_overflow, vm.cycles) == (b"AA", True, 8))
 ok("DBG_IN: [8] rx_valid, [7:0] byte, cleared by the read", (vm.R[5], vm.R[6]) == (0x155, 0))
 vm = run(many, setup=lambda v: (setattr(v, "dbg_live", False), setattr(v, "dbg_in", 0x155)))
 ok("DBG_OUT muted outside BOOT_MODE = 10 / BLANK: same cycles, no output, DBG_IN reads 0",
-   (bytes(vm.dbg), vm.dbg_overflow, vm.cycles, vm.R[5]) == (b"", False, 22, 0))
-for name in ("fp5_horner", "cth_dualmac", "p2gl24_jive"):
-    ok(f"{name} fits the 128-word I_SRAM", len(A.assemble(src(name + ".s"))[0]) // 4 <= 128)
-ok("canopy50_node (130 words) requires I_ROM placement", len(A.assemble(src("canopy50_node.s"))[0]) // 4 == 130)
+   (bytes(vm.dbg), vm.dbg_overflow, vm.cycles, vm.R[5]) == (b"", False, 8, 0))
+total_ex_words = sum(len(A.assemble(src(n + ".s"))[0]) // 4
+                     for n in ("fp5_horner", "cth_dualmac", "p2gl24_jive", "canopy50_node"))
+ok("all four crypto kernels fit comfortably inside 1,024-word I_ROM", total_ex_words < 512, f"{total_ex_words} words")
 
-# ---- CMD_LOAD_CODE and CMD_EXEC: entry state, budget, exit sweep ----------------------------------
+# ---- Two-Ring Hardware W^X CMD_LOAD_CODE (0x30) and resident I_ROM CMD_EXEC (0x31) ----------------
 print("exec")
-APPLET = """
+SERVICE_ENTRY = 0x0200
+SERVICE = """
     LD64    A3, [A0+0x38]       ; tweak t0: the pad word after the left child
     LD64    A4, [A0+0x78]       ; tweak t1: the pad word after the right child
     ADDI    A1, A0, 0x40        ; right child
@@ -342,50 +342,55 @@ APPLET = """
     MOVZ20  A0, 56              ; response length in bytes
     HALT
 """ + src("p2gl24_jive.s")
-img, _, _ = A.assemble(APPLET, A.I_SRAM)
-words = [int.from_bytes(img[i:i + 4], "little") for i in range(0, len(img), 4)]
+img, _, _ = A.assemble(SERVICE, SERVICE_ENTRY)
 payload = b"".join(v.to_bytes(8, "little") for v in [*range(1, 8), 100, *range(8, 15), 200])
 JIVE_KAT = [1170443848852734659, 833485916214919520, 373819593114229865, 2500389336842599945,
             2668122737528357675, 15131165148025152836, 573418327208874869]
+vm_r3 = A.Vm()
+ok("0x30 >64 words rejected with E_LEN", vm_r3.load_code([A.HALT_WORD] * 65) == A.E_LEN)
+ok("0x30 in READY without WOTS+C signature rejected with E_CAP",
+   vm_r3.load_code([A.HALT_WORD], lc="READY", signed_ok=False) == A.E_CAP)
+ok("0x30 in READY with WOTS+C signature injects applet_key in R1..R2 & scrubs R3..R15/S",
+   vm_r3.load_code([A.HALT_WORD], lc="READY", signed_ok=True, applet_key=(11, 22)) == 0
+   and (vm_r3.applet_exec, vm_r3.R[1], vm_r3.R[2], vm_r3.R[3:]) == (True, 11, 22, [0] * 13))
+vm_r3.rom_lock = True
+ok("0x30 under rom_lock hard-rejected with E_LOCKED",
+   vm_r3.load_code([A.HALT_WORD], lc="READY", signed_ok=True) == A.E_LOCKED)
 vm = A.Vm()
-ok("EXEC without a loaded image: E_CAP", vm.exec(payload, 1000)[0] == A.E_CAP)
-ok("LOAD_CODE rejects 0 and 129 words", vm.load_code([]) == vm.load_code([0] * 129) == A.E_LEN)
-ok(f"Jive applet is {len(words)} words; unused I_SRAM words are HALT",
-   vm.load_code(words) == 0 and len(words) == 79 and vm.r64(A.I_SRAM + 0x1F8) == 0x0005000000050000)
-err, tx, instret, cycles = vm.exec(payload, 65535)
-ok("EXEC with sufficient core clocks: seven KAT limbs from TX_MBOX, INSTRET 79, CYCLES 355",
+vm.load(SERVICE_ENTRY, img)
+ok("EXEC without valid capability tag: E_CAP", vm.exec(SERVICE_ENTRY, payload, 1000, cap_ok=False)[0] == A.E_CAP)
+err, tx, instret, cycles = vm.exec(SERVICE_ENTRY, payload, 65535)
+ok("EXEC resident Jive service: seven KAT limbs from TX_MBOX, INSTRET 79, CYCLES 355",
    (err, tx, instret, cycles) == (0, b"".join(v.to_bytes(8, "little") for v in JIVE_KAT), 79, 355))
 ok("exit: response captured before all 512 bytes are swept",
    vm.R == [0] * 16 and vm.S == [0] * 25 and all(vm.r64(a) == 0 for a in range(DATA, TX, 8))
    and all(vm.r64(a) == 0 for a in range(TX, TX + 128, 8)))
-err, tx, instret, cycles = vm.exec(payload, 10)
-ok("EXEC, ten fetch clocks cannot retire the first instruction",
+err, tx, instret, cycles = vm.exec(SERVICE_ENTRY, payload, 2)
+ok("EXEC, two clocks cannot retire the first 11-clock LD64",
    (err, tx, instret, cycles) == (A.E_BUDGET, b"", 0, 0))
 ok("E_BUDGET exit sweeps all 64 words", all(vm.r64(a) == 0 for a in range(DATA, DATA + 0x200, 8)))
-img, _, _ = A.assemble(LI_MMIO + "LD64 A0, [T0+0x20]\nHALT", A.I_SRAM)
-vm.load_code([int.from_bytes(img[i:i + 4], "little") for i in range(0, len(img), 4)])
-err, tx, instret, cycles = vm.exec(b"", 100)
-ok("applet reads PUF_SYNDROME0: E_TRAP, ECAUSE 5, two instructions retired",
-   (err, tx, instret, cycles, vm.ecause) == (A.E_TRAP, b"", 2, 3, 5))
-img, _, _ = A.assemble("LDBU A3, [A0+0]\nSTB [A2+0], A3\nMOVZ20 A0, 1\nRET", A.I_SRAM)
-vm.load_code([int.from_bytes(img[i:i + 4], "little") for i in range(0, len(img), 4)])
-ok("RET to the resident exit stub ends the applet like HALT", vm.exec(b"Z", 100) == (0, b"Z", 5, 7))
-ok("response longer than TX_MBOX: E_LEN",       # MOVZ20 A0, 129; HALT
-   vm.load_code([0x40008104, A.HALT_WORD]) == 0 and vm.exec(b"", 100)[0] == A.E_LEN)
+vm.load(SERVICE_ENTRY, A.assemble("MOVZ20 T0, 0x1000\nLD64 A0, [T0+0]\nHALT", SERVICE_ENTRY)[0])
+err, tx, instret, cycles = vm.exec(SERVICE_ENTRY, b"", 100)
+ok("unmapped load traps cleanly: E_TRAP, ECAUSE 5, one instruction retired",
+   (err, tx, instret, cycles, vm.ecause) == (A.E_TRAP, b"", 1, 2, 5))
+vm.load(SERVICE_ENTRY, A.assemble("LDBU A3, [A0+0]\nSTB [A2+0], A3\nMOVZ20 A0, 1\nRET", SERVICE_ENTRY)[0])
+ok("RET to the resident exit stub ends the service like HALT", vm.exec(SERVICE_ENTRY, b"Z", 100) == (0, b"Z", 5, 7))
+vm.load(SERVICE_ENTRY, b"".join(w.to_bytes(4, "little") for w in (0x40008104, A.HALT_WORD)))  # MOVZ20 A0, 129; HALT
+ok("response longer than TX_MBOX: E_LEN", vm.exec(SERVICE_ENTRY, b"", 100)[0] == A.E_LEN)
 
-# One NOP fetches the macro word (10 clocks) and executes (one clock).
-vm.load_code([0x00060000, A.HALT_WORD])
-ok("watchdog stops exactly after a complete I-SRAM NOP", vm.exec(b"", 11) == (A.E_BUDGET, b"", 1, 1))
-vm.load_code([0x40000004, A.HALT_WORD])  # MOVZ20 A0, 0; HALT
-ok("zero budget selects 65,535 core clocks", vm.exec(b"", 0) == (0, b"", 2, 2))
+# One I_ROM NOP fetches in 2 clocks and executes in 1 clock (3 core clocks).
+vm.load(SERVICE_ENTRY, b"".join(w.to_bytes(4, "little") for w in (0x00060000, A.HALT_WORD)))
+ok("watchdog stops exactly after a complete 3-clock I-ROM NOP", vm.exec(SERVICE_ENTRY, b"", 3) == (A.E_BUDGET, b"", 1, 1))
+vm.load(SERVICE_ENTRY, b"".join(w.to_bytes(4, "little") for w in (0x40000004, A.HALT_WORD)))  # MOVZ20 A0, 0; HALT
+ok("zero budget selects 65,535 core clocks", vm.exec(SERVICE_ENTRY, b"", 0) == (0, b"", 2, 2))
 vm = A.Vm()
 vm.load(A.D_SRAM, bytes([0xa5]) * 512)
 vm.load(0, A.assemble("ZEROIZE")[0])
 vm.step()
-ok("ZEROIZE clears all 512 bytes including TX_MBOX", bytes(vm.regions[2][1]) == bytes(512))
+ok("ZEROIZE clears all 512 bytes including TX_MBOX", bytes(vm.regions[1][1]) == bytes(512))
 ok("full wipe costs 512 byte-write clocks plus fetch and instruction", vm.clocks == 515)
 
-# ---- reference clock model for resident routines and the I_SRAM Jive variant ------
+# ---- reference clock model for resident I_ROM routines ------------------------------------------
 print("clocks")
 
 
@@ -412,13 +417,12 @@ CLOCKS = {
     "cth_dualmac n=2": clocks("cth_dualmac", lambda v: v.R.__setitem__(slice(4, 6), [RX, 2])),
     "p2gl24_jive": clocks("p2gl24_jive", lambda v: v.R.__setitem__(slice(4, 7), [RX, RX + 0x40, TX])),
     "canopy50_node": clocks("canopy50_node", canopy_args),
-    "p2gl24_jive in I_SRAM": clocks("p2gl24_jive", lambda v: v.R.__setitem__(slice(4, 7), [RX, RX + 0x40, TX]), A.I_SRAM),
 }
 for k, v in CLOCKS.items():
     print(f"  {k}: cycles {v[0]}, instructions {v[1]}, core clocks {v[2]}")
 WANT = {"fp5_horner d=0": 12 + 7*2 + 5*8, "fp5_horner d=5": 622 + 57*2 + 30*8,
         "cth_dualmac n=2": 63 + 36*2 + 12*8, "p2gl24_jive": 347 + 73*2 + 35*8,
-        "canopy50_node": 190 + 130*2 + 24*8, "p2gl24_jive in I_SRAM": 347 + 73*10 + 35*8}
+        "canopy50_node": 190 + 130*2 + 24*8}
 ok("byte-port timing model reproduces the routine clock counts", {k: v[2] for k, v in CLOCKS.items()} == WANT, str(WANT))
 
 # ---- DIT audit has teeth --------------------------------------------------------------------------

@@ -133,20 +133,22 @@ CSR = {"ARCH_ID": 0x00, "WORD_BITS": 0x01, "EVEC": 0x02, "POWER": 0x03, "INSTRET
        "CYCLES": 0x05, "FEATURES": 0x06, "EPC": 0x08, "ECAUSE": 0x09, "DBG_OUT": 0x0A,
        "DBG_IN": 0x0B, "EXC_EN": 0x3F, "DIT": 0x40, "ZEROIZE": 0x41}
 
-# ASS2-0P5 memory map (canonical spec, section 3). Rights are those of the core: X fetch, R load,
-# W store. The loader and the test bench reach every region through Vm.load / w64 / r64.
-I_ROM, I_SRAM, D_SRAM, SYS_MMIO = 0x0000_0000, 0x0000_1000, 0x0001_0000, 0xFFFF_0000
+# ASS2-0P5 single-SRAM Two-Ring W^X memory map (Rev. 2.3, canonical spec section 3).
+# Ring 0 (`applet_exec = False`): I_ROM (0x0000..0x0FFF) R+X,!W; D_SRAM (0x10000..0x101FF) R+W,!X; SYS_MMIO R+W,!X.
+# Ring 3 (`applet_exec = True`):  0x10000..0x100FF R+X,!W (<= 64 words); 0x10100..0x101FF R+W,!X; I_ROM & SYS_MMIO MemFault.
+I_ROM, RETIRED_I_SRAM, D_SRAM, SYS_MMIO = 0x0000_0000, 0x0000_1000, 0x0001_0000, 0xFFFF_0000
+APPLET_CODE, APPLET_DATA = D_SRAM, D_SRAM + 0x100
 RX_MBOX, TX_MBOX = D_SRAM + 0x100, D_SRAM + 0x180
-REGIONS = ((I_ROM, 0x1000, "xr"), (I_SRAM, 0x200, "xr"), (D_SRAM, 0x200, "rw"), (SYS_MMIO, 0x80, "rw"))
+REGIONS = ((I_ROM, 0x1000, "xr"), (D_SRAM, 0x200, "rw"), (SYS_MMIO, 0x80, "rw"))
 MMIO = {"FRAM_XFER": 0x00, "FRAM_STATUS": 0x08, "PUF_SYNDROME0": 0x20, "PUF_SYNDROME1": 0x28,
         "PUF_SYNDROME2": 0x30, "PUF_SYNDROME3": 0x38, "TRNG_DATA": 0x40, "TRNG_HEALTH": 0x48,
         "VERDICT_CTRL": 0x60, "GPIO_IO": 0x68, "DBG_UART_DIV": 0x70}
-DBG_FIFO_DEPTH = 16
+DBG_FIFO_DEPTH = 2          # 10-bit active UART shift register + 1-byte tx_hold_q
 HALT_WORD = 0x0005_0000
-EXIT_STUB = 0x0FF8          # resident HALT: the return address handed to an applet
-E_LEN, E_CAP, E_BUDGET, E_TRAP = 3, 13, 15, 16
-# Clock accounting for synchronous fetch, byte-serial SRAM words and full erasure.
-FETCH_ROM, FETCH_SRAM, WORD_SERIAL, SWEEP = 2, 10, 8, 512
+EXIT_STUB = 0x0FF8          # resident HALT: the return address handed to resident entrypoints
+E_BAD_OP, E_LEN, E_CAP, E_LOCKED, E_BUDGET, E_TRAP = 2, 3, 13, 14, 15, 16
+# Clock accounting for synchronous ROM fetch, 4B Ring-3 SRAM fetch, byte-serial D-SRAM words and full 512B erasure.
+FETCH_ROM, FETCH_SRAM, WORD_SERIAL, SWEEP = 2, 5, 8, 512
 
 CMP_PRED = {"F": 0, "EQ": 1, "GTU": 2, "GEU": 3, "GTS": 6, "GES": 7, "T": 8, "NE": 9,
             "LEU": 10, "LTU": 11, "LES": 14, "LTS": 15}
@@ -492,12 +494,13 @@ class Vm:
         self.regions = [(base, bytearray(size), rights) for base, size, rights in REGIONS]
         self.mt = {}                 # taint of each 64-bit memory word, by word address
         self.w64(SYS_MMIO + MMIO["DBG_UART_DIV"], 25)   # 1.0 Mbaud at 25 MHz
-        self.applet = False          # retain applet rights across resident callbacks
+        self.post_running = False    # cold-boot FIPS POST KAT fences both D_SRAM and SYS_MMIO
+        self.applet_exec = False     # Two-Ring Hardware W^X: Ring 0 (False) vs Ring 3 (True)
+        self.rom_lock = False        # sticky / gated ROM lock (blocks 0x30 & applet 0x31)
         self.dbg_live = True         # BOOT_MODE = 10 and lifecycle BLANK
         self.dbg_overflow = False
         self.dbg_in = 0              # [8] rx_valid, [7:0] rx_byte
         self.clocks = 0              # core clocks, fetch and memory serialisation included
-        self.image_valid = False     # set by a successful CMD_LOAD_CODE
         self.R = [0] * 16
         self.S = [0] * 25
         self.rt = [False] * 16
@@ -514,11 +517,21 @@ class Vm:
     # memory ---------------------------------------------------------------------------------
     def _span(self, addr, size, right=None):
         """Backing store and offset of [addr, addr + size). A core access names its right."""
+        if right is not None and self.applet_exec:
+            in_code = APPLET_CODE <= addr and addr + size <= APPLET_CODE + 0x100
+            in_data = APPLET_DATA <= addr and addr + size <= APPLET_DATA + 0x100
+            allowed = (in_code and right in "xr") or (in_data and right in "rw")
+            if not allowed:
+                raise _Trap(MEMFAULT)
+            store = self.regions[1][1]
+            if right == "r" or (right == "w" and size == 8):
+                self.clocks += WORD_SERIAL
+            return store, addr - D_SRAM
         for base, store, rights in self.regions:
             if base <= addr and addr + size <= base + len(store):
                 if right is None or (right in rights and not (
-                        base == SYS_MMIO and (self.applet or self.pc >= I_SRAM))):
-                    if base in (I_SRAM, D_SRAM) and (right == "r" or (right == "w" and size == 8)):
+                        self.post_running and base in (D_SRAM, SYS_MMIO))):
+                    if base == D_SRAM and (right == "r" or (right == "w" and size == 8)):
                         self.clocks += WORD_SERIAL
                     return store, addr - base
                 break
@@ -570,8 +583,7 @@ class Vm:
             if pc & 3:
                 raise _Trap(MISALIGNED_PC)
             store, off = self._span(pc, 4, "x")
-            self.applet |= pc >= I_SRAM
-            self.clocks += FETCH_SRAM if pc >= I_SRAM else FETCH_ROM
+            self.clocks += FETCH_SRAM if self.applet_exec else FETCH_ROM
             w = int.from_bytes(store[off:off + 4], "little")
             op = w >> 28
             rd, ra, rb, rc = w & 15, (w >> 4) & 15, (w >> 8) & 15, (w >> 12) & 15
@@ -604,6 +616,7 @@ class Vm:
                     if rt[ra] and imm8 != 0x41:
                         raise DitViolation(f"pc={pc:#x}: secret written to CSR {imm8:#x}")
                     if imm8 == 0x02:
+                        ill(self.applet_exec)
                         self.evec = v & ~3 & M64
                     elif imm8 == 0x03:
                         self.halted = bool(v & 1) or self.halted
@@ -621,6 +634,7 @@ class Vm:
                         elif self.dbg_live:
                             self.dbg_overflow = True
                     elif imm8 == 0x3F:
+                        ill(self.applet_exec)
                         self.exc_en = v & 1
                     elif imm8 == 0x41:
                         if v & 1:
@@ -704,9 +718,9 @@ class Vm:
                 self._addr(ra, pc)
                 if rb == 0:
                     ea = (R[ra] + (_sx(imm16, 16) << 3)) & M64
+                    self._span(ea, 8, "r")
                     if ea & 7:
                         raise _Trap(MISALIGNED_MEM)
-                    self._span(ea, 8, "r")
                     self._wr(rd, self.r64(ea), bool(self.mt.get(ea // 8)))
                 else:
                     ea = (R[ra] + _sx(imm16, 16)) & M64
@@ -718,9 +732,9 @@ class Vm:
                 self._addr(ra, pc)
                 if rb == 0:
                     ea = (R[ra] + (_sx(imm16, 16) << 3)) & M64
+                    self._span(ea, 8, "w")
                     if ea & 7:
                         raise _Trap(MISALIGNED_MEM)
-                    self._span(ea, 8, "w")
                     self.w64(ea, R[rd], rt[rd])
                 else:
                     ea = (R[ra] + _sx(imm16, 16)) & M64
@@ -851,22 +865,36 @@ class Vm:
         self.zeroize_sram()
         self.clocks += SWEEP
 
-    # host command fixtures, after authentication ----------------------------------------
-    def load_code(self, words):
-        """CMD_LOAD_CODE: the image at I_SRAM, HALT in every unused word."""
-        if not 1 <= len(words) <= 128:
-            self.image_valid = False
+    # host command fixtures, Two-Ring Hardware W^X architecture -----------------------------
+    def load_code(self, words, lc="BLANK", signed_ok=False, applet_key=(0, 0)):
+        """CMD_LOAD_CODE (0x30): open in BLANK, WOTS+C signed in READY/PROVISIONED, E_LOCKED if rom_lock."""
+        if self.rom_lock:
+            return E_LOCKED
+        if not 1 <= len(words) <= 64:
             return E_LEN
-        image = list(words) + [HALT_WORD] * (128 - len(words))
-        self.load(I_SRAM, b"".join(w.to_bytes(4, "little") for w in image))
-        self.image_valid = True
+        if lc == "BLANK":
+            k0, k1, kt = 0, 0, False
+        elif lc in ("PROVISIONED", "READY"):
+            if not signed_ok:
+                return E_CAP
+            k0, k1, kt = applet_key[0] & M64, applet_key[1] & M64, True
+        else:
+            return E_CAP
+        self.zeroize_sram()
+        self.load(APPLET_CODE, b"".join((w & 0xFFFFFFFF).to_bytes(4, "little") for w in words))
+        self.R = [0, k0, k1] + [0] * 13
+        self.rt = [False, kt, kt] + [False] * 13
+        self.S, self.st = [0] * 25, [False] * 25
+        self.evec = self.epc = self.ecause = self.exc_en = 0
+        self.applet_exec = True
+        self.pc, self.halted = APPLET_CODE, False
         return 0
 
-    def exec(self, payload, budget):
-        """Exercise an applet with the leaf-call ABI and return its A0-sized result and counters."""
+    def exec(self, entry, payload, budget, cap_ok=True):
+        """Exercise a resident I_ROM service at `entry` with the mailbox ABI and 16-bit budget."""
         if len(payload) > 128 or not 0 <= budget <= 0xffff:
             return E_LEN, b"", 0, 0
-        if not self.image_valid:
+        if not cap_ok:
             return E_CAP, b"", 0, 0
         self.zeroize_sram()
         self.R, self.rt = [0] * 16, [False] * 16
@@ -876,13 +904,13 @@ class Vm:
         self.R[1], self.R[3] = RX_MBOX, EXIT_STUB
         self.R[4], self.R[5], self.R[6] = RX_MBOX, len(payload), TX_MBOX
         self.load(EXIT_STUB, HALT_WORD.to_bytes(4, "little"))
-        self.pc, self.halted = I_SRAM, False
+        self.pc, self.halted = entry, False
         self.exc_en = self.ecause = self.instret = self.cycles = 0
         deadline = self.clocks + (budget or 0xffff)
         err = E_BUDGET
         while self.clocks < deadline:
             # Preview one instruction atomically. An expired watchdog must not commit
-            # a store, CSR write, trap, FIFO byte or software-writable counter.
+            # a store, CSR write, trap, UART byte or software-writable counter.
             trial = deepcopy(self, {id(self.trace): []})
             trial.step()
             if trial.clocks > deadline:
@@ -898,7 +926,7 @@ class Vm:
         n, counters = self.R[4], (self.instret, self.cycles)
         tx = b"" if err else bytes(self._span(TX_MBOX, n)[0][0x180:0x180 + n])
         self._zeroize()
-        self.halted, self.applet = True, False
+        self.halted = True
         return err, tx, *counters
 
     def call(self, entry, ret=0x0FFC, max_steps=1_000_000):
