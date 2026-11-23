@@ -28,6 +28,7 @@ qsag-policy = { path = "../crates/qsag-policy", features = ["std"] }
 qsag-addr = { path = "../crates/qsag-addr", features = ["std"] }
 qsag-quorum = { path = "../crates/qsag-quorum", features = ["std"] }
 qsag-migrate = { path = "../crates/qsag-migrate", features = ["std"] }
+qsag-ass2 = { path = "../crates/qsag-ass2" }
 
 # Independent upstream reference implementations for coverage-guided differential fuzzing
 sha3 = "0.10"
@@ -96,6 +97,34 @@ bench = false
 [[bin]]
 name = "fuzz_migrate_ownership"
 path = "fuzz_targets/fuzz_migrate_ownership.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hem_quintic_v2"
+path = "fuzz_targets/fuzz_hem_quintic_v2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_recursive_ivc_w24"
+path = "fuzz_targets/fuzz_recursive_ivc_w24.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_zkhem_v2_decode"
+path = "fuzz_targets/fuzz_zkhem_v2_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ass2_wire_and_isa"
+path = "fuzz_targets/fuzz_ass2_wire_and_isa.rs"
 test = false
 doc = false
 bench = false
