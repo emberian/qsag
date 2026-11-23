@@ -1,18 +1,16 @@
 // Dregg-64 / ASS2-0P5 True >=128-Bit Physical Entropy RO-PUF + BCH(63,36,t=5):
-//   - Instantiates 512 physically distinct 5-stage `gf180mcu_fd_sc_mcu7t5v0` ring
+//   - Instantiates all 512 physically distinct 5-stage `gf180mcu_fd_sc_mcu7t5v0` ring
 //     oscillators organized as 256 strictly disjoint differential RO pairs (`4` blocks
 //     x `64` disjoint pairs, zero oscillator reuse across pairs!).
-//   - Only ONE pair (2 oscillators out of 512) is enabled at any instant during
-//     `ENROL` / `BOOT`, keeping dynamic power identical to a 2-ring source (~24k um^2).
-//   - Across 4 disjoint `BCH(63,36,t=5)` blocks:
-//       * 4 x 63 = 252 strictly independent differential sign bits
-//       * 4 x 27 = 108 public BCH syndrome bits
-//       * 252 - 108 = 144 bits (>= 128 bits!) of strictly independent post-helper
-//         physical min-entropy under full helper & syndrome disclosure!
+//   - Area-slimmed pair enable decoding (`256` shared pair enables + zero-subtractor
+//     power-of-2 `ro_dead` check + 7-bit `abs_diff` margin check).
+//   - FIPS 140-3 Level 4 BIST fault-injection hard-gate (`bist_allow_i`).
 module dregg_ro_puf_bch (
     input  wire         clk,
     input  wire         rst_n,
     input  wire         srst_n,
+    input  wire         zeroize_i = 1'b0,
+    input  wire         bist_allow_i,
     input  wire         start_blk,
     input  wire         recon_mode,
     input  wire [2:0]   blk_sel,
@@ -55,24 +53,28 @@ module dregg_ro_puf_bch (
     logic [5:0] sub_idx;
     wire  [7:0] pair_idx = mon_en ? {2'd0, mon_idx} : {blk_sel[1:0], sub_idx};
 
-    // 256 strictly disjoint differential RO pairs (512 physical 5-stage rings).
-    // Grouped into 16 clusters of 16 pairs for clean hierarchical enable & OR reduction.
+    // Active-low 16x16 row/column pre-decode (`nor2_1` = 13.17 um^2, shared across `u_roa` & `u_rob` when `!mon_en`)
+    wire        en_a_glob = rst_n && (meas_active || mon_en);
+    wire        b_allow   = !mon_en || mon_beat;
+    wire [15:0] grp_en_n, col_hot_n;
+    genvar di;
+    generate
+        for (di = 0; di < 16; di++) begin : g_dec
+            assign grp_en_n[di]  = ~(en_a_glob && (pair_idx[7:4] == 4'(di)));
+            assign col_hot_n[di] = ~(pair_idx[3:0] == 4'(di));
+        end
+    endgenerate
+
     wire [15:0] grp_osc_a, grp_osc_b;
     genvar g, p;
     generate
         for (g = 0; g < 16; g++) begin : g_grp
-            wire grp_sel = (pair_idx[7:4] == 4'(g));
             wire [15:0] loc_a, loc_b;
             for (p = 0; p < 16; p++) begin : g_pair
-                wire pair_sel = grp_sel && (pair_idx[3:0] == 4'(p));
-                wire ea = (meas_active || mon_en) && pair_sel;
-                wire eb = (meas_active || (mon_en && mon_beat)) && pair_sel;
-                qsag_ass2_ring #(.STAGES(5)) u_roa (.en(rst_n && ea), .osc(loc_a[p]));
-                qsag_ass2_ring #(.STAGES(5)) u_rob (.en(rst_n && eb), .osc(loc_b[p]));
+                wire pair_en = ~(grp_en_n[g] | col_hot_n[p]);
+                qsag_ass2_ring #(.STAGES(5)) u_roa (.en(pair_en), .osc(loc_a[p]));
+                qsag_ass2_ring #(.STAGES(5)) u_rob (.en(pair_en & b_allow), .osc(loc_b[p]));
             end
-            // Inactive rings have `en=0` -> `u_gate.ZN = 1` -> after 4 inverters `osc = 1`.
-            // Invert inactive outputs via `&` (or gate with `pair_sel`) -> idle `osc = 1` so `&loc_a`
-            // drops low whenever the one active ring pulses `0`, OR mask `~loc_a`!
             assign grp_osc_a[g] = ~(&loc_a);
             assign grp_osc_b[g] = ~(&loc_b);
         end
@@ -83,6 +85,9 @@ module dregg_ro_puf_bch (
 
     wire [1:0]  win_shift = mon_en ? 2'd0 : mon_idx[1:0];
 `ifdef ASS2_FAST_ENTROPY
+`ifdef SYNTHESIS
+    ASS2_FAST_ENTROPY_IS_SIMULATION_ONLY invalid_puf_configuration();
+`endif
     wire [15:0] win_last = (16'd16 << win_shift) - 16'd1;
 `else
     wire [15:0] win_last = (16'd4096 << win_shift) - 16'd1;
@@ -96,14 +101,19 @@ module dregg_ro_puf_bch (
 
     assign puf_mon_clk = mon_beat ? (cnt_a_async[2] ^ cnt_b_async[2]) : cnt_a_async[3];
 
-    wire [CW-1:0] cnt_min = CW'(1024) << win_shift;
-    wire          ro_dead = (cnt_a_async < cnt_min) || (cnt_b_async < cnt_min) ||
-                            (&cnt_a_async[CW-1:CW-2]) || (&cnt_b_async[CW-1:CW-2]);
+    // Exact power-of-2 `cnt < (1024 << win_shift)` check (`0` 20-bit magnitude comparators!)
+    function automatic logic below_min(input logic [CW-11:0] chi, input logic [1:0] ws);
+        unique case (ws)
+            2'd0: below_min = ~(|chi[CW-11:0]);
+            2'd1: below_min = ~(|chi[CW-11:1]);
+            2'd2: below_min = ~(|chi[CW-11:2]);
+            default: below_min = ~(|chi[CW-11:3]);
+        endcase
+    endfunction
+    wire ro_dead = below_min(cnt_a_async[CW-1:10], win_shift) || below_min(cnt_b_async[CW-1:10], win_shift) ||
+                   (&cnt_a_async[CW-1:CW-2]) || (&cnt_b_async[CW-1:CW-2]);
 
 `ifdef ASS2_FAST_ENTROPY
-    // Deterministic 256-pair simulation fixture: pair `sub_idx == 19` in each 64-pair block
-    // has zero margin (`eff_a == eff_b`, exercising the 1-spare margin screen when `margin_thresh >= 1`),
-    // while the other 63 pairs have distinct +/- margins >= 12.
     wire [7:0]    f_hash   = (pair_idx * 8'h9D) ^ {pair_idx[3:0], pair_idx[7:4]} ^ 8'h5A;
     wire          f_zero_m = (sub_idx == 6'd19);
     wire          f_sign   = f_hash[7] ^ f_hash[2] ^ pair_idx[0];
@@ -112,7 +122,7 @@ module dregg_ro_puf_bch (
     wire [CW-1:0] eff_a    = win_x8 + (f_sign ? f_delta : CW'(0));
     wire [CW-1:0] eff_b    = win_x8 + (f_sign ? CW'(0)  : f_delta);
     wire          eff_dead = 1'b0;
-    wire unused_model = &{1'b0, ro_dead, f_hash[6]};
+    wire unused_model = &{1'b0, ro_dead, f_hash[6], cnt_a_async, cnt_b_async};
 `else
     wire [CW-1:0] eff_a    = cnt_a_async;
     wire [CW-1:0] eff_b    = cnt_b_async;
@@ -120,16 +130,17 @@ module dregg_ro_puf_bch (
 `endif
     wire [CW:0]   diff_ab  = {1'b0, eff_a} - {1'b0, eff_b};
     wire          raw_cmp  = !diff_ab[CW];
-    wire [CW-1:0] m_ext    = {{(CW-6){1'b0}}, margin_thresh};
-    wire [CW-1:0] m_m1_inv = ~(m_ext - CW'(1));
-    wire          mag_ok   = (margin_thresh == 6'd0) ||
-                             (raw_cmp ? (diff_ab[CW-1:0] >= m_ext) : (diff_ab[CW-1:0] <= m_m1_inv));
+    // 7-bit magnitude saturation check (`eliminates 20-bit negator + 14-bit mux!`)
+    wire [6:0]    neg_lo7  = {1'b0, ~diff_ab[5:0]} + 7'd1;
+    wire [5:0]    abs_lo6  = raw_cmp ? diff_ab[5:0] : neg_lo7[5:0];
+    wire          abs_hi_nz = raw_cmp ? (|diff_ab[CW-1:6])
+                                      : ((|(~diff_ab[CW-1:6])) || neg_lo7[6]);
+    wire          mag_ok   = abs_hi_nz || (abs_lo6 >= margin_thresh);
 
     localparam logic [3:0] S_IDLE  = 4'd0, S_CLR   = 4'd1, S_RUN   = 4'd2, S_EVAL = 4'd3,
                            S_REM   = 4'd4, S_HORN  = 4'd5, S_BMD   = 4'd6, S_BMU  = 4'd7,
                            S_CHIEN = 4'd8, S_SETL  = 4'd9;
     logic [3:0]  st;
-    logic [15:0] win_cnt;
     logic [6:0]  acc_cnt;
     wire  [63:0] vmsyn_q;
     wire  [62:0] w_sr;
@@ -137,6 +148,9 @@ module dregg_ro_puf_bch (
     wire  [35:0] lam_v;
     wire  [35:0] bpol_v;
     logic [5:0]  gamma, delta_q, acc_gf, tmp_gf, prev_b_q;
+    // Measurement (`S_CLR/S_RUN/S_SETL`) and Berlekamp-Massey (`S_HORN/S_BMD/S_BMU`) are strictly disjoint:
+    wire [15:0] win_cnt  = {gamma[3:0], delta_q, acc_gf};
+    wire [15:0] win_next = (st == S_CLR || (st == S_RUN && win_cnt == win_last)) ? 16'd0 : (win_cnt + 16'd1);
     logic [3:0]  l_deg;
     logic [3:0]  sub_k;
     logic        sub_ph;
@@ -150,13 +164,14 @@ module dregg_ro_puf_bch (
     assign word_out        = blk_err ? 64'd0 : {1'b0, w_sr};
     assign accepted_in_blk = acc_cnt[5:0];
 
-    wire        inj_flip = recon_mode && (
-                               (noise_flips >= 3'd1 && acc_cnt == 7'd3)  ||
-                               (noise_flips >= 3'd2 && acc_cnt == 7'd14) ||
-                               (noise_flips >= 3'd3 && acc_cnt == 7'd25) ||
-                               (noise_flips >= 3'd4 && acc_cnt == 7'd37) ||
-                               (noise_flips >= 3'd5 && acc_cnt == 7'd49)
-                           );
+    wire [2:0]  eff_flips  = bist_allow_i ? noise_flips : 3'd0;
+    wire        inj_flip   = bist_allow_i && recon_mode && (
+                                 (eff_flips >= 3'd1 && acc_cnt == 7'd3)  ||
+                                 (eff_flips >= 3'd2 && acc_cnt == 7'd14) ||
+                                 (eff_flips >= 3'd3 && acc_cnt == 7'd25) ||
+                                 (eff_flips >= 3'd4 && acc_cnt == 7'd37) ||
+                                 (eff_flips >= 3'd5 && acc_cnt == 7'd49)
+                             );
     wire [27:0] rem_shift = {rem_q, w_sr[62]};
     wire [26:0] rem_next  = rem_shift[27] ? (rem_shift[26:0] ^ G_MASK[26:0]) : rem_shift[26:0];
 
@@ -166,10 +181,10 @@ module dregg_ro_puf_bch (
     wire [5:0] chien_ev = mp ^ lam_v[6 +: 6]  ^ lam_v[12 +: 6] ^
                                lam_v[18 +: 6] ^ lam_v[24 +: 6] ^ lam_v[30 +: 6];
 
-    qsag_ass2_cg_dff #(.W(27)) u_syn (.clk(clk), .rst_n(srst_n), .en(syn_ld), .d(puf_wdata[26:0]), .q(syn_in_q));
+    qsag_ass2_cg_dff #(.W(27)) u_syn (.clk(clk), .rst_n(srst_n), .en(zeroize_i || syn_ld), .d(zeroize_i ? 27'd0 : puf_wdata[26:0]), .q(syn_in_q));
 
     wire eval_take = recon_mode ? 1'b1 : ((acc_cnt < {1'b0, BLK_BITS}) && mag_ok);
-    wire w_clr     = (st == S_IDLE && start_blk) || (st == S_EVAL && eff_dead);
+    wire w_clr     = zeroize_i || (st == S_IDLE && start_blk) || (st == S_EVAL && eff_dead);
     wire w_en      = w_clr || (st == S_EVAL && eval_take) || (st == S_REM) ||
                      (st == S_CHIEN && sub_k == 4'd5);
     wire w_lsb     = (st == S_EVAL) ? (recon_mode ? (raw_cmp ^ inj_flip) : raw_cmp) :
@@ -193,10 +208,11 @@ module dregg_ro_puf_bch (
         endcase
     endfunction
 
-    wire [5:0] bmd_sdiff = sub_idx - {2'd0, sub_k} - 6'd1;
+    logic [3:0] bmd_tap_idx_q;
+    logic       bmd_tap_en_q;
     logic [5:0] syn_bmd_tap;
     always_comb begin
-        unique case (bmd_sdiff[3:0])
+        unique case (bmd_tap_idx_q)
             4'd0:    syn_bmd_tap = syn_v[0  +: 6];
             4'd1:    syn_bmd_tap = syn_v[6  +: 6];
             4'd2:    syn_bmd_tap = syn_v[12 +: 6];
@@ -220,8 +236,7 @@ module dregg_ro_puf_bch (
             end
             S_BMD: begin
                 ma = lam_v[5:0];
-                if ((sub_idx >= {2'd0, sub_k} + 6'd1) && (sub_idx <= {2'd0, sub_k} + 6'd10))
-                    mb = syn_bmd_tap;
+                if (bmd_tap_en_q) mb = syn_bmd_tap;
             end
             S_BMU: begin
                 ma = sub_ph ? delta_q  : gamma;
@@ -235,46 +250,39 @@ module dregg_ro_puf_bch (
     end
 
     wire [26:0] dr_final = recon_mode ? (rem_next ^ syn_in_q) : rem_next;
-    wire syn_v_clr = recon_mode && (st == S_REM) && (sub_idx == 6'd0) && !chk_phase && (dr_final != 27'd0);
+    wire syn_v_clr = zeroize_i || (recon_mode && (st == S_REM) && (sub_idx == 6'd0) && !chk_phase && (dr_final != 27'd0));
     wire vmsyn_en  = vmask_ld || (st == S_IDLE && start_blk && !recon_mode) ||
                      (st == S_CLR && recon_mode && !vmsyn_q[0]) || (st == S_EVAL) ||
                      syn_v_clr || (st == S_HORN);
-    wire [63:0] vmsyn_d = vmask_ld                    ? puf_wdata :
-                          (st == S_IDLE || syn_v_clr) ? 64'd0 :
-                          (st == S_HORN)              ? {4'd0, mp ^ {5'd0, rem_q[26]}, syn_v[59:6]} :
-                                                        {(recon_mode ? vmsyn_q[0] : eval_take), vmsyn_q[63:1]};
+    wire [63:0] vmsyn_d = syn_v_clr                 ? 64'd0 :
+                          vmask_ld                  ? puf_wdata :
+                          (st == S_IDLE)            ? 64'd0 :
+                          (st == S_HORN)            ? {4'd0, mp ^ {5'd0, rem_q[26]}, syn_v[59:6]} :
+                                                      {(recon_mode ? vmsyn_q[0] : eval_take), vmsyn_q[63:1]};
     qsag_ass2_cg_dff #(.W(64)) u_vmsyn (.clk(clk), .rst_n(srst_n), .en(vmsyn_en), .d(vmsyn_d), .q(vmsyn_q));
 
     wire        take_lam = ({2'd0, l_deg, 1'b0} <= (sub_idx - 6'd1));
     wire [5:0]  dnext    = acc_gf ^ mp;
     wire        bm_init  = (st == S_HORN) && (sub_k == 4'd9) && (sub_idx == 6'd0);
 
-    wire        lam_en   = bm_init || (st == S_BMD) || (st == S_BMU && sub_ph) || (st == S_CHIEN);
+    wire        lam_en   = zeroize_i || bm_init || (st == S_BMD) || (st == S_BMU && sub_ph) || (st == S_CHIEN);
     wire [5:0]  lam_top  = (st == S_BMD)    ? lam_v[5:0] :
                            (st == S_BMU)    ? (tmp_gf ^ mp) :
                            (sub_k == 4'd0)  ? lam_v[5:0] : mp;
-    wire [35:0] lam_d    = bm_init ? {30'd0, 6'd1} : {lam_top, lam_v[35:6]};
+    wire [35:0] lam_d    = zeroize_i ? 36'd0 : bm_init ? {30'd0, 6'd1} : {lam_top, lam_v[35:6]};
     qsag_ass2_cg_dff #(.W(36)) u_lam (.clk(clk), .rst_n(srst_n), .en(lam_en), .d(lam_d), .q(lam_v));
 
-    wire        rem_clr  = (st == S_IDLE && start_blk) || (st == S_CHIEN && sub_k == 4'd5 && sub_idx == 6'd62);
-    wire        bpol_sh0 = (st == S_BMD) && (sub_k == 4'd5) && (dnext == 6'd0);
+    wire        rem_clr  = zeroize_i || (st == S_IDLE && start_blk) || (st == S_CHIEN && sub_k == 4'd5 && sub_idx == 6'd62);
+    wire        bpol_bmd = (st == S_BMD) && (sub_k == 4'd5);
     wire        bpol_en  = rem_clr || (st == S_REM) || (st == S_HORN && sub_k == 4'd9) ||
-                           bpol_sh0 || (st == S_BMU && sub_ph);
+                           bpol_bmd || (st == S_BMU && sub_ph);
     wire [35:0] bpol_d   = rem_clr        ? 36'd0 :
                            bm_init        ? {30'd0, 6'd1} :
                            (st == S_REM)  ? {9'd0, (sub_idx == 6'd0) ? dr_final : rem_next} :
                            (st == S_HORN) ? {9'd0, rem_q[25:0], 1'b0} :
-                           bpol_sh0       ? {bpol_v[29:0], 6'd0} :
+                           bpol_bmd       ? ((dnext == 6'd0) ? {bpol_v[29:0], 6'd0} : bpol_v) :
                                             {take_lam ? lam_v[5:0] : prev_b_q, bpol_v[35:6]};
     qsag_ass2_cg_dff #(.W(36)) u_bpol (.clk(clk), .rst_n(srst_n), .en(bpol_en), .d(bpol_d), .q(bpol_v));
-
-    always_ff @(posedge clk or negedge srst_n) begin
-        if (!srst_n) win_cnt <= 16'd0;
-        else if (st == S_CLR || (st == S_RUN && win_cnt == win_last))
-            win_cnt <= 16'd0;
-        else if (st == S_RUN || st == S_SETL)
-            win_cnt <= win_cnt + 16'd1;
-    end
 
     always_ff @(posedge clk or negedge srst_n) begin
         if (!srst_n) begin
@@ -290,13 +298,27 @@ module dregg_ro_puf_bch (
             prev_b_q         <= '0;
             l_deg            <= '0;
             sub_k            <= '0;
+            bmd_tap_idx_q    <= '0;
+            bmd_tap_en_q     <= 1'b0;
             sub_ph           <= 1'b0;
             chk_phase        <= 1'b0;
             done             <= 1'b0;
             blk_err          <= 1'b0;
             corrected_in_blk <= '0;
+        end else if (zeroize_i) begin
+            st            <= S_IDLE;
+            meas_active   <= 1'b0;
+            cnt_clr_n     <= 1'b0;
+            done          <= 1'b0;
+            gamma         <= 6'd1;
+            delta_q       <= '0;
+            acc_gf        <= '0;
+            bmd_tap_idx_q <= '0;
+            bmd_tap_en_q  <= 1'b0;
         end else begin
             done <= 1'b0;
+            if (st == S_CLR || st == S_RUN || st == S_SETL)
+                {gamma[3:0], delta_q, acc_gf} <= win_next;
             unique case (st)
                 S_IDLE: if (start_blk) begin
                     sub_idx          <= 6'd0;
@@ -375,21 +397,25 @@ module dregg_ro_puf_bch (
                     if (sub_k == 4'd9) begin
                         sub_k <= 4'd0;
                         if (sub_idx == 6'd0) begin
-                            gamma   <= 6'd1;
-                            l_deg   <= 4'd0;
-                            sub_idx <= 6'd1;
-                            acc_gf  <= 6'd0;
-                            st      <= S_BMD;
+                            gamma         <= 6'd1;
+                            l_deg         <= 4'd0;
+                            sub_idx       <= 6'd1;
+                            acc_gf        <= 6'd0;
+                            bmd_tap_idx_q <= 4'd0;
+                            bmd_tap_en_q  <= 1'b1;
+                            st            <= S_BMD;
                         end else sub_idx <= sub_idx - 6'd1;
                     end else sub_k <= sub_k + 4'd1;
                 end
                 S_BMD: begin
                     if (sub_k == 4'd5) begin
-                        sub_k    <= 4'd0;
-                        sub_ph   <= 1'b0;
-                        delta_q  <= dnext;
-                        acc_gf   <= 6'd0;
-                        prev_b_q <= 6'd0;
+                        sub_k         <= 4'd0;
+                        sub_ph        <= 1'b0;
+                        delta_q       <= dnext;
+                        acc_gf        <= 6'd0;
+                        prev_b_q      <= 6'd0;
+                        bmd_tap_idx_q <= sub_idx[3:0];
+                        bmd_tap_en_q  <= 1'b1;
                         if (dnext == 6'd0) begin
                             if (sub_idx == 6'd10) begin
                                 sub_idx <= 6'd0;
@@ -401,6 +427,8 @@ module dregg_ro_puf_bch (
                     end else begin
                         acc_gf <= dnext;
                         sub_k  <= sub_k + 4'd1;
+                        if (bmd_tap_idx_q == 4'd0) bmd_tap_en_q <= 1'b0;
+                        else bmd_tap_idx_q <= bmd_tap_idx_q - 4'd1;
                     end
                 end
                 S_BMU: begin
@@ -411,7 +439,9 @@ module dregg_ro_puf_bch (
                         prev_b_q <= bpol_v[5:0];
                         sub_ph   <= 1'b0;
                         if (sub_k == 4'd5) begin
-                            sub_k <= 4'd0;
+                            sub_k         <= 4'd0;
+                            bmd_tap_idx_q <= sub_idx[3:0];
+                            bmd_tap_en_q  <= 1'b1;
                             if (take_lam) begin
                                 l_deg <= sub_idx[3:0] - l_deg;
                                 gamma <= delta_q;
@@ -442,5 +472,5 @@ module dregg_ro_puf_bch (
             endcase
         end
     end
-    wire unused = &{1'b0, blk_sel[2], puf_wdata[63:27], bmd_sdiff[5:4]};
+    wire unused = &{1'b0, blk_sel[2], puf_wdata[63:27]};
 endmodule

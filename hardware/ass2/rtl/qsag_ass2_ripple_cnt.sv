@@ -11,8 +11,13 @@ module qsag_ass2_ripple_cnt #(parameter int N = 20) (
         end
 `ifdef GF180_SRAM_MACRO
         wire d_in, q_out;
-        (* keep *) gf180mcu_fd_sc_mcu7t5v0__inv_1 u_inv (.I(q_out), .ZN(d_in));
-        (* keep *) gf180mcu_fd_sc_mcu7t5v0__dffrnq_1 u_ff (.CLK(ck), .D(d_in), .RN(rst_n), .Q(q_out));
+        if (k == 0) begin : g_drv
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__inv_2 u_inv (.I(q_out), .ZN(d_in));
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__dffrnq_2 u_ff (.CLK(ck), .D(d_in), .RN(rst_n), .Q(q_out));
+        end else begin : g_drv
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__inv_1 u_inv (.I(q_out), .ZN(d_in));
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__dffrnq_1 u_ff (.CLK(ck), .D(d_in), .RN(rst_n), .Q(q_out));
+        end
         assign q[k] = q_out;
 `else
         logic toggle;
