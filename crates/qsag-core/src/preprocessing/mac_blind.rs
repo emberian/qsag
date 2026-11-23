@@ -26,6 +26,12 @@ pub(super) fn blind_open_degree_ext2(
     mesh: &mut OtMesh,
     rngs: &mut [PartyPrivateRng],
 ) -> Result<GoldilocksExt2, PreprocessError> {
+    if points.len() != shares.len() {
+        return Err(PreprocessError::InvalidThreshold {
+            t,
+            n: shares.len(),
+        });
+    }
     let tables = GoldilocksOpeningTables::new(t, points)?;
     for (offset, row) in tables.extra.iter().enumerate() {
         let residual = SecretBuffer(
@@ -78,6 +84,12 @@ pub(super) fn blind_open_degree_tower128(
     mesh: &mut OtMesh,
     rngs: &mut [PartyPrivateRng],
 ) -> Result<Tower128, PreprocessError> {
+    if points.len() != shares.len() {
+        return Err(PreprocessError::InvalidThreshold {
+            t,
+            n: shares.len(),
+        });
+    }
     let tables = Gf256OpeningTables::new(t, points)?;
     for (offset, row) in tables.extra.iter().enumerate() {
         let residual = SecretBuffer(
@@ -2065,6 +2077,50 @@ mod tests {
             )
             .unwrap(),
             Tower128::ZERO
+        );
+    }
+
+    #[test]
+    fn tooth_blind_open_degree_rejects_extra_unmapped_shares() {
+        // `#tooth`: Previously `blind_open_degree_ext2` and `blind_open_degree_tower128`
+        // omitted `points.len() == shares.len()`, assigning `0` coefficients to trailing shares
+        // in `shares[points.len()..]` during both syndrome checks and constant-term opening!
+        let sid = [0x91; 32];
+        let mut rngs3 = tower_rngs(3, 0x33);
+        let mut mesh3 = OtMesh::establish_ideal_for_test(sid, &mut rngs3);
+
+        let pts_gl_2 = [Goldilocks::ONE, Goldilocks::TWO];
+        let corrupted_ext2_shares = [
+            GoldilocksExt2::ZERO,
+            GoldilocksExt2::ZERO,
+            GoldilocksExt2::new(Goldilocks::from_u64_reduced(999), Goldilocks::ONE),
+        ];
+        assert_eq!(
+            blind_open_degree_ext2(
+                &sid,
+                "tooth_ext2_mismatch",
+                2,
+                &pts_gl_2,
+                &corrupted_ext2_shares,
+                &mut mesh3,
+                &mut rngs3,
+            ),
+            Err(PreprocessError::InvalidThreshold { t: 2, n: 3 })
+        );
+
+        let pts_t8_2 = [TowerGf256(1), TowerGf256(2)];
+        let corrupted_t128_shares = [Tower128::ZERO, Tower128::ZERO, Tower128(0xDEAD_BEEF)];
+        assert_eq!(
+            blind_open_degree_tower128(
+                &sid,
+                "tooth_t128_mismatch",
+                2,
+                &pts_t8_2,
+                &corrupted_t128_shares,
+                &mut mesh3,
+                &mut rngs3,
+            ),
+            Err(PreprocessError::InvalidThreshold { t: 2, n: 3 })
         );
     }
 }

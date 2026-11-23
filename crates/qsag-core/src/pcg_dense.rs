@@ -4105,7 +4105,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_seed_peer_id_and_punctured_bounds_validation_p1_06() {
+    fn wire_seed_peer_id_and_punctured_bounds_validation() {
         let mut seed = DensePcgPartySeed {
             session_id: [0x77; 32],
             party_id: 0,

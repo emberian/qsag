@@ -5,7 +5,7 @@
 //! Add `--sign-only` to use the reference public key and exclude threshold keygen;
 //! reference keygen/sign timings are printed separately from threshold timings.
 //! For bounded runs, prefix the command with
-//! `SWARM_MEM_MAX=12G timeout --kill-after=10s 600s`.
+//! `timeout --kill-after=10s 600s`.
 use qsag_core::fips205::{
     Fips205Params, slh_keygen_internal, slh_keygen_mpc, slh_sign, slh_sign_mpc, slh_verify,
 };

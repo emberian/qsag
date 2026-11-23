@@ -2562,6 +2562,9 @@ fn derive_extractor_matrix_256x512(
 /// Given level-1 base-OT seed pair `(r_seed, l_seed)` (Sender holds `r_seed` when `b0 == 0`, `l_seed`
 /// when `b0 == 1`) and level-2 base-OT seed pair `(k1_0, k1_1)` (Sender holds `k1_{b1}`), expands
 /// the 4 leaf seeds `[s0, s1, s2, s3]` and encrypts the level-2 XOR sibling pair `(ct0, ct1)` so
+/// Receiver output of one depth-2 `F_4` GGM slice setup: `(four_leaves, sibling_ciphertexts)`.
+pub type F4SliceReceiverSetup = ([[u8; 32]; 4], ([u8; 32], [u8; 32]));
+
 /// Sender recovers `[s_v : v != 2*b0 + b1]` and learns zero information about `s_{2*b0 + b1}`.
 #[inline]
 pub fn softspoken_f4_slice_setup_receiver(
@@ -2571,7 +2574,7 @@ pub fn softspoken_f4_slice_setup_receiver(
     l_seed: &[u8; 32],
     k1_0: &[u8; 32],
     k1_1: &[u8; 32],
-) -> ([[u8; 32]; 4], ([u8; 32], [u8; 32])) {
+) -> F4SliceReceiverSetup {
     let g_row = OT_EXT_SUBSPACE_BITS + slice_idx;
     let p_row = OT_EXT_SUBSPACE_BITS + OT_EXT_F4_SLICES + slice_idx;
     let s0 = combiner_step_hash32(session_id, g_row, 0, 0, 0, &[0u8; 32], l_seed);
@@ -2619,14 +2622,14 @@ pub fn softspoken_f4_slice_setup_sender_ct(
         c_third[b] = ct_sel ^ pad_b1[b] ^ known_sib;
     }
     let mut out = [[0u8; 32]; 4];
-    for v in 0..4usize {
+    for (v, dst) in out.iter_mut().enumerate() {
         let v_hi = ((v >> 1) & 1) as u8;
         let v_lo = (v & 1) as u8;
         let m_other_half = 0u8.wrapping_sub(black_box(v_hi ^ b0));
         let m_third = (!m_other_half) & 0u8.wrapping_sub(black_box(v_lo ^ b1));
         let half_src = if v_lo == 0 { &c_even } else { &c_odd };
         for b in 0..32 {
-            out[v][b] = (m_other_half & half_src[b]) | (m_third & c_third[b]);
+            dst[b] = (m_other_half & half_src[b]) | (m_third & c_third[b]);
         }
     }
     wipe_bytes32(&mut c_even);
@@ -4847,6 +4850,7 @@ fn crh_ot_receiver_pads_batch(
 
 /// Fast 4-way SIMD (`keccak_f1600_x4`) single-block `SHAKE256` transcript-bound correlation-robust
 /// hash batch over 256-bit sender row pairs `(q_row, q_row ^ delta)` (`128`-bit PQ Grover security).
+#[allow(clippy::too_many_arguments)]
 fn crh_ot_sender_pad_pairs_batch(
     session_id: &[u8; 32],
     transcript_bind: &[u8; 32],
