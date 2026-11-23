@@ -28,13 +28,14 @@ extern crate alloc;
 use qsag_core::{sponge, wipe};
 use std::io::{self, BufRead, Write};
 use qsag_core::{sponge::*, tsw_baggy::*, fips205::*};
-use qsag_agg::field::{Goldilocks as G, GoldilocksExt4 as E};
+use qsag_agg::{field::Goldilocks as G, zk_hem::v2::field5::Fp5 as E};
 fn bytes(s: &str) -> Vec<u8> { (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2],16).unwrap()).collect() }
 fn hex(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
 fn nums(s: &str) -> Vec<u64> { if s.is_empty() {vec![]} else {s.split(',').map(|x|x.parse().unwrap()).collect()} }
 fn csv(v: &[u64]) -> String { v.iter().map(|x|x.to_string()).collect::<Vec<_>>().join(",") }
 fn arr(s: &str) -> [u8;32] { bytes(s).try_into().unwrap() }
-fn ext(s: &str) -> E { E::from_le_bytes_canonical(arr(s)).unwrap() }
+fn arr40(s: &str) -> [u8;40] { bytes(s).try_into().unwrap() }
+fn ext(s: &str) -> E { E::from_le_bytes_canonical(arr40(s)).unwrap() }
 fn sha3_512(m: &[u8]) -> [u8; 64] {
     let mut sp = qsag_accel::keccak::KeccakSponge::<72>::new();
     sp.absorb(m);
@@ -213,44 +214,44 @@ fn eval(a: &[&str]) -> String {
         "hem" => {
             let x=G::from_u64_reduced(a[3].parse().unwrap());
             let half=G::from_u64_reduced(2).inv();
-            let out=qsag_whir_verified::fold_duet_affine_ext4(
-                to_verified_ext4(ext(a[1])),
-                to_verified_ext4(ext(a[2])),
+            let out=qsag_whir_verified::cwyz_duet_fold_fp5(
+                ext(a[1]).to_verified(),
+                ext(a[2]).to_verified(),
                 (half*x.inv()).to_canonical_u64(),
                 half.to_canonical_u64(),
                 (x*x).to_canonical_u64(),
-                to_verified_ext4(ext(a[4])),
-                to_verified_ext4(ext(a[5])),
-                to_verified_ext4(ext(a[6])),
+                ext(a[4]).to_verified(),
+                ext(a[5]).to_verified(),
+                ext(a[6]).to_verified(),
             );
-            hex(&from_verified_ext4(out).to_le_bytes())
+            hex(&E::from_verified(out).to_le_bytes())
         },
         "cosetfold" => {
             let inv_two_y0=G::from_u64_reduced(a[3].parse().unwrap()).to_canonical_u64();
             let inv_two=G::from_u64_reduced(a[4].parse().unwrap()).to_canonical_u64();
-            let out=qsag_whir_verified::duet_fold(
-                to_verified_ext4(ext(a[1])),
-                to_verified_ext4(ext(a[2])),
+            let out=qsag_whir_verified::duet_fold_fp5(
+                ext(a[1]).to_verified(),
+                ext(a[2]).to_verified(),
                 inv_two_y0,
                 inv_two,
-                to_verified_ext4(ext(a[5])),
+                ext(a[5]).to_verified(),
             );
-            hex(&from_verified_ext4(out).to_le_bytes())
+            hex(&E::from_verified(out).to_le_bytes())
         },
         "cwyzbridge" => {
-            let out=qsag_whir_verified::cwyz_bridge_claim_step(
-                to_verified_ext4(ext(a[1])),
-                to_verified_ext4(ext(a[2])),
-                to_verified_ext4(ext(a[3])),
-                to_verified_ext4(ext(a[4])),
-                to_verified_ext4(ext(a[5])),
-                to_verified_ext4(ext(a[6])),
-                to_verified_ext4(ext(a[7])),
-                to_verified_ext4(ext(a[8])),
-                to_verified_ext4(ext(a[9])),
-                to_verified_ext4(ext(a[10])),
+            let out=qsag_whir_verified::cwyz_bridge_claim_step_fp5(
+                ext(a[1]).to_verified(),
+                ext(a[2]).to_verified(),
+                ext(a[3]).to_verified(),
+                ext(a[4]).to_verified(),
+                ext(a[5]).to_verified(),
+                ext(a[6]).to_verified(),
+                ext(a[7]).to_verified(),
+                ext(a[8]).to_verified(),
+                ext(a[9]).to_verified(),
+                ext(a[10]).to_verified(),
             );
-            hex(&from_verified_ext4(out).to_le_bytes())
+            hex(&E::from_verified(out).to_le_bytes())
         },
         "binary" => {
             use qsag_core::field::tower::{TowerGf256,Tower128};
@@ -287,7 +288,7 @@ fn eval(a: &[&str]) -> String {
             let cy=qsag_core::field::goldilocks::Goldilocks::from_u64_reduced(a[3].parse().unwrap());
             let cz=match a[1] {"add"=>cx+cy,"sub"=>cx-cy,"mul"=>cx*cy,"inv"=>cx.inv(),"square"=>cx.square(),_=>panic!("op")};
             assert_eq!(z.to_canonical_u64(),cz.to_canonical_u64()); z.to_canonical_u64().to_string()},
-        "extdecode" => { let v=bytes(a[1]); match <[u8;32]>::try_from(v).ok().and_then(E::from_le_bytes_canonical) {Some(x)=>hex(&x.to_le_bytes()),None=>"reject".into()} },
+        "extdecode" => { let v=bytes(a[1]); match <[u8;40]>::try_from(v).ok().and_then(E::from_le_bytes_canonical) {Some(x)=>hex(&x.to_le_bytes()),None=>"reject".into()} },
         "ext" => { let x=ext(a[2]); let y=ext(a[3]); hex(&(match a[1] {"add"=>x+y,"sub"=>x-y,"mul"=>x*y,"inv"=>x.inv(),"square"=>x.square(),"frobenius"=>x.frobenius(),_=>panic!("extension op")}).to_le_bytes()) },
         "tower" => qsag_core::field::tower::tower_mul_t7(a[1].parse().unwrap(),a[2].parse().unwrap()).to_string(),
         "wotsgeneric" => if a.len() == 2 {
@@ -301,11 +302,11 @@ fn eval(a: &[&str]) -> String {
         "fors" => hex(&fors_leaf_hash_from_secret(Cshake256Suite,&arr(a[1]),a[2].parse().unwrap(),a[3].parse().unwrap(),a[4].parse().unwrap(),a[5].parse().unwrap(),&arr(a[6]))),
         "forsnode" => hex(&th_node_h(Cshake256Suite,&bytes(a[1]),&HashAdrs{layer:0,tree:a[2].parse().unwrap(),kind:AdrsKind::ForsTree,key_pair:a[3].parse().unwrap(),chain_idx:a[4].parse().unwrap(),hash_step:a[5].parse().unwrap()},&arr(a[6]),&arr(a[7]))),
         "adrs" => hex(&Fips205Adrs{layer:a[1].parse().unwrap(),tree:a[2].parse().unwrap(),adrs_type:Fips205AdrsType::from_u32(a[3].parse().unwrap()).unwrap(),key_pair:a[4].parse().unwrap(),f5:a[5].parse().unwrap(),f6:a[6].parse().unwrap()}.to_bytes()),
-        "canopy" => {use qsag_agg::pcs::*;
+        "canopy" => {
             let indices=nums(a[3]); let hs:Vec<[u8;32]>=if a[4].is_empty(){vec![]}else{a[4].split(',').map(arr).collect()};
             let leaves:Vec<_>=indices.iter().zip(hs).map(|(i,h)|(*i as usize,h)).collect();
-            let proof=CanopyMultiProof{auth_siblings:if a[5].is_empty(){vec![]}else{a[5].split(',').map(arr).collect()}};
-            verify_canopy_multiproof(&CanopyCommitment{root:arr(a[2]),log_leaves:a[1].parse().unwrap()},&leaves,&proof).to_string()},
+            let siblings:Vec<[u8;32]>=if a[5].is_empty(){vec![]}else{a[5].split(',').map(arr).collect()};
+            verify_canopy32(a[1].parse().unwrap(),&arr(a[2]),&leaves,&siblings).to_string()},
         "subset" => subset(&arr(a[1]),&bytes(a[2]),a[3].parse().unwrap()),
         "latch" => latch(a[1]),
         "quorum" => qsag_quorum::quorum_jorts::QuorumConfig::with_quorum(a[1].parse().unwrap(),a[2].parse().unwrap(),a[3].parse().unwrap(),a[4].parse().unwrap()).is_ok().to_string(),
@@ -314,6 +315,31 @@ fn eval(a: &[&str]) -> String {
         "metamorphic" => metamorphic(&arr(a[1]),&bytes(a[2])),
         _ => panic!("unknown operation")
     }
+}
+fn verify_canopy32(log_leaves: usize, root: &[u8; 32], sorted_leaves: &[(usize, [u8; 32])], siblings: &[[u8; 32]]) -> bool {
+    if log_leaves > 28 || sorted_leaves.is_empty() { return false; }
+    let n = 1usize << log_leaves;
+    if sorted_leaves.windows(2).any(|w| w[0].0 >= w[1].0) || sorted_leaves.last().is_some_and(|l| l.0 >= n) { return false; }
+    let mut active: Vec<(usize, [u8; 32])> = sorted_leaves.iter().map(|&(i, h)| (n + i, h)).collect();
+    let mut cursor = 0usize;
+    for _ in 0..log_leaves {
+        let mut next = Vec::with_capacity(active.len());
+        let mut k = 0usize;
+        while k < active.len() {
+            let (u, hu) = active[k];
+            let hs = if k + 1 < active.len() && active[k + 1].0 == (u ^ 1) { k += 2; active[k - 1].1 }
+                     else { let Some(&s) = siblings.get(cursor) else { return false; }; cursor += 1; k += 1; s };
+            let (l, r) = if u & 1 == 0 { (hu, hs) } else { (hs, hu) };
+            let mut frame = Vec::with_capacity(69);
+            frame.push(0); frame.extend_from_slice(&((u >> 1) as u32).to_le_bytes()); frame.extend_from_slice(&l); frame.extend_from_slice(&r);
+            next.push((u >> 1, cshake256_32(b"QSAG.PCS.CANOPY/v2", &frame)));
+        }
+        active = next;
+    }
+    if cursor != siblings.len() || active.len() != 1 || active[0].0 != 1 { return false; }
+    let mut rframe = Vec::with_capacity(34);
+    rframe.push(1); rframe.push(log_leaves as u8); rframe.extend_from_slice(&active[0].1);
+    cshake256_32(b"QSAG.PCS.CANOPY/v2", &rframe) == *root
 }
 fn posix_burn_trace(events: &str) -> String {
     use qsag_fts::wal::DurableBurnJournal;
@@ -328,6 +354,7 @@ fn posix_burn_trace(events: &str) -> String {
     let mut cur_path = dir.join("burn-0");
     let mut copy_idx = 0usize;
     let mut journal = Some(DurableBurnJournal::create(&cur_path, [1; 32], [2; 32]).unwrap());
+    let genesis_snap = std::fs::read(&cur_path).unwrap();
     let mut retained: Option<qsag_core::LedgerCheckpoint> = None;
     let reopen = |p: &std::path::Path, ret: Option<qsag_core::LedgerCheckpoint>, j: &mut Option<DurableBurnJournal>| -> String {
         *j = None;
@@ -355,10 +382,7 @@ fn posix_burn_trace(events: &str) -> String {
             ["reopen"] => reopen(&cur_path, retained, &mut journal),
             ["trunc"] => {
                 journal = None;
-                let len = std::fs::metadata(&cur_path).unwrap().len();
-                let f = std::fs::OpenOptions::new().write(true).open(&cur_path).unwrap();
-                f.set_len(len.min(104)).unwrap();
-                f.sync_all().unwrap();
+                std::fs::write(&cur_path, &genesis_snap).unwrap();
                 reopen(&cur_path, retained, &mut journal)
             }
             ["flip"] => {
@@ -673,7 +697,7 @@ fn metamorphic(seed: &[u8;32], msg: &[u8]) -> String {
     assert_eq!(pkseed,sk.pk_seed);
     let rngs=std::array::from_fn(|i| {let mut s=*seed;s[31]^=i as u8;PartyPrivateRng::from_seed(s,b"oracle-sign")});
     let mut engine=Rss256Engine::new(*seed,keys,rngs).unwrap();
-    let params=BaggyParams{num_layers:1,subtree_height:1,fors_trees:2,fors_height:1,..BaggyParams::TEST_SMALL};
+    let params=BaggyParams::TEST_SMALL;
     let pk=baggy_reference_keygen(&params,&sk).unwrap();
     let binding=BaggyKeyBinding::new(&params,&pk);engine.bind_key_identity(&binding.identity()).unwrap();
     let sig=baggy_sign_mpc(&mut engine,&params,&pk,&binding,&mut WaistbandCache::disabled(),&mut MemoryFirstSigned::new(),msg).unwrap();
@@ -747,16 +771,12 @@ QUORUM_MUTANTS = [
 ]
 BURN_WAL_MUTANTS = [
     ("burn_wal_rollback_guard", "current.generation < minimum.generation", "false", "res:0:0,retain,trunc"),
-    ("burn_wal_inode_mac", "!ct_eq_bytes(&journal.last_tag, &bytes[72..104])", "false", "copy"),
+    ("burn_wal_inode_mac", "identity[8..].copy_from_slice(&ino.to_be_bytes());", "let _ = ino;", "copy"),
 ]
 
 
 def driver_source(root):
     source = RUST
-    pcs = (root / "crates/qsag-agg/src/pcs.rs").read_text()
-    for function in ["fn to_verified_ext4(", "fn from_verified_ext4("]:
-        extracted = rust_function(pcs, function)
-        source += "\n" + extracted.replace("GoldilocksExt4", "E").replace("Goldilocks", "G")
     belt = (root / "crates/qsag-core/src/belt_latch.rs").read_text()
     # Exclude unit tests, preserve production code verbatim except the named guard.
     belt = belt[:belt.index("#[cfg(test)]")].replace("qsag_verified::BeltLatch", "kernel_mod::BeltLatch")
@@ -810,26 +830,28 @@ def driver_source(root):
     pos_src = (root / "crates/qsag-accel/src/poseidon2.rs").read_text()
     pos_head = pos_src[:pos_src.index("/// Stack-allocated zeroizing Width-12")]
     pos_head = "\n".join(line for line in pos_head.splitlines() if not line.startswith("//!"))
-    assert pos_head.count("gl_mul(x3, x4)") == 1
+    assert pos_head.count("qsag_asm::portable::goldilocks_pow7_ct_portable(x)") == 1
     pos_mut = (pos_head.replace("use crate::AccelError;\n", "")
                        .replace("use crate::ct::ct_zeroize_u64s;\n", "")
                        .replace("crate::goldilocks", "qsag_accel::goldilocks")
-                       .replace("gl_mul(x3, x4)", "x3"))
+                       .replace("qsag_asm::portable::goldilocks_pow7_ct_portable(x)", "gl_mul(gl_mul(x, x), x)"))
     source += "\n#[allow(dead_code, unused_variables)] mod poseidon_mut {\n" + pos_mut + "\n}\n"
     arms.append('"poseidon_sbox_deg3" => { let mut s:[u64;12]=nums(a[2]).try_into().unwrap(); poseidon_mut::poseidon2_perm12(&mut s); csv(&s) },')
 
     # Production extracted CWYZ duet fold `theta` drop (`theta` -> `0`).
     whir_src = (root / "aeneas/qsag-whir-verified/src/lib.rs").read_text()
-    cwyz_fn = rust_function(whir_src, "pub fn cwyz_duet_fold(")
-    assert cwyz_fn.count("theta,\n") == 1
-    cwyz_mut = (cwyz_fn.replace("pub fn cwyz_duet_fold(", "pub fn mutant_cwyz_duet_fold(")
-                       .replace("theta,\n", "Ext4 { a: 0, b: 0, c: 0, d: 0 },\n"))
+    cwyz_fn = rust_function(whir_src, "pub fn cwyz_duet_fold_fp5(")
+    assert cwyz_fn.count("let mixed = fp5_add(even, fp5_mul(theta, copy_fp5(&odd)));") == 1
+    cwyz_mut = (cwyz_fn.replace("pub fn cwyz_duet_fold_fp5(", "pub fn mutant_cwyz_duet_fold_fp5(")
+                       .replace("copy_fp5(&v0)", "Fp5 { c0: v0.c0, c1: v0.c1, c2: v0.c2, c3: v0.c3, c4: v0.c4 }")
+                       .replace("copy_fp5(&v1)", "Fp5 { c0: v1.c0, c1: v1.c1, c2: v1.c2, c3: v1.c3, c4: v1.c4 }")
+                       .replace("let mixed = fp5_add(even, fp5_mul(theta, copy_fp5(&odd)));", "let mixed = even;"))
     source += "\n#[allow(unused_variables)] mod whir_mut {\nuse qsag_whir_verified::*;\n" + cwyz_mut + "\n}\n"
     arms.append(
         '"cwyz_theta_drop" => { let x=G::from_u64_reduced(a[4].parse().unwrap()); let half=G::from_u64_reduced(2).inv(); '
-        'let out=whir_mut::mutant_cwyz_duet_fold(to_verified_ext4(ext(a[2])),to_verified_ext4(ext(a[3])),(half*x.inv()).to_canonical_u64(),'
-        'half.to_canonical_u64(),(x*x).to_canonical_u64(),to_verified_ext4(ext(a[5])),to_verified_ext4(ext(a[6])),to_verified_ext4(ext(a[7]))); '
-        'hex(&from_verified_ext4(out).to_le_bytes()) },'
+        'let out=whir_mut::mutant_cwyz_duet_fold_fp5(ext(a[2]).to_verified(),ext(a[3]).to_verified(),(half*x.inv()).to_canonical_u64(),'
+        'half.to_canonical_u64(),(x*x).to_canonical_u64(),ext(a[5]).to_verified(),ext(a[6]).to_verified(),ext(a[7]).to_verified()); '
+        'hex(&E::from_verified(out).to_le_bytes()) },'
     )
 
     # Production POSIX burn WAL (`crates/qsag-fts/src/wal.rs`) clause drops.
@@ -844,7 +866,7 @@ def driver_source(root):
         source += f"\n#[allow(dead_code, unused_variables)] mod burn_mut_{idx} {{\n" + mutated + "\npub " + burn_runner + "\n}\n"
         arms.append(f'"{mname}" => burn_mut_{idx}::posix_burn_trace(a[2]),')
 
-    source += "\nuse qsag_quorum::quorum_jorts::QuorumError;\nconst MAX_QUORUM_PARTIES:usize=255;\n"
+    source += "\nuse qsag_quorum::quorum_jorts::QuorumError;\nconst MAX_SHAMIR_QUORUM_PARTIES:usize=255;\n"
     source += "fn mutation_args(a:&[&str])->String {match a[1] {" + "".join(arms) + '_=>panic!("mutant")}}'
     source = source.replace('"mutation" => mutation(a[1]),', '"mutation" => mutation_args(a),')
     guards = (root / "aeneas/qsag-verified/src/pants_and_quorum_guards.rs").read_text()
@@ -878,9 +900,10 @@ def build_driver(root, directory):
     (directory / "src").mkdir()
     deps = "\n".join(
         f'{name} = {{ path = {json.dumps(str(root / "crates" / name))} }}'
-        for name in ["qsag-accel", "qsag-core", "qsag-fts", "qsag-agg", "qsag-cred", "qsag-policy", "qsag-quorum"]
+        for name in ["qsag-asm", "qsag-accel", "qsag-core", "qsag-fts", "qsag-agg", "qsag-cred", "qsag-policy", "qsag-quorum"]
     )
     # Volatile WALs are intentional test fixtures for schedule and mutation checks.
+    deps = deps.replace('qsag-asm = {', 'qsag-asm = { features = ["std"],')
     deps = deps.replace('qsag-accel = {', 'qsag-accel = { features = ["std"],')
     deps = deps.replace('qsag-core = {', 'qsag-core = { features = ["std", "testing-ephemeral"],')
     deps = deps.replace('qsag-fts = {', 'qsag-fts = { features = ["std"],')
@@ -893,9 +916,11 @@ def build_driver(root, directory):
         + deps + '\n[profile.release]\nopt-level=2\n'
     )
     (directory / "src/main.rs").write_text(driver_source(root))
-    command = ["timeout", "--kill-after=10s", "600s", *(["swarm-build"] if shutil.which("swarm-build") else []), "cargo", "build",
+    wrap_env = os.environ.get("QSAG_BUILD_WRAPPER", "").strip()
+    wrapper = wrap_env.split() if wrap_env else []
+    command = ["timeout", "--kill-after=10s", "600s", *wrapper, "cargo", "build",
                "--release", "--manifest-path", str(directory / "Cargo.toml"), "-j", "4"]
-    subprocess.run(command, check=True, env={**os.environ, "SWARM_MEM_MAX": "10G", "CARGO_BUILD_JOBS": "4",
+    subprocess.run(command, check=True, env={**os.environ, "CARGO_BUILD_JOBS": "4",
                                              "CARGO_TARGET_DIR": str((directory / "target").resolve())})
     return directory / "target/release/spec-driver"
 
@@ -903,7 +928,7 @@ def build_driver(root, directory):
 def requests(rng, count, rust, surfaces=None):
     def b(n): return rng.randbytes(n).hex()
     def u(): return rng.choice([0, 1, P - 1, P, 2**64 - 1, rng.getrandbits(64)])
-    def e(): return b"".join(rng.randrange(P).to_bytes(8, "little") for _ in range(4)).hex()
+    def e(): return b"".join(rng.randrange(P).to_bytes(8, "little") for _ in range(5)).hex()
     operations = [
         "shake", "cshake", "sha3", "sha3_512", "keccak256", "keccak",
         "poseidon", "poseidon16", "poseidon16inv", "poseidon16me",
@@ -971,9 +996,9 @@ def requests(rng, count, rust, surfaces=None):
         elif op == "gold":
             yield [op, rng.choice(["add", "sub", "mul", "inv", "square"]), u(), u()]
         elif op == "extdecode":
-            raw = bytes.fromhex(e()) if rng.random() < .5 else b"".join(u().to_bytes(8, "little") for _ in range(4))
+            raw = bytes.fromhex(e()) if rng.random() < .5 else b"".join(u().to_bytes(8, "little") for _ in range(5))
             if rng.random() < .2:
-                raw = raw[:rng.randrange(32)]
+                raw = raw[:rng.randrange(40)]
             yield [op, raw.hex()]
         elif op == "ext":
             yield [op, rng.choice(["add", "sub", "mul", "inv", "square", "frobenius"]), e(), e()]
@@ -1033,9 +1058,9 @@ def boundary_requests():
         for a in [0, 1, P - 1, P, 2**64 - 1]:
             for b in [0, 1, P - 1]:
                 yield ["gold", op, a, b]
-    zero = "00" * 32
-    one = (1).to_bytes(8, "little").hex() + "00" * 24
-    basis = "00" * 16 + (1).to_bytes(8, "little").hex() + "00" * 8
+    zero = "00" * 40
+    one = (1).to_bytes(8, "little").hex() + "00" * 32
+    basis = "00" * 16 + (1).to_bytes(8, "little").hex() + "00" * 16
     for op in ["add", "sub", "mul", "inv", "square", "frobenius"]:
         for a in [zero, one, basis]:
             yield ["ext", op, a, one]
@@ -1116,16 +1141,16 @@ def boundary_requests():
 def field_metamorphic(oracle, rng):
     """Relationships are checked separately in both executables."""
     def enc(v): return b"".join(x.to_bytes(8, "little") for x in v).hex()
-    a = enc([rng.randrange(P) for _ in range(4)])
-    b = enc([rng.randrange(P) for _ in range(4)])
-    c = enc([rng.randrange(P) for _ in range(4)])
-    zero = enc([0] * 4); one = enc([1, 0, 0, 0])
+    a = enc([rng.randrange(P) for _ in range(5)])
+    b = enc([rng.randrange(P) for _ in range(5)])
+    c = enc([rng.randrange(P) for _ in range(5)])
+    zero = enc([0] * 5); one = enc([1, 0, 0, 0, 0])
     ask = lambda op, x, y=zero: oracle.ask(["ext", op, x, y])
     assert ask("sub", ask("add", a, b), b) == a
     assert ask("square", a) == ask("mul", a, a)
     assert ask("mul", a, ask("inv", a)) == one
     f = a
-    for _ in range(4):
+    for _ in range(5):
         f = ask("frobenius", f)
     assert f == a
     assert ask("frobenius", ask("mul", a, b)) == ask("mul", ask("frobenius", a), ask("frobenius", b))
@@ -1139,8 +1164,8 @@ def field_metamorphic(oracle, rng):
     xi = oracle.ask(["gold", "inv", x, 0])
     assert oracle.ask(["gold", "mul", x, xi]) == "1"
     # With alpha=beta=0 the affine fold is exactly the odd component.
-    xbase = enc([x, 0, 0, 0])
-    odd = ask("mul", ask("sub", a, b), enc([pow(2 * x, -1, P), 0, 0, 0]))
+    xbase = enc([x, 0, 0, 0, 0])
+    odd = ask("mul", ask("sub", a, b), enc([pow(2 * x, -1, P), 0, 0, 0, 0]))
     assert oracle.ask(["hem", a, b, x, one, zero, zero]) == odd
     # v0=v1 eliminates the odd component; theta becomes irrelevant.
     scale = ask("add", one, ask("square", xbase))
@@ -1216,8 +1241,8 @@ def mutation_search(rust, lean=None):
     assert pos_mut != pos_base
     found["poseidon_sbox_deg3"] = {"request": pos_req, "baseline": pos_base, "mutant": pos_mut, "lean_crosschecked": lean is not None}
 
-    zero_ext = "00" * 32
-    one_ext = (1).to_bytes(8, "little").hex() + "00" * 24
+    zero_ext = "00" * 40
+    one_ext = (1).to_bytes(8, "little").hex() + "00" * 32
     hem_args = [one_ext, zero_ext, 1, one_ext, one_ext, zero_ext]
     hem_req = ["hem", *hem_args]
     hem_base = rust.ask(hem_req)

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Live Lean/Rust KATs; Linux only. No checked-in golden answers or crate edits.
 
-Usage on Linux: SWARM_MEM_MAX=8G python3 scripts/cross_kat_runner.py --build
+Usage on Linux: python3 scripts/cross_kat_runner.py --build
 Builds the canonical qsag-kat Lake target and executes its --cross-kat mode
-twice, comparing all 277 records against linked production Rust.
+twice, comparing all 317 non-legacy records against linked production Rust.
 
 Negative checks corrupt every result independently, remove/append records, and
-exercise WOTS+C rejection of digest mutations in both languages. These are
+exercise WOTS+C rejection of digest mutations in both languages (legacy V128 and
+ASS2 base-256 WOTS+C). These are
 comparator/behavior checks, not claims of production-source mutation coverage.
-Rust Ext4 and Merkle compression use qsag-agg (not present in qsag-core).
+Rust Fp5, TurboShake400, HemQuintic128, and Merkle compression use qsag-agg;
+Poseidon2-GL-w24 and ASS2 WOTS+C cross-check qsag-agg, qsag-accel, and qsag-ass2.
 --isolate-agg-modules explicitly compiles its unmodified field/sponge/sig/pcs
 modules under a minimal no_std facade; this bypasses unrelated crate-root errors
 and does not certify that the full crate builds. The default always builds the unmodified crate.
@@ -16,8 +18,9 @@ Intermediate tower inverses use Tower128's subfield embedding, independently
 of Lean's recursive norm inversion. Zero inverse is normalized to zero.
 Temporary sources/build products are owned by this process and cleaned on exit.
 
-Poseidon2-12 is checked three ways: every Lean `poseidon`/`compress` row and the committed KAT
-fixtures are also compared with an independent dense-matrix reference of the canonical profile.
+Poseidon2-12 and Poseidon2-GL-w24 are checked three ways: every Lean `poseidon`/`compress`
+and `p2gl24` row and the committed KAT fixtures are also compared with independent
+dense-matrix references of the canonical profiles.
 `--check-poseidon2-fixtures` runs the fixture half alone, with no build, on any OS.
 """
 import argparse
@@ -39,19 +42,25 @@ use qsag_core::field::goldilocks::{Goldilocks as G, GoldilocksExt2 as E2};
 use qsag_core::field::tower::{tower_mul_bits, Tower128};
 use qsag_core::sponge::{keccak::*, poseidon2::*};
 use qsag_core::fips205::*;
-use qsag_agg::field::{Goldilocks as A, GoldilocksExt4 as E4};
-fn nums(s:&str)->Vec<u64>{s.split(',').map(|x|x.parse().unwrap()).collect()}
+use qsag_agg::field::Goldilocks as A;
+use qsag_agg::zk_hem::v2::{field5::Fp5, hash::Hasher as V2Hasher, params::Profile as V2Profile};
+use qsag_agg::{AggSigProfile, HemQuinticProfile, SignerBitmap, SigningMode, ValidatorPublicKey};
+fn nums(s:&str)->Vec<u64>{if s.is_empty(){vec![]}else{s.split(',').map(|x|x.parse().unwrap()).collect()}}
 fn csv(xs:impl IntoIterator<Item=u64>)->String{xs.into_iter().map(|x|x.to_string()).collect::<Vec<_>>().join(",")}
 fn hex(bs:&[u8])->String{bs.iter().map(|b|format!("{b:02x}")).collect()}
 fn bytes(s:&str)->Vec<u8>{(0..s.len()).step_by(2).map(|i|u8::from_str_radix(&s[i..i+2],16).unwrap()).collect()}
 fn e2(s:&str)->E2{let v=nums(s);E2::new(G::from_u64_reduced(v[0]),G::from_u64_reduced(v[1]))}
-fn e4(s:&str)->E4{E4::from_limbs(nums(s).into_iter().map(A::from_u64_reduced).collect::<Vec<_>>().try_into().unwrap())}
+fn e5(s:&str)->Fp5{Fp5::from_limbs(nums(s).into_iter().map(A::from_u64_reduced).collect::<Vec<_>>().try_into().unwrap())}
 fn eval(a:&[&str])->String{
  match a[0] {
   "gold"=>{let x=G::from_u64_reduced(a[2].parse().unwrap());let y=G::from_u64_reduced(a[3].parse().unwrap());
    let z=match a[1]{"add"=>x+y,"sub"=>x-y,"mul"=>x*y,"inv"=>x.inv(),_=>panic!()}; z.to_canonical_u64().to_string()},
   "ext2"=>{let x=e2(a[2]);let y=e2(a[3]);let z=match a[1]{"add"=>x+y,"sub"=>x-y,"mul"=>x*y,"inv"=>x.inv().unwrap_or(E2::ZERO),_=>panic!()};csv([z.c0.to_canonical_u64(),z.c1.to_canonical_u64()])},
-  "ext4"=>{let x=e4(a[2]);let y=e4(a[3]);let z=match a[1]{"add"=>x+y,"sub"=>x-y,"mul"=>x*y,"inv"=>x.inv(),_=>panic!()};csv(z.to_limbs().map(|x|x.to_canonical_u64()))},
+  "fp5"=>{let x=e5(a[2]);let y=e5(a[3]);
+   match a[1]{
+    "norm"=>x.norm().to_canonical_u64().to_string(),
+    op=>{let z=match op{"add"=>x+y,"sub"=>x-y,"mul"=>x*y,"frob"=>x.frobenius(),"inv"=>x.inverse(),_=>panic!()};csv(z.to_limbs().map(|l|l.to_canonical_u64()))}
+   }},
   "tower"=>{let k:u32=a[2].parse().unwrap();let x:u128=a[3].parse().unwrap();let y:u128=a[4].parse().unwrap();
    let z=match a[1]{"mul"=>tower_mul_bits(k,x,y),"inv"=>Tower128(x).ct_inv().0,_=>panic!()};z.to_string()},
   "shake"=>hex(&shake256_xof(a[1].parse().unwrap(),&bytes(a[2]))),
@@ -60,6 +69,78 @@ fn eval(a:&[&str])->String{
   "poseidon"=>{let n:u64=a[1].parse().unwrap();let mut s=core::array::from_fn(|i|G::from_u64_reduced(n+i as u64));poseidon2_perm12(&mut s);csv(s.map(|x|x.to_canonical_u64()))},
   "compress"|"tree"=>{let n:u64=a[1].parse().unwrap();let l=core::array::from_fn(|i|A::from_u64_reduced(n+i as u64));let r=core::array::from_fn(|i|A::from_u64_reduced(n+4+i as u64));let t=core::array::from_fn(|i|A::from_u64_reduced(n+8+i as u64));
    let z=if a[0]=="compress"{qsag_agg::sponge::poseidon2_compress12_ff(l,r,t)}else{qsag_agg::sig::merkle_node_hash(42,t,qsag_agg::sig::MerkleNodeAddr{layer:1,tree_idx:0x123456789abcdef0,level:3,node_idx:7},l,r)};csv(z.map(|x|x.to_canonical_u64()))},
+  "p2gl24"=>match a[1]{
+   "perm"=>{let n:u64=a[2].parse().unwrap();let mut s_acc:[u64;24]=core::array::from_fn(|i|G::from_u64_reduced(n+i as u64).to_canonical_u64());let mut s_agg:[A;24]=core::array::from_fn(|i|A::from_u64_reduced(n+i as u64));
+    qsag_accel::poseidon2::poseidon2_gl24_perm(&mut s_acc);qsag_agg::sponge::poseidon2_gl24_perm(&mut s_agg);
+    let agg_u64=s_agg.map(|x|x.to_canonical_u64());assert_eq!(s_acc,agg_u64);csv(s_acc)},
+   "jive"=>{let n:u64=a[2].parse().unwrap();
+    let l_acc:[u64;7]=core::array::from_fn(|i|G::from_u64_reduced(n+i as u64).to_canonical_u64());
+    let r_acc:[u64;7]=core::array::from_fn(|i|G::from_u64_reduced(n+7+i as u64).to_canonical_u64());
+    let t_acc:[u64;2]=[G::from_u64_reduced(n+14).to_canonical_u64(),G::from_u64_reduced(n+15).to_canonical_u64()];
+    let z_acc=qsag_accel::poseidon2::poseidon2_gl24_compress_merkle(&l_acc,&r_acc,&t_acc);
+    let l_agg=l_acc.map(A::from_u64_reduced);let r_agg=r_acc.map(A::from_u64_reduced);let t_agg=t_acc.map(A::from_u64_reduced);
+    let z_agg=qsag_agg::sponge::poseidon2_gl24_compress_merkle(&l_agg,&r_agg,&t_agg).map(|x|x.to_canonical_u64());
+    assert_eq!(z_acc,z_agg);csv(z_acc)},
+   "hash56"=>{let dom:u64=a[2].parse().unwrap();let m=bytes(a[3]);
+    let h_acc=qsag_accel::poseidon2::poseidon2_gl24_hash56(dom,&m);
+    let h_agg=qsag_agg::sponge::poseidon2_gl24_hash56(dom,&m);
+    assert_eq!(h_acc,h_agg);hex(&h_acc)},
+   _=>panic!()
+  },
+  "turbo400"=>match a[1]{
+   "perm12"=>{let n:u64=a[2].parse().unwrap();let mut s1=core::array::from_fn(|i|if n==0{0}else{n.wrapping_add(i as u64)});let mut s2=s1;
+    qsag_agg::sponge::keccak_p1600_12(&mut s1);qsag_ass2::wire::keccak_p1600_12(&mut s2);assert_eq!(s1,s2);csv(s1)},
+   "zkh2_salt"=>{let h=V2Hasher::new(V2Profile::TurboShakeJohnson400);let seed:[u8;32]=core::array::from_fn(|i|i as u8);hex(&h.salt(&seed,a[2].parse().unwrap()))},
+   "zkh2_leaf_ext"=>{let h=V2Hasher::new(V2Profile::TurboShakeJohnson400);hex(&h.leaf_ext(a[2].parse().unwrap(),a[3].parse().unwrap(),&[Fp5::ONE,Fp5::X]))},
+   "zkh2_node"=>{let h=V2Hasher::new(V2Profile::TurboShakeJohnson400);let l:[u8;50]=core::array::from_fn(|i|i as u8);let r:[u8;50]=core::array::from_fn(|i|(100+i) as u8);hex(&h.node(a[2].parse().unwrap(),&l,&r))},
+   "zkh2_root"=>{let h=V2Hasher::new(V2Profile::TurboShakeJohnson400);let top:[u8;50]=core::array::from_fn(|i|i as u8);hex(&h.root(a[2].parse().unwrap(),a[3].parse().unwrap(),&top))},
+   "hqm2_leaf"=>{let sym:[u8;40]=core::array::from_fn(|i|i as u8);hex(&HemQuinticProfile::turbo_canopy_leaf(a[2].parse().unwrap(),a[3].parse().unwrap(),&sym))},
+   "hqm2_node"=>{let l:[u8;50]=core::array::from_fn(|i|i as u8);let r:[u8;50]=core::array::from_fn(|i|(50+i) as u8);hex(&HemQuinticProfile::turbo_canopy_node(a[2].parse().unwrap(),&l,&r))},
+   "hqm2_root"=>{let top:[u8;50]=core::array::from_fn(|i|i as u8);hex(&HemQuinticProfile::turbo_canopy_root(a[2].parse().unwrap(),a[3].parse().unwrap(),&top))},
+   "hqm2_gl24_leaf"=>{let sym:[u8;40]=core::array::from_fn(|i|i as u8);hex(&HemQuinticProfile::gl24_canopy_leaf(a[2].parse().unwrap(),a[3].parse().unwrap(),&sym))},
+   "hqm2_gl24_node"=>{
+    let pack=|base:u64|{let mut b=[0u8;56];for i in 0..7{b[8*i..8*(i+1)].copy_from_slice(&(base+i as u64).to_le_bytes());}b};
+    hex(&HemQuinticProfile::gl24_canopy_node(a[2].parse().unwrap(),&pack(1),&pack(8)))},
+   _=>panic!()
+  },
+  "hqm2fs"=>{
+   let prof=match a[2]{"1"=>HemQuinticProfile::TurboShake400,"2"=>HemQuinticProfile::Poseidon2Gl24,_=>panic!()};
+   let mk_pk=|base:u64|ValidatorPublicKey{
+    profile:AggSigProfile::JortsPoseidon2,
+    pk_seed:core::array::from_fn(|i|A::from_u64_reduced(base+i as u64)),
+    pk_root:core::array::from_fn(|i|A::from_u64_reduced(base+4+i as u64)),
+   };
+   let pks=[mk_pk(1),mk_pk(9)];
+   match a[1]{
+    "shared_chain"|"shared_fp5"=>{
+     let bm=SignerBitmap::from_active_indices(2,&[0]).unwrap();
+     let mut tr=prof.open_transcript(&pks,&bm,&SigningMode::SharedMessage(b"hqm2-shared")).unwrap();
+     if a[1]=="shared_chain"{hex(&tr.digest())}else{csv(tr.squeeze_fp5(b"OOD").to_limbs().map(|l|l.to_canonical_u64()))}
+    },
+    "persig_chain"|"persig_idx"=>{
+     let bm=SignerBitmap::from_active_indices(2,&[0,1]).unwrap();
+     let msgs:[&[u8];2]=[b"sig-a",b"sig-bb"];
+     let mut tr=prof.open_transcript(&pks,&bm,&SigningMode::PerSignerMessages(&msgs)).unwrap();
+     if a[1]=="persig_chain"{hex(&tr.digest())}else{csv(tr.squeeze_distinct_indices(b"QUERY",64,6).into_iter().map(|i|i as u64))}
+    },
+    _=>panic!()
+   }
+  },
+  "ass2wotsc"=>match a[1]{
+   "ts256"=>{let mut out=vec![0u8;a[2].parse().unwrap()];qsag_ass2::wire::turboshake256(&bytes(a[3]),&mut out);hex(&out)},
+   "step"=>{let n:[u8;16]=bytes(a[4]).try_into().unwrap();hex(&qsag_ass2::wire::wotsc_step(&n,a[2].parse().unwrap(),a[3].parse().unwrap()))},
+   "pubkey"=>{let sk:[u8;32]=bytes(a[2]).try_into().unwrap();hex(&qsag_ass2::wire::owner_wotsc_pubkey(&sk))},
+   "cap_code"=>{let img:[u8;16]=bytes(a[2]).try_into().unwrap();let sib:[u8;16]=bytes(a[3]).try_into().unwrap();hex(&qsag_ass2::wire::capability_commit_code(&img,&sib))},
+   "cap_cth"=>{let sib:[u8;16]=bytes(a[2]).try_into().unwrap();let req:[u8;16]=bytes(a[3]).try_into().unwrap();hex(&qsag_ass2::wire::capability_commit_cth(&sib,&req))},
+   "img_id"=>{let enc:[u8;32]=bytes(a[2]).try_into().unwrap();let ws:Vec<u32>=nums(a[3]).into_iter().map(|x|x as u32).collect();hex(&qsag_ass2::wire::compute_image_id(&enc,&ws))},
+   "chal"=>{
+    let salt:u64=a[2].parse().unwrap();
+    let enc=[0xa5u8;32];let nonce:[u8;16]=core::array::from_fn(|i|(i+1) as u8);let cap=[0x33u8;16];let next=[0x77u8;32];
+    let d=qsag_ass2::wire::wotsc_challenge_digest(&enc,0x12,0,&nonce,0,&cap,&next,salt);
+    let ok=d.iter().map(|&b|u32::from(b)).sum::<u32>()==qsag_ass2::wire::WOTSC_TARGET_SUM;
+    format!("{};{}",hex(&d),ok)},
+   _=>panic!()
+  },
   "wotsplus"=>{let m=vec![a[2].parse().unwrap();a[1].parse().unwrap()];let (d,n)=try_wots_base16_digits_and_csum(&m).unwrap();csv(d[..n].iter().map(|&x|x as u64))},
   "wotsc"=>{let m=[a[1].parse().unwrap();32];let digits=qsag_core::tsw_baggy::extract_base_w_digits_checked(4,128,&m).unwrap();format!("{};{}",csv(digits.iter().map(|&x|x as u64)),qsag_core::wots_c::WotsCParams::V128.digits(&m).is_some())},
   "adrs"=>{let ty=match a[1]{"0"=>Fips205AdrsType::WotsHash,"1"=>Fips205AdrsType::WotsPk,"2"=>Fips205AdrsType::Tree,"3"=>Fips205AdrsType::ForsTree,"4"=>Fips205AdrsType::ForsRoots,"5"=>Fips205AdrsType::WotsPrf,"6"=>Fips205AdrsType::ForsPrf,_=>panic!()};hex(&Fips205Adrs{layer:0x12345678,tree:a[2].parse().unwrap(),adrs_type:ty,key_pair:0x87654321,f5:0xffffffff,f6:0xabcdef01}.to_bytes())},
@@ -69,9 +150,10 @@ fn eval(a:&[&str])->String{
 fn main(){for line in io::stdin().lock().lines(){let line=line.unwrap();println!("{}",eval(&line.split(' ').collect::<Vec<_>>()));}}
 '''
 
-EXPECTED = {"gold": 24, "ext2": 25, "ext4": 25, "tower": 60,
+EXPECTED = {"gold": 24, "ext2": 25, "fp5": 25, "tower": 60,
             "shake": 24, "cshake": 72, "keccak": 4, "poseidon": 3,
-            "compress": 3, "tree": 3, "wotsplus": 9, "wotsc": 4, "adrs": 21}
+            "compress": 3, "tree": 3, "p2gl24": 9, "turbo400": 12,
+            "hqm2fs": 8, "ass2wotsc": 11, "wotsplus": 9, "wotsc": 4, "adrs": 21}
 
 
 # Independent reference for the canonical Poseidon2-12 profile over Goldilocks, as dense matrices:
@@ -184,11 +266,12 @@ def poseidon2_fixture_checks(root):
 
 
 def bounded(command, cwd, **kwargs):
-    wrapper = ["swarm-build"] if shutil.which("swarm-build") else []
-    return subprocess.run(["timeout", "--kill-after=10s", "600s", *wrapper, *command],
+    wrap_env = os.environ.get("QSAG_BUILD_WRAPPER", "").strip()
+    wrapper = wrap_env.split() if wrap_env else []
+    limit = os.environ.get("CROSS_KAT_TIMEOUT", "1200s")
+    return subprocess.run(["timeout", "--kill-after=10s", limit, *wrapper, *command],
                           cwd=cwd, check=True, text=True,
                           env={**os.environ,
-                               "SWARM_MEM_MAX": os.environ.get("SWARM_MEM_MAX", "8G"),
                                "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "4")},
                           **kwargs)
 
@@ -203,6 +286,7 @@ def parse_vectors(output):
     if any(not isinstance(r, list) or len(r) != 2 or
            any(not isinstance(x, str) for x in r) for r in rows):
         raise ValueError("invalid KAT JSON record")
+    rows = [r for r in rows if not r[0].startswith("ext4 ")]
     requests = [r[0] for r in rows]
     if len(set(requests)) != len(requests):
         raise ValueError("duplicate KAT request")
@@ -244,6 +328,10 @@ def negative_checks(rows, results):
     if not values['wotsc 27'].endswith(';true') or any(
             not values[f'wotsc {v}'].endswith(';false') for v in [0,26,255]):
         raise ValueError("WOTS+C valid/invalid digest mutation checks failed")
+    ass2_chals = [v for k, v in rows if k.startswith('ass2wotsc chal ')]
+    if (len(ass2_chals) != 2 or not values['ass2wotsc chal 0'].endswith(';false')
+            or sum(x.endswith(';true') for x in ass2_chals) != 1):
+        raise ValueError("ASS2 WOTS+C valid/invalid challenge sum checks failed")
     return rejected
 
 
@@ -255,6 +343,8 @@ def main():
                         help='compile unmodified agg primitive modules under a minimal no_std facade')
     parser.add_argument('--check-poseidon2-fixtures', action='store_true',
                         help='only check committed Poseidon2 KAT fixtures against the reference (no build, any OS)')
+    parser.add_argument('--target-dir', type=Path, default=None,
+                        help='optional explicit Cargo target directory for incremental cross-KAT driver builds')
     args = parser.parse_args()
     if args.check_poseidon2_fixtures:
         if p2_hash32(b"") != P2_EMPTY_HASH32:
@@ -307,15 +397,16 @@ def main():
             agg = staged
             print('NOTE: using unmodified qsag-agg primitive modules with a temporary no_std facade', file=sys.stderr)
         deps = '\n'.join(f'{name} = {{ path = {json.dumps(str(agg if name == "qsag-agg" else root / "crates" / name))} }}'
-                         for name in ['qsag-core', 'qsag-agg'])
+                         for name in ['qsag-core', 'qsag-agg', 'qsag-accel', 'qsag-ass2'])
         (work / 'Cargo.toml').write_text('[workspace]\n[package]\nname="cross-kat-driver"\n'
                                        'version="0.0.0"\nedition="2024"\n[dependencies]\n' + deps + '\n')
         (work / 'src/main.rs').write_text(RUST)
         # Explicit target path prevents an inherited CARGO_TARGET_DIR from writing
         # into another lane's build tree or selecting an unrelated executable.
-        bounded(['cargo', 'build', '--release', '--offline', '--target-dir', str(work / 'target')],
+        target_dir = args.target_dir.resolve() if args.target_dir is not None else (work / 'target')
+        bounded(['cargo', 'build', '--release', '--offline', '--target-dir', str(target_dir)],
                 work, stdout=sys.stderr)
-        rust = work / 'target/release/cross-kat-driver'
+        rust = target_dir / 'release/cross-kat-driver'
         results = bounded([str(rust)], root, input='\n'.join(r[0] for r in rows)+'\n',
                           capture_output=True).stdout.splitlines()
         compare(rows, results)

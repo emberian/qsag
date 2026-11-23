@@ -4,6 +4,9 @@ module
    --cross-kat wire format: JSON Lines records [request, result], numeric values are decimal strings,
    byte strings are lowercase hex, field-extension limbs are c0.c0,c0.c1,c1.c0,c1.c1. -/
 public import Qsag.Math.Gf2Pow128
+public import Qsag.Math.QuinticExt5
+public import Qsag.Math.Poseidon2Gl24
+public import Qsag.Machine.Ass2Dregg64Isa
 public import Qsag.Protocol.Signing.Fips205
 public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
 public import Qsag.Tests.OracleAndQrom
@@ -14,11 +17,156 @@ private def csv (xs : List Nat) : String := String.intercalate "," (xs.map toStr
 private def hex (bs : List UInt8) : String := String.ofList (bs.flatMap fun b =>
   ["0123456789abcdef".toList[b.toNat / 16]!, "0123456789abcdef".toList[b.toNat % 16]!])
 private def seqBytes (n : Nat) : List UInt8 := (List.range n).map UInt8.ofNat
+private def utf8 (s : String) : List UInt8 := s.toUTF8.toList
+private def u32Le (n : Nat) : List UInt8 :=
+  (List.range 4).map fun i => UInt8.ofNat ((n / 2 ^ (8 * i)) % 256)
+private def u64Le (n : Nat) : List UInt8 :=
+  (List.range 8).map fun i => UInt8.ofNat ((n / 2 ^ (8 * i)) % 256)
+private def u128Le (n : Nat) : List UInt8 :=
+  (List.range 16).map fun i => UInt8.ofNat ((n / 2 ^ (8 * i)) % 256)
+private def leBytesToNat : List UInt8 → Nat
+  | [] => 0
+  | b :: bs => b.toNat + 256 * leBytesToNat bs
+private def beBytesToNat (bs : List UInt8) : Nat :=
+  bs.foldl (fun acc b => acc * 256 + b.toNat) 0
 private def lane (n : Nat) : Lane4 :=
   ⟨Goldilocks.ofNat n, Goldilocks.ofNat (n+1), Goldilocks.ofNat (n+2), Goldilocks.ofNat (n+3)⟩
 private def laneOut (x : Lane4) : String := csv [x.x0.val,x.x1.val,x.x2.val,x.x3.val]
 private def e2Out (x : GoldilocksExt2) : String := csv [x.c0.val,x.c1.val]
 private def e4Out (x : GoldilocksExt4) : String := csv [x.c0.c0.val,x.c0.c1.val,x.c1.c0.val,x.c1.c1.val]
+private def e5Out (x : QuinticGoldilocks) : String := csv [x.c0.val,x.c1.val,x.c2.val,x.c3.val,x.c4.val]
+private def e5LeBytes (x : QuinticGoldilocks) : List UInt8 :=
+  [x.c0.val, x.c1.val, x.c2.val, x.c3.val, x.c4.val].flatMap u64Le
+private def kStateLanes (out : KState) : List Nat :=
+  [out.a0,out.a1,out.a2,out.a3,out.a4,out.a5,out.a6,out.a7,out.a8,out.a9,
+   out.a10,out.a11,out.a12,out.a13,out.a14,out.a15,out.a16,out.a17,out.a18,out.a19,
+   out.a20,out.a21,out.a22,out.a23,out.a24].map UInt64.toNat
+
+private def p24OfList (xs : List Goldilocks) : Qsag.Poseidon2Gl24.Poseidon2State24 :=
+  let g (i : Nat) : Goldilocks := xs.getD i Goldilocks.zero
+  ⟨⟨g 0, g 1, g 2, g 3⟩, ⟨g 4, g 5, g 6, g 7⟩, ⟨g 8, g 9, g 10, g 11⟩,
+   ⟨g 12, g 13, g 14, g 15⟩, ⟨g 16, g 17, g 18, g 19⟩, ⟨g 20, g 21, g 22, g 23⟩⟩
+private def p24AddAt (xs : List Goldilocks) (idx : Nat) (v : Goldilocks) : List Goldilocks :=
+  (List.range 24).map fun i =>
+    let cur := xs.getD i Goldilocks.zero
+    if i == idx then Goldilocks.add cur v else cur
+private def p24Chunks7 : Nat → List UInt8 → List Nat
+  | 0, _ => []
+  | k + 1, bs => beBytesToNat (bs.take 7) :: p24Chunks7 k (bs.drop 7)
+private def p24Hash56 (dom : Nat) (msg : List UInt8) : List UInt8 :=
+  let init : List Goldilocks :=
+    List.replicate 16 Goldilocks.zero ++
+    [Goldilocks.ofNat 16, Goldilocks.ofNat 8, Goldilocks.ofNat 56, Goldilocks.ofNat dom,
+     Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Qsag.Poseidon2Gl24.poseidon2Gl24Iv]
+  let rem := (msg.length + 1) % 7
+  let padZeros := if rem == 0 then 0 else 7 - rem
+  let padded := msg ++ [0x01] ++ List.replicate padZeros 0
+  let limbs := msg.length :: p24Chunks7 (padded.length / 7) padded
+  let (st, pos) := limbs.foldl (fun (cur, p) limb =>
+    let next := p24AddAt cur p (Goldilocks.ofNat limb)
+    if p + 1 == 16 then ((Qsag.Poseidon2Gl24.poseidon2Gl24Perm (p24OfList next)).toList, 0)
+    else (next, p + 1)) (init, 0)
+  let fin :=
+    if pos == 15 then p24AddAt st 15 (Goldilocks.ofNat (2 ^ 56 + 1))
+    else p24AddAt (p24AddAt st pos Goldilocks.one) 15 (Goldilocks.ofNat (2 ^ 56))
+  let out := (Qsag.Poseidon2Gl24.poseidon2Gl24Perm (p24OfList fin)).toList.take 7
+  out.flatMap fun g => u64Le g.val
+
+private def turboAbsorb12 : Nat → KState → List UInt8 → KState
+  | 0, s, _ => s
+  | k + 1, s, rest =>
+    turboAbsorb12 k (Qsag.Ass2.keccakRounds 12 (xorRate136 s (rest.take 136))) (rest.drop 136)
+private def turboSqueezeBlocks12 : Nat → KState → List UInt8
+  | 0, _ => []
+  | 1, s => rateBlockBytes s
+  | k + 2, s => rateBlockBytes s ++ turboSqueezeBlocks12 (k + 1) (Qsag.Ass2.keccakRounds 12 s)
+private def turboXofFromMidstate (mid : KState) (suffix : UInt8) (outLen : Nat) (msg : List UInt8) : List UInt8 :=
+  let padded := padForRate msg suffix
+  let st := turboAbsorb12 (padded.length / 136) mid padded
+  (turboSqueezeBlocks12 ((outLen + 135) / 136) st).take outLen
+private def turboMidstate (custom : List UInt8) : KState :=
+  let bitLen := custom.length * 8
+  let lenEnc := if bitLen < 256 then ([1, UInt8.ofNat bitLen] : List UInt8)
+                else [2, UInt8.ofNat ((bitLen / 256) % 256), UInt8.ofNat (bitLen % 256)]
+  let pfx := ([1, 136, 1, 0] : List UInt8) ++ lenEnc ++ custom
+  let blk := pfx ++ List.replicate (136 - pfx.length) 0
+  Qsag.Ass2.keccakRounds 12 (xorRate136 zeroKState blk)
+private def turbo256 (outLen : Nat) (msg : List UInt8) : List UInt8 :=
+  turboXofFromMidstate zeroKState 0x1f outLen msg
+
+private def fsFrame (fields : List (List UInt8)) : List UInt8 :=
+  fields.flatMap fun f => u64Le f.length ++ f
+private def hqm2Mid : KState := turboMidstate (utf8 "QSAG.HEM.QUINTIC.FS/v2")
+private def hqm2Init (tag : UInt8) (binding : List (List UInt8)) : List UInt8 :=
+  turboXofFromMidstate hqm2Mid 0x07 50 (fsFrame [utf8 "INIT", [tag], fsFrame binding])
+private def hqm2Absorb (chain label payload : List UInt8) : List UInt8 :=
+  turboXofFromMidstate hqm2Mid 0x07 50 (fsFrame [utf8 "ABSORB", chain, label, payload])
+private def hqm2TryFp5 : Nat → Nat → List UInt8 → List UInt8 → Nat → QuinticGoldilocks
+  | 0, _, _, _, _ => QuinticGoldilocks.one
+  | fuel + 1, attempt, chain, label, counter =>
+    let raw := turboXofFromMidstate hqm2Mid 0x07 40
+      (fsFrame [utf8 "SQUEEZE_E", chain, label, u64Le counter, u64Le attempt])
+    let ws := (List.range 5).map fun i => leBytesToNat ((raw.drop (8 * i)).take 8)
+    if ws.all (· < goldilocksPrime) then
+      ⟨Goldilocks.ofNat (ws.getD 0 0), Goldilocks.ofNat (ws.getD 1 0),
+       Goldilocks.ofNat (ws.getD 2 0), Goldilocks.ofNat (ws.getD 3 0),
+       Goldilocks.ofNat (ws.getD 4 0)⟩
+    else
+      hqm2TryFp5 fuel (attempt + 1) chain label counter
+private def insertSortedUnique (x : Nat) : List Nat → List Nat
+  | [] => [x]
+  | y :: ys =>
+    if x == y then y :: ys
+    else if x < y then x :: y :: ys
+    else y :: insertSortedUnique x ys
+private def hqm2SqueezeIndicesAux : Nat → List UInt8 → List UInt8 → Nat → Nat → Nat → List Nat → List Nat
+  | 0, _, _, _, _, _, acc => acc
+  | fuel + 1, chain, label, numGroups, target, counter, acc =>
+    if acc.length ≥ target then acc
+    else
+      let need := target - acc.length
+      let raw := turboXofFromMidstate hqm2Mid 0x07 (8 * need)
+        (fsFrame [utf8 "SQUEEZE_IDX", chain, label, u64Le counter, u64Le 0])
+      let words := (List.range need).map fun i => leBytesToNat ((raw.drop (8 * i)).take 8) % numGroups
+      let acc' := words.foldl (fun s w => insertSortedUnique w s) acc
+      hqm2SqueezeIndicesAux fuel chain label numGroups target (counter + 1) acc'
+
+private def ass2WotscStep (node16 : List UInt8) (chain step : Nat) : List UInt8 :=
+  let st : KState :=
+    { zeroKState with
+      a0 := 0x57531
+      a1 := loadLe64 node16 0
+      a2 := loadLe64 node16 1
+      a3 := UInt64.ofNat (chain * 256 + step)
+      a4 := 0x1f
+      a16 := (0x80 : UInt64) <<< 56 }
+  let out := Qsag.Ass2.keccakRounds 12 st
+  u64Le out.a0.toNat ++ u64Le out.a1.toNat
+private def ass2OwnerPubkey (skSeed32 : List UInt8) : List UInt8 :=
+  let ends := (List.range 16).flatMap fun i =>
+    let start := turbo256 16 (utf8 "AS2WSK01" ++ skSeed32 ++ u64Le i)
+    (List.range 255).foldl (fun cur s => ass2WotscStep cur i s) start
+  turbo256 32 (ends ++ u64Le 0x57501)
+private def ass2ImageId (enclaveId32 : List UInt8) (words : List Nat) : List UInt8 :=
+  let hBytes := turbo256 16 (enclaveId32 ++ u64Le 0x47461)
+  let hBv := BitVec.ofNat 128 (leBytesToNat hBytes)
+  let dBv := words.foldl
+    (fun d w => Qsag.MigrationExecution.rustGf128Mul d hBv ^^^ BitVec.ofNat 128 w)
+    (BitVec.ofNat 128 words.length)
+  turbo256 16 (enclaveId32 ++ u128Le dBv.toNat ++ u64Le 0x494d1)
+private def ass2ChallengeDigest (enclaveId32 : List UInt8) (opcode opVal : Nat)
+    (nonce16 : List UInt8) (record : Nat) (cap16 nextRoot32 : List UInt8) (salt : Nat) : List UInt8 :=
+  let msg := u64Le 0x574d1 ++ enclaveId32.take 24 ++ u64Le opcode ++ u64Le record ++
+             nonce16 ++ cap16 ++ u64Le opVal ++ u64Le salt ++ nextRoot32
+  turbo256 16 msg
+private def ass2ByteSum (bs : List UInt8) : Nat := bs.foldl (fun s b => s + b.toNat) 0
+private def ass2FindValidSalt : Nat → Nat → List UInt8 → List UInt8 → List UInt8 → List UInt8 → Nat
+  | 0, salt, _, _, _, _ => salt
+  | fuel + 1, salt, enclaveId32, nonce16, cap16, nextRoot32 =>
+    let d := ass2ChallengeDigest enclaveId32 0x12 0 nonce16 0 cap16 nextRoot32 salt
+    if ass2ByteSum d == 2040 then salt
+    else ass2FindValidSalt fuel (salt + 1) enclaveId32 nonce16 cap16 nextRoot32
+
 private def emit (request result : String) : IO Unit :=
   IO.println ("[\"" ++ request ++ "\",\"" ++ result ++ "\"]")
 -- JSON Lines keeps even the largest sponge vectors independently inspectable.
@@ -62,10 +210,7 @@ def run : IO Unit := do
       ⟨word 0,word 1,word 2,word 3,word 4,word 5,word 6,word 7,word 8,word 9,word 10,word 11,word 12,word 13,word 14,word 15,word 16,word 17,word 18,word 19,word 20,word 21,word 22,word 23,word 24⟩
     let out := keccakF1600 st
     -- All 25 lanes, including capacity, serialized little endian.
-    let lanes := [out.a0,out.a1,out.a2,out.a3,out.a4,out.a5,out.a6,out.a7,out.a8,out.a9,
-      out.a10,out.a11,out.a12,out.a13,out.a14,out.a15,out.a16,out.a17,out.a18,out.a19,
-      out.a20,out.a21,out.a22,out.a23,out.a24]
-    emit s!"keccak {n}" (csv (lanes.map UInt64.toNat))
+    emit s!"keccak {n}" (csv (kStateLanes out))
   for n in [0,1,18446744069414584315] do
     let a := lane n
     let b := lane (n+4)
@@ -84,6 +229,118 @@ def run : IO Unit := do
   for ty in [FipsAdrsType.wotsHash,.wotsPk,.tree,.forsTree,.forsRoots,.wotsPrf,.forsPrf] do
     for tree in [0,0x10000000000000001,2^96-1] do
       emit s!"adrs {ty.toCode} {tree}" (hex (encodeFips205Adrs (mkFipsAdrs 0x12345678 tree ty 0x87654321 0xffffffff 0xabcdef01)))
+
+  -- Wave X5 ICD Extension 1: Quintic extension field Fp5 = F_p[X]/(X^5 - 3) (25 vectors)
+  for a in [0, 1, 0x123456789abcdef0, 18446744069414584320] do
+    let x5 : QuinticGoldilocks :=
+      ⟨Goldilocks.ofNat a, Goldilocks.ofNat (a + 1), Goldilocks.ofNat (a + 2),
+       Goldilocks.ofNat (a + 3), Goldilocks.ofNat 0xcafebabe12345678⟩
+    let y5 : QuinticGoldilocks :=
+      ⟨Goldilocks.ofNat 17, Goldilocks.ofNat 31, Goldilocks.ofNat 43,
+       Goldilocks.ofNat 59, Goldilocks.ofNat 71⟩
+    let xs := csv [a, a + 1, a + 2, a + 3, 0xcafebabe12345678]
+    let ys := "17,31,43,59,71"
+    emit s!"fp5 add {xs} {ys}" (e5Out (QuinticGoldilocks.add x5 y5))
+    emit s!"fp5 sub {xs} {ys}" (e5Out (QuinticGoldilocks.sub x5 y5))
+    emit s!"fp5 mul {xs} {ys}" (e5Out (QuinticGoldilocks.mul x5 y5))
+    emit s!"fp5 frob {xs} {ys}" (e5Out (QuinticGoldilocks.frob x5))
+    emit s!"fp5 norm {xs} {ys}" (toString (QuinticGoldilocks.norm x5).val)
+    emit s!"fp5 inv {xs} {ys}" (e5Out (QuinticGoldilocks.inv x5))
+  emit "fp5 inv 0,0,0,0,0 0,0,0,0,0" (e5Out (QuinticGoldilocks.inv QuinticGoldilocks.zero))
+
+  -- Wave X5 ICD Extension 2: Width-24 Poseidon2-GL-w24 perm, Jive compression & 56B sponge (9 vectors)
+  for n in [0, 1, 18446744069414584305] do
+    let st24 := p24OfList ((List.range 24).map fun i => Goldilocks.ofNat (n + i))
+    emit s!"p2gl24 perm {n}" (csv ((Qsag.Poseidon2Gl24.poseidon2Gl24Perm st24).toList.map (·.val)))
+    let g (k : Nat) : Goldilocks := Goldilocks.ofNat (n + k)
+    let left7 : Qsag.Poseidon2Gl24.Digest7 := ⟨g 0, g 1, g 2, g 3, g 4, g 5, g 6⟩
+    let right7 : Qsag.Poseidon2Gl24.Digest7 := ⟨g 7, g 8, g 9, g 10, g 11, g 12, g 13⟩
+    let jive := Qsag.Poseidon2Gl24.poseidon2Gl24CompressMerkle left7 right7 (g 14) (g 15)
+    emit s!"p2gl24 jive {n}" (csv (jive.toList.map (·.val)))
+  for (dom, mlen) in [(0, 0), (0x45455254324d5148, 91), (0xffffffffffffffff, 98)] do
+    let m := seqBytes mlen
+    emit s!"p2gl24 hash56 {dom} {hex m}" (hex (p24Hash56 dom m))
+
+  -- Wave X5 ICD Extension 3: TurboShake400 & Canopy v1/v2 50B/56B framing (12 vectors)
+  for n in [0, 1, 0xffffffffffffffe0] do
+    let word := fun i => UInt64.ofNat (if n == 0 then 0 else n + i)
+    let st : KState :=
+      ⟨word 0,word 1,word 2,word 3,word 4,word 5,word 6,word 7,word 8,word 9,word 10,word 11,word 12,word 13,word 14,word 15,word 16,word 17,word 18,word 19,word 20,word 21,word 22,word 23,word 24⟩
+    emit s!"turbo400 perm12 {n}" (csv (kStateLanes (Qsag.Ass2.keccakRounds 12 st)))
+  let zkh2TreeMid := turboMidstate (utf8 "QSAG.ZKHEM2.TREE/v1")
+  emit "turbo400 zkh2_salt 7"
+    (hex (turboXofFromMidstate zkh2TreeMid 0x07 32 ([0x02] ++ seqBytes 32 ++ u32Le 7)))
+  emit "turbo400 zkh2_leaf_ext 1 5"
+    (hex (turboXofFromMidstate zkh2TreeMid 0x07 50
+      ([0x12, 1, 1] ++ u32Le 5 ++ e5LeBytes QuinticGoldilocks.one ++ e5LeBytes QuinticGoldilocks.xBasis)))
+  let left50 := seqBytes 50
+  let right50a := (List.range 50).map fun i => UInt8.ofNat (100 + i)
+  emit "turbo400 zkh2_node 3"
+    (hex (turboXofFromMidstate zkh2TreeMid 0x07 50 ([0x00] ++ u32Le 3 ++ left50 ++ right50a)))
+  emit "turbo400 zkh2_root 0 10"
+    (hex (turboXofFromMidstate zkh2TreeMid 0x07 50 ([0x01, 0, 10] ++ left50)))
+  let hqm2TreeBytes := utf8 "QSAG.HEM.QUINTIC.TREE/v2"
+  let hqm2TreeMid := turboMidstate hqm2TreeBytes
+  let sym40 := seqBytes 40
+  emit "turbo400 hqm2_leaf 0 9"
+    (hex (turboXofFromMidstate hqm2TreeMid 0x07 50 ([0x00, 0] ++ u32Le 9 ++ sym40)))
+  let right50b := (List.range 50).map fun i => UInt8.ofNat (50 + i)
+  emit "turbo400 hqm2_node 5"
+    (hex (turboXofFromMidstate hqm2TreeMid 0x07 50 ([0x01] ++ u32Le 5 ++ left50 ++ right50b)))
+  emit "turbo400 hqm2_root 1 8"
+    (hex (turboXofFromMidstate hqm2TreeMid 0x07 50 ([0x02, 1, 8] ++ left50)))
+  emit "turbo400 hqm2_gl24_leaf 0 9"
+    (hex (p24Hash56 0x45455254324d5148 (hqm2TreeBytes ++ [0x00, 0] ++ u32Le 9 ++ sym40)))
+  let glLeft7 : Qsag.Poseidon2Gl24.Digest7 :=
+    ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3, Goldilocks.ofNat 4,
+     Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩
+  let glRight7 : Qsag.Poseidon2Gl24.Digest7 :=
+    ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11,
+     Goldilocks.ofNat 12, Goldilocks.ofNat 13, Goldilocks.ofNat 14⟩
+  let glNode := Qsag.Poseidon2Gl24.poseidon2Gl24CompressMerkle
+    glLeft7 glRight7 (Goldilocks.ofNat 0x45455254324d5148) (Goldilocks.ofNat 5)
+  emit "turbo400 hqm2_gl24_node 5" (hex (glNode.toList.flatMap fun x => u64Le x.val))
+
+  -- Wave X5 ICD Extension 4: HemQuintic128 (QSAGHQM2) Fiat-Shamir transcript (8 vectors)
+  let pkBytes (base : Nat) : List UInt8 :=
+    [1] ++ ((List.range 8).flatMap fun i => u64Le (base + i))
+  let committee := pkBytes 1 ++ pkBytes 9
+  let bmShared := u32Le 2 ++ u64Le 1
+  let bmPerSig := u32Le 2 ++ u64Le 3
+  for profTag in ([1, 2] : List Nat) do
+    let chShared0 := hqm2Init (UInt8.ofNat profTag) [utf8 "QSAGHQM2", bmShared, committee]
+    let chShared := hqm2Absorb chShared0 (utf8 "SHARED") (utf8 "hqm2-shared")
+    emit s!"hqm2fs shared_chain {profTag}" (hex chShared)
+    emit s!"hqm2fs shared_fp5 {profTag}" (e5Out (hqm2TryFp5 32 0 chShared (utf8 "OOD") 0))
+    let chPer0 := hqm2Init (UInt8.ofNat profTag) [utf8 "QSAGHQM2", bmPerSig, committee]
+    let chPer := hqm2Absorb chPer0 (utf8 "PER_SIGNER") (encodeMultiFrame [utf8 "sig-a", utf8 "sig-bb"])
+    emit s!"hqm2fs persig_chain {profTag}" (hex chPer)
+    emit s!"hqm2fs persig_idx {profTag}" (csv (hqm2SqueezeIndicesAux 32 chPer (utf8 "QUERY") 64 6 0 []))
+
+  -- Wave X5 ICD Extension 5: ASS2 WOTS+C capability chains & GF(2^128) image IDs (11 vectors)
+  for (outLen, mlen) in [(32, 0), (48, 135), (264, 137)] do
+    let m := seqBytes mlen
+    emit s!"ass2wotsc ts256 {outLen} {hex m}" (hex (turbo256 outLen m))
+  let nodeA := seqBytes 16
+  let nodeB := (List.range 16).map fun i => UInt8.ofNat (0xa0 + i)
+  emit s!"ass2wotsc step 0 0 {hex nodeA}" (hex (ass2WotscStep nodeA 0 0))
+  emit s!"ass2wotsc step 15 254 {hex nodeB}" (hex (ass2WotscStep nodeB 15 254))
+  let skSeed := List.replicate 32 (0x42 : UInt8)
+  emit s!"ass2wotsc pubkey {hex skSeed}" (hex (ass2OwnerPubkey skSeed))
+  emit s!"ass2wotsc cap_code {hex nodeA} {hex nodeB}"
+    (hex (turbo256 16 (u64Le 0x43500 ++ nodeA ++ nodeB)))
+  emit s!"ass2wotsc cap_cth {hex nodeB} {hex nodeA}"
+    (hex (turbo256 16 (u64Le 0x43501 ++ nodeA ++ nodeB)))
+  let encId := List.replicate 32 (0xa5 : UInt8)
+  let appWords := [0x00050000, 0x00060000, 0xdeadbeef]
+  emit s!"ass2wotsc img_id {hex encId} {csv appWords}" (hex (ass2ImageId encId appWords))
+  let nonce16 := (List.range 16).map fun i => UInt8.ofNat (i + 1)
+  let cap16 := List.replicate 16 (0x33 : UInt8)
+  let nextRoot := List.replicate 32 (0x77 : UInt8)
+  let validSalt := ass2FindValidSalt 10000 0 encId nonce16 cap16 nextRoot
+  for salt in [0, validSalt] do
+    let d := ass2ChallengeDigest encId 0x12 0 nonce16 0 cap16 nextRoot salt
+    emit s!"ass2wotsc chal {salt}" (hex d ++ ";" ++ toString (ass2ByteSum d == 2040))
 end CrossKat
 
 -- Preserve the canonical JSON suite and FIPS 205 export interface as well as
