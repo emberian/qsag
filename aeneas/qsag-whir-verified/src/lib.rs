@@ -656,6 +656,506 @@ pub const fn verify_quintic_schedule_envelope(
     early_stop_vars + folded_vars_sum == log_cells
 }
 
+/// Whether a complete field of the given width fits at this byte offset.
+fn has_bytes_at(bytes: &[u8], off: usize, width: usize) -> bool {
+    width <= bytes.len() && off <= bytes.len() - width
+}
+
+/// Read a possibly unaligned little-endian word without advancing the caller.
+pub fn load_le_u64_slice(bytes: &[u8], off: usize) -> Option<u64> {
+    if !has_bytes_at(bytes, off, 8) {
+        return None;
+    }
+    Some(
+        (bytes[off] as u64)
+            | ((bytes[off + 1] as u64) << 8)
+            | ((bytes[off + 2] as u64) << 16)
+            | ((bytes[off + 3] as u64) << 24)
+            | ((bytes[off + 4] as u64) << 32)
+            | ((bytes[off + 5] as u64) << 40)
+            | ((bytes[off + 6] as u64) << 48)
+            | ((bytes[off + 7] as u64) << 56),
+    )
+}
+
+pub fn decode_canonical_u64_at(bytes: &[u8], off: usize) -> Option<u64> {
+    let Some(word) = load_le_u64_slice(bytes, off) else {
+        return None;
+    };
+    decode_canonical_u64(word)
+}
+
+/// Read one canonical Fp5 at an arbitrary byte offset.
+pub fn decode_canonical_fp5_at(bytes: &[u8], off: usize) -> Option<Fp5> {
+    if !has_bytes_at(bytes, off, 40) {
+        return None;
+    }
+    let Some(l0) = load_le_u64_slice(bytes, off) else {
+        return None;
+    };
+    let Some(l1) = load_le_u64_slice(bytes, off + 8) else {
+        return None;
+    };
+    let Some(l2) = load_le_u64_slice(bytes, off + 16) else {
+        return None;
+    };
+    let Some(l3) = load_le_u64_slice(bytes, off + 24) else {
+        return None;
+    };
+    let Some(l4) = load_le_u64_slice(bytes, off + 32) else {
+        return None;
+    };
+    decode_canonical_fp5_limbs(l0, l1, l2, l3, l4)
+}
+
+/// Read one canonical Gl24Digest at an arbitrary byte offset.
+pub fn decode_canonical_gl24_at(bytes: &[u8], off: usize) -> Option<Gl24Digest> {
+    if !has_bytes_at(bytes, off, 56) {
+        return None;
+    }
+    let Some(l0) = load_le_u64_slice(bytes, off) else {
+        return None;
+    };
+    let Some(l1) = load_le_u64_slice(bytes, off + 8) else {
+        return None;
+    };
+    let Some(l2) = load_le_u64_slice(bytes, off + 16) else {
+        return None;
+    };
+    let Some(l3) = load_le_u64_slice(bytes, off + 24) else {
+        return None;
+    };
+    let Some(l4) = load_le_u64_slice(bytes, off + 32) else {
+        return None;
+    };
+    let Some(l5) = load_le_u64_slice(bytes, off + 40) else {
+        return None;
+    };
+    let Some(l6) = load_le_u64_slice(bytes, off + 48) else {
+        return None;
+    };
+    decode_canonical_gl24_limbs(l0, l1, l2, l3, l4, l5, l6)
+}
+
+/// Number of edges below the first common parent of two distinct sorted leaves,
+/// on either path, excluding the edge incident to that parent.
+fn sibling_path_below_join(mut difference: u64) -> u64 {
+    let mut height = 0;
+    while difference > 1 {
+        difference >>= 1;
+        height += 1;
+    }
+    height
+}
+
+/// The first leaf opens one sibling per level. Each following leaf replaces
+/// one of those unopened subtrees by the sibling path inside it. Sorted order
+/// makes its predecessor the leaf with the deepest common ancestor.
+pub fn compute_steiner_multiproof_siblings(log_leaves: u32, indices: &[usize]) -> Option<usize> {
+    if log_leaves > MAX_CANOPY_LOG_LEAVES || indices.is_empty() {
+        return None;
+    }
+    let limit = 1usize << log_leaves;
+    let mut previous = indices[0];
+    if previous >= limit {
+        return None;
+    }
+    let mut siblings = log_leaves as usize;
+    let mut i = 1;
+    let mut valid = true;
+    while valid && i < indices.len() {
+        let leaf = indices[i];
+        valid = previous < leaf && leaf < limit && siblings != 0;
+        if valid {
+            siblings = siblings - 1 + sibling_path_below_join((previous ^ leaf) as u64) as usize;
+            previous = leaf;
+        }
+        i += 1;
+    }
+    if valid { Some(siblings) } else { None }
+}
+
+/// Reciprocal of the Lagrange denominator at node i of the grid 0 through 8.
+fn row_interpolation_weight(i: usize) -> u64 {
+    match i {
+        0 | 8 => 877958875724369725,
+        1 | 7 => 11423073063619626521,
+        2 | 6 => 6136104450867767979,
+        3 | 5 => 6174535167679048363,
+        _ => 6116889092462127787,
+    }
+}
+
+/// Interpolate the nine evaluations at nodes 0 through 8, enforcing the
+/// Boolean sum at the incoming claim. The challenge comes from the transcript
+/// after absorption of these exact 360 bytes.
+pub fn verify_deg8_row_sumcheck_round_at(
+    payload: &[u8],
+    off: usize,
+    claim: Fp5,
+    challenge: Fp5,
+) -> Option<Fp5> {
+    if !has_bytes_at(payload, off, 360) {
+        return None;
+    }
+    let mut first = fp5_zero();
+    let mut sum = fp5_zero();
+    let mut product = fp5_one();
+    let mut i = 0;
+    while i < 9 {
+        let Some(value) = decode_canonical_fp5_at(payload, off + 40 * i) else {
+            return None;
+        };
+        if i == 0 {
+            first = copy_fp5(&value);
+        } else if i == 1
+            && !fp5_eq(
+                fp5_add(copy_fp5(&first), copy_fp5(&value)),
+                copy_fp5(&claim),
+            )
+        {
+            return None;
+        }
+        let weight = row_interpolation_weight(i);
+        let factor = fp5_sub(copy_fp5(&challenge), fp5_from_base(i as u64));
+        sum = fp5_add(
+            fp5_mul(sum, copy_fp5(&factor)),
+            fp5_mul(copy_fp5(&product), fp5_scale(value, weight)),
+        );
+        product = fp5_mul(product, factor);
+        i += 1;
+    }
+    Some(sum)
+}
+
+/// Fold the row claim from zero using the post-absorption challenge for each
+/// round. A table with at most 28 variables has at most 20 row coordinates.
+pub fn verify_qsaghqm2_row_rounds_at(
+    payload: &[u8],
+    off: usize,
+    challenges: &[Fp5],
+) -> Option<Fp5> {
+    if challenges.len() > 20 || !has_bytes_at(payload, off, 360 * challenges.len()) {
+        return None;
+    }
+    let mut claim = fp5_zero();
+    let mut i = 0;
+    while i < challenges.len() {
+        let Some(next) = verify_deg8_row_sumcheck_round_at(
+            payload,
+            off + 360 * i,
+            claim,
+            copy_fp5(&challenges[i]),
+        ) else {
+            return None;
+        };
+        claim = next;
+        i += 1;
+    }
+    Some(claim)
+}
+
+/// End of a fixed-width block whose element count comes from the verifier geometry.
+/// Division before multiplication also checks offsets near the address-space limit.
+fn block_end(len: usize, off: usize, count: usize, width: usize) -> Option<usize> {
+    if width == 0 || off > len || count > (len - off) / width {
+        None
+    } else {
+        Some(off + count * width)
+    }
+}
+
+/// Check all little-endian field words in a half-open byte interval.
+fn canonical_words_between(bytes: &[u8], mut off: usize, end: usize) -> bool {
+    if end > bytes.len() || off > end || (end - off) % 8 != 0 {
+        return false;
+    }
+    while off < end {
+        let Some(_) = decode_canonical_u64_at(bytes, off) else {
+            return false;
+        };
+        off += 8;
+    }
+    true
+}
+
+/// Validate contiguous root or sibling commitments of the given wire profile.
+pub fn qsaghqm2_digest_block_end(bytes: &[u8], off: usize, count: usize, tag: u8) -> Option<usize> {
+    if tag == QSAGHQM2_PROFILE_TURBO400 {
+        block_end(bytes.len(), off, count, 50)
+    } else if tag == QSAGHQM2_PROFILE_GL24 {
+        let Some(end) = block_end(bytes.len(), off, count, 56) else {
+            return None;
+        };
+        if canonical_words_between(bytes, off, end) {
+            Some(end)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Check fiber symbols and the pruned authentication path. Return the split
+/// between symbols and siblings, and the first byte after the opening. The
+/// caller hashes these exact intervals against its transcript-bound root.
+pub fn qsaghqm2_opening_bounds(
+    bytes: &[u8],
+    off: usize,
+    indices: &[usize],
+    log_leaves: u32,
+    step_vars: u32,
+    base: bool,
+    tag: u8,
+) -> Option<(usize, usize)> {
+    if step_vars > MAX_QUINTIC_LOG_CELLS {
+        return None;
+    }
+    let Some(siblings) = compute_steiner_multiproof_siblings(log_leaves, indices) else {
+        return None;
+    };
+    let width = if base { 8 } else { 40 };
+    let Some(fiber_width) = block_end(bytes.len(), 0, 1usize << step_vars, width) else {
+        return None;
+    };
+    let Some(split) = block_end(bytes.len(), off, indices.len(), fiber_width) else {
+        return None;
+    };
+    if !canonical_words_between(bytes, off, split) {
+        return None;
+    }
+    let Some(end) = qsaghqm2_digest_block_end(bytes, split, siblings, tag) else {
+        return None;
+    };
+    Some((split, end))
+}
+
+/// Fiat–Shamir challenges for a single five-element CWYZ message.
+pub struct CwyzFoldChals {
+    pub phi: Fp5,
+    pub theta: Fp5,
+    pub alpha: Fp5,
+    pub beta: Fp5,
+}
+
+macro_rules! wire_value {
+    ($value:expr) => {
+        match $value {
+            Some(value) => value,
+            None => return None,
+        }
+    };
+}
+
+/// Decode the five wire elements and advance the dual linear-functional claim.
+pub fn verify_qsaghqm2_cwyz_fold_at(
+    payload: &[u8],
+    off: usize,
+    claim: Fp5,
+    chals: CwyzFoldChals,
+) -> Option<Fp5> {
+    if !has_bytes_at(payload, off, 200) {
+        return None;
+    }
+    let sigma_even = wire_value!(decode_canonical_fp5_at(payload, off));
+    let tau_01 = wire_value!(decode_canonical_fp5_at(payload, off + 40));
+    let tau_10 = wire_value!(decode_canonical_fp5_at(payload, off + 80));
+    let c_f = wire_value!(decode_canonical_fp5_at(payload, off + 120));
+    let c_g = wire_value!(decode_canonical_fp5_at(payload, off + 160));
+    Some(cwyz_bridge_claim_step_fp5(
+        sigma_even,
+        tau_01,
+        tau_10,
+        c_f,
+        c_g,
+        claim,
+        chals.phi,
+        chals.theta,
+        chals.alpha,
+        chals.beta,
+    ))
+}
+
+/// Replay all fold messages in a single oracle stage.
+pub fn verify_qsaghqm2_cwyz_folds_at(
+    payload: &[u8],
+    off: usize,
+    mut claim: Fp5,
+    fold_chals: &[CwyzFoldChals],
+) -> Option<Fp5> {
+    if fold_chals.len() > MAX_QUINTIC_LOG_CELLS as usize {
+        return None;
+    }
+    wire_value!(block_end(payload.len(), off, fold_chals.len(), 200));
+    let mut i = 0;
+    while i < fold_chals.len() {
+        let c = &fold_chals[i];
+        let chals = CwyzFoldChals {
+            phi: copy_fp5(&c.phi),
+            theta: copy_fp5(&c.theta),
+            alpha: copy_fp5(&c.alpha),
+            beta: copy_fp5(&c.beta),
+        };
+        claim = wire_value!(verify_qsaghqm2_cwyz_fold_at(
+            payload,
+            off + 200 * i,
+            claim,
+            chals
+        ));
+        i += 1;
+    }
+    Some(claim)
+}
+
+/// Verifier-derived geometry and sorted transcript queries for one commitment.
+pub struct StageEnvelope<'a> {
+    pub step_vars: u32,
+    pub log_leaves: u32,
+    pub indices: &'a [usize],
+}
+
+fn fp5_block_end(bytes: &[u8], off: usize, count: usize) -> Option<usize> {
+    let end = wire_value!(block_end(bytes.len(), off, count, 40));
+    if canonical_words_between(bytes, off, end) {
+        Some(end)
+    } else {
+        None
+    }
+}
+
+/// Consume a fold block, the next commitment and OOD values (or the terminal
+/// polynomial), then the current commitment's opening at its transcript queries.
+fn qsaghqm2_stage_end(
+    bytes: &[u8],
+    off: usize,
+    stage: &StageEnvelope<'_>,
+    base: bool,
+    terminal_count: usize,
+    tag: u8,
+) -> Option<usize> {
+    if stage.step_vars == 0 || stage.step_vars > 6 {
+        return None;
+    }
+    let folds = wire_value!(fp5_block_end(bytes, off, 5 * stage.step_vars as usize));
+    let opening = if terminal_count == 0 {
+        let root = wire_value!(qsaghqm2_digest_block_end(bytes, folds, 1, tag));
+        wire_value!(fp5_block_end(bytes, root, 2))
+    } else {
+        wire_value!(fp5_block_end(bytes, folds, terminal_count))
+    };
+    let (_, end) = wire_value!(qsaghqm2_opening_bounds(
+        bytes,
+        opening,
+        stage.indices,
+        stage.log_leaves,
+        stage.step_vars,
+        base,
+        tag,
+    ));
+    Some(end)
+}
+
+/// The two deployed schedule shapes, with each opening bound to its own indices.
+pub struct PayloadStages<'a> {
+    pub first: StageEnvelope<'a>,
+    pub second: StageEnvelope<'a>,
+    pub third: StageEnvelope<'a>,
+    pub fourth: Option<StageEnvelope<'a>>,
+}
+
+fn payload_schedule_ok(
+    rows: usize,
+    early: u32,
+    a: u32,
+    b: u32,
+    c: u32,
+    extra: u32,
+    count: u32,
+) -> bool {
+    if rows > 20 || a > 6 || b > 6 || c > 6 || extra > 6 {
+        return false;
+    }
+    verify_quintic_schedule_envelope(rows as u32 + 8, early, a + b + c + extra, count)
+}
+
+/// Check the complete payload after stripping the framed header. The returned
+/// zero-initialized row sumcheck's terminal value is pinned to the row relation
+/// by the caller. The caller also replays the fold claims and hashes the openings.
+pub fn verify_qsaghqm2_multiproof_and_rounds(
+    payload: &[u8],
+    tag: u8,
+    row_challenges: &[Fp5],
+    early_stop_vars: u32,
+    stages: PayloadStages<'_>,
+) -> Option<Fp5> {
+    let (extra, count) = match &stages.fourth {
+        Some(stage) => (stage.step_vars, 4),
+        None => (0, 3),
+    };
+    if early_stop_vars > 8
+        || !payload_schedule_ok(
+            row_challenges.len(),
+            early_stop_vars,
+            stages.first.step_vars,
+            stages.second.step_vars,
+            stages.third.step_vars,
+            extra,
+            count,
+        )
+    {
+        return None;
+    }
+    let row = wire_value!(qsaghqm2_digest_block_end(payload, 0, 1, tag));
+    let claim = wire_value!(verify_qsaghqm2_row_rounds_at(payload, row, row_challenges));
+    let cols = wire_value!(block_end(payload.len(), row, row_challenges.len(), 360));
+    let ood = wire_value!(fp5_block_end(payload, cols, 256));
+    let off = wire_value!(fp5_block_end(payload, ood, 5));
+    let off = wire_value!(qsaghqm2_stage_end(
+        payload,
+        off,
+        &stages.first,
+        true,
+        0,
+        tag
+    ));
+    let off = wire_value!(qsaghqm2_stage_end(
+        payload,
+        off,
+        &stages.second,
+        false,
+        0,
+        tag
+    ));
+    let terminal = (1usize << early_stop_vars) + 2;
+    let end = match &stages.fourth {
+        None => wire_value!(qsaghqm2_stage_end(
+            payload,
+            off,
+            &stages.third,
+            false,
+            terminal,
+            tag
+        )),
+        Some(last) => {
+            let off = wire_value!(qsaghqm2_stage_end(
+                payload,
+                off,
+                &stages.third,
+                false,
+                0,
+                tag
+            ));
+            wire_value!(qsaghqm2_stage_end(payload, off, last, false, terminal, tag))
+        }
+    };
+    if end == payload.len() {
+        Some(claim)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

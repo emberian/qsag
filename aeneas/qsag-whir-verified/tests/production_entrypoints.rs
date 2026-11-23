@@ -1,8 +1,8 @@
 use qsag_whir_verified::{
     FP5_NONRESIDUE_W, Fp5, GOLDILOCKS_P, cwyz_bridge_claim_step_fp5, cwyz_duet_fold_fp5,
     decode_canonical_fp5, decode_canonical_gl24_digest, eval_fp5_univariate_at_base,
-    eval_quadratic_sumcheck_wire_fp5, fp5_add, fp5_frobenius, fp5_mul,
-    step_merkle_pair_order_400, step_merkle_pair_order_gl24, verify_affine_duet_fold_step_fp5,
+    eval_quadratic_sumcheck_wire_fp5, fp5_add, fp5_frobenius, fp5_mul, step_merkle_pair_order_400,
+    step_merkle_pair_order_gl24, verify_affine_duet_fold_step_fp5,
     verify_cwyz_bridge_claim_step_fp5, verify_cwyz_duet_fold_step_fp5,
     verify_fp5_univariate_at_base_pin, verify_ood_pin_eq_fp5, verify_qsaghqm2_header,
     verify_quintic_schedule_envelope,
@@ -44,7 +44,12 @@ fn product(x: [u64; 5], y: [u64; 5]) -> [u64; 5] {
     for i in 0..5 {
         for j in 0..5 {
             let term = (x[i] as u128 * y[j] as u128) % p;
-            let term = term * if i + j >= 5 { FP5_NONRESIDUE_W as u128 } else { 1 };
+            let term = term
+                * if i + j >= 5 {
+                    FP5_NONRESIDUE_W as u128
+                } else {
+                    1
+                };
             out[(i + j) % 5] = ((out[(i + j) % 5] as u128 + term) % p) as u64;
         }
     }
@@ -249,7 +254,14 @@ fn cwyz_bridge_and_quadratic_sumcheck_verifiers_accept_and_reject_perturbations(
     // Quadratic sumcheck wire: g(0) + g(1) == sum_claim and g(r) == c0 + c1*r + c2*r^2.
     let g0 = eval_quadratic_sumcheck_wire_fp5(ext(a0), ext(a1), ext(claim), ext([0; 5]));
     let g1 = eval_quadratic_sumcheck_wire_fp5(ext(a0), ext(a1), ext(claim), ext([1, 0, 0, 0, 0]));
-    assert!(verify_ood_pin_eq_fp5(fp5_add(g0, g1), ext(claim)));
+    let kernel_eval = limbs(fp5_add(g0, g1));
+    assert!(verify_ood_pin_eq_fp5(ext(kernel_eval), ext(claim)));
+    for limb in 0..5 {
+        assert!(!verify_ood_pin_eq_fp5(
+            ext(kernel_eval),
+            ext(perturb_limb(claim, limb))
+        ));
+    }
 }
 
 #[test]
@@ -269,11 +281,7 @@ fn horner_canopy_and_wire_envelope_entrypoints() {
                 power = (power as u128 * z as u128 % GOLDILOCKS_P as u128) as u64;
             }
             assert_eq!(limbs(eval_fp5_univariate_at_base(&coeffs, z)), expected);
-            assert!(verify_fp5_univariate_at_base_pin(
-                &coeffs,
-                z,
-                ext(expected),
-            ));
+            assert!(verify_fp5_univariate_at_base_pin(&coeffs, z, ext(expected),));
             for limb in 0..5 {
                 assert!(!verify_fp5_univariate_at_base_pin(
                     &coeffs,
@@ -296,7 +304,9 @@ fn horner_canopy_and_wire_envelope_entrypoints() {
     }
     let gl24 = decode_canonical_gl24_digest(&raw56).expect("canonical gl24");
     assert_eq!(
-        [gl24.l0, gl24.l1, gl24.l2, gl24.l3, gl24.l4, gl24.l5, gl24.l6],
+        [
+            gl24.l0, gl24.l1, gl24.l2, gl24.l3, gl24.l4, gl24.l5, gl24.l6
+        ],
         [10, 11, 12, 13, 14, 15, 16]
     );
     assert!(step_merkle_pair_order_400(5, 0, [0xAA; 50], [0xBB; 50]).is_some());
@@ -319,4 +329,239 @@ fn horner_canopy_and_wire_envelope_entrypoints() {
     );
     assert!(verify_qsaghqm2_header(*b"QSAGHQM2", 1, 1, 1, 64, 64).is_some());
     assert!(verify_quintic_schedule_envelope(24, 8, 16, 4));
+}
+
+#[test]
+fn slice_cursor_boundaries_and_canonical_limbs() {
+    use qsag_whir_verified::*;
+    let mut bytes = [0u8; 57];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    assert_eq!(load_le_u64_slice(&bytes, 1), Some(0x0807060504030201));
+    for off in [50, 57, usize::MAX] {
+        assert_eq!(load_le_u64_slice(&bytes, off), None);
+    }
+    for limb in 0..7 {
+        let mut bad = bytes;
+        bad[1 + 8 * limb..9 + 8 * limb].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
+        assert!(decode_canonical_gl24_at(&bad, 1).is_none());
+        assert_eq!(decode_canonical_fp5_at(&bad, 1).is_none(), limb < 5);
+    }
+    assert!(decode_canonical_gl24_at(&bytes, 1).is_some());
+    assert!(decode_canonical_gl24_at(&bytes, 2).is_none());
+    assert!(decode_canonical_fp5_at(&bytes, usize::MAX).is_none());
+}
+
+#[test]
+fn steiner_count_matches_level_pruning_for_every_small_tree_opening() {
+    use qsag_whir_verified::compute_steiner_multiproof_siblings as count;
+    for depth in 0..=4 {
+        let n = 1usize << depth;
+        for mask in 1u32..1 << n {
+            let leaves: Vec<_> = (0..n).filter(|&i| mask >> i & 1 != 0).collect();
+            let mut active = mask;
+            let mut expected = 0;
+            for level in 0..depth {
+                let mut parents = 0;
+                for parent in 0..n >> (level + 1) {
+                    let children = (active >> (2 * parent)) & 3;
+                    if children == 1 || children == 2 {
+                        expected += 1;
+                    }
+                    if children != 0 {
+                        parents |= 1 << parent;
+                    }
+                }
+                active = parents;
+            }
+            assert_eq!(count(depth, &leaves), Some(expected));
+        }
+    }
+    for invalid in [&[][..], &[1, 1], &[3, 1], &[16], &[usize::MAX]] {
+        assert_eq!(count(4, invalid), None);
+    }
+    assert_eq!(count(29, &[0]), None);
+    assert_eq!(count(28, &[0, (1 << 28) - 1]), Some(54));
+}
+
+#[test]
+fn row_round_interpolates_and_rejects_tampering() {
+    use qsag_whir_verified::*;
+    // Degree eight over the base field, challenged at an extension point.
+    let polynomial = |x: Fp5| {
+        let x = limbs(x);
+        let mut y = fp5_one();
+        for _ in 0..8 {
+            y = fp5_mul(y, ext(x));
+        }
+        fp5_add(y, fp5_from_base(17))
+    };
+    let mut bytes = [0u8; 361];
+    for i in 0..9 {
+        let v = polynomial(fp5_from_base(i as u64));
+        bytes[1 + 40 * i..9 + 40 * i].copy_from_slice(&v.c0.to_le_bytes());
+    }
+    for r in [[0; 5], [8, 0, 0, 0, 0], [0, 1, 2, 3, 4]] {
+        let run = |b: &[u8], off, claim| {
+            verify_deg8_row_sumcheck_round_at(b, off, fp5_from_base(claim), ext(r))
+        };
+        assert!(fp5_eq(run(&bytes, 1, 35).unwrap(), polynomial(ext(r))));
+        assert!(run(&bytes, 1, 36).is_none());
+        assert!(run(&bytes[..360], 1, 35).is_none());
+        assert!(run(&bytes, usize::MAX, 35).is_none());
+        for limb in 0..45 {
+            let mut bad = bytes;
+            bad[1 + 8 * limb..9 + 8 * limb].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
+            assert!(run(&bad, 1, 35).is_none());
+        }
+    }
+}
+
+#[test]
+fn row_chain_threads_the_claim_through_every_round() {
+    use qsag_whir_verified::*;
+    // The first polynomial is 2X - 1. At 3 it hands 5 to the second polynomial 5X.
+    let mut bytes = [0u8; 721];
+    for i in 0..9u64 {
+        let first = qsag_whir_verified::sub(2 * i, 1);
+        let pos = 1 + 40 * i as usize;
+        bytes[pos..pos + 8].copy_from_slice(&first.to_le_bytes());
+        bytes[pos + 360..pos + 368].copy_from_slice(&(5 * i).to_le_bytes());
+    }
+    let challenges = [fp5_from_base(3), fp5_from_base(7)];
+    let run = |b: &[u8]| verify_qsaghqm2_row_rounds_at(b, 1, &challenges);
+    assert!(fp5_eq(run(&bytes).unwrap(), fp5_from_base(35)));
+    assert!(run(&bytes[..720]).is_none());
+    bytes[361] = 1;
+    assert!(run(&bytes).is_none());
+    assert!(verify_qsaghqm2_row_rounds_at(&[], 0, &[]).is_some());
+    assert!(verify_qsaghqm2_row_rounds_at(&[], usize::MAX, &[]).is_none());
+    let too_many = [const { fp5_zero() }; 21];
+    assert!(verify_qsaghqm2_row_rounds_at(&[0; 7560], 0, &too_many).is_none());
+}
+
+#[test]
+fn opening_offsets_bind_the_fibers_and_profile_specific_path() {
+    use qsag_whir_verified::*;
+    let indices = [0, 1, 6];
+    for (tag, width) in [(QSAGHQM2_PROFILE_TURBO400, 50), (QSAGHQM2_PROFILE_GL24, 56)] {
+        for base in [false, true] {
+            let split = 1 + 3 * 4 * if base { 8 } else { 40 };
+            let end = split + 3 * width;
+            let mut raw = vec![0; end + 1];
+            let read = |bytes: &[u8]| qsaghqm2_opening_bounds(bytes, 1, &indices, 3, 2, base, tag);
+            assert_eq!(read(&raw), Some((split, end)));
+            assert_eq!(read(&raw[..end - 1]), None);
+            raw[split - 8..split].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
+            assert_eq!(read(&raw), None);
+            raw[split - 8..split].fill(0);
+            raw[end - 8..end].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
+            assert_eq!(
+                read(&raw),
+                if tag == QSAGHQM2_PROFILE_GL24 {
+                    None
+                } else {
+                    Some((split, end))
+                }
+            );
+        }
+    }
+    assert_eq!(qsaghqm2_digest_block_end(&[], usize::MAX, 0, 1), None);
+    assert_eq!(qsaghqm2_digest_block_end(&[], 0, usize::MAX, 2), None);
+    assert_eq!(qsaghqm2_digest_block_end(&[], 0, 0, 3), None);
+}
+
+#[test]
+fn deployed_fold_decodes_five_elements_and_threads_the_claim() {
+    use qsag_whir_verified::*;
+    let challenges = || CwyzFoldChals {
+        phi: ext([3, 4, 1, 0, 2]),
+        theta: fp5_from_base(7),
+        alpha: fp5_from_base(11),
+        beta: fp5_from_base(13),
+    };
+    let mut payload = vec![99];
+    let mut claim = fp5_from_base(5);
+    for i in 0..2 {
+        let words: [[u64; 5]; 5] =
+            core::array::from_fn(|j| core::array::from_fn(|k| 1 + (25 * i + 5 * j + k) as u64));
+        for word in words.iter().flatten() {
+            payload.extend(word.to_le_bytes());
+        }
+        let [a, b, c, f, g] = words.map(ext);
+        let ch = challenges();
+        claim =
+            cwyz_bridge_claim_step_fp5(a, b, c, f, g, claim, ch.phi, ch.theta, ch.alpha, ch.beta);
+    }
+    let run = |b: &[u8], off| {
+        verify_qsaghqm2_cwyz_folds_at(b, off, fp5_from_base(5), &[challenges(), challenges()])
+    };
+    assert!(fp5_eq(run(&payload, 1).unwrap(), claim));
+    assert!(run(&payload[..400], 1).is_none());
+    assert!(run(&payload, usize::MAX).is_none());
+    for j in 0..50 {
+        let mut bad = payload.clone();
+        bad[1 + 8 * j..9 + 8 * j].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
+        assert!(run(&bad, 1).is_none());
+    }
+}
+
+#[test]
+fn payload_consumes_deployed_sections_in_both_stage_counts_and_profiles() {
+    use qsag_whir_verified::*;
+    for steps in [&[4, 4, 4][..], &[6, 5, 4, 4][..]] {
+        let rows = steps.iter().sum::<usize>() + 4 - 8;
+        let challenges: Vec<_> = (0..rows).map(|_| fp5_zero()).collect();
+        let stages = || {
+            let stage = |step: usize| StageEnvelope {
+                step_vars: step as u32,
+                log_leaves: 3,
+                indices: &[0, 1, 6],
+            };
+            PayloadStages {
+                first: stage(steps[0]),
+                second: stage(steps[1]),
+                third: stage(steps[2]),
+                fourth: steps.get(3).copied().map(stage),
+            }
+        };
+        for (tag, width) in [(1, 50), (2, 56)] {
+            let mut buf = vec![0; width + rows * 360 + 256 * 40 + 5 * 40];
+            let mut fields = vec![width, width + rows * 360, buf.len() - 8];
+            for (i, &step) in steps.iter().enumerate() {
+                fields.push(buf.len());
+                buf.resize(buf.len() + 200 * step, 0);
+                if i + 1 < steps.len() {
+                    buf.resize(buf.len() + width, 0);
+                    fields.push(buf.len());
+                    buf.resize(buf.len() + 80, 0);
+                } else {
+                    fields.push(buf.len());
+                    buf.resize(buf.len() + 18 * 40, 0);
+                }
+                fields.push(buf.len());
+                buf.resize(buf.len() + 3 * (1 << step) * if i == 0 { 8 } else { 40 }, 0);
+                if tag == 2 {
+                    fields.push(buf.len());
+                }
+                buf.resize(buf.len() + 3 * width, 0);
+            }
+            let run = |bytes: &[u8]| {
+                verify_qsaghqm2_multiproof_and_rounds(bytes, tag, &challenges, 4, stages())
+            };
+            assert!(fp5_eq(run(&buf).unwrap(), fp5_zero()));
+            assert!(run(&buf[..buf.len() - 1]).is_none());
+            buf.push(0);
+            assert!(run(&buf).is_none());
+            buf.pop();
+            for off in fields {
+                buf[off..off + 8].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
+                assert!(run(&buf).is_none());
+                buf[off..off + 8].fill(0);
+            }
+            buf[width] = 1;
+            assert!(run(&buf).is_none());
+        }
+    }
 }
