@@ -4,14 +4,12 @@
     every stage <= 4 CSA rows) and direct Golden-Ratio modular CSA fold
     `a*b == (1 - 2^32)*P0 + 2^32*PS - P2 (mod p)` (`sk_p0`, `sk_ps`, `sk_a`, `sk_b`, `sk_s2`)
   * Standalone 128->64 CSA reducer (`fold_one` + `final_par`) matching Obend `goldilocksReduce128`
-  * True 2-level Tower Karatsuba `GoldilocksExt4` (`3 x F_{p^2}` Karatsuba + outer `Ext4` combiner,
-    every leaf <= 4 CSA rows)
   * Hierarchical CSE Poseidon2 `M_E` (`csa4 + 4 x m4_lane`, `csa3 + 3 x me_col_lane`) & `M_I`
-    (`2 x csa3 + sum4_csa` tail + `12 x mi_lane0..11`)
+    (`2 x csa3 + sum4_csa` tail + `12 parameterized mi_lane instances`)
   * Canopy feed-forward, Poseidon2 round constants, and balanced-XOR-tree GF(2^128) Wiedemann `T_7` maps
 
-Every leaf arithmetic sub-module compresses <= 4 rows (`<= 268` input bits; `<= 134` input bits on
-all modulo-p leaves) so Z3 and Bitwuzla discharge 100% of compositional LEC miters in < 15s (`0` undecided).
+The generated carry-save networks are also checked against their integer or modulo-p
+weights by lec/check_csa.py.
 
   python3 gen/gen_rtl.py rtl/
 """
@@ -362,61 +360,9 @@ def _emit_lin_mod(name, terms):
     return m.text(), c.fas
 
 
-def gen_ext4_karatsuba():
-    """True 2-level Tower Karatsuba over F_p[v]/(v^4 - 7), limb order [1, u, v, u*v]."""
-    inp = """module qsag_ext4_kara_inputs (
-  input  wire [255:0] a,
-  output wire [575:0] q
-);
-  wire [63:0] a0 = a[63:0];
-  wire [63:0] a1 = a[127:64];
-  wire [63:0] a2 = a[191:128];
-  wire [63:0] a3 = a[255:192];
-  wire [63:0] s01, s23, s02, s13, sall;
-  qsag_gl64_addsub u_01  (.a(a0),  .b(a1),  .sub(1'b0), .r(s01));
-  qsag_gl64_addsub u_23  (.a(a2),  .b(a3),  .sub(1'b0), .r(s23));
-  qsag_gl64_addsub u_02  (.a(a0),  .b(a2),  .sub(1'b0), .r(s02));
-  qsag_gl64_addsub u_13  (.a(a1),  .b(a3),  .sub(1'b0), .r(s13));
-  qsag_gl64_addsub u_all (.a(s01), .b(s23), .sub(1'b0), .r(sall));
-  assign q = {sall, s13, s02, s23, a3, a2, s01, a1, a0};
-endmodule
-"""
-    fp2_re, fa_re = _emit_lin_mod("qsag_fp2_kara_re", [("m0", 64, 0, 1), ("m1", 64, 0, 7)])
-    fp2_im, fa_im = _emit_lin_mod("qsag_fp2_kara_im", [("m2", 64, 0, 1), ("m0", 64, 0, -1), ("m1", 64, 0, -1)])
-    r0, fa0 = _emit_lin_mod("qsag_ext4_kara_r0", [("re_a", 64, 0, 1), ("im_b", 64, 0, 7), ("z0", 64, 0, 1)])
-    r1, fa1 = _emit_lin_mod("qsag_ext4_kara_r1", [("im_a", 64, 0, 1), ("re_b", 64, 0, 1), ("z1", 64, 0, 1)])
-    r2, fa2 = _emit_lin_mod("qsag_ext4_kara_r2", [("re_m", 64, 0, 1), ("re_a", 64, 0, -1), ("re_b", 64, 0, -1), ("z2", 64, 0, 1)])
-    r3, fa3 = _emit_lin_mod("qsag_ext4_kara_r3", [("im_m", 64, 0, 1), ("im_a", 64, 0, -1), ("im_b", 64, 0, -1), ("z3", 64, 0, 1)])
-    stats["kara_combine_fa"] = 3 * (fa_re + fa_im) + fa0 + fa1 + fa2 + fa3
-
-    comb = """module qsag_ext4_kara_combine (
-  input  wire [575:0] p,
-  input  wire [255:0] z,
-  output wire [255:0] r
-);
-  wire [63:0] p0 = p[63:0],    p1 = p[127:64],  p2 = p[191:128];
-  wire [63:0] p3 = p[255:192], p4 = p[319:256], p5 = p[383:320];
-  wire [63:0] p6 = p[447:384], p7 = p[511:448], p8 = p[575:512];
-  wire [63:0] z0 = z[63:0],    z1 = z[127:64],  z2 = z[191:128], z3 = z[255:192];
-  wire [63:0] re_a, im_a, re_b, im_b, re_m, im_m;
-  qsag_fp2_kara_re u_rea (.m0(p0), .m1(p1), .r(re_a));
-  qsag_fp2_kara_im u_ima (.m2(p2), .m0(p0), .m1(p1), .r(im_a));
-  qsag_fp2_kara_re u_reb (.m0(p3), .m1(p4), .r(re_b));
-  qsag_fp2_kara_im u_imb (.m2(p5), .m0(p3), .m1(p4), .r(im_b));
-  qsag_fp2_kara_re u_rem (.m0(p6), .m1(p7), .r(re_m));
-  qsag_fp2_kara_im u_imm (.m2(p8), .m0(p6), .m1(p7), .r(im_m));
-  qsag_ext4_kara_r0 u_r0 (.re_a(re_a), .im_b(im_b), .z0(z0), .r(r[63:0]));
-  qsag_ext4_kara_r1 u_r1 (.im_a(im_a), .re_b(re_b), .z1(z1), .r(r[127:64]));
-  qsag_ext4_kara_r2 u_r2 (.re_m(re_m), .re_a(re_a), .re_b(re_b), .z2(z2), .r(r[191:128]));
-  qsag_ext4_kara_r3 u_r3 (.im_m(im_m), .im_a(im_a), .im_b(im_b), .z3(z3), .r(r[255:192]));
-endmodule
-"""
-    return "\n".join([inp, fp2_re, fp2_im, r0, r1, r2, r3, comb])
-
-
 def gen_csa_helpers():
     """Pure carry-save 3:2 and 4:2 word compressors (`sx + sy == sum(inputs)` with 0 final adders)."""
-    m3 = Mod("qsag_gl64_csa3", [
+    m3 = Mod("qsag_gl_csa3_66", [
         "input  wire [63:0] a0",
         "input  wire [63:0] a1",
         "input  wire [63:0] a2",
@@ -428,7 +374,7 @@ def gen_csa_helpers():
         c3.term_exact(f"a{k}", 64)
     _assign_rows(m3, c3, 66, "sx", "sy")
 
-    m4 = Mod("qsag_gl64_csa4", [
+    m4 = Mod("qsag_gl_csa4_66", [
         "input  wire [63:0] a0",
         "input  wire [63:0] a1",
         "input  wire [63:0] a2",
@@ -453,102 +399,56 @@ def gen_me(fa_csa3, fa_csa4):
     ])
     stats["me_total_fa"] = 3 * (fa_csa4 + 4 * fa_m4l) + 4 * (fa_csa3 + 3 * fa_mel)
 
-    m4_wrap = """module qsag_p2_m4 (
-  input  wire [255:0] b,
-  output wire [255:0] y
+    layer = """module qsag_p2_me (
+  input wire [767:0] x, rc,
+  output wire [767:0] y
 );
-  wire [63:0] b0 = b[63:0], b1 = b[127:64], b2 = b[191:128], b3 = b[255:192];
-  wire [65:0] sx, sy;
-  qsag_gl64_csa4    u_s  (.a0(b0), .a1(b1), .a2(b2), .a3(b3), .sx(sx), .sy(sy));
-  qsag_p2_m4_lane   u_l0 (.sx(sx), .sy(sy), .bi(b0), .bj(b1), .r(y[63:0]));
-  qsag_p2_m4_lane   u_l1 (.sx(sx), .sy(sy), .bi(b1), .bj(b2), .r(y[127:64]));
-  qsag_p2_m4_lane   u_l2 (.sx(sx), .sy(sy), .bi(b2), .bj(b3), .r(y[191:128]));
-  qsag_p2_m4_lane   u_l3 (.sx(sx), .sy(sy), .bi(b3), .bj(b0), .r(y[255:192]));
+  wire [63:0] mixed [3][4];
+  for (genvar block=0; block<3; block++) begin : g_block
+    wire [63:0] b [4];
+    wire [65:0] sx, sy;
+    qsag_gl_csa4_66 sum (.a0(b[0]), .a1(b[1]), .a2(b[2]), .a3(b[3]), .sx, .sy);
+    for (genvar i=0; i<4; i++) begin : g_lane
+      assign b[i] = x[64*(3*i+block) +:64];
+      qsag_p2_m4_lane lane (.sx, .sy, .bi(b[i]), .bj(b[(i+1)%4]), .r(mixed[block][i]));
+    end
+  end
+  for (genvar i=0; i<4; i++) begin : g_col
+    wire [65:0] sx, sy;
+    qsag_gl_csa3_66 sum (.a0(mixed[0][i]), .a1(mixed[1][i]), .a2(mixed[2][i]), .sx, .sy);
+    for (genvar b=0; b<3; b++) begin : g_lane
+      qsag_p2_me_col_lane lane (.sx, .sy, .yb(mixed[b][i]), .rcb(rc[64*(3*i+b) +:64]), .r(y[64*(3*i+b) +:64]));
+    end
+  end
 endmodule
 """
-    mc_wrap = """module qsag_p2_me_col (
-  input  wire [63:0] y0,
-  input  wire [63:0] y1,
-  input  wire [63:0] y2,
-  input  wire [63:0] rc0,
-  input  wire [63:0] rc1,
-  input  wire [63:0] rc2,
-  output wire [63:0] o0,
-  output wire [63:0] o1,
-  output wire [63:0] o2
-);
-  wire [65:0] sx, sy;
-  qsag_gl64_csa3      u_s  (.a0(y0), .a1(y1), .a2(y2), .sx(sx), .sy(sy));
-  qsag_p2_me_col_lane u_l0 (.sx(sx), .sy(sy), .yb(y0), .rcb(rc0), .r(o0));
-  qsag_p2_me_col_lane u_l1 (.sx(sx), .sy(sy), .yb(y1), .rcb(rc1), .r(o1));
-  qsag_p2_me_col_lane u_l2 (.sx(sx), .sy(sy), .yb(y2), .rcb(rc2), .r(o2));
-endmodule
-"""
-    lines = [
-        "module qsag_p2_me (",
-        "  input  wire [767:0] x,",
-        "  input  wire [767:0] rc,",
-        "  output wire [767:0] y",
-        ");",
-        "  wire [255:0] m0, m1, m2;",
-        "  qsag_p2_m4 u_m0 (.b({x[639:576], x[447:384], x[255:192], x[63:0]}),    .y(m0));",
-        "  qsag_p2_m4 u_m1 (.b({x[703:640], x[511:448], x[319:256], x[127:64]}),  .y(m1));",
-        "  qsag_p2_m4 u_m2 (.b({x[767:704], x[575:512], x[383:320], x[191:128]}), .y(m2));",
-    ]
-    for i in range(4):
-        l0, l1, l2 = 3 * i, 3 * i + 1, 3 * i + 2
-        lines.append(
-            f"  qsag_p2_me_col u_c{i} ("
-            f".y0(m0[{64*i+63}:{64*i}]), .y1(m1[{64*i+63}:{64*i}]), .y2(m2[{64*i+63}:{64*i}]), "
-            f".rc0(rc[{64*l0+63}:{64*l0}]), .rc1(rc[{64*l1+63}:{64*l1}]), .rc2(rc[{64*l2+63}:{64*l2}]), "
-            f".o0(y[{64*l0+63}:{64*l0}]), .o1(y[{64*l1+63}:{64*l1}]), .o2(y[{64*l2+63}:{64*l2}]));"
-        )
-    lines.append("endmodule\n")
-    return "\n".join([m4_lane, me_lane, m4_wrap, mc_wrap, "\n".join(lines)])
+    return "\n".join([m4_lane, me_lane, layer])
 
 
 def gen_mi(fa_csa3):
     """Hierarchical CSE M_I with <=4-row leaf modules."""
-    sum4_csa, fa_s4 = _emit_lin_mod("qsag_gl64_sum4_csa", [
+    sum4_csa, fa_s4 = _emit_lin_mod("qsag_p2_sum4_csa", [
         ("sx0", 66, 0, 1), ("sy0", 66, 0, 1), ("sx1", 66, 0, 1), ("sy1", 66, 0, 1)
     ])
-    sum6_wrap = """module qsag_gl64_sum6 (
-  input  wire [63:0] a0,
-  input  wire [63:0] a1,
-  input  wire [63:0] a2,
-  input  wire [63:0] a3,
-  input  wire [63:0] a4,
-  input  wire [63:0] a5,
-  output wire [63:0] r
-);
-  wire [65:0] sx0, sy0, sx1, sy1;
-  qsag_gl64_csa3     u_c0 (.a0(a0), .a1(a1), .a2(a2), .sx(sx0), .sy(sy0));
-  qsag_gl64_csa3     u_c1 (.a0(a3), .a1(a4), .a2(a5), .sx(sx1), .sy(sy1));
-  qsag_gl64_sum4_csa u_s4 (.sx0(sx0), .sy0(sy0), .sx1(sx1), .sy1(sy1), .r(r));
-endmodule
-"""
-    tail = """module qsag_p2_mi_tail (
-  input  wire [703:0] x_hi,
-  output wire [63:0]  s_tail
-);
-  wire [63:0] s_lo, s_hi;
-  qsag_gl64_sum6 u_lo (
-    .a0(x_hi[63:0]),    .a1(x_hi[127:64]),  .a2(x_hi[191:128]),
-    .a3(x_hi[255:192]), .a4(x_hi[319:256]), .a5(x_hi[383:320]), .r(s_lo));
-  qsag_gl64_sum6 u_hi (
-    .a0(x_hi[447:384]), .a1(x_hi[511:448]), .a2(x_hi[575:512]),
-    .a3(x_hi[639:576]), .a4(x_hi[703:640]), .a5(64'd0),         .r(s_hi));
-  qsag_gl64_addsub u_add (.a(s_lo), .b(s_hi), .sub(1'b0), .r(s_tail));
+    tail = """module qsag_p2_mi_tail (input wire [703:0] x_hi, output wire [63:0] s_tail);
+  wire [767:0] padded = {64'd0, x_hi};
+  wire [63:0] part [2];
+  for (genvar half=0; half<2; half++) begin : g_half
+    wire [65:0] sx [2], sy [2];
+    for (genvar g=0; g<2; g++) begin : g_sum
+      localparam int OFFSET = 64*(6*half+3*g);
+      qsag_gl_csa3_66 sum (.a0(padded[OFFSET +:64]), .a1(padded[OFFSET+64 +:64]),
+                           .a2(padded[OFFSET+128 +:64]), .sx(sx[g]), .sy(sy[g]));
+    end
+    qsag_p2_sum4_csa combine (.sx0(sx[0]), .sy0(sy[0]), .sx1(sx[1]), .sy1(sy[1]), .r(part[half]));
+  end
+  qsag_gl64_addsub add (.a(part[0]), .b(part[1]), .sub(1'b0), .r(s_tail));
 endmodule
 """
     lanes = []
     tot_fa = 2 * (2 * fa_csa3 + fa_s4)
     for l in range(12):
-        ports = ["input  wire [63:0] x0", "input  wire [63:0] s_tail", "input  wire [63:0] rcl"]
-        if l > 0:
-            ports.insert(1, "input  wire [63:0] xl")
-        ports.append("output wire [63:0] y")
-        ml = Mod(f"qsag_p2_mi_lane{l}", ports)
+        ml = Mod("lane", [])
         cl = Csa(ml)
         cl.term_exact("s_tail", 64)
         cl.term_exact("rcl", 64)
@@ -561,28 +461,26 @@ endmodule
         lx, ly, lw, lq = cl.rows("o_", None)
         final(ml, "u_f", lx, ly, lw, lq, "y", False)
         tot_fa += cl.fas
-        lanes.append(ml.text())
+        lanes.append(f"  if (LANE == {l}) begin : g_lane{l}")
+        lanes.extend(ml.lines)
+        if l == 0:
+            lanes.append("    wire unused_xl = ^xl;")
+        lanes.append("  end")
     stats["mi_total_fa"] = tot_fa
 
-    app = [
-        "module qsag_p2_mi_apply (",
-        "  input  wire [63:0]  x0,",
-        "  input  wire [703:0] x_hi,",
-        "  input  wire [63:0]  s_tail,",
-        "  input  wire [767:0] rc,",
-        "  output wire [767:0] y",
-        ");",
-        "  qsag_p2_mi_lane0 u_l0 (.x0(x0), .s_tail(s_tail), .rcl(rc[63:0]), .y(y[63:0]));",
-    ]
-    for l in range(1, 12):
-        hi_lo = 64 * (l - 1)
-        app.append(
-            f"  qsag_p2_mi_lane{l} u_l{l} ("
-            f".x0(x0), .xl(x_hi[{hi_lo+63}:{hi_lo}]), .s_tail(s_tail), "
-            f".rcl(rc[{64*l+63}:{64*l}]), .y(y[{64*l+63}:{64*l}]));"
-        )
-    app.append("endmodule\n")
-
+    lane = ("module qsag_p2_mi_lane #(parameter int LANE=0) "
+            "(input wire [63:0] x0, xl, s_tail, rcl, output wire [63:0] y);\n"
+            + "\n".join(lanes) + "\nendmodule\n")
+    app = """module qsag_p2_mi_apply (
+  input wire [63:0] x0, input wire [703:0] x_hi, input wire [63:0] s_tail,
+  input wire [767:0] rc, output wire [767:0] y
+);
+  wire [767:0] x = {x_hi, x0};
+  for (genvar l=0; l<12; l++) begin : g_lane
+    qsag_p2_mi_lane #(.LANE(l)) lane (.x0, .xl(x[64*l +:64]), .s_tail, .rcl(rc[64*l +:64]), .y(y[64*l +:64]));
+  end
+endmodule
+"""
     wrap = """module qsag_p2_mi (
   input  wire [767:0] x,
   input  wire [767:0] rc,
@@ -593,38 +491,24 @@ endmodule
   qsag_p2_mi_apply u_apply (.x0(x[63:0]), .x_hi(x[767:64]), .s_tail(s_tail), .rc(rc), .y(y));
 endmodule
 """
-    return "\n".join([sum4_csa, sum6_wrap, tail, "\n".join(lanes), "\n".join(app), wrap])
+    return "\n".join([sum4_csa, tail, lane, app, wrap])
 
 
 def gen_canopy_ff():
     """ff_i = l_i + 2 r_i + 4 c_i (mod p), i < 4; l = st[0..3], r = st[4..7], c = st[8..11]."""
-    m1 = Mod("qsag_p2_canopy_ff_lane", [
-        "input  wire [63:0] l",
-        "input  wire [63:0] r",
-        "input  wire [63:0] c",
-        "output wire [63:0] ff",
-    ])
+    m1 = Mod("lane", [])
     csa = Csa(m1)
     csa.term_exact("l", 64, 0)
     csa.term_exact("r", 64, 1)
     csa.term_exact("c", 64, 2)
     x, y, w, q = csa.rows("o_", None)
-    final(m1, "u_f", x, y, w, q, "ff", False)
+    final(m1, "u_f", x, y, w, q, "result", False)
 
-    wrap = [
-        "module qsag_p2_canopy_ff (",
-        "  input  wire [767:0] x,",
-        "  output wire [255:0] ff",
-        ");",
-    ]
-    for i in range(4):
-        wrap.append(
-            f"  qsag_p2_canopy_ff_lane u_ff{i} ("
-            f".l(x[{64*i+63}:{64*i}]), .r(x[{64*(4+i)+63}:{64*(4+i)}]), "
-            f".c(x[{64*(8+i)+63}:{64*(8+i)}]), .ff(ff[{64*i+63}:{64*i}]));"
-        )
-    wrap.append("endmodule\n")
-    return m1.text() + "\n" + "\n".join(wrap)
+    return ("module qsag_p2_canopy_ff (input wire [767:0] x, output wire [255:0] ff);\n"
+            "  for (genvar i=0; i<4; i++) begin : g_lane\n"
+            "    wire [63:0] l=x[64*i+:64], r=x[64*(4+i)+:64], c=x[64*(8+i)+:64];\n"
+            "    wire [63:0] result;\n" + "\n".join(m1.lines) +
+            "\n    assign ff[64*i+:64] = result;\n  end\nendmodule\n")
 
 
 def gen_rc():
@@ -678,8 +562,8 @@ def main(outdir):
     gl = HDR + gen_mul_tree() + "\n" + fold_txt + "\n" + gen_mul(fw, fq) + "\n" + red_txt + FTR
     open(os.path.join(outdir, "qsag_asic_gl64_csa_gen.sv"), "w").write(gl)
     csa_txt, fa_c3, fa_c4 = gen_csa_helpers()
-    p2 = HDR + csa_txt + "\n" + gen_ext4_karatsuba() + "\n" + gen_me(fa_c3, fa_c4) + "\n" + gen_mi(fa_c3) + "\n" + gen_canopy_ff() + "\n" + gen_rc() + FTR
-    open(os.path.join(outdir, "qsag_asic_ext4_p2_gen.sv"), "w").write(p2)
+    p2 = HDR + csa_txt + "\n" + gen_me(fa_c3, fa_c4) + "\n" + gen_mi(fa_c3) + "\n" + gen_canopy_ff() + "\n" + gen_rc() + FTR
+    open(os.path.join(outdir, "qsag_asic_p2_gen.sv"), "w").write(p2)
     open(os.path.join(outdir, "qsag_asic_tower_maps_gen.sv"), "w").write(HDR + gen_tower_maps() + FTR)
     open(os.path.join(outdir, "qsag_asic_gen_params.svh"), "w").write(
         f"// GENERATED by hardware/asic/gen/gen_rtl.py\n"
