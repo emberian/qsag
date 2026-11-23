@@ -557,11 +557,11 @@ fn exc_eret_and_counter_write_precedence() {
     assert_eq!(
         (
             mem_map::IROM_BASE,
-            mem_map::ISRAM_BASE,
-            mem_map::DSRAM_BASE,
+            mem_map::APPLET_CODE_BASE,
+            mem_map::APPLET_DATA_BASE,
             mem_map::SYS_MMIO_BASE
         ),
-        (0, 0x1000, 0x1_0000, 0xFFFF_0000)
+        (0, 0x1_0000, 0x1_0100, 0xFFFF_0000)
     );
 }
 
@@ -1327,4 +1327,275 @@ fn dit_auditor_covers_control_csrs_eret_and_fetch() {
         (m.reg_taint[6], m.reg_taint[7]),
         (Taint::Secret, Taint::Public)
     );
+}
+
+#[test]
+fn tooth_two_ring_wx_mpu_enforces_ring0_and_ring3_permissions_and_mmio_fence() {
+    use qsag_ass2::{Cause, EnclaveError, LcState};
+
+    let k_root = [0x5Au8; 32];
+
+    // 1. Ring 0 (`applet_exec = false`):
+    //    * 0x0000..=0x0FFF (`I-ROM`): R+X, !W
+    //    * 0x10000..=0x101FF (`SRAM`): R+W, !X
+    //    * 0xFFFF_0000 (`SYS_MMIO`): accessible (Vault/PUF/LC_STATE R-only, FRAM_XFER R+W, !X)
+    let mut r0 = Ass2Vm::new_enclave(k_root, LcState::PROVISIONED_SIGNED_APPLETS);
+    r0.mmio.puf_syndrome = [0x1122_3344_5566_7788, 0x99AA_BBCC_DDEE_FF00];
+    let rom_ok = assemble(
+        "LD64 R1,[R0]
+         MOVZ20 R2,0x10000
+         ADDI R3,R0,42
+         ST64 [R2],R3
+         LD64 R4,[R2]
+         MOVZ20 R5,0xFFFF0
+         SHLI R5,R5,12
+         LD64 R6,[R5+0x10]
+         LD64 R7,[R5+0x30]
+         LD64 R8,[R5+0x50]
+         ST64 [R5],R3
+         LD64 R9,[R5]
+         HALT",
+    )
+    .unwrap();
+    r0.load_image(mem_map::IROM_BASE, &rom_ok).unwrap();
+    assert!(!r0.applet_exec);
+    assert_eq!(r0.run(32), RunExit::Halted);
+    assert_eq!(r0.regs[4], 42);
+    assert_eq!(r0.regs[6], u64::from_le_bytes([0x5Au8; 8]));
+    assert_eq!(r0.reg_taint[6], Taint::Secret);
+    assert_eq!(r0.regs[7], 0x1122_3344_5566_7788);
+    assert_eq!(r0.reg_taint[7], Taint::Secret);
+    assert_eq!(
+        r0.regs[8],
+        LcState::PROVISIONED_SIGNED_APPLETS.to_mmio_u64()
+    );
+    assert_eq!(r0.regs[9], 42);
+
+    // Ring 0 write to `I-ROM` (`0x0000..=0x0FFF`) MUST fault (`!W`).
+    let mut r0_rom_write = Ass2Vm::new_enclave(k_root, LcState::Blank);
+    r0_rom_write
+        .load_image(0, &assemble("ST64 [R0],R0\nHALT").unwrap())
+        .unwrap();
+    assert_eq!(r0_rom_write.run(8), RunExit::Trap(Cause::MemFault));
+
+    // Ring 0 jump/fetch into `SRAM` (`0x10000..=0x101FF`) MUST fault (`!X`).
+    let mut r0_sram_exec = Ass2Vm::new_enclave(k_root, LcState::Blank);
+    r0_sram_exec
+        .load_image(
+            mem_map::SRAM_BASE,
+            &assemble("HALT").unwrap(),
+        )
+        .unwrap();
+    r0_sram_exec
+        .load_image(
+            0,
+            &assemble("MOVZ20 R1,0x10000\nJALR R0,R1,0").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(r0_sram_exec.run(8), RunExit::Trap(Cause::MemFault));
+
+    // Ring 0 write to read-only `MMIO_VAULT_KEY` MUST fault (`!W`).
+    let mut r0_vault_write = Ass2Vm::new_enclave(k_root, LcState::Blank);
+    r0_vault_write
+        .load_image(
+            0,
+            &assemble("MOVZ20 R5,0xFFFF0\nSHLI R5,R5,12\nST64 [R5+0x10],R0\nHALT").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(r0_vault_write.run(8), RunExit::Trap(Cause::MemFault));
+
+    // 2. Ring 3 (`applet_exec = true`):
+    //    * Lower 256 B (`0x10000..=0x100FF`, <= 64 insns): R+X, !W
+    //    * Upper 256 B (`0x10100..=0x101FF`): R+W, !X
+    //    * Any `0xFFFF_0000` MMIO or `I-ROM` access faults with `Cause::MemFault`!
+    let words_from_asm = |src: &str| -> Vec<u32> {
+        assemble(src)
+            .unwrap()
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    };
+
+    let mut r3_ok = Ass2Vm::new_enclave(k_root, LcState::Blank);
+    let ok_words = words_from_asm(
+        "MOVZ20 R3,0x10000
+         LD64 R4,[R3]
+         MOVZ20 R5,0x10100
+         ST64 [R5],R4
+         LD64 R6,[R5]
+         HALT",
+    );
+    r3_ok.load_open_applet(&ok_words).unwrap();
+    assert!(r3_ok.applet_exec);
+    assert_eq!(r3_ok.run(16), RunExit::Halted);
+    assert_eq!(r3_ok.regs[6], r3_ok.regs[4]);
+    assert_ne!(r3_ok.regs[6], 0);
+
+    for bad_applet in [
+        // Self-modifying write to lower 256 B (`0x10000..=0x100FF` is `!W`).
+        "MOVZ20 R3,0x10000\nST64 [R3],R0\nHALT",
+        // Byte write to `0x100FF` (end of lower 256 B code window).
+        "MOVZ20 R3,0x100FF\nSTB [R3],R0\nHALT",
+        // Execute from upper 256 B (`0x10100..=0x101FF` is `!X`).
+        "MOVZ20 R3,0x10100\nJALR R0,R3,0",
+        // Read `0xFFFF_0000` MMIO (`FRAM_XFER`) from Ring 3 -> `Cause::MemFault`.
+        "MOVZ20 R5,0xFFFF0\nSHLI R5,R5,12\nLD64 R6,[R5]\nHALT",
+        // Read `0xFFFF_0010` MMIO (`VAULT_KEY`) via `LDBU` from Ring 3 -> `Cause::MemFault`.
+        "MOVZ20 R5,0xFFFF0\nSHLI R5,R5,12\nLDBU R6,[R5+0x10]\nHALT",
+        // Misaligned access inside `0xFFFF_0000` MMIO from Ring 3 -> `Cause::MemFault` (never `MisalignedMem`).
+        "MOVZ20 R5,0xFFFF0\nSHLI R5,R5,12\nADDI R5,R5,3\nLD64 R6,[R5]\nHALT",
+        // Write `0xFFFF_0000` MMIO from Ring 3 -> `Cause::MemFault`.
+        "MOVZ20 R5,0xFFFF0\nSHLI R5,R5,12\nST64 [R5],R0\nHALT",
+        // Read `I-ROM` (`0x0000`) from Ring 3 -> `Cause::MemFault`.
+        "LD64 R6,[R0]\nHALT",
+        // Jump to `I-ROM` (`0x0000`) from Ring 3 -> `Cause::MemFault`.
+        "JALR R0,R0,0",
+    ] {
+        let mut vm = Ass2Vm::new_enclave(k_root, LcState::Blank);
+        vm.load_image(mem_map::APPLET_DATA_BASE, &assemble("HALT").unwrap())
+            .unwrap();
+        vm.load_open_applet(&words_from_asm(bad_applet)).unwrap();
+        assert_eq!(vm.run(16), RunExit::Trap(Cause::MemFault), "{bad_applet}");
+    }
+
+    // 64-insn boundary: exactly 64 instructions succeeds; 65 instructions is rejected!
+    let mut max64 = vec![qsag_ass2::isa::NOP_WORD; 63];
+    max64.push(0x0005_0000); // HALT at 0x100FC
+    let mut vm64 = Ass2Vm::new_enclave(k_root, LcState::Blank);
+    vm64.load_open_applet(&max64).unwrap();
+    assert_eq!(vm64.run(80), RunExit::Halted);
+
+    let over65 = vec![qsag_ass2::isa::NOP_WORD; 65];
+    assert_eq!(
+        vm64.load_open_applet(&over65),
+        Err(EnclaveError::AppletWordCountOutOfRange)
+    );
+}
+
+#[test]
+fn tooth_lifecycle_modes_enforce_signed_applet_key_injection_scrub_and_rom_lock() {
+    use qsag_ass2::wire::{
+        compute_code_hash, derive_applet_key, load_code_open_frame, load_code_wotsc_frame,
+        owner_wotsc_pubkey,
+    };
+    use qsag_ass2::{EnclaveError, LcState};
+
+    let k_root: [u8; 32] = core::array::from_fn(|i| (0xA0 + i) as u8);
+    let sk0 = [0x31u8; 32];
+    let sk1 = [0x42u8; 32];
+    let sk2 = [0x53u8; 32];
+    let pk0 = owner_wotsc_pubkey(&sk0);
+    let pk1 = owner_wotsc_pubkey(&sk1);
+    let pk2 = owner_wotsc_pubkey(&sk2);
+    let eid = [0xE1u8; 32];
+    let nonce: [u8; 16] = core::array::from_fn(|i| (i + 1) as u8);
+
+    // Applet stores its injected (r1, r2) applet key and residual (r3, S0) into upper SRAM `0x10100..0x10120`.
+    let applet_words_a: Vec<u32> = assemble(
+        "MOVZ20 R10,0x10100
+         ST64 [R10],R1
+         ST64 [R10+8],R2
+         ST64 [R10+16],R3
+         SST64 [R10+24],S0
+         HALT",
+    )
+    .unwrap()
+    .chunks_exact(4)
+    .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+    .collect();
+
+    let mut applet_words_b = applet_words_a.clone();
+    applet_words_b.insert(0, qsag_ass2::isa::NOP_WORD);
+
+    // Mode 1: `LcState::Provisioned { allow_signed_applets: true, rom_lock: false }`
+    let mut vm = Ass2Vm::new_enclave(k_root, LcState::PROVISIONED_SIGNED_APPLETS);
+    // Pre-contaminate Ring-0 registers & sponge with secret residue to prove hardware scrub!
+    vm.regs.fill(0xDEAD_BEEF_CAFE_BABE);
+    vm.reg_taint.fill(Taint::Secret);
+    vm.spg.fill(0xBAD0_C0DE_1234_5678);
+    vm.spg_taint.fill(Taint::Secret);
+
+    let mut cur_pk = pk0;
+    let mut record = (5u64 << 32) | 1;
+
+    // Open `flags = 0` CMD_LOAD_CODE frame MUST be rejected in Provisioned mode!
+    let open_frame = load_code_open_frame(0x80, &applet_words_a).unwrap();
+    assert_eq!(
+        vm.execute_cmd_load_code(&open_frame, &mut cur_pk, &eid, &nonce, &mut record),
+        Err(EnclaveError::SignatureRequired)
+    );
+    assert_eq!(vm.load_open_applet(&applet_words_a), Err(EnclaveError::SignatureRequired));
+
+    // Tampered WOTS+C signed applet frame MUST be rejected without advancing generation!
+    let signed_a =
+        load_code_wotsc_frame(0x80, &sk0, &eid, &nonce, record, &pk1, &applet_words_a).unwrap();
+    let mut forged_a = signed_a.clone();
+    forged_a[14] ^= 0x04; // mutate applet code word after signing `code_hash`
+    assert!(
+        vm.execute_cmd_load_code(&forged_a, &mut cur_pk, &eid, &nonce, &mut record)
+            .is_err()
+    );
+    assert_eq!(cur_pk, pk0);
+    assert_eq!(record, (5u64 << 32) | 1);
+
+    // Authentic Owner `WOTS+C` signed applet succeeds, scrubs `r3..r15`/`spg`, and injects
+    // `cSHAKE256(K_root, "ASS2.APPLET" || code_hash)` into `r1..r2`!
+    let hash_a = vm
+        .execute_cmd_load_code(&signed_a, &mut cur_pk, &eid, &nonce, &mut record)
+        .unwrap();
+    assert_eq!(hash_a, compute_code_hash(&applet_words_a));
+    assert_eq!(cur_pk, pk1);
+    assert_eq!(record, (6u64 << 32) | 1);
+    assert!(vm.applet_exec);
+    assert_eq!(&vm.regs[3..16], &[0u64; 13]);
+    assert_eq!(&vm.reg_taint[3..16], &[Taint::Public; 13]);
+    assert_eq!(vm.spg, [0u64; 25]);
+    assert_eq!(vm.spg_taint, [Taint::Public; 25]);
+    assert_eq!((vm.reg_taint[1], vm.reg_taint[2]), (Taint::Secret, Taint::Secret));
+
+    let expected_key_a = derive_applet_key(&k_root, &hash_a);
+    let exp_r1_a = u64::from_le_bytes(expected_key_a[0..8].try_into().unwrap());
+    let exp_r2_a = u64::from_le_bytes(expected_key_a[8..16].try_into().unwrap());
+    assert_eq!((vm.regs[1], vm.regs[2]), (exp_r1_a, exp_r2_a));
+
+    assert_eq!(vm.run(16), RunExit::Halted);
+    assert_eq!(vm.read_word(0x10100).unwrap(), exp_r1_a);
+    assert_eq!(vm.read_word(0x10108).unwrap(), exp_r2_a);
+    assert_eq!(vm.read_word(0x10110).unwrap(), 0);
+    assert_eq!(vm.read_word(0x10118).unwrap(), 0);
+
+    // Different applet `code_hash` derives an independent per-applet key in `r1..r2`!
+    let signed_b =
+        load_code_wotsc_frame(0x80, &sk1, &eid, &nonce, record, &pk2, &applet_words_b).unwrap();
+    let hash_b = vm
+        .execute_cmd_load_code(&signed_b, &mut cur_pk, &eid, &nonce, &mut record)
+        .unwrap();
+    assert_ne!(hash_a, hash_b);
+    assert_ne!((vm.regs[1], vm.regs[2]), (exp_r1_a, exp_r2_a));
+
+    // Mode 2: `LcState::Provisioned { rom_lock: true, .. }` rejects `CMD_LOAD_CODE` (`0x30`) unconditionally!
+    for locked_state in [
+        LcState::PROVISIONED_ROM_LOCKED,
+        LcState::Provisioned {
+            allow_signed_applets: true,
+            rom_lock: true,
+        },
+    ] {
+        let mut locked_vm = Ass2Vm::new_enclave(k_root, locked_state);
+        let mut lpk = pk0;
+        let mut lrec = (5u64 << 32) | 1;
+        assert_eq!(
+            locked_vm.execute_cmd_load_code(&open_frame, &mut lpk, &eid, &nonce, &mut lrec),
+            Err(EnclaveError::RomLocked)
+        );
+        assert_eq!(
+            locked_vm.execute_cmd_load_code(&signed_a, &mut lpk, &eid, &nonce, &mut lrec),
+            Err(EnclaveError::RomLocked)
+        );
+        assert_eq!(
+            locked_vm.load_open_applet(&applet_words_a),
+            Err(EnclaveError::RomLocked)
+        );
+        assert!(!locked_vm.applet_exec);
+    }
 }

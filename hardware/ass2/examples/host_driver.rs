@@ -1,7 +1,8 @@
 //! QSAG-Wire host driver for ASS2-0P5, SPI ×1. Each write and each reply has its own CS-low interval.
 //! A board adapter owns RDY, IRQ, chip select, clocking and its I/O deadline.
-//! Layouts follow the Rev. 1.0 host interface: CMD_LOAD_CODE carries `u32 word_count`, the instruction
-//! words and a 16-byte tag; a CMD_EXEC reply is the 128 mailbox bytes, then A0, ECAUSE, INSTRET and CYCLES.
+//! Layouts follow the Rev. 2.3 Two-Ring Hardware W^X host interface: Ring 0 executes from immutable
+//! 4 KiB mask I-ROM while `CMD_LOAD_CODE` (`0x30`) loads <= 64-word Ring-3 applets into `0x10000..0x100FF`
+//! (open in `BLANK`, Owner `WOTS+C` signed in `!rom_lock`, hard-rejected with `E_LOCKED = 14` under `rom_lock`).
 
 use std::io::{self, Read};
 
@@ -14,15 +15,20 @@ pub trait Bus {
 }
 
 pub const CMD_IDENT: u8 = 0x01;
-pub const CMD_LOAD_CODE: u8 = 0x30;
+pub const CMD_LOAD_CODE: u8 = 0x30; // Two-Ring W^X <= 64-word Ring-3 applet loader
 pub const CMD_EXEC: u8 = 0x31;
 
-pub const I_SRAM_WORDS: usize = 128; // 0x0000_1000..0x0000_11FF
 pub const MBOX_BYTES: usize = 128; // RX_MBOX and TX_MBOX, each
 const EXEC_REPLY_BYTES: usize = MBOX_BYTES + 4 * 8;
-pub const FLAG_TAG: u8 = 1; // CMD_LOAD_CODE: the tag field holds an H_ZK_PIN tag
+pub const SERVICE_CANOPY: u8 = 0x01;
+pub const SERVICE_HORNER: u8 = 0x02;
+pub const SERVICE_JIVE: u8 = 0x03;
+pub const SERVICE_CTH: u8 = 0x04;
+pub const SERVICE_IDENT: u8 = 0x07;
+pub const E_LOCKED: u16 = 14; // SafeRecovery or provisioned rom_lock blocks 0x30 / applet 0x31
+pub const E_CAP: u16 = 13; // missing/invalid WOTS+C / capability or unleased session
 pub const E_BUDGET: u16 = 15; // CMD_EXEC stopped at its cycle budget
-pub const E_TRAP: u16 = 16; // CMD_EXEC stopped on a trap; ECAUSE is in DIAG_RAW
+pub const E_TRAP: u16 = 16; // CMD_EXEC stopped on a trap; ECAUSE & EPC in 16-byte error body
 
 #[derive(Debug)]
 pub enum WireError {
@@ -102,23 +108,54 @@ pub fn request<B: Bus>(
     Ok(body)
 }
 
-/// Payload: `u32 word_count || u32 words[word_count] || 16-byte tag`, all little-endian.
-/// The tag covers the count and the words. Frame padding follows the tag.
-pub fn load_code<B: Bus>(bus: &mut B, code: &[u32], tag: [u8; 16]) -> Result<(), WireError> {
-    if code.is_empty() || code.len() > I_SRAM_WORDS {
+pub fn ident<B: Bus>(bus: &mut B) -> Result<[u64; 4], WireError> {
+    let body = request(bus, CMD_IDENT, 0, 0, &[])?;
+    if body.len() != 32 {
         return Err(WireError::Length);
     }
-    let mut payload = (code.len() as u32).to_le_bytes().to_vec();
-    payload.extend(code.iter().flat_map(|w| w.to_le_bytes()));
-    payload.extend_from_slice(&tag);
-    request(bus, CMD_LOAD_CODE, FLAG_TAG, 0, &payload).map(|_| ())
+    Ok(std::array::from_fn(|i| {
+        u64::from_le_bytes(body[8 * i..8 * (i + 1)].try_into().unwrap())
+    }))
 }
 
-pub fn exec<B: Bus>(bus: &mut B, input: &[u8], budget: u16) -> Result<ExecResult, WireError> {
+pub fn exec<B: Bus>(
+    bus: &mut B,
+    service: u8,
+    input: &[u8],
+    budget: u16,
+) -> Result<ExecResult, WireError> {
     if input.len() > MBOX_BYTES {
         return Err(WireError::Length);
     }
-    let mut body = request(bus, CMD_EXEC, 0, budget, input)?;
+    let mut body = request(bus, CMD_EXEC, service, budget, input)?;
+    if body.len() != EXEC_REPLY_BYTES {
+        return Err(WireError::Length);
+    }
+    let word = |offset: usize| {
+        let start = MBOX_BYTES + 8 * offset;
+        u64::from_le_bytes(body[start..start + 8].try_into().unwrap())
+    };
+    let (a0, ecause, instret, cycles) = (word(0), word(1), word(2), word(3));
+    body.truncate(MBOX_BYTES);
+    Ok(ExecResult {
+        tx_mbox: body,
+        a0,
+        ecause,
+        instret,
+        cycles,
+    })
+}
+
+pub fn load_open_applet<B: Bus>(bus: &mut B, words: &[u32]) -> Result<ExecResult, WireError> {
+    if words.is_empty() || words.len() > 64 {
+        return Err(WireError::Length);
+    }
+    let mut payload = Vec::with_capacity(4 + 4 * words.len());
+    payload.extend_from_slice(&(words.len() as u32).to_le_bytes());
+    for &w in words {
+        payload.extend_from_slice(&w.to_le_bytes());
+    }
+    let mut body = request(bus, CMD_LOAD_CODE, 0, 0, &payload)?;
     if body.len() != EXEC_REPLY_BYTES {
         return Err(WireError::Length);
     }
@@ -162,36 +199,30 @@ impl Bus for MockBus {
 fn main() {
     let mut bus = MockBus {
         sent: vec![],
-        reply: vec![0x51, 0xb0, 1, 0, 0, 0, 0, 0],
+        reply: vec![0x51, 0x81, 1, 32, 0, 0, 0, 0],
     };
-    let tag = [0xa5; 16]; // fixture bytes supplied by the test
-    load_code(&mut bus, &[0x0005_0000], tag).unwrap(); // HALT, LE
-    assert_eq!(
-        &bus.sent[..17],
-        &[0, 0x51, 0x30, 1, 24, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 5, 0]
-    );
-    assert_eq!(&bus.sent[17..], &tag); // 24 payload bytes: no frame padding
+    for w in [0x3038_3144_3253_5341u64, 0x4153_5332_0000_0001, 0, 0] {
+        bus.reply.extend_from_slice(&w.to_le_bytes());
+    }
+    let id = ident(&mut bus).unwrap();
+    assert_eq!(&bus.sent, &[0, 0x51, 0x01, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(id[1], 0x4153_5332_0000_0001);
 
-    bus.reply = vec![0x51, 0xb0, 1, 0, 0, 0, 0, 0];
-    load_code(&mut bus, &[0x0006_0000, 0x0005_0000], tag).unwrap(); // NOP, HALT
-    assert_eq!(
-        &bus.sent[..13],
-        &[0, 0x51, 0x30, 1, 28, 0, 0, 0, 0, 2, 0, 0, 0]
-    );
-    assert_eq!(&bus.sent[21..37], &tag);
-    assert_eq!(&bus.sent[37..], &[0; 4]); // padding follows the tag
+    // Provisioned rom_lock / SafeRecovery blocks CMD_LOAD_CODE (0x30) with E_LOCKED = 14.
+    bus.reply = vec![0x51, 0xb0, 0x80, 0, 0, 0, 14, 0];
     assert!(matches!(
-        load_code(&mut bus, &[0; I_SRAM_WORDS + 1], tag),
-        Err(WireError::Length)
+        load_open_applet(&mut bus, &[0x0005_0000]),
+        Err(WireError::Chip(E_LOCKED))
     ));
+    assert!(matches!(load_open_applet(&mut bus, &[0; 65]), Err(WireError::Length)));
 
     bus.reply = vec![0x51, 0xb1, 1, 160, 0, 0, 0, 0, b'o', b'k'];
     bus.reply.resize(8 + MBOX_BYTES, 0);
     for value in [2u64, 0, 41, 190] {
         bus.reply.extend_from_slice(&value.to_le_bytes());
     }
-    let result = exec(&mut bus, b"hello", 0x1234).unwrap();
-    assert_eq!(&bus.sent[..9], &[0, 0x51, 0x31, 0, 5, 0, 0, 0x34, 0x12]);
+    let result = exec(&mut bus, SERVICE_CANOPY, b"hello", 0x1234).unwrap();
+    assert_eq!(&bus.sent[..9], &[0, 0x51, 0x31, 1, 5, 0, 0, 0x34, 0x12]);
     assert_eq!(result.tx_mbox.len(), MBOX_BYTES);
     assert_eq!(&result.tx_mbox[..2], b"ok");
     assert_eq!(
@@ -199,28 +230,37 @@ fn main() {
         (2, 0, 41, 190)
     );
 
-    bus.reply = vec![0x51, 0xb1, 0x80, 0, 0, 0, 4, 0];
-    assert!(matches!(exec(&mut bus, &[], 0), Err(WireError::Chip(4))));
-    bus.reply = vec![0x51, 0xb1, 0x80, 16, 0, 0, 15, 0]; // budget spent: counters, no payload
-    bus.reply.extend_from_slice(&41u64.to_le_bytes());
-    bus.reply.extend_from_slice(&190u64.to_le_bytes());
+    bus.reply = vec![0x51, 0xb1, 0x80, 0, 0, 0, 13, 0];
     assert!(matches!(
-        exec(&mut bus, &[], 190),
+        exec(&mut bus, SERVICE_JIVE, &[], 0),
+        Err(WireError::Chip(E_CAP))
+    ));
+    bus.reply = vec![0x51, 0xb1, 0x80, 16, 0, 0, 15, 0]; // budget spent: diagnostic words, no mailbox
+    bus.reply.extend_from_slice(&0u64.to_le_bytes());
+    bus.reply.extend_from_slice(&0x0200u64.to_le_bytes());
+    assert!(matches!(
+        exec(&mut bus, SERVICE_JIVE, &[], 190),
         Err(WireError::Chip(E_BUDGET))
     ));
     bus.reply = vec![0x51, 0xb1, 0x80, 16, 0, 0, 16, 0];
     bus.reply.resize(24, 0);
     assert!(matches!(
-        exec(&mut bus, &[], 9),
+        exec(&mut bus, SERVICE_JIVE, &[], 9),
         Err(WireError::Chip(E_TRAP))
     ));
     assert!(matches!(
-        exec(&mut bus, &[0; MBOX_BYTES + 1], 9),
+        exec(&mut bus, SERVICE_IDENT, &[0; MBOX_BYTES + 1], 9),
         Err(WireError::Length)
     ));
     bus.reply = vec![0x51, 0xb1, 1, 0, 0, 0, 0, 0];
-    assert!(matches!(exec(&mut bus, &[], 0), Err(WireError::Length)));
+    assert!(matches!(
+        exec(&mut bus, SERVICE_IDENT, &[], 0),
+        Err(WireError::Length)
+    ));
     bus.reply = vec![0x51, 0xb1, 1, 16, 0, 0, 0, 0]; // advertised body absent
-    assert!(matches!(exec(&mut bus, &[], 0), Err(WireError::Io(_))));
+    assert!(matches!(
+        exec(&mut bus, SERVICE_IDENT, &[], 0),
+        Err(WireError::Io(_))
+    ));
     println!("host_driver: framing checks passed");
 }

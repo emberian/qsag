@@ -8,8 +8,8 @@
 // The listing blocks between `@listing` / `@rust` and `@end` are written by
 // hardware/ass2/tools/sync_listings.py from build/listings/*.lst; do not edit them by hand.
 
-#let doc_rev  = "Rev. 2.0"
-#let doc_date = "2026-11-22"
+#let doc_rev  = "Rev. 2.3"
+#let doc_date = "2026-11-23"
 
 // ---- theme ---------------------------------------------------------------------------------
 #let navy   = rgb("#0f2742")
@@ -151,26 +151,26 @@
 #set heading(numbering: none)
 #set text(size: 9.4pt)
 #block(width: 100%, fill: navy, inset: 13pt, radius: 3pt)[
-  #text(size: 8.5pt, weight: "bold", fill: rgb("#7dd3fc"))[SILICON ARCHITECTURE SPECIFICATION  /  REV. 2.0]
+  #text(size: 8.5pt, weight: "bold", fill: rgb("#7dd3fc"))[SILICON ARCHITECTURE & PHYSICAL SIGNOFF SPECIFICATION  /  REV. 2.3]
   #v(6pt)
   #text(size: 28pt, weight: "bold", fill: white)[Dregg-64]
   #v(3pt)
   #text(size: 12pt, fill: white)[ASS2-0P5  ·  64-bit Zero-Factory-Trust post-quantum enclave crypto-RISC]
 ]
 #v(5pt)
-The `ASS2-0P5` integrates a 64-bit `DIT = 1` crypto-RISC core, a `4,096 B` (`1,024`-word) post-quantum `WOTS+C` resident `I-ROM`, `514` physical ring oscillators (`512` PUF + `2` CoSO TRNG), and two 5.0 V byte-wide foundry SRAM macros in the 56-pad GF180MCU `SLOT_0P5X0P5` (`1,936 × 2,531 µm`). A host exchanges little-endian `QSAG-Wire` frames over 1, 4 or 8 data lines while a dedicated SPI master manages dual-slot torn-write-safe FRAM records.
+The `ASS2-0P5` integrates a 64-bit `DIT = 1` crypto-RISC core, an immutable `4,096 B` (`1,024`-word) post-quantum `WOTS+C` resident mask `I-ROM`, a Two-Ring Hardware `W^X` MPU (`applet_exec_q`), `3,008` asynchronous-clear `latrnq_1` secret latches (`2,560` core + `448` Vault), `514` physical ring oscillators (`512` PUF + `2` coprime CoSO TRNG), and a single 5.0 V byte-wide `512 B` foundry SRAM macro (`D-SRAM`) in the 56-pad GF180MCU `SLOT_0P5X0P5` (`1,936 × 2,531 µm`). A host exchanges little-endian `QSAG-Wire` frames over 1, 4 or 8 data lines while a dedicated SPI master manages dual-slot torn-write-safe FRAM records.
 
 == Device at a glance
 #dtable((1.1fr, 3fr), size: 8.8pt, inset: 3.4pt,
-  table.header(..th([Parameter], [ASS2-0P5 (Rev. 2.0)])),
-  [Architecture ID], [`0x4153_5332_0000_0001`. Sixteen instruction families, 32-bit little-endian encodings, independent 64-bit PC, unconditional `DIT = 1`.],
-  [Memory], [4 KiB synthesized `I-ROM` (`1,024 / 1,024` words), 512 B authenticated `I-SRAM` (`SRAM1`) and 512 B `D-SRAM` (`SRAM0`, including `RX_MBOX` / `TX_MBOX`).],
-  [Clock and supply], [25 MHz (`40.0 ns`) nominal target over 4.5–5.5 V (`−40..+125 °C`). Pre-layout OpenSTA reaches `54.44 MHz` (`70.51 MHz` reg) TT, `67.44 MHz` FF and `37.75 MHz` (`+13.51 ns` margin, `TNS = 0.00 ns`) at `125 °C` SS.],
+  table.header(..th([Parameter], [ASS2-0P5 (Rev. 2.3 · Two-Ring Single-SRAM W^X Signoff)])),
+  [Architecture ID], [`0x4153_5332_0000_0001`. Sixteen instruction families, 32-bit little-endian encodings, independent 64-bit PC, formally proven (`UNSAT`) `DIT = 1`.],
+  [Memory (2-Ring W^X)], [Ring 0: 4 KiB `I-ROM` (`1,020 / 1,024` words) `R+X,!W` + 512 B `D-SRAM` `R+W,!X` + `SYS_MMIO`. Ring 3 (`applet_exec_q=1`): `0x10000..0x100FF` `R+X,!W` (`<= 64` insns), `0x10100..0x101FF` `R+W,!X`, `I-ROM` & `SYS_MMIO` fenced (`MemFault`).],
+  [Clock and supply], [20 MHz (`50.0 ns`) 9-corner SPEF signoff over 4.5–5.5 V (`−40..+125 °C`). Zero-waiver STA (`set_max_time_borrow 0.0`, all 45 clocks constrained, `ERROR_ON_* = true`).],
   [Die and core], [`1,936 × 2,531 µm` (`4.900 mm²`) `SLOT_0P5X0P5` die, 56 pads (`48` signal/analog + `8` supply). Core `(442, 442)..(1,494, 2,089) µm` (`1,732,644 µm²`).],
-  [Secret storage & PUF], [5-octet hierarchical `2,560`-bit `latrnq_1` bank (`0.600 ns` clockless wipe) + `512` 5-stage PUF ROs (`252` disjoint pairs, `4 × BCH(63,36,5)` = `144`-bit post-helper entropy) + `2` 17-stage CoSO TRNG ROs.],
-  [Arithmetic], [16-function `LUT4`, 16 `CMP` predicates, formally verified (`UNSAT`) Radix-16 Wallace CSA Goldilocks & $FF_(p^5)$ ($u^5=3$), 4-bit/clk $"GF"(2^128)$, 1-clk/round `Keccak-f[1600]` and `Poseidon2`.],
-  [Owner authority & I/O], [Zero-Factory-Trust 16-chain base-256 `WOTS+C` (`TurboSHAKE256`) owner bootstrap & dual-slot FRAM journal. Mode-0 SPI/QSPI/OSPI, `RDY`, `IRQ`, `UART`, `GPIO[7:0]`, `SafeRecovery` & `TAMPER_ZEROIZE_N`.],
-  [Core verification], [6/6 formal `UNSAT` theorems, exhaustive $2^{32}$ Lean decode parity, `98,824`-step cosim, `39/39` Rust tests, 9/9 `WOTS+C`/crypto pin-level suites, and 4/4 `GF180MCU` specify GL gates.],
+  [Secret storage & PUF], [`2,560`-bit core + `448`-bit Vault `latrnq_1` latches (`0`-clock stopped-`CLK` wipe) + `512` 5-stage PUF ROs (`252` pairs, `4 × BCH(63,36,5)` = `144`b entropy) + `33/35`-stage CoSO TRNG.],
+  [Arithmetic & POST], [Full cold-boot FIPS 140-3 §10.3.A KAT over ALU, Shifter, `GL.MAC`, 128-step $"GF"(2^128)$, $FF_(p^5)$, 30r `Poseidon2-GL12`, and 24r/12r `Keccak-f[1600]` (`0` fast-bypass wires).],
+  [Owner authority & I/O], [Zero-Factory-Trust 16-chain base-256 `WOTS+C` (`TurboSHAKE256`) owner bootstrap, signed Ring-3 applets (`cSHAKE256` key in `R1..R2`), & dual-slot FRAM journal. SPI/QSPI/OSPI, `UART`, `GPIO[7:0]`, `SafeRecovery` & `TAMPER_ZEROIZE_N`.],
+  [Signoff & Verification], [182 `UNSAT` ISA checks, 5/5 `UNSAT` inductive `DIT=1` proofs, `98,824`-step cosim, `46/46` Rust tests, 83-step `0`-DRC/`0`-LVS LibreLane signoff, post-route `chip_top.nl.v` LEC & 4-state specify sim.],
 )
 
 == Programming model
@@ -207,7 +207,7 @@ A low TAMPER_ZEROIZE_N immediately clears the 2,560-bit bank, deasserts VERIFY_O
     #at(7.25cm, -0.04cm)[`LEASE` (nonce-bound grant)]
     #st(11.6cm, 0.04cm, 1.6cm, "READY", secbg)
     #at(13.3cm, 0.0cm, box(width: 4.2cm)[#set par(justify: false, leading: 0.4em)
-      unleased policy: `BOOT` goes straight to `READY`. `GATE`, signing, `LOAD_CODE`, `EXEC`])
+      unleased policy: `BOOT` goes straight to `READY`. `GATE`, signing, resident `EXEC`])
     #harrow(7.0cm, 0.95cm, 3.15cm)
     #at(7.25cm, 0.61cm)[`NONCE`, `REINIT` (owner root)]
     #harrow(7.0cm, 1.6cm, 3.15cm)
@@ -229,7 +229,7 @@ A low TAMPER_ZEROIZE_N immediately clears the 2,560-bit bank, deasserts VERIFY_O
 = Architecture
 
 One fetch-and-decode sequencer drives one shared datapath over one register bank. The six
-hardwired engines of Dregg-180 v1 and their private state registers are replaced by
+hardwired engines of the prototype latch enclave and their private state registers are replaced by
 instructions that operate in place on `S0..S24`.
 
 #figure(
@@ -261,8 +261,8 @@ instructions that operate in place on `S0..S24`.
     ], bd: slate)
     #node(0.1cm, 5.51cm, 4.2cm, 2.3cm, [Physical roots (`514` ROs)], [
       `512` 5-stage ROs (`4 × BCH(63,36,5)` = 144b)\
-      `2` 17-stage CoSO TRNG + NIST RCT/APT\
-      `TAMPER_ZEROIZE_N`: `0.600 ns` latch clear,\
+      `33/35`-stage CoSO TRNG + NIST RCT/APT\
+      `TAMPER_ZEROIZE_N`: 0-clk `3,008`-latch wipe,\
       `VERIFY_OK = 0`, `FAULT = 1` combinational
     ], fill: warnbg, bd: warnbd)
 
@@ -281,27 +281,27 @@ instructions that operate in place on `S0..S24`.
       views: Keccak lanes · Poseidon2 limbs ·\
       `E0..E4` (5 lanes each) · `P0..P11` (2 lanes each)
     ], fill: secbg, bd: secbd)
-    #node(5.0cm, 5.56cm, 5.55cm, 2.25cm, [Memory], [
-      `0x0000_0000` `I-ROM` 4 KiB (`WOTS+C` + kernels)\
-      `0x0000_1000` `I-SRAM` 512 B, authenticated applet\
+    #node(5.0cm, 5.56cm, 5.55cm, 2.25cm, [Memory (Single-SRAM W^X)], [
+      `0x0000_0000` `I-ROM` 4 KiB (`WOTS+C` + POST)\
+      `0x0000_1000` *(retired / unmapped `MemFault`)*\
       `0x0001_0000` `D-SRAM` 512 B: scratch, `RX_MBOX`,\
-      `TX_MBOX` · byte-serial zeroizer\
-      `0xFFFF_0000` `SYS_MMIO`, fenced from applets
+      `TX_MBOX` · zero CSPs · byte-serial zeroizer\
+      `0xFFFF_0000` `SYS_MMIO` + `448`b `latrnq_1` Vault
     ])
 
     // right column
     #node(11.25cm, 0.42cm, 6.3cm, 1.55cm, [Word unit · 1 arch cycle], [
-      `LUT4` 16 bitwise functions · CLA64 add/sub, log shifts\
+      `LUT4` 16 bitwise functions · Kogge-Stone64 add/sub\
       `CMP` 16 predicates → 0 or 1 · `SEL` 4-operand select\
-      byte extract, `BSWAP64`
+      log/arith/rot barrel shifter, byte extract, `BSWAP64`
     ])
     #node(11.25cm, 2.2cm, 6.3cm, 1.55cm, [Goldilocks multiplier · 4 arch cyc], [
-      Radix-16 (`4b/clk`) Wallace 5:2 CSA (`17` phys clks)\
+      64-step iterative shift-add sharing `qsag_ass2_add64`\
       `GL.MAC`, `GL.SBOX7` (12), `FP5.MUL` (104), `MUL64`\
       formally proven `UNSAT` over all $2^192$ inputs
     ])
     #node(11.25cm, 3.98cm, 6.3cm, 1.35cm, [$"GF"(2^128)$ multiplier · 4 arch cyc], [
-      $x^128 + x^7 + x^2 + x + 1$, 4-bit/clk Horner (`32` clks)\
+      $x^128 + x^7 + x^2 + x + 1$, 128-step bit-serial Horner\
       `GF128.MUL`, `GF128.XOR` on `P0..P11`
     ])
     #node(11.25cm, 5.56cm, 6.3cm, 2.25cm, [Round network · in place on the bank], [
@@ -335,32 +335,32 @@ instructions that operate in place on `S0..S24`.
   ]
 ]
 
-== Memory map
-#dtable((1.52fr, .66fr, .33fr, .48fr, 2.05fr), size: 8pt, inset: 3.5pt,
-  table.header(..th([Inclusive byte addresses], [Region], [Access], [Size], [Function])),
-  [`0x0000_0000..0x0000_0FFF`], [`I-ROM`], [X R], [4 KiB], [1,024 × 32-bit instructions. Resident boot dispatcher and crypto kernels.],
-  [`0x0000_1000..0x0000_11FF`], [`I-SRAM`], [X R], [512 B], [SRAM1. Up to 128 authenticated instructions. CPU stores fault.],
-  [`0x0001_0000..0x0001_00FF`], [`D-SRAM`], [R W], [256 B], [SRAM0 words 0–31. Scratch and downward-growing stack.],
-  [`0x0001_0100..0x0001_017F`], [`RX_MBOX`], [R W], [128 B], [SRAM0 words 32–47. Request bytes in wire order.],
-  [`0x0001_0180..0x0001_01FF`], [`TX_MBOX`], [R W], [128 B], [SRAM0 words 48–63. Application response bytes.],
-  [`0xFFFF_0000..0xFFFF_007F`], [`SYS_MMIO`], [R W], [128 B], [Resident-only peripherals. Applet execution locks access through I-ROM returns.],
+== Memory map (Two-Ring Hardware `W^X`: Ring 0 vs Ring 3)
+#dtable((1.45fr, .68fr, .42fr, .42fr, .42fr, 1.85fr), size: 7.7pt, inset: 3.1pt,
+  table.header(..th([Inclusive byte addresses], [Region], [R0], [R3], [Size], [Function])),
+  [`0x0000_0000..0x0000_0FFF`], [`I-ROM`], [X R], [—], [4 KiB], [1,024 × 32-bit insns (`1,020` used). Ring-0 boot, POST KAT, `WOTS+C` & `CTH_SIGN`.],
+  [`0x0000_1000..0x0000_11FF`], [*(retired)*], [—], [—], [—], [Unmapped former `I-SRAM` (`MemFault` in both rings).],
+  [`0x0001_0000..0x0001_00FF`], [`APPLET / D`], [R W], [X R], [256 B], [`sram512x8m8wm1` words 0–31: Ring-0 scratch/stack or Ring-3 `<= 64`-insn code (`!W`).],
+  [`0x0001_0100..0x0001_017F`], [`RX_MBOX`], [R W], [R W], [128 B], [`D-SRAM` words 32–47. Request bytes / Ring-3 data (`!X`).],
+  [`0x0001_0180..0x0001_01FF`], [`TX_MBOX`], [R W], [R W], [128 B], [`D-SRAM` words 48–63. Application response bytes (`!X`).],
+  [`0xFFFF_0000..0xFFFF_007F`], [`SYS_MMIO`], [R W], [—], [128 B], [Ring-0 peripherals + `448`b `latrnq_1` Vault (`MemFault` in Ring 3 & POST KAT).],
 )
 
-The full D-SRAM window spans `0x0001_0000..0x0001_01FF`. SRAM0 holds 64 little-endian 64-bit words.
+The full `D-SRAM` window spans `0x0001_0000..0x0001_01FF` inside the single 5.0 V `sram512x8m8wm1` macro (`64` little-endian 64-bit words). All CSPs (`root_secret`, per-applet key in `R1..R2`, `cap_commit`, `nonce`, raw PUF words, private `WOTS+C` chain pre-images) reside strictly in `latrnq_1` latches (`3,008` bits) and never touch `D-SRAM`.
 
-== Erasure and isolation
-Core `ZEROIZE` (`0x00040000`) or a `CSRW` to `0x41` with bit 0 set clears the register banks in one architectural cycle and starts the full D-SRAM scrub. The scrubber writes bytes 0–511, including TX_MBOX, one byte per clock (20.48 µs at 25 MHz). Reset, tamper release and budget expiry also select a full scrub. Normal halt or trap selects bytes 0–383 (scratch and RX), retaining TX. HOST_RDY stays low during a sweep.
+== Erasure and Two-Ring `W^X` isolation
+Core `ZEROIZE` (`0x00040000`) or a `CSRW` to `0x41` with bit 0 set clears `R1..R15` and `S0..S24` in one architectural cycle, clears the 448-bit Vault & PUF buffers (`vault_clr_q`), scrubs `buf64_q`, and starts the full 512-byte D-SRAM scrub (512 clocks = 25.60 µs at 20 MHz). Reset, tamper release, TRNG health fault and budget expiry also select a full scrub. Ring-0 halt scrubs bytes 0–383; Ring-3 halt wipes `R1..R2` (`applet_key`) before `HOST_RDY` rises and scrubs `RX_MBOX` (`256..383`). `HOST_RDY` stays low throughout cold-boot FIPS 140-3 §10.3.A `POST KAT` (`284` arch cycles against `0x17e8_2cb8_0830_751d`) and every sweep.
 
-Hardware `W^X` restricts instruction fetch to I-ROM and authenticated I-SRAM. Any fetch outside those regions raises MemFault (ECAUSE = 5). SYS_MMIO requires an I-ROM PC and clear `applet_mode_q`. Once applet execution begins, this bit stays set for the execution, so a peripheral load or store faults with the same cause even after control returns to I-ROM.
+Hardware `applet_exec_q` enforces Two-Ring `W^X` in ~18 gates: Ring 0 fetches strictly from `I-ROM` (`D-SRAM` is `!X`); Ring 3 flips `0x10000..0x100FF` to `R+X, !W`, keeps `0x10100..0x101FF` `R+W, !X`, fences `I-ROM` & `SYS_MMIO` (`MemFault` over `MisalignedMem`), and traps `CSRW EVEC/EXC_EN` (`IllegalInsn`).
 
 #pagebreak()
 = Peripherals, verification and silicon signoff
-Access `SYS_MMIO` at base `0xFFFF_0000` (aligned LE64, `I-ROM` + `!applet_mode_q` only). All 16 word offsets are decoded below.
+Access `SYS_MMIO` at base `0xFFFF_0000` (aligned LE64, `I-ROM` + `!post_running` only). All 16 word offsets are decoded below.
 #dtable((.82fr, 1.25fr, .38fr, 3.4fr), size: 7.1pt, inset: 2.5pt,
   table.header(..th([Offset], [Register], [Acc.], [Fields and operation])),
   [`+0x00`], [`FRAM_XFER`], [RW], [Read: `[7:0]` RX byte. Write: `[7:0]` TX byte, `[8]` `FRAM_CS_N`, `[9]` start 1-byte transfer (`FRAM_SCK = CLK_IN / 8`).],
   [`+0x08`], [`FRAM_STATUS / CAP_LO`], [R/W], [Read: `[0]` busy, `[1]` sync `MISO`. Write (64b): enclave-private `cap_commit[63:0]`.],
-  [`+0x10`], [`CMD_CTX / PUF_CTRL`], [RW], [Read: `{record.state, 4'd0, flags[1:0], len[9:0], load_cnt[7:0], op[7:0]}`. Write: `{margin[5:0], 4'd0, recon, blk[2:0]}` starts PUF.],
+  [`+0x10`], [`CMD_CTX / PUF_CTRL`], [RW], [Read: `{record.state, 4'd0, flags[1:0], len[9:0], 8'd0, op[7:0]}`. Write: `{bist[3:0], 2'd0, margin[5:0], 4'd0, recon, blk[2:0]}` starts PUF.],
   [`+0x18, +0x78`], [`VAULT_NONCE_LO/HI`], [RW], [Enclave-private 128-bit session `nonce`, cleared asynchronously on `srst_n`.],
   [`+0x20, +0x28`], [`PUF_VMASK`, `PUF_SYN`], [RW], [63-bit valid-pair mask and 27-bit `BCH(63,36,5)` helper syndrome (`dregg_ro_puf_bch`).],
   [`+0x30`], [`PUF_WORD / CAP_HI`], [R/W], [Read: `[35:0]` 36-bit BCH word when `puf_complete && !puf_err`. Write (64b): `cap_commit[127:64]`.],
@@ -368,31 +368,31 @@ Access `SYS_MMIO` at base `0xFFFF_0000` (aligned LE64, `I-ROM` + `!applet_mode_q
   [`+0x40, +0x48`], [`TRNG_DATA / HEALTH`], [R], [`+0x40`: conditioned 64b word. `+0x48`: `{rct_fail, apt_fail, !uart_ovf, ok, valid, cnt[29:0]}`.],
   [`+0x50, +0x58`], [`VAULT_LO / HI`], [RW], [Reads `root_secret` (`VERDICT_CTRL[16]=0`) or `cap_commit` (`=1`); 64b writes update `key_lo/hi`.],
   [`+0x60`], [`VERDICT_CTRL`], [RW], [`[0]` `VERIFY_OK`, `[1]` sticky `FAULT`, `[10:8]` `lc_state`, `[16]` `vault_cap_sel`. Tamper forces `0` / `1`.],
-  [`+0x68, +0x70`], [`GPIO_IO`, `UART_DIV`], [RW], [`+0x68`: `{in[7:0], oe[7:0], out[7:0]}` (PD reset). `+0x70`: `[11:0]` clocks/bit (reset `25` = `1 Mbaud`).],
+  [`+0x68, +0x70`], [`GPIO_IO`, `UART_DIV`], [RW], [`+0x68`: `{in[7:0], oe[7:0], out[7:0]}` (PD reset). `+0x70`: `[11:0]` clocks/bit (reset `25` = `800 kbaud` @ 20M).],
 )
 
 == Debug and physical entropy roots
-Only `BOOT_MODE = 10` with `lc_state == BLANK` enables the 8N1 UART (`CSR 0x0A` 16-byte non-stalling TX FIFO, `CSR 0x0B` RX). Outside `BLANK && 10`, TX idles high and `DBG_IN` reads zero. `dregg_ro_puf_bch` instantiates *512 physical 5-stage `gf180mcu_fd_sc_mcu7t5v0` ring oscillators* (`256` strictly disjoint differential pairs, `252` active across 4 disjoint `BCH(63,36,5)` blocks -> `4 × 36 = 144` bits of independent post-helper min-entropy, `t = 5` error correction per block). `qsag_trng` instantiates *two physical 17-stage CoSO ring oscillators* with continuous NIST SP 800-90B `RCT` and `APT` health monitors.
+Only `BOOT_MODE = 10` with `lc_state == BLANK` enables the 8N1 UART (`CSR 0x0A` 2-byte shift+hold non-stalling TX, `CSR 0x0B` RX). Outside `BLANK && 10`, TX idles high and `DBG_IN` reads zero. `dregg_ro_puf_bch` instantiates *512 physical 5-stage `gf180mcu_fd_sc_mcu7t5v0` ring oscillators* (`256` strictly disjoint differential pairs, `252` active across 4 disjoint `BCH(63,36,5)` blocks -> `4 × 36 = 144` bits of independent post-helper min-entropy, `t = 5` error correction per block). `qsag_trng` instantiates *coprime 33-stage and 35-stage physical CoSO ring oscillators* (`16.5`-cycle nominal half-integer beat) with continuous NIST SP 800-90B `RCT`, `APT`, and lock-detector health gates.
 
-== Formal, lockstep and 4-state gate-level verification
-All 6 Yosys/SBY formal theorems passed `UNSAT` (`gl_helpers`, `gf_step4`, `alu_equiv`, universal $2^132$ `prove_radix16_step`, universal $2^192$ `prove_mul_ind`, `prove_mul_bmc`). Lean 4.35 `decodeAss2` matched over all $2^32$ encodings; Rust `qsag-ass2` passed `39/39` tests; RTL cosim matched over `98,824` steps; Verilator pin-level tests passed all 9 Zero-Factory-Trust `WOTS+C`, `SafeRecovery`, torn-FRAM and crypto oracle suites across `×1/×4/×8`; 4-state `GF180MCU` specify sim (`iverilog -gspecify -Ttyp`) verified `0.600 ns` clockless wipe of all `2,560/2,560` `.Q` latch nodes.
+== Formal, lockstep, coverage and 4-state gate-level verification
+All formal proofs passed `UNSAT`: Z3 182-case ALU proof (`lec_ass2.py`), Z3 5-check relational inductive `DIT = 1` constant-time proof across Ring 0 & Ring 3 (`lec_timing.py`), Yosys SAT `add64`/`u8add64` exactness, and all 6 SBY/Bitwuzla theorems (`gl_helpers`, `gf_step`, `alu_equiv`, `seq_mul_inductive`, `seq_mul_bmc`). Rust `qsag-ass2` passed `46/46` tests; RTL lockstep cosim matched over `1,028` programs (`98,824` steps); merged 5-suite DO-254 production RTL line coverage achieved *`96.45%` (`1,467 / 1,521`)*; pre-route & post-route (`final/nl/chip_top.nl.v`) Yosys formal LEC (`equiv_status -assert`) and 4-state `GF180MCU` specify sim (`iverilog -gspecify -Ttyp`) verified cold-boot FIPS POST KAT, clockless `DIAG`, `IDENT`, resident `EXEC`, and `0.600 ns` clockless tamper wipe of all `3,008` (`2,560` bank + `448` Vault) `.Q` latch nodes.
 
-== GF180MCU synthesis and 3-corner OpenSTA (`SLOT_0P5X0P5`)
-`qsag_ass2_enclave_top` maps to *42,485 cells* (`42,483` stdcells = `1,007,069.95 µm²` + `2 × sram512x8m8wm1` = `418,800.55 µm²` -> *1,425,870.50 µm²*) inside the `SLOT_0P5X0P5` `1,732,644 µm²` core (`[442, 442]..[1494, 2089] µm`).
+== GF180MCU synthesis and 9-corner SPEF signoff (`SLOT_0P5X0P5`)
+`qsag_ass2_enclave_top` maps to *38,742 cells* (`38,741` stdcells = `831,919.33 µm²` + `1 × sram512x8m8wm1` = `209,400.28 µm²` -> *1,041,319.61 µm²*, `-27.0%` vs 2-SRAM) inside the `SLOT_0P5X0P5` `1,732,644 µm²` core (`[442, 442]..[1494, 2089] µm`).
 
 #dtable((1.45fr, 1.05fr, 1.05fr, .85fr, .8fr, .75fr, .75fr), size: 7.1pt, inset: 2.3pt,
-  table.header(..th([Pre-Layout Corner], [Core min. (ns)], [Core Fmax (MHz)], [`HOST_SCK`], [`trng_sclk`], [TNS @ 25M], [Min hold])),
-  [TT · 25 °C · 5.00 V], [18.37 (14.18 reg)], [54.44 (70.51 reg)], [144.50 MHz], [170.55 MHz], [0.00 ns], [+0.13 ns],
-  [FF · −40 °C · 5.50 V], [14.83 (8.85 reg)], [67.44 (113.05 reg)], [232.56 MHz], [274.44 MHz], [0.00 ns], [+0.05 ns],
-  [SS · 125 °C · 4.50 V], [*26.49*], [*37.75*], [77.72 MHz], [90.37 MHz], [*0.00 ns*], [+0.30 ns],
+  table.header(..th([Pre-Layout Corner], [Core min. (ns)], [Core Fmax (MHz)], [`HOST_SCK`], [`trng_sclk`], [TNS @ 20M], [Min hold])),
+  [TT · 25 °C · 5.00 V], [20.16], [49.60], [64.81 (101.9 reg)], [223.18 MHz], [0.00 ns], [+0.27 ns],
+  [FF · −40 °C · 5.50 V], [14.65 (12.74 reg)], [68.27 (78.52 reg)], [87.25 (156.3 reg)], [351.09 MHz], [0.00 ns], [+0.16 ns],
+  [SS · 125 °C · 4.50 V], [*37.15*], [*26.92*], [41.73 (56.4 reg)], [122.41 MHz], [*0.00 ns*], [+0.30 ns],
 )
-*Post-CTS 3-Corner Timing (`SLOT_0P5X0P5`).* 5-octet regbank, `N_GRP=32` ICG clustering and `root_only` CTS close post-CTS 3-corner OpenSTA (`Setup WNS = 0.00 ns`, `Setup TNS = 0.00 ns`, `Hold WNS = 0.00 ns`, `Hold TNS = 0.00 ns` across `TT`, `FF` and `125 °C SS`).
+*83-Step 9-Corner SPEF Signoff (`SLOT_0P5X0P5`).* Single-SRAM floorplan (`[465, 465]` `FS`), `set_max_time_borrow 0.0` across all 46 clocks, and full `ERROR_ON_* = true` signoff close all 9 SPEF corners at 20 MHz (`Setup WNS = 0.00 ns`, `Setup TNS = 0.00 ns`, `Hold WNS = 0.00 ns`, `Hold TNS = 0.00 ns`, `0` slew/cap/fanout, `0` DRC/Antenna/Density/XOR/PDN/LVS).
 
 == Supply, pad controls and reset
 #dtable((1.0fr, 1.1fr, 2.7fr), size: 7.6pt, inset: 2.6pt,
   table.header(..th([Interface], [Operating value], [Board connection])),
   [Chip supplies], [4.5–5.5 V, nominal 5 V], [Feed three `DVDD/DVSS` pairs and one `VDD/VSS` pair (`8` supply pads, `60 mA` DC rating per pad).],
-  [Host DQ0–7], [8 mA, slow slew], [Fit a 33 Ω series resistor per line (`pads 5–12`). Switch direction during the 8-clock dummy turnaround.],
+  [Host DQ0–7], [8 mA, fast slew], [Fit a 33 Ω series resistor per line (`pads 5–12`). Switch direction during the 8-clock dummy turnaround.],
   [Clock and reset], [5 V Schmitt inputs], [`RST_N` low disables bidirectional output drivers. Drive `CLK_IN` (`pad 1`) externally on the reference carrier.],
   [Operating temp.], [−40 to +125 °C silicon], [`TPS3839K50` and `FM25W256-G` limit the populated reference carrier to −40 to +85 °C.],
 )
@@ -538,7 +538,7 @@ north on the east and west sides.
 )
 #v(1pt)
 
-The eight HOST_DQ pads use `gf180mcu_fd_io__bi_t` at 8 mA (`PDRV=2'b01`, `SL=1`, slow slew). Fit 33 Ω in series on each DQ trace. See page 11 for south-bank bounce at this setting.
+The eight HOST_DQ pads use `gf180mcu_fd_io__bi_t` at 8 mA (`PDRV=2'b01`, `SL=0`, fast slew for 20 MHz 50 pF `max_ss` margin). Fit 33 Ω in series on each DQ trace. See page 11 for south-bank bounce notes.
 #pagebreak()
 = Host interface and `QSAG-Wire` protocol
 
@@ -620,20 +620,20 @@ and `rflags[7]` is `err`.
 )
 #v(-1pt)
 #text(size: 7.7pt)[Bits 63–56 = 0x5A, 55–48 = link_stat, 47–32 = `PC[15:0]`, 31–24 = lc_state, 23–16 = `ECAUSE[7:0]`, 15–0 = 0xA552. From bit 7 to bit 0, link_stat carries FAULT, VERIFY_OK, tampered, running, scrub active, IRQ, RDY and halted. Lifecycle codes are 0 RESET, 1 BLANK, 2 PROVISIONED, 3 LEASE_PENDING, 4 ORPHAN, 5 READY and 6 LOCKED_OUT.]
-== Host command set (`1,024 / 1,024`-word Zero-Factory-Trust `WOTS+C` resident `I-ROM`)
-#dtable((.62fr, 1.18fr, .98fr, 2.75fr), size: 6.9pt, inset: 3.1pt,
+== Host command set (`1,020 / 1,024`-word Zero-Factory-Trust `WOTS+C` resident `I-ROM`)
+#dtable((.62fr, 1.18fr, .98fr, 2.75fr), size: 6.8pt, inset: 2.9pt,
   table.header(..th([Opcode], [Command], [State], [Operation])),
   [`0x01`], [`CMD_IDENT`], [Any], [Hardware fast-path: four LE64 words (`ASS2D180`, `ARCH_ID`, `{lc_state, trng_ok, trng_valid, cnt}`, `CYCLES`).],
-  [`0x10`], [`CMD_BOOT`], [`RESET`], [Inspects dual 64B FRAM slots (`0x0000`/`0x0040`), recovers torn writes by highest MAC-valid `gen`, reconstructs 144b PUF `root_secret` into `VAULT`, emits `(nonce, record, enclave_id)` and enters `BLANK` or `LEASE_PENDING`.],
-  [`0x11`], [`CMD_ENROL`], [`BLANK`], [Binds Owner's 32B post-quantum `WOTS+C` root `pk_0`, enrolls 4 `BCH(63,36,5)` PUF blocks, seals `(helpers, pk_0)` to FRAM (`0x0080`), and returns `(16B nonce || 32B public enclave_id)` — zero factory secret export.],
+  [`0x10`], [`CMD_BOOT`], [`RESET`], [Inspects dual 64B FRAM slots (`0x0000`/`0x0040`), recovers torn writes by highest MAC-valid `gen`, reconstructs 144b PUF `root_secret` into `VAULT` (`S0..S3` staging only), emits `(nonce, record, enclave_id)` and enters `BLANK` or `LEASE_PENDING`.],
+  [`0x11`], [`CMD_ENROL`], [`BLANK`], [Binds Owner's 32B post-quantum `WOTS+C` root `pk_0`, enrolls 4 `BCH(63,36,5)` PUF blocks, seals `(helpers, pk_0)` to FRAM (`0x0100`), and returns `(16B nonce || 32B public enclave_id)` — zero factory secret export.],
   [`0x12`], [`CMD_COMMIT`], [`BLANK`], [Verifies 320B Owner `WOTS+C` frame (`24B` header + `296B` 16-chain base-256 `sum=2040` `TurboSHAKE256` proof), persists `gen=1` journal record with `next_wots_root`, and enters `PROVISIONED`.],
   [`0x15 / 0x16`], [`CMD_LEASE / GATE`], [`LEASE_PENDING` / `READY`], [Verifies 320B Owner `WOTS+C` proof bound to `(enclave_id, nonce, record)`, caches `cap_commit` in `VAULT_CAP`, rolls `(gen+1, state, next_wots_root)` into the alternate FRAM slot, and enters/updates `READY`.],
-  [`0x20`], [`CMD_CTH_SIGN`], [`READY`], [Verifies 16B `cap_token` (`120B` payload), runs constant-time `GF(2^128)` `cth_dualmac`, derives base-4 `Poseidon2-GL-w12` Jive chains in `S0..S24` (zero `root_secret` SRAM spill), and rolls `gen+1`.],
-  [`0x30`], [`CMD_LOAD_CODE`], [`READY`], [Streams `1..128` words with `isram_auth_valid_q = 0` and verifies `flags=1` (`20+4n` B: `H_ZK_PIN` + 16B `cap_token`) or `flags=2` (`300+4n` B: inline 296B Owner `WOTS+C` rolling `gen+1`).],
-  [`0x31`], [`CMD_EXEC`], [`READY` (`f=0`) / Any (`f=1`)], [Executes authenticated `I-SRAM` applet (`flags=0`, `0x1000`, `applet_mode=1`) or resident `I-ROM` service (`flags=1`) under exact-edge clock watchdog `arg` (`0` = `65,535`).],
+  [`0x20`], [`CMD_CTH_SIGN`], [`READY`], [Verifies 16B `cap_token` (`120B` payload), runs constant-time `GF(2^128)` `cth_dualmac`, derives base-4 `Poseidon2-GL-w12` Jive chains strictly in `S0..S24` (zero CSP SRAM spill), and rolls `gen+1`.],
+  [`0x30`], [`CMD_LOAD_CODE`], [`BLANK / PROV / READY`], [Two-Ring `W^X` `<= 64`-word Ring-3 loader: `flags=0` (`4+4n` B) open in `BLANK`; `flags=2` (`300+4n` B) Owner `WOTS+C` signed over `cSHAKE256("ASS2.CODE", words)` when `!rom_lock`, rolling `gen+1`, injecting `cSHAKE256("ASS2.APPLET", K_root || "ASS2.APPLET" || code_hash)` into `R1..R2` and scrubbing `R3..R15`/`S0..S24`; `E_LOCKED = 14` if `rom_lock`.],
+  [`0x31`], [`CMD_EXEC`], [`READY` / Any (`f[0]=1`)], [Executes installed Ring-3 applet (`f[0]=0`) or resident Ring-0 `I-ROM` service (`f[0]=1`: `IDENT`, `BIST` in `BLANK`, `LIFECYCLE`, `CTH_SIGN`) under exact-edge clock watchdog `arg` (`0` = `65,535`).],
 )
 
-#text(size: 7.35pt)[*Load and execute.* `CMD_LOAD_CODE` (`0x30`) accepts `u32 word_count || u32 words[n]` (`n ∈ 1..128`) followed either by a 16-byte Owner capability token (`flags = 1`, `20 + 4n` bytes) bound to the `GF(2^128)` `H_ZK_PIN` polynomial digest and leased `cap_commit`, or by an inline 296-byte `WOTS+C` proof (`flags = 2`, `300 + 4n` bytes) rolling `wots_root` and `gen + 1`. CPU stores to `I-SRAM` always fault. `CMD_EXEC` (`0x31`) accepts up to 128 bytes in `RX_MBOX`; registered 1-bit lookahead `budget_last_q` halts execution on the *exact* requested physical core-clock edge (`arg`, `0` = `65,535`). A successful response is 160 bytes: `128B TX_MBOX` + four LE64 words (`A0`, `ECAUSE`, `INSTRET`, `CYCLES`).]
+#text(size: 7.3pt)[*Execute and Two-Ring W^X.* `CMD_LOAD_CODE` (`0x30`) enforces three hardware-backed lifecycle policies (`BLANK` open devkit, `PROVISIONED/READY` `!rom_lock` `WOTS+C` signed code with domain-separated `applet_key` in `R1..R2`, and `rom_lock` / `SafeRecovery` `E_LOCKED = 14`). `CMD_EXEC` (`0x31`) accepts up to 128 bytes in `RX_MBOX`; registered 1-bit lookahead `budget_last_q` halts execution on the *exact* requested physical core-clock edge (`arg`, `0` = `65,535`). A successful response is 160 bytes: `128B TX_MBOX` + four LE64 words (`A0`, `ECAUSE`, `INSTRET`, `CYCLES`).]
 
 #text(size: 7.2pt)[*Wire errors.* 1 `E_MAGIC` · 2 `E_OPCODE` · 3 `E_LEN` · 4 `E_NOKEY` · 5 `E_MAC` · 6 `E_ANCHOR_EMPTY` · 7 `E_ROLLBACK` · 8 `E_REUSE` · 9 `E_ANCHOR_IO` · 10 `E_KEYSET` · 11 `E_TRNG` · 12 `E_PUF` · 13 `E_CAP` · 14 `E_LOCKED` · 15 `E_BUDGET` · 16 `E_TRAP`]
 
@@ -889,18 +889,18 @@ assembled by the reference assembler and are checked by `check_examples.py`.
     #dtable(
       (1.6fr, 0.5fr, 0.9fr),
       size: 6.8pt, inset: 2.5pt,
-      table.header(..th([Architectural cost], [Cycles], [Cost × 40 ns¹])),
-      [word unit, branch, jump, CSR, lane move], [1], [40 ns],
-      [memory and lane load or store], [2], [80 ns],
-      [`MUL64`, `MULHU64`, `GL.MAC`, `GF128.MUL`], [4], [160 ns],
-      [`FP5.ADD`, `FP5.SUB` · `GL.SBOX7`], [5 · 12], [200 ns · 480 ns],
-      [`KECCAK.F1600 12` · `24`], [12 · 24], [0.48 µs · 0.96 µs],
-      [`FP5.MUL` · `POSEIDON2.GL12` · `GL24`], [104 · 120 · 216], [4.16 · 4.8 · 8.64 µs],
+      table.header(..th([Architectural cost], [Cycles], [Cost × 50 ns¹])),
+      [word unit, branch, jump, CSR, lane move], [1], [50 ns],
+      [memory and lane load or store], [2], [100 ns],
+      [`MUL64`, `MULHU64`, `GL.MAC`, `GF128.MUL`], [4], [200 ns],
+      [`FP5.ADD`, `FP5.SUB` · `GL.SBOX7`], [5 · 12], [250 ns · 600 ns],
+      [`KECCAK.F1600 12` · `24`], [12 · 24], [0.60 µs · 1.20 µs],
+      [`FP5.MUL` · `POSEIDON2.GL12` · `GL24`], [104 · 120 · 216], [5.20 · 6.00 · 10.80 µs],
     )
   ],
 )
 
-¹ Architectural cost at 40 ns per cycle. Fetch and memory waits add elapsed time.
+¹ Architectural cost at 50 ns per cycle (20 MHz 9-corner SPEF signoff). Fetch and memory waits add elapsed time.
 
 #pagebreak()
 
@@ -1069,7 +1069,7 @@ Listing PCs are offsets from the routine base. All memory displacements in assem
 
 = Programming guide · 50-byte Canopy node and SPI host
 
-#text(size: 8pt)[`A0/A1` point to padded current/sibling digests (50 bytes + six zero bytes each). `A2` is the possibly secret direction. `A3` holds the public 32-bit heap parent index, `A4` points to the 25-lane tree midstate, and `A5` points to 56 writable bytes. `SP` has one disjoint stack word below it. The routine absorbs tag 0, LE32 parent index, then 50 bytes per child, with suffix `0x07` at byte 105 and final bit at byte 135. *130 instructions, 190 cycles; 520 bytes of resident code, eight bytes larger than I-SRAM*. Read down the left column, then the right.]
+#text(size: 8pt)[`A0/A1` point to padded current/sibling digests (50 bytes + six zero bytes each). `A2` is the possibly secret direction. `A3` holds the public 32-bit heap parent index, `A4` points to the 25-lane tree midstate, and `A5` points to 56 writable bytes. `SP` has one disjoint stack word below it. The routine absorbs tag 0, LE32 parent index, then 50 bytes per child, with suffix `0x07` at byte 105 and final bit at byte 135. *130 instructions, 190 cycles; 520 bytes in immutable resident `I-ROM`*. Read down the left column, then the right.]
 #show raw.where(block: true): set text(size: listtext)
 #grid(columns: (1fr, 1fr), gutter: 12pt, [
   // @listing canopy50_node print 0-64
@@ -1214,7 +1214,7 @@ Listing PCs are offsets from the routine base. All memory displacements in assem
 ])
 == Reading a QSAG-Wire response
 #text(size: 7.6pt)[After `HOST_IRQ` rises, the driver keeps `HOST_CS_N` low across the header and padded body. The prefix supplies the single-bit read command and eight dummy clocks. The full Rust example and error paths appear in the programming guide.]
- // @rust 80-89
+ // @rust 86-95
 ```rust
     let mut rx = bus.begin_read(&[0x02, 0x00])?; // read prefix and eight dummy clocks
     let mut hdr = [0; 8];
