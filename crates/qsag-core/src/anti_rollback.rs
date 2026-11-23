@@ -312,26 +312,8 @@ fn trim_ascii_whitespace(mut s: &[u8]) -> &[u8] {
     s
 }
 
-fn read_bounded_sysfs_id(path: &Path) -> Result<Option<[u8; 16]>, AntiRollbackError> {
-    let meta = match fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(AntiRollbackError::Io(e.kind())),
-    };
-    if meta.is_dir() || meta.file_type().is_symlink() {
-        return Ok(None);
-    }
-    let mut f = match OpenOptions::new().read(true).open(path) {
-        Ok(f) => f,
-        Err(e)
-            if e.kind() == io::ErrorKind::NotFound
-                || e.kind() == io::ErrorKind::PermissionDenied =>
-        {
-            return Ok(None);
-        }
-        Err(e) => return Err(AntiRollbackError::Io(e.kind())),
-    };
-    let mut buf = [0u8; 64];
+fn read_bounded_id128_reader<R: Read>(mut f: R) -> Result<Option<[u8; 16]>, AntiRollbackError> {
+    let mut buf = [0u8; 65];
     let mut total = 0usize;
     while total < buf.len() {
         match f.read(&mut buf[total..]) {
@@ -344,7 +326,39 @@ fn read_bounded_sysfs_id(path: &Path) -> Result<Option<[u8; 16]>, AntiRollbackEr
     if total == 0 {
         return Ok(None);
     }
+    if total > 64 {
+        return Err(AntiRollbackError::ProtocolFramingError(
+            "oversized 128-bit generation identifier",
+        ));
+    }
     parse_id128_bytes(&buf[..total]).map(Some)
+}
+
+fn read_bounded_sysfs_id(path: &Path) -> Result<Option<[u8; 16]>, AntiRollbackError> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound
+                || e.kind() == io::ErrorKind::PermissionDenied =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(AntiRollbackError::Io(e.kind())),
+    };
+    if meta.is_dir() || meta.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let f = match OpenOptions::new().read(true).open(path) {
+        Ok(f) => f,
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound
+                || e.kind() == io::ErrorKind::PermissionDenied =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(AntiRollbackError::Io(e.kind())),
+    };
+    read_bounded_id128_reader(f)
 }
 
 impl VmGenSource for LinuxSysfsVmGenSource {
@@ -1947,7 +1961,7 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
                 let pend_hw = u64::from_le_bytes(raw[72..80].try_into().unwrap());
                 let pend_gen = u64::from_le_bytes(raw[80..88].try_into().unwrap());
                 let pend_tag: [u8; 32] = raw[88..120].try_into().unwrap();
-                if pend_hw != committed_hw.saturating_add(1) || pend_gen <= committed_gen {
+                if committed_hw.checked_add(1) != Some(pend_hw) || pend_gen <= committed_gen {
                     return Err(AntiRollbackError::AuthenticationFailed);
                 }
                 Some((
@@ -2068,22 +2082,37 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
                     return Ok(());
                 }
 
-                let next_hw =
-                    active_hw
-                        .checked_add(1)
-                        .ok_or(AntiRollbackError::ProtocolFramingError(
+                let next_hw = if let Some((pend_hw, pend_cp)) = st.pending
+                    && active_hw == st.committed_hw
+                {
+                    // Phase 1 already staged an unfinalized pending intent before crashing prior to
+                    // the TPM2 NV increment: forbid equivocating to any different checkpoint.
+                    if checkpoint.generation != pend_cp.generation
+                        || !ct_eq_bytes32(&checkpoint.tag, &pend_cp.tag)
+                    {
+                        return Err(AntiRollbackError::RollbackOrForkDetected(
+                            "divergent checkpoint against unfinalized pending TPM2 intent",
+                        ));
+                    }
+                    pend_hw
+                } else {
+                    let next_hw = active_hw.checked_add(1).ok_or(
+                        AntiRollbackError::ProtocolFramingError(
                             "TPM2 64-bit NV counter exhausted",
-                        ))?;
+                        ),
+                    )?;
 
-                // Phase 1: Stage pending `(next_hw, checkpoint)` to durable disk BEFORE
-                // incrementing the irreversible TPM2 NV counter.
-                let staged = TpmSealedState {
-                    committed_hw: active_hw,
-                    committed_cp: active_cp,
-                    pending: Some((next_hw, checkpoint)),
-                    rebind: st.rebind,
+                    // Phase 1: Stage pending `(next_hw, checkpoint)` to durable disk BEFORE
+                    // incrementing the irreversible TPM2 NV counter.
+                    let staged = TpmSealedState {
+                        committed_hw: active_hw,
+                        committed_cp: active_cp,
+                        pending: Some((next_hw, checkpoint)),
+                        rebind: st.rebind,
+                    };
+                    self.record.replace(&self.encode_state(&staged))?;
+                    next_hw
                 };
-                self.record.replace(&self.encode_state(&staged))?;
 
                 // Phase 2: Increment hardware TPM2 NV counter and read-back verify `next_hw`.
                 self.increment_hardware_counter()?;
@@ -2687,8 +2716,10 @@ pub mod tpm2_model {
                     index.attributes |= TPMA_NV_WRITTEN;
                     index.count = max_count;
                 }
-                index.count = index.count.checked_add(1).expect("64-bit counter");
-                let count = index.count;
+                let Some(count) = index.count.checked_add(1) else {
+                    return error_response(TPM_RC_NV_RANGE);
+                };
+                index.count = count;
                 state.max_count = state.max_count.max(count);
                 return session_response(&[]);
             }
@@ -3791,6 +3822,96 @@ mod tests {
         );
         assert_eq!(parse_id128_bytes(&parsed).unwrap(), parsed);
         assert!(parse_id128_bytes(b"short").is_err());
+    }
+
+    #[test]
+    fn tooth_sysfs_id_reader_rejects_oversized_65_byte_stream_without_truncation() {
+        // `#tooth`: `read_bounded_sysfs_id` previously read into `[0u8; 64]` and stopped
+        // without checking EOF, silently accepting a 65+-byte stream whose first 64 bytes
+        // happened to be a valid UUID + whitespace.
+        let mut padded_64 = b"f47ac10b-58cc-4372-a567-0e02b2c3d479".to_vec();
+        padded_64.resize(64, b' ');
+        assert!(read_bounded_id128_reader(io::Cursor::new(&padded_64)).unwrap().is_some());
+
+        let mut oversized_65 = padded_64;
+        oversized_65.push(b'X');
+        assert_eq!(
+            read_bounded_id128_reader(io::Cursor::new(&oversized_65)),
+            Err(AntiRollbackError::ProtocolFramingError(
+                "oversized 128-bit generation identifier"
+            ))
+        );
+    }
+
+    #[test]
+    fn tooth_tpm2_pending_intent_prevents_pre_increment_crash_equivocation_and_u64_max_wrap() {
+        // `#tooth`:
+        // 1. After Phase 1 stages `pending = Some((next_hw, cp_a))` to disk (before Phase 2
+        //    increments the TPM2 NV counter), attempting to advance to a divergent `cp_b != cp_a`
+        //    must fail with `RollbackOrForkDetected`, whereas retrying `cp_a` must recover cleanly.
+        // 2. `decode_state` must reject `committed_hw == u64::MAX` with `pend_hw == u64::MAX`
+        //    (previously accepted due to `saturating_add(1)`).
+        let tmp = TempDir::new("tpm2-pending-tooth");
+        let seal = tmp.0.join("tpm_pending_seal");
+        let nv_index = 0x0150_00DF;
+        let tpm = ModelTpm2::with_history(50);
+        tpm.define_counter(nv_index, PW);
+
+        let anchor = open_anchor(&tpm, &seal, nv_index).unwrap();
+        let cp1 = checkpoint(1);
+        anchor.advance_checked(cp1).unwrap();
+        assert_eq!(tpm.count(nv_index), Some(51));
+
+        let cp2_honest = LedgerCheckpoint {
+            generation: 2,
+            tag: [0x22; 32],
+        };
+        let cp2_equivocated = LedgerCheckpoint {
+            generation: 2,
+            tag: [0xEE; 32],
+        };
+        let cp3_skipped = checkpoint(3);
+
+        // Simulate crash immediately after Phase 1 persisted `pending = Some((52, cp2_honest))`
+        // while hardware TPM2 NV counter is still at `51`.
+        let staged = TpmSealedState {
+            committed_hw: 51,
+            committed_cp: cp1,
+            pending: Some((52, cp2_honest)),
+            rebind: None,
+        };
+        anchor
+            .record
+            .replace(&anchor.encode_state(&staged))
+            .unwrap();
+
+        assert!(matches!(
+            anchor.advance_checked(cp2_equivocated),
+            Err(AntiRollbackError::RollbackOrForkDetected(_))
+        ));
+        assert!(matches!(
+            anchor.advance_checked(cp3_skipped),
+            Err(AntiRollbackError::RollbackOrForkDetected(_))
+        ));
+        assert_eq!(tpm.count(nv_index), Some(51));
+
+        // Retrying the exact staged `cp2_honest` completes Phase 2 & Phase 3 cleanly.
+        anchor.advance_checked(cp2_honest).unwrap();
+        assert_eq!(tpm.count(nv_index), Some(52));
+        assert_eq!(anchor.load_checked().unwrap(), Some(cp2_honest));
+
+        // Verify `decode_state` rejects saturated `committed_hw = u64::MAX, pend_hw = u64::MAX`.
+        let saturated = TpmSealedState {
+            committed_hw: u64::MAX,
+            committed_cp: cp1,
+            pending: Some((u64::MAX, cp2_honest)),
+            rebind: None,
+        };
+        let encoded_sat = anchor.encode_state(&saturated);
+        assert!(matches!(
+            anchor.decode_state(&encoded_sat),
+            Err(AntiRollbackError::AuthenticationFailed)
+        ));
     }
 }
 
