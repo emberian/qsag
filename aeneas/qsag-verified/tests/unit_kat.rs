@@ -2,13 +2,10 @@
 //! (`#![no_std]`, `#![forbid(unsafe_code)]`, 0 external deps).
 
 use qsag_verified::{
-    BdozCommittedBatchOpening2Lane, BdozVerifierSession2Lane, BdozWireOpening2Lane, EpochLatch,
-    EpochLatchError, EpochRequest, EpochSignRequest, Fips205Adrs, Fips205AdrsType,
+    EpochLatch, EpochLatchError, EpochRequest, EpochSignRequest, Fips205Adrs, Fips205AdrsType,
     GOLDILOCKS_PRIME, Gf16, Gf256, Goldilocks, GoldilocksExt2, LastBoundEpoch, RssShare64,
-    RssZeroSeeds64, Shake256Sponge, Tower128, Tower256, bdoz_commit_masked_tag,
-    bdoz_fold_masked_value, cshake256_32, ct_eq_bytes32, decode_fips205_adrs,
-    dkg_beaver_frobenius_eval_gf256,
-    dkg_beaver_frobenius_share_shamir_gf256, dkg_verify_key_shares_boolean_bdoz_gf256,
+    RssZeroSeeds64, Shake256Sponge, cshake256_32, ct_eq_bytes32, decode_fips205_adrs,
+    dkg_beaver_frobenius_eval_gf256, dkg_beaver_frobenius_share_shamir_gf256,
     dkg_verify_shamir_2of3_key_bit_gf256, embed_gf256_to_tower128, encode_fips205_adrs,
     epoch_latch_advance, fips205_f, fips205_wots_chain, fips205_wots_checksum, gf16_add, gf16_mul,
     gf256_add, gf256_frobenius_residual, gf256_inv, gf256_inv_or_zero, gf256_is_boolean_frobenius,
@@ -18,48 +15,9 @@ use qsag_verified::{
     rss_keccak_chi_lane, rss_not, rss_reconstruct, rss_xor, shake256_32,
     shamir_degree_reduce_2of3_gf256, shamir_eval_poly_gf256, shamir_eval_poly_goldilocks,
     shamir_lagrange_at_zero_gf256, shamir_lagrange_at_zero_goldilocks,
-    shamir_validate_points_gf256, tower128_add, tower128_mul, tower256_add, tower256_mul,
-    tsw_canonical_target_sum, tsw_check_target_sum, verify_mac_2lane, verify_mac_2lane_with_burn,
+    shamir_validate_points_gf256, tower128_mul, tsw_canonical_target_sum, tsw_check_target_sum,
     wots_checksum_base16, wots_extract_base16_digits,
 };
-
-fn make_honest_bdoz_batch(
-    alpha: [Tower128; 2],
-    session_id: [u8; 32],
-    round_id: u64,
-    mask_value: Tower128,
-    mask_key_lanes: [Tower128; 2],
-    open_nonce: [u8; 32],
-    openings: &[BdozWireOpening2Lane],
-) -> BdozCommittedBatchOpening2Lane {
-    let masked_sum = bdoz_fold_masked_value(mask_value, openings);
-    let mut folded_key0 = mask_key_lanes[0];
-    let mut folded_key1 = mask_key_lanes[1];
-    for w in openings {
-        folded_key0 = tower128_add(folded_key0, tower128_mul(w.chal_weight, w.key_lanes[0]));
-        folded_key1 = tower128_add(folded_key1, tower128_mul(w.chal_weight, w.key_lanes[1]));
-    }
-    let peer_masked_mac_lanes = [
-        tower128_add(folded_key0, tower128_mul(alpha[0], masked_sum)),
-        tower128_add(folded_key1, tower128_mul(alpha[1], masked_sum)),
-    ];
-    let tag_commitment = bdoz_commit_masked_tag(
-        &session_id,
-        round_id,
-        masked_sum,
-        peer_masked_mac_lanes,
-        &open_nonce,
-    );
-    BdozCommittedBatchOpening2Lane {
-        session_id,
-        round_id,
-        mask_value,
-        mask_key_lanes,
-        peer_masked_mac_lanes,
-        open_nonce,
-        tag_commitment,
-    }
-}
 
 #[test]
 fn test_cshake256_nist_sp800_185_kat() {
@@ -222,7 +180,7 @@ fn test_goldilocks_branchless_and_ext2_field_laws() {
 }
 
 #[test]
-fn test_wiedemann_tower_frobenius_and_committed_bdoz_mac() {
+fn test_wiedemann_tower_frobenius() {
     for x in 1u8..16 {
         let mut acc = Gf16(1);
         for _ in 0..15 {
@@ -252,94 +210,6 @@ fn test_wiedemann_tower_frobenius_and_committed_bdoz_mac() {
         embed_gf256_to_tower128(gf256_mul(a8, b8)),
         tower128_mul(embed_gf256_to_tower128(a8), embed_gf256_to_tower128(b8))
     );
-
-    let t0 = Tower256 {
-        lo: 0x0123_4567_89AB_CDEF_FEDC_BA98_7654_3210,
-        hi: 0xCAFEF00D_DEADBEEF_11223344_55667788,
-    };
-    let t1 = Tower256 {
-        lo: 0xAAAA_5555_FFFF_0000_1234_5678_9ABC_DEF0,
-        hi: 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100,
-    };
-    let t2 = Tower256 {
-        lo: 7,
-        hi: 0x8000_0000_0000_0000_0000_0000_0000_0001,
-    };
-    assert_eq!(
-        tower256_mul(t0, tower256_add(t1, t2)),
-        tower256_add(tower256_mul(t0, t1), tower256_mul(t0, t2))
-    );
-
-    // Committed & random-masked 2-lane BDOZ MAC verification + single-abort key burn
-    let alpha = [
-        Tower128(0xDEAD_BEEF_CAFE_BABE_0123_4567_89AB_CDEF),
-        Tower128(0x1357_9BDF_2468_ACE0_FEDC_BA98_7654_3210),
-    ];
-    let w0 = BdozWireOpening2Lane {
-        opened_value: Gf256(0x7B),
-        chal_weight: Tower128(0x9988_7766_5544_3322_1100_AA55_CC33_F00D),
-        key_lanes: [
-            Tower128(0x1111_2222_3333_4444),
-            Tower128(0x9999_AAAA_BBBB_CCCC),
-        ],
-    };
-    let w1 = BdozWireOpening2Lane {
-        opened_value: Gf256(0xE3),
-        chal_weight: Tower128(0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10),
-        key_lanes: [
-            Tower128(0x5555_6666_7777_8888),
-            Tower128(0xDDDD_EEEE_FFFF_1234),
-        ],
-    };
-    let wires = [w0, w1];
-    let batch = make_honest_bdoz_batch(
-        alpha,
-        [0xAAu8; 32],
-        7,
-        Tower128(0xCAFE_BABE_1234_5678_9ABC_DEF0_4242_1337),
-        [Tower128(0xA1B2_C3D4), Tower128(0xE5F6_0718)],
-        [0x55u8; 32],
-        &wires,
-    );
-
-    // Empty slice MUST reject!
-    assert!(!verify_mac_2lane(alpha, &batch, &[]));
-    // Honest committed + masked opening succeeds
-    assert!(verify_mac_2lane(alpha, &batch, &wires));
-
-    // Tampered wire value MUST reject
-    let mut bad_wires = wires;
-    bad_wires[0].opened_value = Gf256(0x7A);
-    assert!(!verify_mac_2lane(alpha, &batch, &bad_wires));
-
-    // Zero challenge weight MUST reject
-    let mut zero_chal_wires = wires;
-    zero_chal_wires[1].chal_weight = Tower128(0);
-    let zero_chal_batch = make_honest_bdoz_batch(
-        alpha,
-        [0xAAu8; 32],
-        7,
-        Tower128(0xCAFE),
-        [Tower128(1), Tower128(2)],
-        [0x55u8; 32],
-        &zero_chal_wires,
-    );
-    assert!(!verify_mac_2lane(alpha, &zero_chal_batch, &zero_chal_wires));
-
-    // Tampered pre-open commitment MUST reject even if algebraic MAC holds!
-    let mut bad_commit_batch = batch;
-    bad_commit_batch.tag_commitment[0] ^= 0x01;
-    assert!(!verify_mac_2lane(alpha, &bad_commit_batch, &wires));
-
-    // Single-abort key burn permanently zeroes alpha_lanes and rejects subsequent calls!
-    let sess0 = BdozVerifierSession2Lane::new(alpha);
-    let (sess1, ok1) = verify_mac_2lane_with_burn(sess0, &batch, &wires);
-    assert!(ok1 && !sess1.is_burned());
-    let (sess2, ok2) = verify_mac_2lane_with_burn(sess1, &bad_commit_batch, &wires);
-    assert!(!ok2 && sess2.is_burned());
-    // Even a valid batch MUST be rejected after burn!
-    let (sess3, ok3) = verify_mac_2lane_with_burn(sess2, &batch, &wires);
-    assert!(!ok3 && sess3.is_burned());
 }
 
 #[test]
@@ -439,7 +309,7 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
         [Gf256(1), Gf256(1), Gf256(2)]
     ));
 
-    // Beaver Shamir share linearity + BDOZ DKG batch Booleanity check
+    // Beaver Shamir share linearity
     let a_poly = [Gf256(0x3A), Gf256(0x11)];
     let b_poly = [Gf256(0x9E), Gf256(0x22)];
     let c_val = gf256_mul(a_poly[0], b_poly[0]);
@@ -465,48 +335,6 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     );
     let z_rec = shamir_lagrange_at_zero_gf256(&pts3[..2], &[z_sh0, z_sh1]).unwrap();
     assert_eq!(z_rec, Gf256(0));
-
-    let alpha = [Tower128(0x1234_5678), Tower128(0x9ABC_DEF0)];
-    let ok_res_wire = [BdozWireOpening2Lane {
-        opened_value: z_rec,
-        chal_weight: Tower128(7),
-        key_lanes: [Tower128(0x11), Tower128(0x22)],
-    }];
-    let ok_batch = make_honest_bdoz_batch(
-        alpha,
-        [0xCCu8; 32],
-        1,
-        Tower128(0x9999),
-        [Tower128(3), Tower128(4)],
-        [0x77u8; 32],
-        &ok_res_wire,
-    );
-    assert!(dkg_verify_key_shares_boolean_bdoz_gf256(
-        alpha,
-        &ok_batch,
-        &ok_res_wire
-    ));
-
-    // Poisoned non-Boolean share (s = 0x02 -> s^2 ^ s != 0) MUST be rejected even with valid BDOZ MAC!
-    let bad_res_wire = [BdozWireOpening2Lane {
-        opened_value: gf256_frobenius_residual(Gf256(0x02)),
-        chal_weight: Tower128(7),
-        key_lanes: [Tower128(0x11), Tower128(0x22)],
-    }];
-    let bad_batch = make_honest_bdoz_batch(
-        alpha,
-        [0xCCu8; 32],
-        2,
-        Tower128(0x8888),
-        [Tower128(5), Tower128(6)],
-        [0x66u8; 32],
-        &bad_res_wire,
-    );
-    assert!(!dkg_verify_key_shares_boolean_bdoz_gf256(
-        alpha,
-        &bad_batch,
-        &bad_res_wire
-    ));
 
     // Shamir Goldilocks & 2-of-3 RSS gates
     let poly_gf = [Gf256(0x9C), Gf256(0x31), Gf256(0xF4)];
@@ -888,84 +716,13 @@ fn test_rss_cut_session_anti_dfa_phase_barrier() {
 }
 
 #[test]
-fn test_fts_spn_deferred_mac_and_single_use_wots_cs_guard() {
-    use qsag_verified::{
-        FTS_SPN_REQUIRED_ROUNDS, FtsDeferredMacSession, FtsEpochGuard, FtsGuardError,
-        wots_cs_verify_68_array, wots_cs_verify_68_w5_sum136,
-    };
-
-    let key_id = [0x11u8; 32];
-    let msg_a = [0x22u8; 32];
-    let msg_b = [0x33u8; 32];
-
-    // 1. 1-Use WOTS+CS Epoch Guard (P0-04): 0 -> 1 succeeds once, 2nd use rejected & poisoned!
-    let g0 = FtsEpochGuard::new_unused(key_id, 3, 16);
-    assert_eq!(g0.used(), 0);
-    assert!(!g0.poisoned());
-    let (g1, p1) = g0.consume_epoch_once(key_id, 3, msg_a);
-    let permit = p1.expect("first epoch burn must succeed");
-    assert_eq!(permit.into_binding().1, 3);
-    assert_eq!(g1.used(), 1);
-    let (g2, p2) = g1.consume_epoch_once(key_id, 3, msg_b);
-    assert_eq!(p2.err(), Some(FtsGuardError::EpochAlreadyUsed));
-    assert!(g2.poisoned());
-    let (_g3, p3) = g2.consume_epoch_once(key_id, 3, msg_a);
-    assert_eq!(p3.err(), Some(FtsGuardError::GuardPoisoned));
-
-    // 2. 68-digit w = 5 constant-sum S = 136 verifier
-    let balanced = [2u8; 68]; // 68 * 2 = 136, every digit < 5
-    assert!(wots_cs_verify_68_array(&balanced));
-    assert!(!wots_cs_verify_68_w5_sum136(&balanced[..67]));
-    let mut wrong_sum = balanced;
-    wrong_sum[0] = 3;
-    assert!(!wots_cs_verify_68_array(&wrong_sum));
-    let mut out_of_range = balanced;
-    out_of_range[0] = 5;
-    out_of_range[1] = 0;
-    out_of_range[2] = 1; // 5 + 0 + 1 + 65*2 = 136, but out_of_range[0] == 5 >= w!
-    assert!(!wots_cs_verify_68_array(&out_of_range));
-
-    // 3. 48-Round SPN Deferred-MAC Session (P0-03)
-    let sid = [0x55u8; 32];
-    let out_lo = 0xDEAD_BEEF_CAFE_BABE_1122_3344_5566_7788u128;
-    let out_hi = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10u128;
-
-    // Attempting release BEFORE intermediate MAC check MUST quarantine and fail!
-    let unv0 =
-        FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
-    let (unv1, rel_unv) = unv0.release_spn_output(sid, &balanced);
-    assert_eq!(rel_unv, Err(FtsGuardError::IntermediateMacNotVerified));
-    assert!(unv1.is_quarantined());
-
-    // Non-zero intermediate MAC residual MUST quarantine and block release!
-    let bad0 =
-        FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
-    let (bad1, mac_err) = bad0.verify_intermediate_mac(sid, 0, 1);
-    assert_eq!(mac_err, Err(FtsGuardError::IntermediateMacQuarantined));
-    assert!(bad1.is_quarantined());
-    let (_bad2, rel_after_quarantine) = bad1.release_spn_output(sid, &balanced);
-    assert_eq!(rel_after_quarantine, Err(FtsGuardError::SessionQuarantined));
-
-    // Honest 48-round + zero MAC residual + valid 68-digit sum=136 releases once!
-    let ok0 =
-        FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
-    let (ok1, mac_ok) = ok0.verify_intermediate_mac(sid, 0, 0);
-    assert_eq!(mac_ok, Ok(()));
-    let (ok2, released) = ok1.release_spn_output(sid, &balanced);
-    assert_eq!(released, Ok((out_lo, out_hi)));
-    let (ok3, second_rel) = ok2.release_spn_output(sid, &balanced);
-    assert_eq!(second_rel, Err(FtsGuardError::OutputAlreadyReleased));
-    assert!(ok3.is_quarantined());
-}
-
-#[test]
 fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
     use qsag_verified::{
         CanonicalIntent128, HybridRoleTag, IntentAddressVersion, IntentIdentityKind,
-        IntentSuiteTag, PolicyAddrError, SUITE_HYBRID_ED25519_MLDSA65, SUITE_HYBRID_SECP256K1_MLDSA44,
-        StatefulVelocityGuard,
-        VelocitySpendRequest, check_hybrid_domain_framing, decode_intent_128,
-        derive_hybrid_transcript_digest, encode_intent_128,
+        IntentSuiteTag, PolicyAddrError, SUITE_HYBRID_ED25519_MLDSA65,
+        SUITE_HYBRID_SECP256K1_MLDSA44, StatefulVelocityGuard, VelocitySpendRequest,
+        check_hybrid_domain_framing, decode_intent_128, derive_hybrid_transcript_digest,
+        encode_intent_128,
     };
 
     let pol_pin = [0xAAu8; 32];
@@ -1104,11 +861,26 @@ fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
     // mandates; the encoder is total, so every other pair encodes to a refused frame.
     let mut admitted = 0;
     for (suite, expected_kind) in [
-        (IntentSuiteTag::MlDsa65, IntentIdentityKind::SingleOrThreshold),
-        (IntentSuiteTag::SlhDsa128f, IntentIdentityKind::SingleOrThreshold),
-        (IntentSuiteTag::JortsPoseidon2, IntentIdentityKind::SingleOrThreshold),
-        (IntentSuiteTag::HybridSecp256k1MlDsa44, IntentIdentityKind::HybridConjunctive),
-        (IntentSuiteTag::HybridEd25519MlDsa65, IntentIdentityKind::HybridConjunctive),
+        (
+            IntentSuiteTag::MlDsa65,
+            IntentIdentityKind::SingleOrThreshold,
+        ),
+        (
+            IntentSuiteTag::SlhDsa128f,
+            IntentIdentityKind::SingleOrThreshold,
+        ),
+        (
+            IntentSuiteTag::JortsPoseidon2,
+            IntentIdentityKind::SingleOrThreshold,
+        ),
+        (
+            IntentSuiteTag::HybridSecp256k1MlDsa44,
+            IntentIdentityKind::HybridConjunctive,
+        ),
+        (
+            IntentSuiteTag::HybridEd25519MlDsa65,
+            IntentIdentityKind::HybridConjunctive,
+        ),
     ] {
         assert_eq!(suite.expected_identity_kind(), expected_kind);
         for kind in [
@@ -1116,7 +888,11 @@ fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
             IntentIdentityKind::HybridConjunctive,
             IntentIdentityKind::ScriptPredicate,
         ] {
-            let paired = CanonicalIntent128 { suite_tag: suite, identity_kind: kind, ..intent };
+            let paired = CanonicalIntent128 {
+                suite_tag: suite,
+                identity_kind: kind,
+                ..intent
+            };
             let frame = encode_intent_128(&paired);
             assert_eq!(suite.admits_identity_kind(kind), kind == expected_kind);
             match decode_intent_128(&frame) {
@@ -1333,10 +1109,10 @@ fn test_mldsa_release_gate_toprf_majority_and_hd_zero_test() {
 #[test]
 fn test_pants_and_quorum_guards_kat_and_adversarial() {
     use qsag_verified::{
-        PantsGuardError, RssLatchStepInput, RssLatchStepOutput,
-        VerifiedRssPoisonLatch, VerifiedWaistbandRootGuard, VerifiedWotsC256Guard, WOTSC256_BASE_W,
-        WOTSC256_CHAINS, WOTSC256_TARGET_SUM, WaistbandDerivationRequest,
-        verified_wotsc256_extract_digits, verified_wotsc256_verify_sum, wotsc256_extract_digit,
+        PantsGuardError, RssLatchStepInput, RssLatchStepOutput, VerifiedRssPoisonLatch,
+        VerifiedWaistbandRootGuard, VerifiedWotsC256Guard, WOTSC256_BASE_W, WOTSC256_CHAINS,
+        WOTSC256_TARGET_SUM, WaistbandDerivationRequest, verified_wotsc256_extract_digits,
+        verified_wotsc256_verify_sum, wotsc256_extract_digit,
     };
 
     // =========================================================================
@@ -1419,7 +1195,10 @@ fn test_pants_and_quorum_guards_kat_and_adversarial() {
     let (h3, hopen) = h2.authorize_open();
     assert!(hopen.is_ok());
     let (_h4, hstep_open) = h3.step(RssLatchStepInput::AuthorizeOpen);
-    assert!(matches!(hstep_open, Ok(RssLatchStepOutput::OpenAuthorized(_))));
+    assert!(matches!(
+        hstep_open,
+        Ok(RssLatchStepOutput::OpenAuthorized(_))
+    ));
 
     // =========================================================================
     // 4. VerifiedWaistbandRootGuard: pk/params/child_root + first-signed lock

@@ -29,7 +29,6 @@ pub use belt_latch_kernel::{
 };
 pub mod cred_and_hd_guards;
 pub mod fips205;
-pub mod fts_spn_guard;
 pub mod goldilocks;
 pub mod keccak;
 pub mod opening_guard;
@@ -49,11 +48,6 @@ pub use fips205::{
     Fips205Adrs, Fips205AdrsType, decode_fips205_adrs, encode_fips205_adrs, fips205_f,
     fips205_wots_chain, fips205_wots_checksum, tsw_canonical_target_sum, tsw_check_target_sum,
     wots_checksum_base16, wots_extract_base16_digits,
-};
-pub use fts_spn_guard::{
-    FTS_SPN_REQUIRED_ROUNDS, FtsDeferredMacSession, FtsEpochGuard, FtsEpochPermit, FtsGuardError,
-    WOTS_CS_BASE_W, WOTS_CS_CHAINS, WOTS_CS_TARGET_SUM, wots_cs_verify_68_array,
-    wots_cs_verify_68_w5_sum136,
 };
 pub use goldilocks::{
     CanonicalLiftError, GOLDILOCKS_EPSILON, GOLDILOCKS_NON_RESIDUE, GOLDILOCKS_PRIME, Goldilocks,
@@ -87,19 +81,16 @@ pub use rss_cut_session::{
 };
 pub use threshold::{
     BoundEpochRecord, EpochAuthGrant, EpochLatch, EpochLatchError, EpochRequest, EpochSignRequest,
-    LastBoundEpoch, RssShare64, RssZeroSeeds64, ct_eq_bytes32,
-    dkg_beaver_frobenius_eval_gf256, dkg_beaver_frobenius_share_shamir_gf256,
-    dkg_verify_key_shares_boolean_bdoz_gf256, dkg_verify_shamir_2of3_key_bit_gf256,
+    LastBoundEpoch, RssShare64, RssZeroSeeds64, ct_eq_bytes32, dkg_beaver_frobenius_eval_gf256,
+    dkg_beaver_frobenius_share_shamir_gf256, dkg_verify_shamir_2of3_key_bit_gf256,
     epoch_latch_advance, rss_and_gate, rss_keccak_chi_lane, rss_not, rss_party_and_local,
-    rss_reconstruct, rss_reshare_views, rss_xor, shamir_degree_reduce_2of3_gf256,
-    shamir_eval_poly_gf256, shamir_eval_poly_goldilocks, shamir_lagrange_at_zero_gf256,
-    shamir_lagrange_at_zero_goldilocks, shamir_lagrange_weight_zero_gf256,
-    shamir_lagrange_weight_zero_goldilocks, shamir_validate_points_gf256,
+    rss_reconstruct, rss_xor, shamir_degree_reduce_2of3_gf256, shamir_eval_poly_gf256,
+    shamir_eval_poly_goldilocks, shamir_lagrange_at_zero_gf256, shamir_lagrange_at_zero_goldilocks,
+    shamir_lagrange_weight_zero_gf256, shamir_lagrange_weight_zero_goldilocks,
+    shamir_validate_points_gf256,
 };
 pub use tower::{
-    BdozCommittedBatchOpening2Lane, BdozVerifierSession2Lane, BdozWireOpening2Lane, Gf16, Gf256,
-    Tower128, Tower256, bdoz_commit_masked_tag, bdoz_fold_masked_value, embed_gf256_to_tower128,
-    gf16_add, gf16_mul, gf256_add, gf256_frobenius_residual, gf256_inv, gf256_inv_or_zero,
-    gf256_is_boolean_frobenius, gf256_mul, tower128_add, tower128_mul, tower256_add, tower256_mul,
-    verify_mac_2lane, verify_mac_2lane_with_burn,
+    Gf16, Gf256, Tower128, embed_gf256_to_tower128, gf16_add, gf16_mul, gf256_add,
+    gf256_frobenius_residual, gf256_inv, gf256_inv_or_zero, gf256_is_boolean_frobenius, gf256_mul,
+    tower128_add, tower128_mul,
 };
