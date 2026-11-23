@@ -1299,3 +1299,1304 @@ module qsag_wire_engine #(
             S_PF0[11:5]: begin
                 cond         = !puf_recon_mode || in_valid;
                 do_pop       = puf_recon_mode;
+                puf_vmask_ld = puf_recon_mode && in_valid;
+                // Absorb `vmask` (`in_data`) into `st[2]` before `S_HORN..S_BMU` reuses `vmsyn_q` for `syn_v`
+                e_rd         = 6'd2;
+                e_wa         = 6'd2;
+                xsel         = 3'd0;
+                wsel         = 3'd1;
+                e_wreq       = puf_recon_mode;
+            end
+            S_PF1[11:5]: begin
+                cond          = !puf_recon_mode || in_valid;
+                do_pop        = puf_recon_mode;
+                puf_syn_ld    = puf_recon_mode && in_valid;
+                puf_start_blk = cond;
+            end
+            S_PF2[11:5]: begin
+                cond = puf_done && (puf_recon_mode || out_ready);
+                emit = !puf_recon_mode;
+                isel = 6'd23;
+            end
+            S_PF3[11:5]: begin
+                cond = puf_recon_mode || out_ready;
+                emit = !puf_recon_mode;
+                isel = 6'd24;
+            end
+            S_PF4[11:5]: begin
+                // Copy all 10 derived words st[0..9] -> sh[0..9] (rows 32..41) so Reconstruct
+                // commits the EXACT SAME `(K_vat[0..3], SK.seed[0..1], SK.prf[0..1], K_MAC[0..1])`!
+                e_rd   = {1'b0, cnt2};
+                e_wa   = 6'd32 + {1'b0, cnt2};
+                wsel   = 3'd2;
+                e_wreq = (cnt2 <= 5'd9);
+                if (!puf_recon_mode && !puf_any_err) begin
+                    kvat_we     = (cnt2 <= 5'd3) ? (4'b0001 << cnt2[1:0]) : 4'd0;
+                    kvat_commit = (cnt2 == 5'd3);
+                    key_we      = (cnt2 >= 5'd4 && cnt2 <= 5'd9) ? (6'b000001 << (cnt2 - 5'd4)) : 6'd0;
+                end
+            end
+            S_PF5[11:5]: begin
+                if (!puf_recon_mode) begin
+                    cond      = out_ready;
+                    emit      = 1'b1;
+                    emit_port = 1'b1;
+                    e_rd      = {1'b0, cnt2};
+                end else if (cnt2 <= 5'd3) begin
+                    cond   = in_valid;
+                    do_pop = 1'b1;
+                    e_rd   = {1'b0, cnt2};
+                end else begin
+                    e_rd        = 6'd32 + (cnt2 - 5'd4); // sh[0..9] = rows 32..41!
+                    kvat_we     = (!puf_any_err && !macdiff && cnt2 >= 5'd4 && cnt2 <= 5'd7)
+                                  ? (4'b0001 << (cnt2 - 5'd4)) : 4'd0;
+                    kvat_commit = (!puf_any_err && !macdiff && cnt2 == 5'd7);
+                    key_we      = (!puf_any_err && !macdiff && cnt2 >= 5'd8 && cnt2 <= 5'd13)
+                                  ? (6'b000001 << (cnt2 - 5'd8)) : 6'd0;
+                    if (cnt2 == 5'd14) begin
+                        e_wreq = 1'b1;
+                        e_wa   = 6'd0;
+                        xsel   = 3'd1;
+                        isel = 6'd36;
+                    end
+                end
+            end
+            // ---------------------------------------------------------- CapTP Vat & Keyed-MAC NFC
+            S_VLD[11:5]: begin
+                cond         = in_valid;
+                do_pop       = 1'b1;
+                e_rd         = 6'd44 + {4'd0, cnt2[1:0]}; // zk_pin[0..3] streamed to dregg_captp_vat!
+                e_wreq       = 1'b1;
+                e_wa         = 6'd32 + {1'b0, cnt2};
+                xsel         = 3'd0;
+                vat_pchk_clr = (cnt2 == 5'd0) && !(op == OP_VAT && !flags[0]);
+                vat_pwe      = !(op == OP_VAT && !flags[0]);
+            end
+            S_VTG[11:5]: begin
+                cond         = in_valid;
+                do_pop       = 1'b1;
+                e_rd         = {1'b0, cnt2};
+                vat_cchk_clr = (cnt2 == 5'd3) && (op == OP_VAT);
+            end
+            S_VAT[11:5]: begin
+                cond    = in_valid;
+                do_pop  = 1'b1;
+                e_rd    = 6'd32 + {1'b0, cnt2};
+                e_wreq  = 1'b1;
+                e_wa    = 6'd32 + {1'b0, cnt2};
+                xsel    = 3'd0;
+                vat_cwe = 1'b1;
+            end
+            S_VOT[11:5]: begin
+                cond      = out_ready;
+                emit      = 1'b1;
+                emit_port = 1'b1;
+                e_rd      = (cnt2 < 5'd8) ? (6'd32 + {1'b0, cnt2}) : {1'b0, cnt2 - 5'd8};
+            end
+            S_NFC[11:5]: e_rd = {5'd0, cnt2[0]};
+            S_VZK[11:5]: ;
+            // ---------------------------------------------------------- DB + NCO (0x52)
+            S_DB0[11:5]: begin
+                cond             = in_valid;
+                do_pop           = 1'b1;
+                db_load_r0       = permit_control && in_valid && (cnt2 == 5'd0) && arg[0];
+                db_load_r1       = permit_control && in_valid && (cnt2 == 5'd1) && arg[0];
+                db_arm_responder = permit_control && in_valid && (cnt2 == 5'd2) && arg[0];
+                db_step_round    = permit_control && in_valid && (cnt2 == 5'd2) && arg[1];
+                db_launch_ping   = permit_control && in_valid && (cnt2 == 5'd2) && arg[2] && !arg[3];
+                db_cal_ping      = permit_control && in_valid && (cnt2 == 5'd2) && arg[2] &&  arg[3];
+                nco_pkt_load     = permit_control && in_valid && (cnt2 == 5'd1) && arg[4] &&  arg[12];
+            end
+            S_DBO[11:5]: begin
+                cond = out_ready;
+                emit = 1'b1;
+                unique case (cnt2[1:0])
+                    2'd0:    isel = 6'd32;
+                    2'd1:    isel = 6'd33;
+                    2'd2:    isel = 6'd34;
+                    default: isel = 6'd35;
+                endcase
+            end
+            // ---------------------------------------------------------- Verifier VM (Ext4 + Fp5)
+            S_HVR[11:5]: begin
+                if (wrem == 21'd0) kind = K_NONE;
+                else begin
+                    kind   = K_GF;
+                    cond   = in_valid;
+                    xsel   = 3'd0;
+                    do_pop = 1'b1;
+                end
+            end
+            S_HVH[11:5]: begin
+                kind  = (ha[2:0] != 3'd0) ? K_FE : K_NONE;
+                fe_op = F_MOV;
+                fe_d  = rb_vm(fp5_vm, ha[2:0]);
+                fe_s1 = 6'd0;
+                fe_n  = vm_limbs;
+            end
+            S_HVA[11:5]: begin
+                kind  = K_FE;
+                fe_op = fp5_vm ? ((hop == 4'd2) ? F_FP5_MUL : (hop == 4'd3) ? F_FP5_ADD : F_FP5_SUB)
+                               : ((hop == 4'd2) ? F_EMUL    : (hop == 4'd3) ? F_EADD    : F_ESUB);
+                fe_d  = rb_vm(fp5_vm, ha[2:0]);
+                fe_s1 = rb_vm(fp5_vm, hb[2:0]);
+                fe_s2 = rb_vm(fp5_vm, hc[2:0]);
+            end
+            S_HVE[11:5]: begin
+                kind  = K_FE;
+                fe_op = fp5_vm ? F_FP5_EQ : F_EEQ;
+                fe_s1 = rb_vm(fp5_vm, hb[2:0]);
+                fe_s2 = rb_vm(fp5_vm, hc[2:0]);
+            end
+            S_HVP[11:5]: begin
+                kind  = K_FE;
+                fe_op = F_LDRES;
+                fe_s1 = rb_vm(fp5_vm, hb[2:0]);
+            end
+            S_HVI[11:5]: begin
+                kind  = K_FE;
+                fe_op = F_LDRES;
+                fe_s1 = rb_vm(fp5_vm, hb[2:0]) + {4'd0, ha[1:0]};
+            end
+            S_HVN[11:5]: begin
+                cond   = (dleft == 16'd0) || in_valid;
+                do_pop = (dleft != 16'd0);
+            end
+            S_HVF[11:5]: begin
+                if (cnt2 < {2'd0, vm_limbs}) begin
+                    e_wreq = 1'b1;
+                    e_rd   = 6'd12 + {1'b0, cnt2};
+                    e_wa   = 6'd32 + {1'b0, cnt2};
+                    wsel   = 3'd2;
+                end else if (vm_pin_mode && verdict) begin
+                    logic [1:0] pidx;
+                    pidx = cnt2[1:0] - (fp5_vm ? 2'd1 : 2'd0);
+                    unique case (pidx)
+                        2'd0: begin e_rd = 6'd33; zkpin_we = 4'b0100; zkpin_wdata = y_hold0;       end
+                        2'd1: begin e_rd = 6'd35; zkpin_we = 4'b0001; zkpin_wdata = gf_acc[63:0];  end
+                        2'd2: begin               zkpin_we = 4'b0010; zkpin_wdata = gf_acc[127:64]; end
+                        default: begin            zkpin_we = 4'b1000; zkpin_wdata = y_hold0;       end
+                    endcase
+                    zk_latch_set = (pidx == 2'd3);
+                end
+            end
+            S_HVS[11:5]: begin
+                cond = out_ready;
+                emit = 1'b1;
+                isel = 6'd19;
+            end
+            default: ;
+        endcase
+        if (sid == S_IDLE[11:5] && in_valid && (in_data[7:0] == 8'h51) &&
+            (in_data[15:8] == OP_FOLD || in_data[15:8] == OP_HEM))
+            zk_latch_clr = 1'b1;
+        if (emit && !emit_port) xsel = 3'd1;
+    end
+
+
+    // Single flat constant-folded 64-bit immediate OR-bus (replaces 9 nested 64-bit $pmux trees!)
+    logic [36:1] is_oh;
+    always_comb begin
+        for (int k = 1; k <= 36; k++) is_oh[k] = (isel == 6'(k));
+        imm = ({64{is_oh[1]}}  & 64'd1)
+            | ({64{is_oh[2]}}  & 64'h1F)
+            | ({64{is_oh[3]}}  & PAD_END)
+            | ({64{is_oh[4]}}  & {rcode, rlen, rerr, 6'd0, rok, op | 8'h80, 8'h51})
+            | ({64{is_oh[5]}}  & CHIP_ID)
+            | ({64{is_oh[6]}}  & tel0)
+            | ({64{is_oh[7]}}  & {vat_spend_used[15:0], 8'd0, vat_mint_locked, zk_root_valid,
+                                  nfc_frame_rdy, vat_ready, hwm_valid, fault_mac, fault_anchor, key_valid, tel1})
+            | ({64{is_oh[8]}}  & trng_word)
+            | ({64{is_oh[9]}}  & FS_INIT)
+            | ({64{is_oh[10]}} & P2_IV)
+            | ({64{is_oh[11]}} & {48'd0, hs_n})
+            | ({64{is_oh[12]}} & t0_word)
+            | ({64{is_oh[13]}} & {63'd0, verdict})
+            | ({64{is_oh[14]}} & ksd_pad)
+            | ({64{is_oh[15]}} & a3_word)
+            | ({64{is_oh[16]}} & {32'd0, ctmp})
+            | ({64{is_oh[17]}} & C_FRAM)
+            | ({64{is_oh[18]}} & C_MASK)
+            | ({64{is_oh[19]}} & stat_word)
+            | ({64{is_oh[20]}} & C_VAT)
+            | ({64{is_oh[21]}} & (C_PUF ^ {arg[15], 60'd0, puf_blk}))
+            | ({64{is_oh[22]}} & puf_word_out)
+            | ({64{is_oh[23]}} & puf_vmask_out)
+            | ({64{is_oh[24]}} & {37'd0, puf_syn_out})
+            | ({64{is_oh[25]}} & C_PUF_CHK)
+            | ({64{is_oh[26]}} & {arg[15], 63'd0})
+            | ({64{is_oh[27]}} & C_ZKG)
+            | ({64{is_oh[28]}} & {48'd0, arg})
+            | ({64{is_oh[29]}} & C_NFC)
+            | ({64{is_oh[30]}} & {nfc_quorum_flags, 16'd0, nfc_seq})
+            | ({64{is_oh[31]}} & hdr_word)
+            | ({64{is_oh[32]}} & {nfc_rx_frames, nfc_quorum_flags, 19'd0, db_cal_valid,
+                                  nco_tx_active, nfc_frame_rdy, db_responder_armed,
+                                  db_dist_timeout, db_dist_valid, db_rounds_done})
+            | ({64{is_oh[33]}} & {32'd0, db_dist_cycles})
+            | ({64{is_oh[34]}} & db_chal_log)
+            | ({64{is_oh[35]}} & db_resp_log)
+            | ({64{is_oh[36]}} & {48'd0, 7'd0, !puf_any_err, puf_corr_tot});
+    end
+    wire cth_pub_illegal = pubgen && !is_fors && (sw != 5'd4);
+    assign vat_commit_inv = fire && (
+        (sid == S_VZK[11:5] && vat_inv_ok) ||
+        (sid == S_KSW[11:5] && op == OP_PRFMSG && cap_mode && key_valid && !macdiff && vat_inv_ok) ||
+        (sid == S_CTD[11:5] && cap_mode && key_valid && !macdiff && !cth_pub_illegal && vat_inv_ok && (!stateful || pubgen)) ||
+        (sid == S_CA3[11:5] && cap_mode && rcmp)
+    );
+
+    // Hardwired enclave secret non-exfiltration gate: addresses >= 44 (`zk_pin`, `key`, `kvat`)
+    // can NEVER reach `out_data`, even under arbitrary multi-bit control-flow faults!
+    wire rd_is_secret = (e_rd >= 6'd44);
+    assign an_tx      = (sid == S_AW2[11:5]) ? {32'd0, ctmp} : port;
+
+    // Single shared 64-bit equality comparator across FRAM, Tag, Vat, PUF, NFC, and CTH DFA checks!
+    wire cmp_in_lhs   = (sid == S_CTT[11:5]) || (sid == S_VTG[11:5]) || (sid == S_PF5[11:5]) ||
+                        (sid == S_CZ0[11:5]) || (sid == S_CZ1[11:5]) ||
+                        (sid == S_VLD[11:5]) || (sid == S_VAT[11:5]) || (sid == S_CTL[11:5]);
+    wire [63:0] cmp_lhs = cmp_in_lhs            ? in_data :
+                          (sid == S_NFC[11:5])  ? (cnt2[0] ? {32'd0, nfc_mac[95:64]} : nfc_mac[63:0]) :
+                                                  an_rx;
+    wire [63:0] cmp_rhs = (sid == S_AW7[11:5]) ? {32'd0, ctmp} :
+                          (sid == S_CTT[11:5]) ? e_wd :
+                          (sid == S_NFC[11:5] && cnt2[0]) ? {32'd0, port[31:0]} :
+                                                  port;
+    wire cmp_eq       = (cmp_lhs == cmp_rhs);
+    assign cmp_ne     = !cmp_eq;
+    assign fe_start   = launch && (kind == K_FE);
+    assign kc_start   = launch && (kind == K_KC);
+    assign gf_start   = launch && (kind == K_GF);
+    assign in_pop     = fire && do_pop;
+    assign out_push   = fire && emit;
+    assign out_data   = emit_port ? (rd_is_secret ? 64'd0 : port) : imm;
+    assign e_we       = (fire && e_wreq) || (launch && e_wlaunch);
+
+    wire [4:0] hvf_last = vm_pin_mode ? ({2'd0, vm_limbs} + 5'd3) : ({2'd0, vm_limbs} - 5'd1);
+
+    logic [6:0] nxt_st_id, nxt_ret_id, nxt_ret2_id, nxt_ret3_id;
+    always_comb begin
+        nxt_st_id   = sid;
+        nxt_ret_id  = ret[11:5];
+        nxt_ret2_id = ret2[11:5];
+        nxt_ret3_id = ret3[11:5];
+        unique case (sid)
+            S_IDLE[11:5]: begin
+                nxt_ret_id  = idle_ret_id;
+                nxt_ret2_id = idle_ret2_id;
+                nxt_ret3_id = S_IDLE[11:5];
+                nxt_st_id   = idle_st_id;
+            end
+            S_DRAIN[11:5]: if (wrem == 21'd0) nxt_st_id = S_EHDR[11:5];
+            S_EHDR[11:5]:  nxt_st_id = S_WIPE[11:5];
+            S_HDR[11:5]: begin
+                nxt_st_id = ret[11:5];
+                if (ret[11:5] == S_HDR[11:5]) begin
+                    nxt_ret_id = (op == OP_VAT_ZK || op == OP_PRFMSG) ? S_WIPE[11:5] : S_IDLE[11:5];
+                    nxt_st_id  = S_OUTL[11:5];
+                end
+            end
+            S_OUTL[11:5]: if (cnt2 + 5'd1 == olim) nxt_st_id = ret[11:5];
+            S_WIPE[11:5]: nxt_st_id = S_IDLE[11:5];
+            S_PING[11:5]: if (cnt2 == 5'd3) nxt_st_id = S_IDLE[11:5];
+            S_CSR[11:5]:  begin nxt_ret_id = S_IDLE[11:5]; nxt_st_id = S_HDR[11:5]; end
+            // ------------------------------------------------ OP_BIST
+            S_BSW[11:5]: nxt_st_id = S_BS0[11:5];
+            S_BS0[11:5]: if (cnt2 == 5'd2) begin nxt_ret3_id = S_BS1[11:5]; nxt_st_id = S_BKC[11:5]; end
+            S_BS1[11:5]: nxt_st_id = S_BS2[11:5];
+            S_BS2[11:5]: begin nxt_ret_id = S_BSO[11:5]; nxt_st_id = S_HDR[11:5]; end
+            S_BSO[11:5]: nxt_st_id = S_WIPE[11:5];
+            // ------------------------------------------------ Poseidon2
+            S_P2R[11:5]:  if (cnt2 == 5'd11) nxt_st_id = S_P2RP[11:5];
+            S_P2RP[11:5]: begin nxt_ret_id = S_HDR[11:5]; nxt_st_id = S_HDR[11:5]; end
+            S_HSZ[11:5]:  if (cnt2 == (hs_rate6 ? 5'd11 : 5'd7)) nxt_st_id = hs_rate6 ? S_HSL[11:5] : S_HSD[11:5];
+            S_HSD[11:5]:  if (!bindw) nxt_st_id = S_HSC[11:5];
+            S_HSC[11:5]:  if (hs_capsrc == 2'd1 || cnt2 == 5'd3) nxt_st_id = S_HSN[11:5];
+            S_HSN[11:5]:  nxt_st_id = S_HSL[11:5];
+            S_HSL[11:5]: begin
+                if (hs_n == 16'd0) begin
+                    if (!hs_rate6 || hs_pad_done) nxt_st_id = S_HSF[11:5];
+                end else if (!bindw && !hs_lat_now && hs_idx == (hs_rate6 ? 4'd5 : 4'd7)) begin
+                    nxt_st_id = S_HSP[11:5];
+                end
+            end
+            S_HSP[11:5]: nxt_st_id = S_HSL[11:5];
+            S_HSF[11:5]: nxt_st_id = ret[11:5];
+            // ------------------------------------------------ Canopy
+            S_MK0[11:5]: nxt_st_id = S_MK1[11:5];
+            S_MK1[11:5]: nxt_st_id = S_MK2[11:5];
+            S_MK2[11:5]: nxt_st_id = S_MK3[11:5];
+            S_MK3[11:5]: nxt_st_id = S_MK4[11:5];
+            S_MK4[11:5]: nxt_st_id = S_MK5[11:5];
+            S_MK5[11:5]: nxt_st_id = S_MPS[11:5];
+            S_MPS[11:5]: begin
+                if (cnt == 16'd0) nxt_st_id = ret2[11:5];
+                else if (cnt2 == 5'd3) nxt_st_id = S_MK0[11:5];
+            end
+            S_MOK[11:5]: if (cnt2 == 5'd2) nxt_st_id = S_MOI[11:5];
+            S_MOI[11:5]: nxt_st_id = S_MOL[11:5];
+            S_MOL[11:5]: if (cnt2 == 5'd3) begin nxt_ret2_id = S_MOR[11:5]; nxt_st_id = S_MPS[11:5]; end
+            S_MOR[11:5]: if (cnt2 == 5'd3) nxt_st_id = S_MOE[11:5];
+            S_MOE[11:5]: begin nxt_ret_id = S_MOV[11:5]; nxt_st_id = S_HDR[11:5]; end
+            S_MOV[11:5]: begin nxt_ret_id = S_IDLE[11:5]; nxt_st_id = S_OUTL[11:5]; end
+            // ------------------------------------------------ Keccak & Authenticated PRF_msg
+            S_KSW[11:5]: begin
+                if (op == OP_PRFMSG) begin
+                    if (!key_valid || (cap_mode && (macdiff || !vat_inv_ok))) nxt_st_id = S_DRAIN[11:5];
+                    else nxt_st_id = S_KSK[11:5];
+                end else nxt_st_id = S_KSA[11:5];
+            end
+            S_KSK[11:5]: if (cnt2 == 5'd1) nxt_st_id = S_KSA[11:5];
+            S_KSA[11:5]: if (!(prf_legacy_tag && (ksa_has_msg || ksa_is_part) && !gfdone)) begin
+                if (!ksa_has_msg) nxt_st_id = S_KSD[11:5];
+                else if (wi == 5'd16) nxt_st_id = S_KSP[11:5];
+            end
+            S_KSP[11:5]: nxt_st_id = S_KSA[11:5];
+            S_KSD[11:5]: nxt_st_id = S_KSE[11:5];
+            S_KSE[11:5]: nxt_st_id = S_KSQ[11:5];
+            S_KSQ[11:5]: begin
+                if (prf_legacy_tag) nxt_st_id = S_PFT[11:5];
+                else begin nxt_ret_id = S_KSO[11:5]; nxt_st_id = S_HDR[11:5]; end
+            end
+            S_PFT[11:5]: if (cnt2 == 5'd2) begin nxt_ret3_id = S_CTT[11:5]; nxt_st_id = S_BLD[11:5]; end
+            S_KSO[11:5]: begin
+                if (cnt == 16'd0) nxt_st_id = S_WIPE[11:5];
+                else if (wi == 5'd16 && cnt != 16'd1) nxt_st_id = S_KSR[11:5];
+            end
+            S_KSR[11:5]: nxt_st_id = S_KSO[11:5];
+            // ------------------------------------------------ Key load
+            S_KLM[11:5]: if (cnt2 == 5'd1) nxt_st_id = flags[0] ? S_KLH[11:5] : (!trng_ok ? S_DRAIN[11:5] : S_KLW[11:5]);
+            S_KLH[11:5]: if (cnt2 == (flags[2] ? 5'd7 : 5'd3)) nxt_st_id = S_KLN[11:5];
+            S_KLW[11:5]: nxt_st_id = S_KLT[11:5];
+            S_KLT[11:5]: if (wi == 5'd3) nxt_st_id = S_KLA[11:5];
+            S_KLA[11:5]: if (wrem == 21'd0) nxt_st_id = S_KLD[11:5];
+            S_KLD[11:5]: nxt_st_id = S_KLE[11:5];
+            S_KLE[11:5]: nxt_st_id = S_KLP[11:5];
+            S_KLP[11:5]: nxt_st_id = S_KLK[11:5];
+            S_KLK[11:5]: if (cnt2 == (flags[2] ? 5'd7 : 5'd3)) nxt_st_id = S_KLZ[11:5];
+            S_KLZ[11:5]: nxt_st_id = S_KLN[11:5];
+            S_KLN[11:5]: begin
+                if (flags[1]) begin nxt_ret3_id = S_AW1[11:5]; nxt_ret2_id = S_KLF[11:5]; nxt_st_id = S_BLD[11:5]; end
+                else          begin nxt_ret_id  = S_IDLE[11:5]; nxt_st_id  = S_HDR[11:5]; end
+            end
+            S_KLF[11:5]: begin
+                if (!rcmp)       nxt_st_id = S_DRAIN[11:5];
+                else if (!aslot) begin nxt_ret3_id = S_AW1[11:5]; nxt_st_id = S_BLD[11:5]; end
+                else             begin nxt_ret_id  = S_IDLE[11:5]; nxt_st_id = S_HDR[11:5]; end
+            end
+            S_BLD[11:5]: if (cnt2 == 5'd24) nxt_st_id = S_BKC[11:5];
+            S_BKC[11:5]: nxt_st_id = ret3[11:5];
+            // ------------------------------------------------ FRAM anchor
+            S_AR0[11:5]: nxt_st_id = S_AR1[11:5];
+            S_AR1[11:5]: begin nxt_ret3_id = S_AR2[11:5]; nxt_st_id = S_BLD[11:5]; end
+            S_AR2[11:5]: nxt_st_id = S_AR3[11:5];
+            S_AR3[11:5]: nxt_st_id = S_AR4[11:5];
+            S_AR4[11:5]: nxt_st_id = S_AR5[11:5];
+            S_AR5[11:5]: nxt_st_id = ret2[11:5];
+            S_AW1[11:5]: nxt_st_id = S_AW2[11:5];
+            S_AW2[11:5]: nxt_st_id = S_AW3[11:5];
+            S_AW3[11:5]: nxt_st_id = S_AW4[11:5];
+            S_AW4[11:5]: nxt_st_id = S_AW5[11:5];
+            S_AW5[11:5]: nxt_st_id = S_AW6[11:5];
+            S_AW6[11:5]: nxt_st_id = S_AW7[11:5];
+            S_AW7[11:5]: nxt_st_id = S_AW8[11:5];
+            S_AW8[11:5]: nxt_st_id = S_AW9[11:5];
+            S_AW9[11:5]: nxt_st_id = S_AWA[11:5];
+            S_AWA[11:5]: nxt_st_id = ret2[11:5];
+            // ------------------------------------------------ Cut-the-Hash + PRF_msg Tag
+            S_CTG[11:5]: nxt_st_id = (op == OP_PRFMSG) ? S_KSK[11:5] : S_CTL[11:5];
+            S_CTL[11:5]: if (cnt2 == 5'd7) begin
+                if (cap_mode) begin
+                    if (vat_need_nfc) begin nxt_ret2_id = S_CTD[11:5]; nxt_ret3_id = S_NFC[11:5]; nxt_st_id = S_BLD[11:5]; end
+                    else nxt_st_id = S_CTD[11:5];
+                end else begin
+                    nxt_ret3_id = S_CTT[11:5];
+                    nxt_st_id   = S_BLD[11:5];
+                end
+            end
+            S_CTT[11:5]: if (cnt2 == 5'd1) begin
+                if (op == OP_PRFMSG) begin
+                    if (macdiff || cmp_ne) nxt_st_id = S_EHDR[11:5];
+                    else begin nxt_ret_id = S_HDR[11:5]; nxt_st_id = S_HDR[11:5]; end
+                end else nxt_st_id = S_CTD[11:5];
+            end
+            S_CTD[11:5]: begin
+                if (!key_valid || macdiff || cth_pub_illegal || (cap_mode && !vat_inv_ok)) nxt_st_id = S_DRAIN[11:5];
+                else if (stateful && !pubgen) begin nxt_ret2_id = S_CA0[11:5]; nxt_st_id = S_AR0[11:5]; end
+                else                          begin nxt_ret_id  = S_CTS[11:5]; nxt_st_id = S_HDR[11:5]; end
+            end
+            S_CA0[11:5]: begin nxt_ret2_id = S_CA1[11:5]; nxt_st_id = S_AR0[11:5]; end
+            S_CA1[11:5]: nxt_st_id = S_CA2[11:5];
+            S_CA2[11:5]: begin
+                if (!anyv || (hwm_valid && cur < hwm) || port[31:0] < cur || port[31:0] == 32'hFFFF_FFFF)
+                    nxt_st_id = S_DRAIN[11:5];
+                else begin nxt_ret3_id = S_AW1[11:5]; nxt_ret2_id = S_CA3[11:5]; nxt_st_id = S_BLD[11:5]; end
+            end
+            S_CA3[11:5]: begin
+                if (!rcmp) nxt_st_id = S_DRAIN[11:5];
+                else       begin nxt_ret_id = S_CTS[11:5]; nxt_st_id = S_HDR[11:5]; end
+            end
+            S_CTS[11:5]: begin
+                if (ci == nch) nxt_st_id = S_WIPE[11:5];
+                else           begin nxt_ret3_id = S_CKD[11:5]; nxt_st_id = S_BLD[11:5]; end
+            end
+            S_CM0[11:5]: nxt_st_id = S_CM1[11:5];
+            S_CM1[11:5]: nxt_st_id = S_BLD[11:5];
+            S_CKD[11:5]: begin
+                if (steps == 16'd0)
+                    nxt_st_id = self_chk ? (chk_cont ? S_CZ0[11:5] : S_CY0[11:5]) : S_CO[11:5];
+                else
+                    nxt_st_id = S_CM0[11:5];
+            end
+            S_CY0[11:5]: nxt_st_id = S_CY1[11:5];
+            S_CY1[11:5]: begin
+                if (sym == symmask) nxt_st_id = S_CZ0[11:5];
+                else                begin nxt_ret3_id = S_CKD[11:5]; nxt_st_id = S_CM0[11:5]; end
+            end
+            S_CZ0[11:5]: nxt_st_id = S_CZ1[11:5];
+            S_CZ1[11:5]: nxt_st_id = ((dfa_ok_q != 2'b10) || cmp_ne || (hj != symmask)) ? S_DEAD[11:5] : S_CZ2[11:5];
+            S_CZ2[11:5]: nxt_st_id = (dfa_ok_q != 2'b10) ? S_DEAD[11:5] : S_CO[11:5];
+            S_CO[11:5]:  if (cnt2 == 5'd1) nxt_st_id = S_CTS[11:5];
+            // ------------------------------------------------ Houyhnhnm PUF + BCH (0x50)
+            S_PF0[11:5]: nxt_st_id = S_PF1[11:5];
+            S_PF1[11:5]: nxt_st_id = S_PF2[11:5];
+            S_PF2[11:5]: nxt_st_id = S_PF3[11:5];
+            S_PF3[11:5]: begin
+                nxt_ret3_id = (puf_blk == 3'd7) ? S_PF4[11:5] : S_PF0[11:5];
+                nxt_st_id   = S_BLD[11:5];
+            end
+            S_PF4[11:5]: if (cnt2 == 5'd9) begin nxt_ret3_id = S_PF5[11:5]; nxt_st_id = S_BLD[11:5]; end
+            S_PF5[11:5]: begin
+                if (!puf_recon_mode) begin
+                    if (cnt2 == 5'd3) nxt_st_id = S_WIPE[11:5];
+                end else if (cnt2 == 5'd3) begin
+                    if (puf_any_err || macdiff || cmp_ne) nxt_st_id = S_EHDR[11:5];
+                end else if (cnt2 == 5'd14) begin
+                    nxt_ret_id = S_BSO[11:5];
+                    nxt_st_id  = S_HDR[11:5];
+                end
+            end
+            // ------------------------------------------------ CapTP Vat & Keyed-MAC NFC
+            S_VLD[11:5]: if (cnt2 == 5'd7) begin
+                nxt_ret3_id = (op == OP_VAT && !flags[0]) ? S_HDR[11:5] : S_VTG[11:5];
+                if (op == OP_VAT && !flags[0]) nxt_ret_id = S_VOT[11:5];
+                nxt_st_id = S_BLD[11:5];
+            end
+            S_VTG[11:5]: if (cnt2 == 5'd3) begin
+                if (macdiff || cmp_ne) nxt_st_id = S_DRAIN[11:5];
+                else if (vat_need_nfc && (op == OP_PRFMSG || op == OP_VAT_ZK)) begin
+                    nxt_ret3_id = S_NFC[11:5];
+                    nxt_st_id   = S_BLD[11:5];
+                end else nxt_st_id = ret2[11:5];
+            end
+            S_NFC[11:5]: if (cnt2 == 5'd1) begin
+                if (!nfc_frame_rdy || (nfc_seq <= nfc_last_seq_q) || macdiff || cmp_ne) nxt_st_id = S_DRAIN[11:5];
+                else nxt_st_id = ret2[11:5];
+            end
+            S_VAT[11:5]: if (cnt2 == 5'd7) begin
+                nxt_ret3_id = S_HDR[11:5];
+                nxt_ret_id  = S_VOT[11:5];
+                nxt_st_id   = vat_att_step_ok ? S_BLD[11:5] : S_DRAIN[11:5];
+            end
+            S_VOT[11:5]: if (cnt2 == 5'd11) nxt_st_id = S_WIPE[11:5];
+            S_VZK[11:5]: begin
+                if (!vat_inv_ok) nxt_st_id = S_DRAIN[11:5];
+                else begin nxt_ret3_id = S_HDR[11:5]; nxt_ret_id = S_HDR[11:5]; nxt_st_id = S_BLD[11:5]; end
+            end
+            // ------------------------------------------------ DB + NCO (0x52)
+            S_DB0[11:5]: if (cnt2 == 5'd2) begin nxt_ret_id = S_DBO[11:5]; nxt_st_id = S_HDR[11:5]; end
+            S_DBO[11:5]: if (cnt2 == 5'd3) nxt_st_id = S_IDLE[11:5];
+            // ------------------------------------------------ Verifier VM
+            S_HVG[11:5]: nxt_st_id = S_HVR[11:5];
+            S_HVR[11:5]: nxt_st_id = (wrem == 21'd0) ? S_HVF[11:5] : S_HVD[11:5];
+            S_HVD[11:5]: begin
+                unique case (hop)
+                    4'd1: begin
+                        if (dleft == 16'd0 && !hc[6]) nxt_st_id = S_HVN[11:5];
+                        else begin nxt_ret_id = S_HVH[11:5]; nxt_st_id = S_HSZ[11:5]; end
+                    end
+                    4'd2, 4'd3, 4'd4: nxt_st_id = S_HVA[11:5];
+                    4'd5: nxt_st_id = (dleft != {13'd0, vm_limbs} || (vm_pin_mode && ha[2:0] == 3'd1)) ? S_HVN[11:5] : S_HVL[11:5];
+                    4'd6: nxt_st_id = S_HVE[11:5];
+                    4'd7: nxt_st_id = S_HVP[11:5];
+                    4'd8: nxt_st_id = (ha[5:0] == 6'd0 || ha[5:0] > 6'd32 ||
+                                       dleft != 16'd1 + {8'd0, ha[5:0], 2'd0}) ? S_HVN[11:5] : S_HVM[11:5];
+                    4'd9: nxt_st_id = S_HVI[11:5];
+                    default: nxt_st_id = S_HVN[11:5];
+                endcase
+            end
+            S_HVH[11:5], S_HVA[11:5], S_HVE[11:5], S_HVQ[11:5], S_HVJ[11:5]: nxt_st_id = S_HVN[11:5];
+            S_HVL[11:5]: if (!bindw && cnt2 + 5'd1 == {2'd0, vm_limbs}) nxt_st_id = S_HVN[11:5];
+            S_HVP[11:5]: nxt_st_id = S_HVQ[11:5];
+            S_HVM[11:5]: begin nxt_ret2_id = S_HVN[11:5]; nxt_st_id = S_MPS[11:5]; end
+            S_HVI[11:5]: nxt_st_id = S_HVJ[11:5];
+            S_HVN[11:5]: if (dleft == 16'd0) nxt_st_id = S_HVR[11:5];
+            S_HVF[11:5]: if (cnt2 == hvf_last) begin
+                nxt_ret3_id = S_HDR[11:5];
+                nxt_ret_id  = S_HVS[11:5];
+                nxt_st_id   = S_BLD[11:5];
+            end
+            S_HVS[11:5]: begin nxt_ret_id = S_HVC[11:5];  nxt_st_id = S_OUTL[11:5]; end
+            S_HVC[11:5]: begin nxt_ret_id = S_WIPE[11:5]; nxt_st_id = S_OUTL[11:5]; end
+            default:     nxt_st_id = S_DEAD[11:5];
+        endcase
+    end
+
+    // ------------------------------------------------------------------ FSM sequencing
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            st              <= S_IDLE;
+            ret             <= S_IDLE;
+            ret2            <= S_IDLE;
+            ret3            <= S_IDLE;
+            w               <= 1'b0;
+            steps           <= 16'h0000;
+            steps_inv_q     <= 16'hFFFF;
+            verify_ok       <= 1'b0;
+            key_valid       <= 1'b0;
+            vat_mint_locked <= 1'b0;
+            hwm_valid       <= 1'b0;
+            fault_anchor    <= 1'b0;
+            fault_mac       <= 1'b0;
+            fault_laser_dfa <= 1'b0;
+            nco_en          <= 1'b0;
+            nco_mode        <= 2'd0;
+            nco_sym_shift   <= 4'd0;
+            nfc_auth_ok     <= 1'b0;
+            nfc_drop_pulse  <= 1'b0;
+        end else if (zeroize_q || control_bad || fault_control || fault_laser_dfa) begin
+            st              <= S_DEAD;
+            w               <= 1'b0;
+            key_valid       <= 1'b0;
+            vat_mint_locked <= 1'b0;
+            verify_ok       <= 1'b0;
+            hwm_valid       <= 1'b0;
+            nfc_auth_ok     <= 1'b0;
+            nfc_drop_pulse  <= 1'b0;
+        end else begin
+            nfc_drop_pulse <= 1'b0;
+            if (launch) w <= 1'b1;
+            if (fire) begin
+                w    <= 1'b0;
+                st   <= hd4_enc(nxt_st_id);
+                ret  <= hd4_enc(nxt_ret_id);
+                ret2 <= hd4_enc(nxt_ret2_id);
+                ret3 <= hd4_enc(nxt_ret3_id);
+                unique case (sid)
+                    S_IDLE[11:5]: begin
+                        nfc_auth_ok <= 1'b0;
+                        if (in_data[7:0] == 8'h51) begin
+                            if (in_data[15:8] == OP_BIST || in_data[15:8] == OP_P2 ||
+                                in_data[15:8] == OP_MERKLE || in_data[15:8] == OP_FOLD ||
+                                in_data[15:8] == OP_HEM)
+                                verify_ok <= 1'b0;
+                            if (in_data[15:8] == OP_VAT && idle_err == 16'd0 && !in_data[16] && in_data[19])
+                                vat_mint_locked <= 1'b1;
+                        end
+                    end
+                    S_BS2[11:5]: verify_ok <= (e_wd == BIST_GOLDEN_KAT);
+                    S_MOE[11:5]: verify_ok <= fe_eq;
+                    S_KSW[11:5]: if (op == OP_PRFMSG && key_valid && cap_mode && macdiff) fault_mac <= 1'b1;
+                    S_KLN[11:5]: key_valid <= 1'b1;
+                    S_KLF[11:5]: begin
+                        if (!rcmp) begin
+                            key_valid    <= 1'b0;
+                            fault_anchor <= 1'b1;
+                        end else if (aslot) hwm_valid <= 1'b1;
+                    end
+                    S_CTT[11:5]: if (cnt2 == 5'd1 && op == OP_PRFMSG && (macdiff || cmp_ne)) fault_mac <= 1'b1;
+                    S_CTD[11:5]: if (key_valid && macdiff) fault_mac <= 1'b1;
+                    S_CA2[11:5]: if (anyv && hwm_valid && cur < hwm) fault_anchor <= 1'b1;
+                    S_CA3[11:5]: begin
+                        if (!rcmp) fault_anchor <= 1'b1;
+                        else       hwm_valid    <= 1'b1;
+                    end
+                    S_CTS[11:5]: if (ci != nch) begin
+                        logic [15:0] st_init;
+                        st_init     = pubgen ? (is_fors ? 16'd1 : symmask) : (is_fors ? 16'd0 : (port_sh16 & symmask));
+                        steps       <= st_init;
+                        steps_inv_q <= ~st_init;
+                    end
+                    S_CKD[11:5]: if (steps != 16'd0) begin
+                        steps       <= steps - 16'd1;
+                        steps_inv_q <= steps_inv_q + 16'd1;
+                    end
+                    S_CY1[11:5]: if (sym != symmask) begin
+                        logic [15:0] rem_st;
+                        rem_st      = symmask - sym - 16'd1;
+                        steps       <= rem_st;
+                        steps_inv_q <= ~rem_st;
+                    end
+                    S_CZ1[11:5]: if ((dfa_ok_q != 2'b10) || cmp_ne || (hj != symmask)) fault_laser_dfa <= 1'b1;
+                    S_CZ2[11:5]: if (dfa_ok_q != 2'b10) fault_laser_dfa <= 1'b1;
+                    S_PF4[11:5]: if (cnt2 == 5'd9 && !puf_recon_mode && !puf_any_err) begin
+                        key_valid       <= 1'b1;
+                        vat_mint_locked <= arg[15];
+                    end
+                    S_PF5[11:5]: if (puf_recon_mode && cnt2 == 5'd14) begin
+                        key_valid       <= 1'b1;
+                        vat_mint_locked <= arg[15];
+                    end
+                    S_VTG[11:5]: if (cnt2 == 5'd3 && (macdiff || cmp_ne)) fault_mac <= 1'b1;
+                    S_NFC[11:5]: if (cnt2 == 5'd1) begin
+                        if (!nfc_frame_rdy || (nfc_seq <= nfc_last_seq_q)) begin
+                            if (nfc_frame_rdy) nfc_drop_pulse <= 1'b1;
+                        end else if (macdiff || cmp_ne) begin
+                            fault_mac      <= 1'b1;
+                            nfc_drop_pulse <= 1'b1;
+                        end else nfc_auth_ok <= 1'b1;
+                    end
+                    S_DB0[11:5]: if (cnt2 == 5'd0 && arg[4]) begin
+                        nco_en        <= arg[7];
+                        nco_mode      <= arg[6:5];
+                        nco_sym_shift <= arg[11:8];
+                    end
+                    S_HVF[11:5]: if (cnt2 == hvf_last) verify_ok <= verdict;
+                    default: ;
+                endcase
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------ Clock-gated wide registers (`qsag_ereg`)
+    wire reg_alive = !(zeroize_q || control_bad || fault_control || fault_laser_dfa);
+    wire fg        = fire && reg_alive;
+
+    qsag_ereg #(.W(64)) u_csr_reg (
+        .clk(clk), .rst_n(rst_n), .en(fg && (sid == S_CSR[11:5])),
+        .d(in_data ^ CSR_RST), .q(csr_xor_q)
+    );
+    assign nco_cfg_we = fg && (sid == S_DB0[11:5]) && (cnt2 == 5'd0) && arg[4];
+    qsag_ereg_nr #(.W(35)) u_pkt_hdr (
+        .clk(clk), .en(fg && (sid == S_IDLE[11:5])),
+        .d({in_data[63:48], in_data[23:16], in_data[15:8], in_data[26:24]}),
+        .q({arg, flags, op, lenb})
+    );
+    qsag_ereg #(.W(32)) u_nfc_seq (
+        .clk(clk), .rst_n(sub_rst_n),
+        .en(fg && (sid == S_NFC[11:5]) && (cnt2 == 5'd1) && nfc_frame_rdy && (nfc_seq > nfc_last_seq_q) && !macdiff && !cmp_ne),
+        .d(nfc_seq), .q(nfc_last_seq_q)
+    );
+
+    wire ctmp_en = fg && ((sid == S_KLN[11:5]) || (sid == S_AR1[11:5]) ||
+                          (sid == S_CA2[11:5] && anyv && !(hwm_valid && cur < hwm) && !(port[31:0] < cur || port[31:0] == 32'hFFFF_FFFF)));
+    wire [31:0] ctmp_d = (sid == S_KLN[11:5]) ? 32'd0 : (sid == S_AR1[11:5]) ? an_rx[31:0] : (port[31:0] + 32'd1);
+    qsag_ereg #(.W(32)) u_ctmp (.clk(clk), .rst_n(sub_rst_n), .en(ctmp_en), .d(ctmp_d), .q(ctmp));
+
+    wire cur_en = fg && ((sid == S_CA0[11:5]) || (sid == S_CA1[11:5] && rcmp && (!v0 || ctmp >= cur)));
+    qsag_ereg #(.W(32)) u_cur (.clk(clk), .rst_n(sub_rst_n), .en(cur_en), .d(ctmp), .q(cur));
+
+    wire hwm_en = fg && ((sid == S_KLF[11:5] && rcmp && aslot) || (sid == S_CA3[11:5] && rcmp));
+    wire [31:0] hwm_d = (sid == S_CA3[11:5]) ? ctmp : 32'd0;
+    qsag_ereg #(.W(32)) u_hwm (.clk(clk), .rst_n(sub_rst_n), .en(hwm_en), .d(hwm_d), .q(hwm));
+
+    wire hvf_pidx0 = (cnt2 == {2'd0, vm_limbs});
+    wire hvf_pidx1 = (cnt2 == {2'd0, vm_limbs} + 5'd1);
+    wire yh0_en  = fg && (sid == S_HVF[11:5]) &&
+                   (cnt2 == 5'd0 || cnt2 == 5'd2 || (fp5_vm && cnt2 == 5'd4) ||
+                    (vm_pin_mode && verdict && (hvf_pidx0 || hvf_pidx1)));
+    wire yh0_xor = (sid == S_HVF[11:5]) && (cnt2 == 5'd2 || (fp5_vm && cnt2 == 5'd4) || hvf_pidx1);
+    qsag_ereg_nr #(.W(64)) u_yh0 (
+        .clk(clk), .en(yh0_en),
+        .d(yh0_xor ? (y_hold0 ^ port) : port), .q(y_hold0)
+    );
+
+    // ------------------------------------------------------------------ Non-secret datapath registers
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wrem          <= '0;
+            rlen          <= '0;
+            rcode         <= '0;
+            rerr          <= 1'b0;
+            rok           <= 1'b0;
+            cnt           <= '0;
+            cnt2          <= '0;
+            wi            <= '0;
+            obase         <= '0;
+            olim          <= '0;
+            partial       <= 1'b0;
+            hs_n          <= '0;
+            hs_k          <= '0;
+            hs_idx        <= '0;
+            hs_first      <= 1'b0;
+            hs_ph         <= 1'b0;
+            hs_rate6      <= 1'b0;
+            hs_pad_done   <= 1'b0;
+            gfdone        <= 1'b0;
+            hs_capsrc     <= '0;
+            hs_capreg     <= '0;
+            hs_latch      <= '0;
+            hs_skip       <= '0;
+            idx_armed     <= 1'b0;
+            midx          <= '0;
+            lidx          <= '0;
+            mk_kb         <= '0;
+            hop           <= '0;
+            ha            <= '0;
+            hb            <= '0;
+            hc            <= '0;
+            dleft         <= '0;
+            recidx        <= '0;
+            fidx          <= '0;
+            inrec         <= 1'b0;
+            fail          <= 1'b0;
+            fset          <= 1'b0;
+            noncanon      <= 1'b0;
+            verdict       <= 1'b0;
+            has_assert_q  <= 1'b0;
+            v0            <= 1'b0;
+            anyv          <= 1'b0;
+            older         <= 1'b0;
+            aslot         <= 1'b0;
+            rcmp          <= 1'b0;
+            hi0           <= 1'b0;
+            macdiff       <= 1'b0;
+            is_fors       <= 1'b0;
+            isprf         <= 1'b0;
+            bmode         <= '0;
+            widx          <= '0;
+            sh            <= '0;
+            dfa_ok_q      <= 2'b00;
+            chk_cont      <= 1'b0;
+            puf_recon_mode <= 1'b0;
+            puf_margin     <= 6'd4;
+            puf_flips_q    <= 3'd0;
+            puf_blk        <= '0;
+            puf_any_err    <= 1'b0;
+        end else if (reg_alive) begin
+            if (in_pop) wrem <= wrem - 21'd1;
+            if (in_pop && inrec) dleft <= dleft - 16'd1;
+            if (fire) begin
+                unique case (sid)
+                    S_IDLE[11:5]: begin
+                        wrem         <= in_data[47:27] + {20'd0, |in_data[26:24]};
+                        rerr         <= 1'b0;
+                        rok          <= 1'b1;
+                        rcode        <= idle_err;
+                        rlen         <= idle_rlen;
+                        cnt          <= '0;
+                        cnt2         <= '0;
+                        wi           <= '0;
+                        partial      <= 1'b0;
+                        fail         <= 1'b0;
+                        fset         <= 1'b0;
+                        noncanon     <= 1'b0;
+                        has_assert_q <= 1'b0;
+                        recidx       <= '0;
+                        fidx         <= '0;
+                        inrec        <= 1'b0;
+                        hs_k         <= '0;
+                        hs_rate6     <= 1'b0;
+                        hs_pad_done  <= 1'b0;
+                        gfdone       <= 1'b0;
+                        macdiff      <= 1'b0;
+                        idx_armed    <= 1'b0;
+                        chk_cont     <= 1'b0;
+                        dfa_ok_q     <= 2'b00;
+                        if (in_data[7:0] == 8'h51 && idle_err == 16'd0) begin
+                            if (in_data[15:8] == OP_P2 && !in_data[16]) begin
+                                hs_rate6    <= in_data[17];
+                                hs_pad_done <= 1'b0;
+                                hs_n        <= in_data[17] ? in_data[42:27] : (in_data[42:27] - 16'd5);
+                                hs_capsrc   <= 2'd0;
+                                hs_latch    <= 3'd0;
+                                hs_skip     <= 2'd0;
+                            end
+                            if (in_data[15:8] == OP_PUF) begin
+                                puf_recon_mode <= in_data[16];
+                                puf_margin     <= (in_data[53:48] == 6'd0) ? 6'd4 : in_data[53:48];
+                                puf_flips_q    <= in_data[56:54];
+                                puf_blk        <= 3'd0;
+                                puf_any_err    <= 1'b0;
+                                dleft[7:0]     <= 8'd0;
+                            end
+                        end
+                    end
+                    S_DRAIN[11:5]: if (wrem == 21'd0) begin
+                        rerr <= 1'b1;
+                        rok  <= 1'b0;
+                        rlen <= '0;
+                    end
+                    S_HDR[11:5]:  cnt2 <= '0;
+                    S_OUTL[11:5]: cnt2 <= cnt2 + 5'd1;
+                    S_PING[11:5]: cnt2 <= cnt2 + 5'd1;
+                    S_BSW[11:5]:  cnt2 <= '0;
+                    S_BS0[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd2) begin
+                            cnt2  <= '0;
+                            bmode <= 4'd1;
+                        end
+                    end
+                    S_BS2[11:5]: begin
+                        verdict <= (e_wd == BIST_GOLDEN_KAT);
+                        rok     <= (e_wd == BIST_GOLDEN_KAT);
+                        rlen    <= 24'd8;
+                    end
+                    S_P2R[11:5]: cnt2 <= cnt2 + 5'd1;
+                    S_P2RP[11:5]: begin
+                        rlen  <= 24'd96;
+                        obase <= 6'd0;
+                        olim  <= 5'd12;
+                    end
+                    S_HSZ[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == (hs_rate6 ? 5'd11 : 5'd7)) begin
+                            cnt2     <= '0;
+                            gfdone   <= 1'b0;
+                            hs_idx   <= 4'd0;
+                            hs_first <= 1'b1;
+                            hs_ph    <= 1'b0;
+                        end
+                    end
+                    S_HSD[11:5]: begin
+                        if (bindw) gfdone <= 1'b1;
+                        else begin
+                            gfdone <= 1'b0;
+                            if (hs_k != 16'd0) hs_k <= hs_k - 16'd1;
+                        end
+                    end
+                    S_HSC[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (hs_capsrc == 2'd1 || cnt2 == 5'd3) cnt2 <= '0;
+                    end
+                    S_HSN[11:5]: begin
+                        hs_idx   <= 4'd2;
+                        hs_first <= 1'b1;
+                        hs_ph    <= 1'b0;
+                    end
+                    S_HSL[11:5]: begin
+                        if (hs_n == 16'd0) begin
+                            if (hs_rate6 && !hs_pad_done) hs_pad_done <= 1'b1;
+                        end else if (bindw) begin
+                            gfdone <= 1'b1;
+                        end else if (hs_lat_now) begin
+                            hs_ph <= 1'b1;
+                        end else begin
+                            if (hs_k == 16'd0 && in_ge_p && (op != OP_P2)) noncanon <= 1'b1;
+                            gfdone <= 1'b0;
+                            hs_ph  <= 1'b0;
+                            if (hs_k != 16'd0) hs_k <= hs_k - 16'd1;
+                            hs_n   <= hs_n - 16'd1;
+                            hs_idx <= hs_idx + 4'd1;
+                        end
+                    end
+                    S_HSP[11:5]: begin
+                        hs_first <= 1'b0;
+                        hs_idx   <= '0;
+                    end
+                    S_HSF[11:5]: begin
+                        rlen  <= (op == OP_P2 && hs_rate6) ? 24'd48 : 24'd32;
+                        obase <= 6'd0;
+                        olim  <= (op == OP_P2 && hs_rate6) ? 5'd6  : 5'd4;
+                    end
+                    S_MK5[11:5]: begin
+                        midx <= {1'b0, midx[32:1]};
+                        cnt  <= cnt - 16'd1;
+                        cnt2 <= '0;
+                    end
+                    S_MPS[11:5]: if (cnt != 16'd0) begin
+                        if (in_ge_p) noncanon <= 1'b1;
+                        cnt2 <= cnt2 + 5'd1;
+                    end
+                    S_MOK[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd2) cnt2 <= '0;
+                    end
+                    S_MOI[11:5]: begin
+                        midx  <= mk_top_bit | {1'b0, in_data[31:0]};
+                        lidx  <= in_data[31:0];
+                        mk_kb <= 6'd16;
+                    end
+                    S_MOL[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) begin
+                            cnt2 <= '0;
+                            cnt  <= {10'd0, arg[5:0]};
+                        end
+                    end
+                    S_MOR[11:5]: cnt2 <= cnt2 + 5'd1;
+                    S_MOE[11:5]: begin
+                        verdict <= fe_eq;
+                        rok     <= fe_eq;
+                        rlen    <= 24'd40;
+                    end
+                    S_MOV[11:5]: begin
+                        cnt2  <= '0;
+                        obase <= 6'd32;
+                        olim  <= 5'd4;
+                    end
+                    S_KSW[11:5]: begin
+                        cnt2    <= '0;
+                        wi      <= '0;
+                        gfdone  <= 1'b0;
+                        if (op == OP_PRFMSG) begin
+                            if (!key_valid) rcode <= E_NOKEY;
+                            else if (cap_mode && macdiff) rcode <= E_MAC;
+                            else if (cap_mode && !vat_inv_ok) rcode <= E_CAP;
+                        end
+                    end
+                    S_KSK[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) wi <= 5'd2;
+                    end
+                    S_KSA[11:5]: begin
+                        if (prf_legacy_tag && (ksa_has_msg || ksa_is_part) && !gfdone) begin
+                            gfdone <= 1'b1;
+                        end else begin
+                            gfdone <= 1'b0;
+                            if (ksa_is_part) begin
+                                partial <= 1'b1;
+                            end else if (ksa_has_msg) begin
+                                if (wi == 5'd16) begin
+                                    wi      <= '0;
+                                end else wi <= wi + 5'd1;
+                            end
+                        end
+                    end
+                    S_KSQ[11:5]: begin
+                        cnt  <= (op == OP_KECCAK) ? {8'd0, arg[15:8]} : 16'd2;
+                        rlen <= (op == OP_KECCAK) ? {13'd0, arg[15:8], 3'd0} : 24'd16;
+                        wi   <= '0;
+                        cnt2 <= '0;
+                    end
+                    S_PFT[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd2) begin
+                            cnt2  <= '0;
+                            bmode <= 4'd2;
+                        end
+                    end
+                    S_KSO[11:5]: if (cnt != 16'd0) begin
+                        cnt <= cnt - 16'd1;
+                        if (wi == 5'd16 && cnt != 16'd1) wi <= '0;
+                        else wi <= wi + 5'd1;
+                    end
+                    S_KLM[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) begin
+                            cnt2 <= '0;
+                            if (!flags[0] && !trng_ok) rcode <= E_TRNG;
+                        end
+                    end
+                    S_KLH[11:5]: cnt2 <= cnt2 + 5'd1;
+                    S_KLW[11:5]: wi   <= '0;
+                    S_KLT[11:5]: wi   <= wi + 5'd1;
+                    S_KLA[11:5]: if (wrem != 21'd0 && wi != 5'd15) wi <= wi + 5'd1;
+                    S_KLP[11:5]: cnt2 <= '0;
+                    S_KLK[11:5]: cnt2 <= cnt2 + 5'd1;
+                    S_KLN[11:5]: begin
+                        aslot <= 1'b0;
+                        if (flags[1]) begin
+                            bmode <= 4'd1;
+                            cnt2  <= '0;
+                        end
+                    end
+                    S_KLF[11:5]: begin
+                        if (!rcmp) rcode <= E_ANCHOR_IO;
+                        else if (!aslot) begin
+                            aslot <= 1'b1;
+                            bmode <= 4'd1;
+                            cnt2  <= '0;
+                        end
+                    end
+                    S_BLD[11:5]: cnt2 <= cnt2 + 5'd1;
+                    S_BKC[11:5]: begin
+                        cnt2 <= '0;
+                        if (bmode == 4'd0) begin
+                            if (!isprf) cnt <= cnt + 16'd1;
+                            isprf <= 1'b0;
+                        end
+                    end
+                    S_AR1[11:5]: begin
+                        hi0   <= (an_rx[63:32] == 32'd0);
+                        bmode <= 4'd1;
+                        cnt2  <= '0;
+                    end
+                    S_AR3[11:5]: rcmp <= !cmp_ne && hi0;
+                    S_AR4[11:5]: rcmp <= rcmp && !cmp_ne;
+                    S_AW7[11:5]: rcmp <= !cmp_ne;
+                    S_AW8[11:5], S_AW9[11:5]: rcmp <= rcmp && !cmp_ne;
+                    S_CTG[11:5]: cnt2 <= '0;
+                    S_CTL[11:5]: begin
+                        if (cnt2 == 5'd4) is_fors <= (in_data[31:24] == 8'd3);
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd7) begin
+                            cnt2 <= '0;
+                            if (cap_mode && vat_need_nfc) bmode <= 4'd8;
+                            else if (!cap_mode)           bmode <= 4'd2;
+                        end
+                    end
+                    S_CTT[11:5]: begin
+                        if (cmp_ne) macdiff <= 1'b1;
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1 && op == OP_PRFMSG) begin
+                            cnt2 <= '0;
+                            if (macdiff || cmp_ne) begin
+                                rerr  <= 1'b1;
+                                rok   <= 1'b0;
+                                rlen  <= '0;
+                                rcode <= E_MAC;
+                            end else begin
+                                obase <= 6'd38;
+                                olim  <= 5'd2;
+                                rlen  <= 24'd16;
+                            end
+                        end
+                    end
+                    S_CTD[11:5]: begin
+                        cnt2 <= '0;
+                        if (!key_valid) rcode <= E_NOKEY;
+                        else if (macdiff) rcode <= E_MAC;
+                        else if (cth_pub_illegal) rcode <= E_LEN;
+                        else if (cap_mode && !vat_inv_ok) rcode <= E_CAP;
+                        else if (stateful && !pubgen) aslot <= 1'b0;
+                        else begin
+                            rlen       <= {12'd0, nch, 4'd0};
+                            dleft[7:0] <= 8'd0;
+                            widx       <= '0;
+                            sh         <= '0;
+                        end
+                    end
+                    S_CA0[11:5]: begin
+                        v0    <= rcmp;
+                        aslot <= 1'b1;
+                    end
+                    S_CA1[11:5]: begin
+                        anyv  <= v0 | rcmp;
+                        older <= !(rcmp && (!v0 || ctmp >= cur));
+                    end
+                    S_CA2[11:5]: begin
+                        if (!anyv) rcode <= E_ANCHOR_EMPTY;
+                        else if (hwm_valid && cur < hwm) rcode <= E_ROLLBACK;
+                        else if (port[31:0] < cur || port[31:0] == 32'hFFFF_FFFF) rcode <= E_REUSE;
+                        else begin
+                            aslot <= older;
+                            bmode <= 4'd1;
+                            cnt2  <= '0;
+                        end
+                    end
+                    S_CA3[11:5]: begin
+                        if (!rcmp) rcode <= E_ANCHOR_IO;
+                        else begin
+                            rlen       <= {12'd0, nch, 4'd0};
+                            dleft[7:0] <= 8'd0;
+                            widx       <= '0;
+                            sh         <= '0;
+                        end
+                    end
+                    S_CTS[11:5]: if (ci != nch) begin
+                        hs_n     <= port_sh16 & symmask;
+                        chk_cont <= 1'b0;
+                        if (sh + {2'd0, sw} + {2'd0, sw} > 7'd64) begin
+                            sh   <= '0;
+                            widx <= widx + 2'd1;
+                        end else sh <= sh + {2'd0, sw};
+                        cnt   <= '0;
+                        isprf <= 1'b1;
+                        bmode <= 4'd0;
+                        cnt2  <= '0;
+                    end
+                    S_CM1[11:5]: cnt2 <= '0;
+                    S_CKD[11:5]: cnt2 <= '0;
+                    S_CY0[11:5]: dfa_ok_q <= 2'b01; // armed complementary canary!
+                    S_CY1[11:5]: begin
+                        chk_cont <= 1'b1;
+                        bmode    <= 4'd0;
+                        cnt2     <= '0;
+                    end
+                    S_CZ0[11:5]: dfa_ok_q <= ((dfa_ok_q == 2'b01) && cmp_eq) ? 2'b10 : 2'b00;
+                    S_CZ1[11:5]: begin
+                        if ((dfa_ok_q != 2'b10) || cmp_ne) dfa_ok_q <= 2'b00;
+                        cnt2 <= '0;
+                    end
+                    S_CO[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) dleft[7:0] <= dleft[7:0] + 8'd1;
+                    end
+                    S_PF2[11:5]: begin
+                        if (puf_blk_err) puf_any_err <= 1'b1;
+                        dleft[7:0] <= dleft[7:0] + {4'd0, puf_corrected};
+                    end
+                    S_PF3[11:5]: begin
+                        cnt2  <= '0;
+                        bmode <= 4'd5;
+                        if (puf_blk != 3'd7) puf_blk <= puf_blk + 3'd1;
+                    end
+                    S_PF4[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd9) begin
+                            cnt2  <= '0;
+                            bmode <= 4'd6;
+                        end
+                    end
+                    S_PF5[11:5]: begin
+                        if (puf_recon_mode && cnt2 <= 5'd3 && cmp_ne)
+                            macdiff <= 1'b1;
+                        if (puf_recon_mode && cnt2 == 5'd3 && (puf_any_err || macdiff || cmp_ne)) begin
+                            rerr  <= 1'b1;
+                            rok   <= 1'b0;
+                            rlen  <= '0;
+                            rcode <= E_PUF;
+                        end else if (puf_recon_mode && cnt2 == 5'd14) begin
+                            rlen <= 24'd8;
+                            rok  <= 1'b1;
+                        end
+                        cnt2 <= cnt2 + 5'd1;
+                    end
+                    S_VLD[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd7) begin
+                            cnt2  <= '0;
+                            bmode <= 4'd4;
+                        end
+                    end
+                    S_VTG[11:5]: begin
+                        if (cmp_ne) macdiff <= 1'b1;
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) begin
+                            cnt2 <= '0;
+                            if (macdiff || cmp_ne) rcode <= E_MAC;
+                            else if (vat_need_nfc && (op == OP_PRFMSG || op == OP_VAT_ZK)) bmode <= 4'd8;
+                        end
+                    end
+                    S_NFC[11:5]: begin
+                        if (cmp_ne) macdiff <= 1'b1;
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) begin
+                            cnt2 <= '0;
+                            if (!nfc_frame_rdy || (nfc_seq <= nfc_last_seq_q)) rcode <= E_CAP;
+                            else if (macdiff || cmp_ne)                        rcode <= E_MAC;
+                        end
+                    end
+                    S_VAT[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd7) begin
+                            cnt2  <= '0;
+                            bmode <= 4'd4;
+                            if (!vat_att_step_ok) rcode <= E_CAP;
+                        end
+                    end
+                    S_VOT[11:5]: cnt2 <= cnt2 + 5'd1;
+                    S_VZK[11:5]: begin
+                        if (!vat_inv_ok) rcode <= E_CAP;
+                        else begin
+                            cnt2  <= '0;
+                            bmode <= 4'd7;
+                            obase <= 6'd0;
+                            olim  <= 5'd4; // Locked to 4 words (256-bit grant; never leaks capacity!)
+                        end
+                    end
+                    S_DB0[11:5], S_DBO[11:5]: cnt2 <= cnt2 + 5'd1;
+                    S_HVR[11:5]: begin
+                        if (wrem == 21'd0) begin
+                            verdict <= !fail && !noncanon && has_assert_q && (recidx != 16'd0);
+                            cnt2    <= '0;
+                        end else begin
+                            hop    <= in_data[3:0] | {4{|in_data[7:4]}};
+                            ha     <= in_data[13:8];
+                            hb     <= in_data[18:16];
+                            hc     <= in_data[30:24];
+                            dleft  <= in_data[47:32];
+                            hs_k   <= in_data[63:48];
+                            recidx <= recidx + 16'd1;
+                            inrec  <= 1'b1;
+                            gfdone <= 1'b0;
+                        end
+                    end
+                    S_HVD[11:5]: begin
+                        cnt2 <= '0;
+                        unique case (hop)
+                            4'd1: begin
+                                hs_rate6    <= hc[6];
+                                hs_pad_done <= 1'b0;
+                                if (hc[6]) begin
+                                    hs_n      <= dleft;
+                                    hs_capsrc <= 2'd0;
+                                    hs_latch  <= hc[2:0];
+                                    hs_skip   <= hc[5:4];
+                                end else if (dleft == 16'd0) begin
+                                    fail <= 1'b1;
+                                end else begin
+                                    hs_n      <= dleft - 16'd1;
+                                    hs_capsrc <= hc[3] ? 2'd2 : 2'd1;
+                                    hs_capreg <= hb[2:0];
+                                    hs_latch  <= hc[2:0];
+                                    hs_skip   <= hc[5:4];
+                                end
+                            end
+                            4'd2, 4'd3, 4'd4, 4'd9: ;
+                            4'd5: begin
+                                if (dleft != {13'd0, vm_limbs} || (vm_pin_mode && ha[2:0] == 3'd1))
+                                    fail <= 1'b1;
+                            end
+                            4'd6, 4'd7: has_assert_q <= 1'b1;
+                            4'd8: begin
+                                has_assert_q <= 1'b1;
+                                if (ha[5:0] == 6'd0 || ha[5:0] > 6'd32 ||
+                                    dleft != 16'd1 + {8'd0, ha[5:0], 2'd0}) fail <= 1'b1;
+                            end
+                            default: fail <= 1'b1;
+                        endcase
+                    end
+                    S_HVL[11:5]: begin
+                        if (bindw) gfdone <= 1'b1;
+                        else begin
+                            if (hs_k == 16'd0 && in_ge_p) noncanon <= 1'b1;
+                            gfdone <= 1'b0;
+                            if (hs_k != 16'd0) hs_k <= hs_k - 16'd1;
+                            cnt2 <= cnt2 + 5'd1;
+                        end
+                    end
+                    S_HVE[11:5]: if (!fe_eq) fail <= 1'b1;
+                    S_HVQ[11:5]: if (res_masked != 32'd0) fail <= 1'b1;
+                    S_HVM[11:5]: begin
+                        if (idx_armed && (in_data[31:0] != lidx || |in_data[63:32])) fail <= 1'b1;
+                        idx_armed <= 1'b0;
+                        midx      <= mk_top_bit | {1'b0, in_data[31:0]};
+                        mk_kb     <= rb_vm(fp5_vm, hb[2:0]);
+                        cnt       <= {10'd0, ha[5:0]};
+                        cnt2      <= '0;
+                    end
+                    S_HVJ[11:5]: begin
+                        lidx      <= res_masked;
+                        idx_armed <= 1'b1;
+                    end
+                    S_HVN[11:5]: if (dleft == 16'd0) begin
+                        inrec <= 1'b0;
+                        hs_k  <= '0;
+                        if (fail && !fset) begin
+                            fset <= 1'b1;
+                            fidx <= recidx;
+                        end
+                    end
+                    S_HVF[11:5]: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == hvf_last) begin
+                            cnt2  <= '0;
+                            bmode <= 4'd3;
+                            rok   <= verdict;
+                            rlen  <= fp5_vm ? 24'd80 : 24'd72;
+                        end
+                    end
+                    S_HVS[11:5]: begin
+                        cnt2  <= '0;
+                        obase <= 6'd0;
+                        olim  <= 5'd4;
+                    end
+                    S_HVC[11:5]: begin
+                        cnt2  <= '0;
+                        obase <= 6'd32;
+                        olim  <= {2'd0, vm_limbs};
+                    end
+                    default: ;
+                endcase
+            end
+        end
+    end
+
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused = &{1'b0, vat_att_ok, mul_busy, gf_busy, vat_spend_used[31:16], res[63:32], psh2[19], S_KSB};
+    /* verilator lint_on UNUSEDSIGNAL */
+endmodule
+`default_nettype wire
