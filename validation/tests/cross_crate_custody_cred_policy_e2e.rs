@@ -2,7 +2,7 @@
 //! End-to-End Cross-Crate Custody, BlindVC -> `zk-Hem`, Policy/Capability -> Threshold `ML-DSA`,
 //! and Paged Crash-Journal (`QSBURN05` & `QSHDQB05`) Validation Suite.
 //!
-//! Proves zero architectural seams across crates (`Subcarbon C4` & `Subcarbon C5` remediation):
+//! Proves zero architectural seams across crates:
 //! 1. **Journey A (`qsag-cred` -> `qsag-agg` `239 KiB` `zk-Hem` BlindVC Selective Disclosure):**
 //!    - 3-of-5 dishonest-majority SPDZ TOPRF DKG & online blinded evaluation (`voprf_spdz`)
 //!    - 438-repetition Quantum-128 ZKBoo blind issuance (`holder_prepare_blind_issuance`,

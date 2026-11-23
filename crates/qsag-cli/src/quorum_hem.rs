@@ -3,7 +3,7 @@
 //!
 //! Produces canonical 65-byte [`qsag_agg::ValidatorPublicKey`]s and 4,328-byte
 //! [`qsag_agg::ValidatorSignature`]s accepted directly by untrusted public `qsag aggregate`
-//! and `qsag verify-aggregate` (`BciksJohnsonQrom128`), while supporting proactive share
+//! and `qsag verify-aggregate` (`QSAGHQM2` `HemQuintic128`), while supporting proactive share
 //! refresh (`qsag quorum refresh`) and `(t, n) -> (t', n')` roster/threshold switching
 //! (`qsag quorum reshare`) without changing the validator public key.
 //!

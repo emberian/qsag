@@ -6,7 +6,7 @@
 //! this module produces canonical 65-byte [`HemJortsPublicKey`]s and 4,328-byte
 //! [`HemJortsSignature`]s accepted byte-for-byte by `qsag_agg::ValidatorPublicKey`,
 //! `qsag_agg::ValidatorSignature`, `qsag_agg::verify_individual_signature`, and untrusted public
-//! `Hem` WHIR multi-signature aggregation under `BciksJohnsonQrom128`.
+//! `Hem` WHIR multi-signature aggregation under `HemQuintic128` (`QSAGHQM2`, `[DKT26]` `< 2^{-128}` QROM).
 //!
 //! Three custody architectures are provided:
 //! 1. **Mode QS-A ([`HemCommitteePartitionedQuorum`]):** Partitions active XMSS leaves across all
@@ -3022,9 +3022,9 @@ mod tests {
     }
 
     use qsag_agg::{
-        AggSigProfile, EpochWalSink, HemAggConfig, HemAggregator, SigError, SignerBitmap,
-        SigningMode, ValidatorKeypair, ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime,
-        verify_individual_signature,
+        AggSigProfile, EpochWalSink, HemQuinticProfile, SigError, SignerBitmap, SigningMode,
+        ValidatorKeypair, ValidatorPublicKey, ValidatorSignature, prove_hem_quintic_128,
+        verify_hem_quintic_128, verify_individual_signature,
     };
 
     #[derive(Default)]
@@ -3248,31 +3248,22 @@ mod tests {
         ));
         assert!(verify_individual_signature(&agg_pk2, block_msg, &sig_v2));
 
-        // 4. Untrusted public `Hem` aggregator proves & verifies under `BciksJohnsonQrom128`!
+        // 4. Untrusted public `Hem` aggregator proves & verifies under `HemQuintic128` (`QSAGHQM2`)!
         let committee_pks = vec![agg_pk0, agg_pk1, agg_pk2];
         let bitmap = SignerBitmap::from_active_indices(3, &[0, 1, 2]).unwrap();
         let mode = SigningMode::SharedMessage(block_msg);
-        let cfg = HemAggConfig {
-            regime: WhirSecurityRegime::BciksJohnsonQrom128,
-            ..HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [0x77; 32])
-        };
 
-        let agg_proof = HemAggregator::aggregate_with_config(
+        let agg_proof = prove_hem_quintic_128(
+            HemQuinticProfile::TurboShake400,
             &committee_pks,
             &bitmap,
             &mode,
             &[agg_sig_qsb, agg_sig_qsa, sig_v2],
-            &cfg,
         )
         .unwrap();
 
         assert_eq!(agg_proof.num_signers(), 3);
-        assert!(HemAggregator::verify_with_regime(
-            &committee_pks,
-            &mode,
-            &agg_proof,
-            WhirSecurityRegime::BciksJohnsonQrom128,
-        ));
+        assert!(verify_hem_quintic_128(&committee_pks, &mode, &agg_proof));
     }
 
     #[test]
@@ -3834,23 +3825,18 @@ mod tests {
 
         let bitmap = SignerBitmap::from_active_indices(1, &[0]).unwrap();
         let mode = SigningMode::SharedMessage(msg1);
-        let cfg = HemAggConfig {
-            regime: WhirSecurityRegime::BciksJohnsonQrom128,
-            ..HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [0x95; 32])
-        };
-        let proof = HemAggregator::aggregate_with_config(
+        let proof = prove_hem_quintic_128(
+            HemQuinticProfile::TurboShake400,
             core::slice::from_ref(&agg_pk),
             &bitmap,
             &mode,
             &[agg_sig1],
-            &cfg,
         )
         .unwrap();
-        assert!(HemAggregator::verify_with_regime(
+        assert!(verify_hem_quintic_128(
             core::slice::from_ref(&agg_pk),
             &mode,
             &proof,
-            WhirSecurityRegime::BciksJohnsonQrom128,
         ));
     }
 

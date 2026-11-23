@@ -7,7 +7,7 @@
 //!    `HemDynamicShamirQuorum` QS-B with proactive refresh `Π_refresh` and `(2, 3) -> (3, 5)`
 //!    quorum-switching `Π_reshare`, and dealerless `HemSpdzSeedQuorum`) with `qsag-agg`
 //!    (`ValidatorPublicKey`, `ValidatorSignature`, `verify_individual_signature`, and untrusted
-//!    `HemAggregator` WHIR aggregation under `BciksJohnsonQrom128`), plus negative adversarial
+//!    `prove_hem_quintic_128` Quintic `Fp5` WHIR aggregation under `[DKT26]` `< 2^{-128}` QROM), plus negative adversarial
 //!    tamper/bitmap/message rejection checks.
 //! 2. Exact consistency of the `QS <-> AG` `Hem` Merkle/compression bridge: the canonical weighted
 //!    compression `perm(in0 ‖ in1 ‖ tweak)[0..4] + in0 + 2·in1 + 4·tweak` agrees between
@@ -26,8 +26,8 @@ use qsag_agg::field::Goldilocks as AggGoldilocks;
 use qsag_agg::sig::{DOMAIN_MERKLE_NODE, MerkleNodeAddr, merkle_node_hash};
 use qsag_agg::sponge::poseidon2_compress12_ff;
 use qsag_agg::{
-    AggSigProfile, HemAggConfig, HemAggregator, SignerBitmap, SigningMode, ValidatorPublicKey,
-    ValidatorSignature, WhirSecurityRegime, verify_individual_signature,
+    AggSigProfile, HemQuinticProfile, SignerBitmap, SigningMode, ValidatorPublicKey,
+    ValidatorSignature, prove_hem_quintic_128, verify_hem_quintic_128, verify_individual_signature,
 };
 use qsag_core::field::goldilocks::Goldilocks as CoreGoldilocks;
 use qsag_core::poseidon2_mpc::{
@@ -127,37 +127,24 @@ fn e2e_quorum_qsa_qsb_spdz_to_hem_whir_aggregation_and_adversarial_rejection() {
         assert!(!verify_individual_signature(pk, b"tampered-msg", sig));
     }
 
-    // Aggregate all 3 heterogeneous threshold-quorum validators into a single WHIR QROM-128 proof
+    // Aggregate all 3 heterogeneous threshold-quorum validators into a single Quintic Fp5 QROM-128 proof
     let bitmap = SignerBitmap::from_active_indices(3, &[0, 1, 2]).unwrap();
     let mode = SigningMode::SharedMessage(consensus_msg);
-    let cfg = HemAggConfig {
-        regime: WhirSecurityRegime::BciksJohnsonQrom128,
-        ..HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [0x88; 32])
-    };
-    let agg_proof =
-        HemAggregator::aggregate_with_config(&agg_pks, &bitmap, &mode, &agg_sigs, &cfg).unwrap();
-    assert!(HemAggregator::verify_with_regime(
+    let agg_proof = prove_hem_quintic_128(
+        HemQuinticProfile::TurboShake400,
         &agg_pks,
+        &bitmap,
         &mode,
-        &agg_proof,
-        WhirSecurityRegime::BciksJohnsonQrom128,
-    ));
+        &agg_sigs,
+    )
+    .unwrap();
+    assert!(verify_hem_quintic_128(&agg_pks, &mode, &agg_proof));
 
     // Adversarial rejection checks: wrong message or swapped committee roster must be rejected
     let wrong_mode = SigningMode::SharedMessage(b"forged-consensus-block");
-    assert!(!HemAggregator::verify_with_regime(
-        &agg_pks,
-        &wrong_mode,
-        &agg_proof,
-        WhirSecurityRegime::BciksJohnsonQrom128,
-    ));
+    assert!(!verify_hem_quintic_128(&agg_pks, &wrong_mode, &agg_proof));
     let swapped_pks = vec![agg_pks[1], agg_pks[0], agg_pks[2]];
-    assert!(!HemAggregator::verify_with_regime(
-        &swapped_pks,
-        &mode,
-        &agg_proof,
-        WhirSecurityRegime::BciksJohnsonQrom128,
-    ));
+    assert!(!verify_hem_quintic_128(&swapped_pks, &mode, &agg_proof));
 }
 
 proptest! {
