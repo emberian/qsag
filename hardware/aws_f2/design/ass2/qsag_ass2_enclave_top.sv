@@ -1,23 +1,26 @@
 // ASS2-0P5 (`Dregg-64`) Enclave Top for wafer.space GF180MCU `SLOT_0P5X0P5` (56 pads):
-//   - Strict 1-function-per-pad assignment matching `dregg64-ass2-datasheet.typ` Rev. 1.0 Page 3.
-//   - Exact `ASS2-0P5` physical memory hierarchy (`2 x sram512x8m8wm1` + `4 KiB I-ROM`):
-//       0x0000_0000 .. 0x0000_0FFF : 4 KiB Resident `I-ROM` (`X R`)
-//       0x0000_1000 .. 0x0000_11FF : 512 B Authenticated `I-SRAM` (`SRAM1`, write-locked while running)
-//       0x0001_0000 .. 0x0001_01FF : 512 B Enclave `D-SRAM` (`SRAM0`: scratch, `RX_MBOX`, `TX_MBOX`)
-//                                    with deterministic hardware zeroizer scrub FSM
-//       0xFFFF_0000 .. 0xFFFF_007F : `SYS_MMIO` with hardware privilege fence
-//                                    (`PC >= 0x1000` raises `MemFault` `ecause = 5`!)
+//   - Strict 1-function-per-pad assignment matching `dregg64-ass2-datasheet.typ` Rev. 2.0.
+//   - Zero-Factory-Trust Post-Quantum Owner Authority support:
+//       * `0x11 CMD_ENROL` (`32 B` `owner_auth_root` in `RX_MBOX`)
+//       * `0x12 CMD_COMMIT`, `0x15 CMD_LEASE`, `0x16 CMD_GATE`: `320 B` Owner `WOTS+C`
+//         capability frame streamed to `0x10040..0x1017F` (`24 B` header + `296 B` `WOTS+C`!)
+//       * `0x30 CMD_LOAD_CODE`: supports BOTH `flags == 1` (`20 + 4*n B` Owner-capability
+//         commitment) AND `flags == 2` (`300 + 4*n B` inline `296 B` Owner `WOTS+C` proof)!
+//   - Hardware `SafeRecovery` (`BOOT_MODE == 2'b01` blocks `0x20, 0x30`, and applet `0x31`
+//     with `E_LOCKED = 14`), JTAG lockout / async wipe, and exact-edge watchdog cutoff!
 module qsag_ass2_enclave_top #(
     parameter int DEFAULT_UART_DIV = 25, VAT_ID = 0
 ) (
-    input  wire        clk,
-    input  wire        rst_n,
-    input  wire        erase,
-    input  wire [8:0]  erase_addr,
-    input  wire [3:0]  input_in,
-    output wire [3:0]  input_pu,
-    output wire [3:0]  input_pd,
-    input  wire [37:0] bidir_in,
+    input  wire [511:0] cloud_response,
+    input  wire [63:0]  cloud_word,
+    input  wire         cloud_epoch, cloud_ok, cloud_rct, cloud_apt, erase,
+    input  wire [8:0]   erase_addr,
+    input  wire         clk,
+    input  wire         rst_n,
+    input  wire  [3:0]  input_in,
+    output wire  [3:0]  input_pu,
+    output wire  [3:0]  input_pd,
+    input  wire  [37:0] bidir_in,
     output logic [37:0] bidir_out,
     output logic [37:0] bidir_oe,
     output logic [37:0] bidir_cs,
@@ -45,6 +48,7 @@ module qsag_ass2_enclave_top #(
     wire       jtag_tms_in    = bidir_in[36];
     wire       jtag_tck_in    = bidir_in[37];
     wire       jtag_mode      = (boot_mode == 2'b11);
+    wire       safe_recovery  = (boot_mode == 2'b01);
 
     logic      tampered, halted, trap;
     logic      verify_q, fault_q, host_irq_q, running_q;
@@ -52,11 +56,20 @@ module qsag_ass2_enclave_top #(
     logic      scrub_active_q, scrub_full_q;
     logic [8:0] scrub_addr_q;
 
-    wire srst_n      = rst_n && tamper_n && !tampered && !jtag_mode;
+    // JTAG test mode (`2'b11`) holds `srst_n` asserted low (0-clock secret wipe!),
+    // AND JTAG TDO is additionally locked out if `lc_state_q != LC_RESET && lc_state_q != LC_BLANK` or tampered!
+    wire srst_raw    = rst_n && tamper_n && !tampered && !jtag_mode;
+    wire srst_n;
+`ifdef GF180_SRAM_MACRO
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__clkbuf_8 u_top_srst_drv (.I(srst_raw), .Z(srst_n));
+`else
+    assign srst_n = srst_raw;
+`endif
     wire verify_pin  = verify_q && srst_n && !tampered;
     wire fault_pin   = fault_q || tampered || !tamper_n;
     wire host_rdy;
     wire dbg_allowed = (boot_mode == 2'b10) && (lc_state_q == LC_BLANK);
+    wire jtag_ok     = jtag_mode && !tampered && (lc_state_q == LC_RESET || lc_state_q == LC_BLANK);
 
     logic [63:0] core_pc, core_ecause, core_instret, core_cycles, core_phys, core_r4;
     wire  [7:0]  link_stat = {fault_pin, verify_pin, tampered, running_q,
@@ -73,7 +86,6 @@ module qsag_ass2_enclave_top #(
     logic [7:0]  cmd_op_q, cmd_flags_q, resp_len_q;
     logic [4:0]  resp_err_code_q;
     logic        resp_err_q;
-    // Unified 64-bit buffer (`buf64_q`) shared across core SRAM read, DMA write, and host TX read!
     logic [63:0] buf64_q, buf64_d;
     logic        buf64_en;
     qsag_ass2_cg_dff #(.W(64)) u_buf64 (
@@ -84,7 +96,7 @@ module qsag_ass2_enclave_top #(
                            resp_err_q, 6'd0, !resp_err_q, (cmd_op_q | 8'h80), 8'h51};
 
     qsag_ass2_host u_host (
-        .sck(host_sck), .cs_n(host_cs_n), .rst_n(rst_n), .tamper_n(tamper_n),
+        .clk(clk), .sck(host_sck), .cs_n(host_cs_n), .rst_n(rst_n), .tamper_n(tamper_n),
         .dq_i(bidir_in[7:0]), .dq_o(host_dq_o), .dq_oe(host_dq_oe),
         .diag_word_i(diag_word), .resp_w0_i(resp_w0), .resp_word_i(buf64_q),
         .rx_hdr_toggle_o(rx_hdr_tog), .rx_word_toggle_o(rx_word_tog),
@@ -107,11 +119,19 @@ module qsag_ass2_enclave_top #(
     logic [7:0]  dbg_byte, uart_rx_byte;
     logic        uart_tx_pin, uart_tx_ovf, uart_rx_valid;
 
+    logic [15:0] cmd_arg_q, exec_budget_q, exec_cnt_q;
+    logic [8:0]  service_timer_q;
+    logic        budget_last_q;
+    wire long_service   = start_is_irom_q && (cmd_op_q != 8'h31 || cmd_arg_q == 16'd0);
+    // Registered 1-bit lookahead `budget_last_q` fires on the exact expiry clock with 0 comparator delay!
+    wire budget_expired = running_q && !core_start && budget_last_q;
+    wire core_halt_comb = core_halt_req || budget_expired;
+
     qsag_ass2_core #(.WITH_DEBUG_RX(1'b1)) u_core (
         .clk(clk), .rst_n(rst_n), .tamper_zeroize_n(tamper_n),
         .jtag_test_mode_i(jtag_mode),
         .start_i(core_start), .zeroize_first_i(core_zeroize_first),
-        .dbg_halt_i(core_halt_req), .start_pc_i({51'd0, !start_is_irom_q, 12'd0}),
+        .dbg_halt_i(core_halt_comb), .start_pc_i({51'd0, !start_is_irom_q, 12'd0}),
         .arg_regs_we_i(1'b0), .arg_reg_addr_i(4'd0), .arg_reg_data_i(64'd0),
         .mem_en_o(mem_en), .mem_we_o(mem_we), .mem_wstrb_o(mem_wstrb),
         .mem_addr_o(mem_addr), .mem_wdata_o(mem_wdata),
@@ -125,7 +145,6 @@ module qsag_ass2_enclave_top #(
         .dbg_rd_o(dbg_rd)
     );
 
-    // Power-of-two aligned decode (eliminates eight 64-bit magnitude comparators on the SRAM critical path)
     wire addr_hi32_z = (mem_addr[63:32] == 32'd0);
     wire addr_mid_z  = addr_hi32_z && (mem_addr[31:17] == 15'd0);
     wire sel_irom    = addr_mid_z && (mem_addr[16:12] == 5'd0);
@@ -133,23 +152,22 @@ module qsag_ass2_enclave_top #(
     wire sel_dsram   = addr_mid_z && (mem_addr[16:9]  == 8'b1000_0000);
     wire sel_mmio    = addr_hi32_z && (mem_addr[31:16] == 16'hFFFF) && (mem_addr[15:7] == 9'd0);
 
-    // Strict W^X (`D-SRAM` / `SYS_MMIO` never executable!) & sticky `applet_mode_q` `SYS_MMIO` fence
     logic isram_auth_valid_q, frame_active_q, launch_pending_q;
     logic [7:0] load_count_q, frame_index_q, frame_last_q;
     logic [9:0] payload_len_q;
 
-    wire  pc_hi_z      = (core_pc[63:13] == 51'd0);
-    wire  pc_in_irom   = pc_hi_z && !core_pc[12];
-    wire  pc_in_isram  = pc_hi_z && (core_pc[12:9] == 4'b1000);
-    wire  mmio_priv_ok = !applet_mode_q && pc_in_irom;
+    wire pc_hi_z        = (core_pc[63:13] == 51'd0);
+    wire pc_in_irom     = pc_hi_z && !core_pc[12];
+    wire pc_in_isram    = pc_hi_z && (core_pc[12:9] == 4'b1000);
+    wire mmio_priv_ok   = !applet_mode_q && pc_in_irom;
     wire verifying_load = running_q && cmd_op_q == 8'h30 && mmio_priv_ok;
-    wire image_pc_ok = pc_in_isram && isram_auth_valid_q
-                    && {1'b0,core_pc[8:2]} < load_count_q;
-    assign mem_fault   = !(pc_in_irom || image_pc_ok)
-                       || (sel_irom && mem_we)
-                       || (sel_isram && (mem_we || (!isram_auth_valid_q && !verifying_load)))
-                       || (sel_mmio && !mmio_priv_ok)
-                       || (!sel_irom && !sel_isram && !sel_dsram && !sel_mmio);
+    wire image_pc_ok    = pc_in_isram && isram_auth_valid_q
+                        && {1'b0, core_pc[8:2]} < load_count_q;
+    assign mem_fault    = !(pc_in_irom || image_pc_ok)
+                        || (sel_irom && mem_we)
+                        || (sel_isram && (mem_we || (!isram_auth_valid_q && !verifying_load)))
+                        || (sel_mmio && !mmio_priv_ok)
+                        || (!sel_irom && !sel_isram && !sel_dsram && !sel_mmio);
 
     logic [3:0] sram_step_q;
     logic [1:0] rd_src_q;
@@ -161,30 +179,26 @@ module qsag_ass2_enclave_top #(
     assign mem_ready = sel_irom || (sel_mmio && mmio_priv_ok)
                      || (core_sram_req && !scrub_active_q && (sram_step_q == sram_last));
 
-    logic [15:0] cmd_arg_q, exec_budget_q, exec_cnt_q;
-    logic [6:0] service_timer_q;
-    wire long_service = start_is_irom_q && (cmd_op_q != 8'h31 || cmd_arg_q == 0);
-    wire budget_expired = long_service ? (&service_timer_q && &exec_cnt_q)
-                                      : exec_cnt_q == exec_budget_q;
-    logic dma_half_q;
-
-
-    logic        dma_active_q, dma_is_isram_q, dma_we_q, dma_rd_tx_q;
+    logic        dma_half_q, dma_active_q, dma_is_isram_q, dma_we_q, dma_rd_tx_q;
     logic [8:0]  dma_base_q;
     logic [3:0]  dma_bstep_q;
 
     wire dma_finishing = dma_bstep_q == (dma_we_q ? (dma_half_q ? 4'd3 : 4'd7) : 4'd8);
 
     assign host_rdy = halted && srst_n && !running_q && !scrub_active_q && !launch_pending_q && !dma_active_q;
-    wire load_frame = cmd_op_q == 8'h30;
-    wire frame_beat = wrd_ev && frame_active_q && !running_q && !scrub_active_q;
+    wire load_frame   = (cmd_op_q == 8'h30);
+    wire load_wotsc   = load_frame && (cmd_flags_q == 8'd2);
+    wire ext_wotsc_op = (cmd_op_q == 8'h12 || cmd_op_q == 8'h15 || cmd_op_q == 8'h16) && (payload_len_q == 10'd320);
+    wire frame_beat   = wrd_ev && frame_active_q && !running_q && !scrub_active_q;
     wire consume_beat = frame_beat && rx_widx_sck == frame_index_q
-                     && (!dma_active_q || dma_finishing);
-    wire [7:0] code_index = rx_widx_sck - 8'd1;
-    wire [7:0] tag_index = code_index - load_count_q;
-    wire load_code_beat = load_frame && rx_widx_sck != 0 && code_index < load_count_q;
-    wire load_tag_beat = load_frame && rx_widx_sck != 0 && !load_code_beat && tag_index < 4;
-    wire payload_dma = consume_beat && (!load_frame || load_code_beat || load_tag_beat);
+                      && (!dma_active_q || dma_finishing);
+    wire [7:0] code_index   = rx_widx_sck - 8'd1;
+    wire [7:0] tag_index    = code_index - load_count_q;
+    wire [7:0] tag_words    = load_wotsc ? 8'd74 : 8'd4; // 74 x 4B = 296B WOTS+C, or 4 x 4B = 16B cap token
+    wire load_code_beat     = load_frame && rx_widx_sck != 8'd0 && code_index < load_count_q;
+    wire load_tag_beat      = load_frame && rx_widx_sck != 8'd0 && !load_code_beat && tag_index < tag_words;
+    wire payload_dma        = consume_beat && (!load_frame || load_code_beat || load_tag_beat);
+
     wire [63:0] irom_rdata;
     qsag_ass2_irom u_irom (
         .clk(clk), .en(mem_en && sel_irom), .addr(mem_addr[11:3]), .rdata(irom_rdata)
@@ -229,8 +243,6 @@ module qsag_ass2_enclave_top #(
         end
     end
 
-    // The macro requires CEN high before its first access. Hold both banks
-    // deselected through reset so byte zero is written on the first scrub edge.
     qsag_ass2_sram u_isram (
         .clk(clk), .en(erase || (srst_n && isram_en)), .we(erase || isram_we), .addr(erase ? erase_addr : isram_addr), .wdata(erase ? 8'd0 : isram_wdata), .rdata(isram_rdata)
     );
@@ -241,41 +253,45 @@ module qsag_ass2_enclave_top #(
     logic [7:0]  gpio_out_q, gpio_oe_q, gpio_in_s;
     logic [11:0] uart_div_q;
     logic        fram_cs_n_q, fram_sck_q, fram_mosi_q, fram_busy_q;
-    logic [1:0] fram_div_q;
-    logic [63:0] record_q;
+    logic [1:0]  fram_div_q;
     logic [3:0]  fram_cnt_q;
     logic [7:0]  fram_sr_q;
     logic [29:0] trng_cnt_q;
     logic [63:0] trng_word;
-    logic trng_take_q;
-    logic trng_valid, trng_ok, trng_rct, trng_apt, raw_bit;
-    wire mmio_en = running_q && !trap && mem_en && sel_mmio && mmio_priv_ok;
+    logic        trng_take_q;
+    logic        trng_valid, trng_ok, trng_rct, trng_apt, raw_bit;
+    wire mmio_en   = running_q && !trap && mem_en && sel_mmio && mmio_priv_ok;
     wire trng_take = mmio_en && !mem_we && mem_addr[6:3] == 4'h8 && trng_valid && trng_ok;
-    qsag_trng #(.VAT_ID(VAT_ID)) u_trng (
+    qsag_trng u_trng (
+        .cloud_word, .cloud_epoch, .cloud_ok, .cloud_rct, .cloud_apt,
         .clk(clk), .rst_n(srst_n), .en(srst_n), .take(trng_take_q),
         .word(trng_word), .valid(trng_valid), .ok(trng_ok),
         .rct_fail(trng_rct), .apt_fail(trng_apt), .raw_bit(raw_bit)
     );
 
-    logic [63:0] key_lo, key_hi, nonce_lo, nonce_hi;
+    // Resident-only SYS_MMIO vault. Full-word stores at +0x08/+0x30
+    // install the capability. Stores at +0x50/+0x58 install the root.
+    logic [63:0] record_q, key_lo, key_hi, nonce_lo, nonce_hi, cap_lo, cap_hi;
     wire private_write = mmio_en && mem_we && (&mem_wstrb);
-    qsag_ass2_cg_dff u_record (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==7), .d(mem_wdata), .q(record_q));
-    qsag_ass2_cg_dff u_key_lo (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==10), .d(mem_wdata), .q(key_lo));
-    qsag_ass2_cg_dff u_key_hi (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==11), .d(mem_wdata), .q(key_hi));
-    qsag_ass2_cg_dff u_nonce_lo (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==3), .d(mem_wdata), .q(nonce_lo));
-    qsag_ass2_cg_dff u_nonce_hi (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==15), .d(mem_wdata), .q(nonce_hi));
-    // Private PUF sequencer. Write CTRL to start one block. Poll BUSY and
-    // completion before reading its word and public BCH helpers.
-    logic [2:0] puf_block_q;
-    logic puf_recon_q, puf_busy, puf_done, puf_err, puf_complete_q;
-    logic [5:0] puf_margin_q, puf_accepted;
-    logic [3:0] puf_corrected;
+    qsag_ass2_cg_dff u_cap_lo   (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==4'h1), .d(mem_wdata), .q(cap_lo));
+    qsag_ass2_cg_dff u_cap_hi   (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==4'h6), .d(mem_wdata), .q(cap_hi));
+    qsag_ass2_cg_dff u_record   (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==4'h7), .d(mem_wdata), .q(record_q));
+    qsag_ass2_cg_dff u_key_lo   (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==4'hA), .d(mem_wdata), .q(key_lo));
+    qsag_ass2_cg_dff u_key_hi   (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==4'hB), .d(mem_wdata), .q(key_hi));
+    qsag_ass2_cg_dff u_nonce_lo (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==4'h3), .d(mem_wdata), .q(nonce_lo));
+    qsag_ass2_cg_dff u_nonce_hi (.clk(clk), .rst_n(srst_n), .en(private_write && mem_addr[6:3]==4'hF), .d(mem_wdata), .q(nonce_hi));
+
+    logic [2:0]  puf_block_q;
+    logic        puf_recon_q, puf_busy, puf_done, puf_err, puf_complete_q;
+    logic [5:0]  puf_margin_q, puf_accepted;
+    logic [3:0]  puf_corrected;
     logic [26:0] puf_syn;
     logic [63:0] puf_mask, puf_word;
     wire puf_write = mmio_en && mem_we && (&mem_wstrb) && !puf_busy;
     wire puf_start = puf_write && mem_addr[6:3] == 4'h2;
     wire unused_mon;
     dregg_ro_puf_bch #(.VAT_ID(VAT_ID)) u_puf (
+        .cloud_response,
         .clk(clk), .rst_n(srst_n), .srst_n(srst_n), .start_blk(puf_start),
         .recon_mode(puf_start ? mem_wdata[3] : puf_recon_q), .blk_sel(puf_block_q),
         .margin_thresh(puf_margin_q), .noise_flips(3'd0), .mon_en(1'b0),
@@ -295,30 +311,35 @@ module qsag_ass2_enclave_top #(
         .rx(dbg_uart_rx_in), .rx_ack(dbg_rd), .rx_byte(uart_rx_byte), .rx_valid(uart_rx_valid)
     );
 
+    // VERDICT_CTRL bit 16 selects which pair resident firmware reads at
+    // +0x50/+0x58. Each command starts with the root selected.
+    logic vault_cap_sel_q;
+    wire vault_we_lo = private_write && mem_addr[6:3] == 4'hA;
+    wire vault_we_hi = private_write && mem_addr[6:3] == 4'hB;
     logic [63:0] mmio_rdata;
     always_comb begin
         case (mmio_idx_q)
             4'h0: mmio_rdata = {56'd0, fram_sr_q};
             4'h1: mmio_rdata = {62'd0, fram_miso_s, fram_busy_q};
-            4'h2: mmio_rdata = {record_q[31:0],6'd0,payload_len_q,load_count_q,cmd_op_q};
+            4'h2: mmio_rdata = {record_q[31:0], 4'd0, cmd_flags_q[1:0], payload_len_q, load_count_q, cmd_op_q};
             4'h3: mmio_rdata = nonce_lo;
-            4'hA: mmio_rdata = key_lo;
-            4'hB: mmio_rdata = key_hi;
-            4'hF: mmio_rdata = nonce_hi;
             4'h4: mmio_rdata = puf_mask;
             4'h5: mmio_rdata = {37'd0, puf_syn};
-            4'h6: mmio_rdata = puf_complete_q && !puf_err ? puf_word : 64'd0;
-            4'h7: mmio_rdata = {record_q[63:32],19'd0, puf_corrected, puf_accepted, puf_err, puf_complete_q, puf_busy};
+            4'h6: mmio_rdata = (puf_complete_q && !puf_err) ? puf_word : 64'd0;
+            4'h7: mmio_rdata = {record_q[63:32], 19'd0, puf_corrected, puf_accepted, puf_err, puf_complete_q, puf_busy};
             4'h8: mmio_rdata = trng_take_q ? trng_word : 64'd0;
             4'h9: mmio_rdata = {29'd0, trng_rct, trng_apt, !uart_tx_ovf, trng_ok, trng_valid, trng_cnt_q};
-            4'hC: mmio_rdata = {53'd0, lc_state_q, 6'd0, fault_q, verify_q};
+            4'hA: mmio_rdata = vault_cap_sel_q ? cap_lo : key_lo;
+            4'hB: mmio_rdata = vault_cap_sel_q ? cap_hi : key_hi;
+            4'hC: mmio_rdata = {47'd0, vault_cap_sel_q, 5'd0, lc_state_q, 6'd0, fault_q, verify_q};
             4'hD: mmio_rdata = {40'd0, gpio_in_s, gpio_oe_q, gpio_out_q};
             4'hE: mmio_rdata = {52'd0, uart_div_q};
-            default: mmio_rdata = 64'd0;
+            4'hF: mmio_rdata = nonce_hi;
         endcase
     end
 
-    wire [63:0] sram_assembled = {(rd_src_q == 2'd1) ? isram_rdata : dsram_rdata, buf64_q[55:0]};
+    wire [7:0]  sram_byte      = (rd_src_q == 2'd1) ? isram_rdata : dsram_rdata;
+    wire [63:0] sram_assembled = {sram_byte, buf64_q[55:0]};
     assign mem_rdata = (rd_src_q == 2'd0) ? irom_rdata
                      : (rd_src_q == 2'd3) ? mmio_rdata
                      : sram_assembled;
@@ -331,28 +352,27 @@ module qsag_ass2_enclave_top #(
 
     logic prev_tampered_q;
 
+    // Unified byte-shift path across Core SRAM read, DMA write, and DMA TX read (saves 56 muxes!)
+    wire sram_shift_core = core_sram_req && !scrub_active_q && !dma_active_q
+                        && (sram_step_q > 4'd0) && (sram_step_q <= 4'd7);
+    wire sram_shift_dma  = dma_active_q && !scrub_active_q
+                        && (dma_we_q || (dma_bstep_q > 4'd0 && dma_bstep_q <= 4'd7));
+    wire [7:0] shift_top_byte = sram_shift_core ? (sel_isram ? isram_rdata : dsram_rdata)
+                              : dma_we_q        ? buf64_q[63:56]
+                              :                   dsram_rdata;
 
-    // Combinational next-value logic for clock-gated `buf64_q` & `mac_acc_q`
     always_comb begin
         buf64_en = 1'b0;
         buf64_d  = buf64_q;
         if (payload_dma) begin
             buf64_en = 1'b1;
-            buf64_d = rx_word_sck;
-        end else if (core_sram_req && !scrub_active_q && !dma_active_q && sram_step_q > 4'd0 && sram_step_q <= 4'd7) begin
+            buf64_d  = rx_word_sck;
+        end else if (sram_shift_core || sram_shift_dma) begin
             buf64_en = 1'b1;
-            buf64_d  = {8'd0, (sel_isram ? isram_rdata : dsram_rdata), buf64_q[55:8]};
-        end else if (dma_active_q && !scrub_active_q) begin
-            if (dma_we_q) begin
-                buf64_en = 1'b1;
-                buf64_d  = {8'd0, buf64_q[63:8]};
-            end else if (dma_bstep_q > 4'd0 && dma_bstep_q <= 4'd7) begin
-                buf64_en = 1'b1;
-                buf64_d  = {8'd0, dsram_rdata, buf64_q[55:8]};
-            end else if (dma_bstep_q == 4'd8 && dma_rd_tx_q) begin
-                buf64_en = 1'b1;
-                buf64_d  = {dsram_rdata, buf64_q[55:0]};
-            end
+            buf64_d  = {8'd0, shift_top_byte, buf64_q[55:8]};
+        end else if (dma_active_q && !scrub_active_q && dma_bstep_q == 4'd8 && dma_rd_tx_q) begin
+            buf64_en = 1'b1;
+            buf64_d  = {dsram_rdata, buf64_q[55:0]};
         end else if (hdr_ev && host_rdy && rx_word_sck[7:0] == 8'h51 && rx_word_sck[15:8] == 8'h01) begin
             buf64_en = 1'b1;
             buf64_d  = 64'h3038_3144_3253_5341;
@@ -378,35 +398,46 @@ module qsag_ass2_enclave_top #(
                          : (tx_widx_sck == 5'd18) ? core_instret : core_cycles;
             end
         end
-
     end
 
+    wire [23:0] hdr_len = rx_word_sck[47:24];
+    wire [7:0]  hdr_flg = rx_word_sck[23:16];
     logic [4:0] header_error;
     always_comb begin
-        header_error = 0;
-        if (rx_word_sck[7:0] != 8'h51) header_error = 1;
-`ifdef QSAG_F2_CLOUD_BRINGUP
-        // Hardware bring-up accepts public IDENT and clockless READ_DIAG.
-        else if (rx_word_sck[15:8] != 8'h01) header_error = 17;
-`endif
+        header_error = 5'd0;
+        if (rx_word_sck[7:0] != 8'h51) header_error = 5'd1;
         else case (rx_word_sck[15:8])
-            8'h01, 8'h10, 8'h11: if (rx_word_sck[47:24] != 0) header_error = 3;
-            8'h12, 8'h15: if (rx_word_sck[47:24] != 16) header_error = 3;
-            8'h16: if (rx_word_sck[47:24] != 24) header_error = 3;
-            8'h20: if (rx_word_sck[47:24] != 120) header_error = 3;
+            8'h01, 8'h10: if (hdr_len != 24'd0) header_error = 5'd3;
+            8'h11: if (hdr_len != 24'd32) header_error = 5'd3;
+            8'h12, 8'h15, 8'h16: if (hdr_len != 24'd320) header_error = 5'd3;
+            8'h20: begin
+                if (hdr_len != 24'd120) header_error = 5'd3;
+                else if (safe_recovery) header_error = 5'd14;
+            end
             8'h30: begin
-                if (rx_word_sck[23:16] != 1 || rx_word_sck[47:24] < 24 ||
-                    rx_word_sck[47:24] > 532 || rx_word_sck[25:24] != 0) header_error = 3;
-                else if (lc_state_q != LC_READY) header_error = 4;
+                if (safe_recovery) header_error = 5'd14;
+                else if (hdr_flg == 8'd1) begin
+                    if (hdr_len < 24'd24 || hdr_len > 24'd532 || hdr_len[1:0] != 2'd0) header_error = 5'd3;
+                    else if (lc_state_q != LC_READY) header_error = 5'd4;
+                end else if (hdr_flg == 8'd2) begin
+                    if (hdr_len < 24'd304 || hdr_len > 24'd812 || hdr_len[1:0] != 2'd0) header_error = 5'd3;
+                    else if (lc_state_q != LC_READY) header_error = 5'd4;
+                end else header_error = 5'd3;
             end
             8'h31: begin
-                if (rx_word_sck[47:24] > 128) header_error = 3;
-                else if (!rx_word_sck[16] && (!isram_auth_valid_q || lc_state_q != LC_READY))
-                    header_error = 13;
+                if (hdr_len > 24'd128) header_error = 5'd3;
+                else if (!hdr_flg[0] && safe_recovery) header_error = 5'd14;
+                else if (!hdr_flg[0] && (!isram_auth_valid_q || lc_state_q != LC_READY))
+                    header_error = 5'd13;
             end
-            default: header_error = 2;
+            default: header_error = 5'd2;
         endcase
     end
+
+    wire [9:0] expected_load_len = load_wotsc
+                                 ? (10'd300 + {rx_word_sck[7:0], 2'b00})
+                                 : (10'd20  + {rx_word_sck[7:0], 2'b00});
+    wire [7:0] hdr_qwords = 8'((rx_word_sck[33:24] + 10'd7) >> 3);
 
     always_ff @(posedge clk or negedge srst_n) begin
         if (!srst_n) begin
@@ -415,14 +446,14 @@ module qsag_ass2_enclave_top #(
             txn_m <= 1'b0; txn_s <= 1'b0; txn_seen <= 1'b0;
             verify_q <= 1'b0; fault_q <= 1'b0; host_irq_q <= 1'b0; running_q <= 1'b0;
             lc_state_q <= LC_RESET;
-            isram_auth_valid_q <= 1'b0;
+            isram_auth_valid_q <= 1'b0; vault_cap_sel_q <= 1'b0;
             scrub_active_q <= 1'b1; scrub_full_q <= 1'b1; scrub_addr_q <= 9'd0;
             sram_step_q <= 4'd0; rd_src_q <= 2'd0; mmio_idx_q <= 4'd0;
             core_start <= 1'b0; core_zeroize_first <= 1'b0; core_halt_req <= 1'b0;
             start_is_irom_q <= 1'b0; applet_mode_q <= 1'b0;
             cmd_op_q <= 8'd0; cmd_flags_q <= 8'd0; cmd_arg_q <= 16'd0;
             resp_len_q <= 8'd0; resp_err_code_q <= 5'd0; resp_err_q <= 1'b0;
-            exec_budget_q <= 16'd0; exec_cnt_q <= 16'd0; load_count_q <= '0;
+            exec_budget_q <= 16'd0; exec_cnt_q <= 16'd0; load_count_q <= '0; budget_last_q <= 1'b0;
             frame_active_q <= 1'b0; launch_pending_q <= 1'b0; frame_index_q <= '0;
             frame_last_q <= '0; payload_len_q <= '0; dma_half_q <= 1'b0; service_timer_q <= '0;
             dma_active_q <= 1'b0; dma_is_isram_q <= 1'b0; dma_we_q <= 1'b0; dma_rd_tx_q <= 1'b0;
@@ -431,7 +462,7 @@ module qsag_ass2_enclave_top #(
             uart_div_q <= 12'(DEFAULT_UART_DIV);
             fram_cs_n_q <= 1'b1; fram_sck_q <= 1'b0; fram_mosi_q <= 1'b0; fram_busy_q <= 1'b0;
             fram_div_q <= '0; fram_cnt_q <= 4'd0; fram_sr_q <= 8'd0; fram_miso_m <= 1'b0; fram_miso_s <= 1'b0;
-            trng_cnt_q <= '0; trng_take_q <= 0;
+            trng_cnt_q <= '0; trng_take_q <= 1'b0;
             puf_block_q <= '0; puf_recon_q <= 1'b0; puf_margin_q <= '0; puf_complete_q <= 1'b0;
             prev_tampered_q <= 1'b0;
         end else begin
@@ -446,23 +477,23 @@ module qsag_ass2_enclave_top #(
             core_halt_req <= 1'b0;
 
             trng_take_q <= trng_take;
-            if (trng_take) trng_cnt_q <= trng_cnt_q + 1'b1;
+            if (trng_take_q) trng_cnt_q <= trng_cnt_q + 30'd1;
             if (puf_done) puf_complete_q <= 1'b1;
             if (puf_start) begin
-                puf_block_q <= mem_wdata[2:0];
-                puf_recon_q <= mem_wdata[3];
-                puf_margin_q <= mem_wdata[13:8];
+                puf_block_q    <= mem_wdata[2:0];
+                puf_recon_q    <= mem_wdata[3];
+                puf_margin_q   <= mem_wdata[13:8];
                 puf_complete_q <= 1'b0;
             end
 
             if (fram_busy_q) begin
-                fram_div_q <= fram_div_q + 1'b1;
+                fram_div_q <= fram_div_q + 2'd1;
                 if (&fram_div_q) begin
                     fram_sck_q <= !fram_sck_q;
                     if (!fram_sck_q) fram_sr_q <= {fram_sr_q[6:0], fram_miso_s};
                     else if (fram_cnt_q == 4'd7) fram_busy_q <= 1'b0;
                     else begin
-                        fram_cnt_q <= fram_cnt_q + 1'b1;
+                        fram_cnt_q  <= fram_cnt_q + 4'd1;
                         fram_mosi_q <= fram_sr_q[7];
                     end
                 end
@@ -506,7 +537,7 @@ module qsag_ass2_enclave_top #(
                         if (mem_wdata[9] && !fram_busy_q) begin
                             fram_sr_q   <= mem_wdata[7:0];
                             fram_mosi_q <= mem_wdata[7];
-                            fram_div_q  <= 0; fram_cnt_q  <= 4'd0;
+                            fram_div_q  <= 2'd0; fram_cnt_q <= 4'd0;
                             fram_sck_q  <= 1'b0;
                             fram_busy_q <= 1'b1;
                         end
@@ -518,6 +549,9 @@ module qsag_ass2_enclave_top #(
                         end
                         if (mem_wstrb[1] && mem_wdata[10:8] <= 3'd6) begin
                             lc_state_q <= lc_state_t'(mem_wdata[10:8]);
+                        end
+                        if (mem_wstrb[2]) begin
+                            vault_cap_sel_q <= mem_wdata[16];
                         end
                     end
                     4'hD: begin
@@ -533,77 +567,91 @@ module qsag_ass2_enclave_top #(
             end
 
             if (hdr_ev && host_rdy) begin
-                host_irq_q <= 1'b0;
-                cmd_op_q <= rx_word_sck[15:8];
-                cmd_flags_q <= rx_word_sck[23:16];
-                cmd_arg_q <= rx_word_sck[63:48];
-                payload_len_q <= rx_word_sck[33:24];
-                frame_index_q <= '0;
-                frame_active_q <= 1'b0;
+                host_irq_q       <= 1'b0;
+                cmd_op_q         <= rx_word_sck[15:8];
+                cmd_flags_q      <= rx_word_sck[23:16];
+                cmd_arg_q        <= rx_word_sck[63:48];
+                payload_len_q    <= rx_word_sck[33:24];
+                frame_index_q    <= 8'd0;
+                frame_active_q   <= 1'b0;
                 launch_pending_q <= 1'b0;
-                resp_err_q <= header_error != 0;
-                resp_err_code_q <= header_error;
-                resp_len_q <= 0;
+                resp_err_q       <= header_error != 5'd0;
+                resp_err_code_q  <= header_error;
+                resp_len_q       <= 8'd0;
                 if (rx_word_sck[15:8] == 8'h30) isram_auth_valid_q <= 1'b0;
-                if (header_error != 0) host_irq_q <= 1'b1;
+                if (header_error != 5'd0) host_irq_q <= 1'b1;
                 else if (rx_word_sck[15:8] == 8'h01) begin
-                    resp_len_q <= 32;
+                    resp_len_q <= 8'd32;
                     host_irq_q <= 1'b1;
-                end else if (rx_word_sck[47:24] == 0) launch_pending_q <= 1'b1;
+                end else if (rx_word_sck[47:24] == 24'd0) launch_pending_q <= 1'b1;
                 else begin
                     frame_active_q <= 1'b1;
-                    frame_last_q <= rx_word_sck[15:8] == 8'h30
-                        ? ({rx_word_sck[33:27],1'b0} + (rx_word_sck[26] ? 8'd2 : 8'd0) - 1'b1)
-                        : (8'((rx_word_sck[33:24] + 10'd7) >> 3) - 1'b1);
+                    frame_last_q   <= rx_word_sck[15:8] == 8'h30
+                        ? ({hdr_qwords[6:0], 1'b0} - 8'd1)
+                        : (hdr_qwords - 8'd1);
                 end
             end
             if (frame_beat) begin
-                if (!consume_beat || (load_frame && rx_widx_sck == 0 &&
-                    (rx_word_sck[31:0] == 0 || rx_word_sck[31:0] > 128 ||
-                     payload_len_q != 10'd20 + {rx_word_sck[7:0],2'b00})) ||
-                    (load_frame && rx_widx_sck != 0 && !load_code_beat && !load_tag_beat &&
-                     rx_word_sck[31:0] != 0)) begin
-                    frame_active_q <= 1'b0;
-                    resp_err_q <= 1'b1; resp_err_code_q <= 3; resp_len_q <= 0;
-                    host_irq_q <= 1'b1;
+                if (!consume_beat || (load_frame && rx_widx_sck == 8'd0 &&
+                    (rx_word_sck[31:0] == 32'd0 || rx_word_sck[31:0] > 32'd128 ||
+                     payload_len_q != expected_load_len)) ||
+                    (load_frame && rx_widx_sck != 8'd0 && !load_code_beat && !load_tag_beat &&
+                     rx_word_sck[31:0] != 32'd0)) begin
+                    frame_active_q  <= 1'b0;
+                    resp_err_q      <= 1'b1; resp_err_code_q <= 5'd3; resp_len_q <= 8'd0;
+                    host_irq_q      <= 1'b1;
                 end else begin
-                    frame_index_q <= frame_index_q + 1'b1;
-                    if (load_frame && rx_widx_sck == 0) load_count_q <= rx_word_sck[7:0];
+                    frame_index_q <= frame_index_q + 8'd1;
+                    if (load_frame && rx_widx_sck == 8'd0) load_count_q <= rx_word_sck[7:0];
                     if (payload_dma) begin
-                        dma_active_q <= 1'b1; dma_is_isram_q <= load_code_beat;
-                        dma_we_q <= 1'b1; dma_rd_tx_q <= 1'b0; dma_half_q <= load_frame;
-                        dma_bstep_q <= 0;
-                        dma_base_q <= load_code_beat ? {code_index[6:0],2'b0}
-                            : load_tag_beat ? {5'b10000,tag_index[1:0],2'b0}
-                            : {2'b10,rx_widx_sck[3:0],3'b0};
+                        dma_active_q   <= 1'b1;
+                        dma_is_isram_q <= load_code_beat;
+                        dma_we_q       <= 1'b1;
+                        dma_rd_tx_q    <= 1'b0;
+                        dma_half_q     <= load_frame;
+                        dma_bstep_q    <= 4'd0;
+                        dma_base_q     <= load_code_beat ? {code_index[6:0], 2'b00}
+                                        : load_tag_beat  ? (load_wotsc ? (9'h058 + {tag_index[6:0], 2'b00})
+                                                                       : {5'b10000, tag_index[1:0], 2'b00})
+                                        : ext_wotsc_op   ? (9'h040 + {rx_widx_sck[5:0], 3'b000})
+                                        :                  {2'b10, rx_widx_sck[3:0], 3'b000};
                     end
                     if (frame_index_q == frame_last_q) begin
-                        frame_active_q <= 1'b0;
+                        frame_active_q   <= 1'b0;
                         launch_pending_q <= 1'b1;
                     end
                 end
             end
             if (launch_pending_q && !dma_active_q) begin
-                launch_pending_q <= 1'b0;
-                core_start <= 1'b1;
+                automatic logic        next_irom   = cmd_op_q != 8'h31 || cmd_flags_q[0];
+                automatic logic        next_long   = next_irom && (cmd_op_q != 8'h31 || cmd_arg_q == 16'd0);
+                automatic logic [15:0] next_budget = (cmd_op_q == 8'h31 && cmd_arg_q != 16'd0) ? cmd_arg_q : 16'hffff;
+                launch_pending_q   <= 1'b0;
+                core_start         <= 1'b1;
                 core_zeroize_first <= 1'b1;
-                start_is_irom_q <= cmd_op_q != 8'h31 || cmd_flags_q[0];
-                applet_mode_q <= cmd_op_q == 8'h31 && !cmd_flags_q[0];
-                exec_cnt_q <= 0; service_timer_q <= 0;
-                exec_budget_q <= (cmd_op_q == 8'h31 && cmd_arg_q != 0) ? cmd_arg_q : 16'hffff;
-                running_q <= 1'b1; verify_q <= 1'b0;
+                start_is_irom_q    <= next_irom;
+                applet_mode_q      <= cmd_op_q == 8'h31 && !cmd_flags_q[0];
+                vault_cap_sel_q    <= 1'b0;
+                exec_cnt_q         <= 16'd1;
+                service_timer_q    <= 9'd0;
+                exec_budget_q      <= next_budget;
+                budget_last_q      <= !next_long && (next_budget == 16'd1);
+                running_q          <= 1'b1;
+                verify_q           <= 1'b0;
             end
             if (running_q && !core_start && core_pc >= 64'h1000) applet_mode_q <= 1'b1;
 
             if (running_q && !core_start) begin
-                exec_cnt_q <= exec_cnt_q + 16'd1;
-                if (&exec_cnt_q) service_timer_q <= service_timer_q + 1'b1;
+                exec_cnt_q    <= exec_cnt_q + 16'd1;
+                budget_last_q <= long_service ? (&service_timer_q && (exec_cnt_q == 16'hfffe))
+                                              : ((exec_cnt_q + 16'd1) == exec_budget_q);
+                if (&exec_cnt_q) service_timer_q <= service_timer_q + 9'd1;
                 if ((trap || budget_expired) && start_is_irom_q) begin
-                    lc_state_q <= LC_LOCKED_OUT;
+                    lc_state_q         <= LC_LOCKED_OUT;
                     isram_auth_valid_q <= 1'b0;
                 end
                 if (trap) begin
-                    core_halt_req <= 1'b1;
+                    core_halt_req   <= 1'b1;
                     running_q       <= 1'b0;
                     fault_q         <= 1'b1;
                     scrub_active_q  <= 1'b1; scrub_full_q <= 1'b0; scrub_addr_q <= 9'd0;
@@ -618,32 +666,31 @@ module qsag_ass2_enclave_top #(
                     host_irq_q      <= 1'b1;
                 end else if (halted) begin
                     running_q       <= 1'b0;
-                    verify_q        <= cmd_flags_q[1] ? (start_is_irom_q ? core_r4 == 1 : core_r4[0]) : verify_q;
+                    verify_q        <= cmd_flags_q[1] ? (start_is_irom_q ? core_r4 == 64'd1 : core_r4[0]) : verify_q;
                     scrub_active_q  <= 1'b1; scrub_full_q <= 1'b0; scrub_addr_q <= 9'd0;
                     if (load_frame) begin
-                        isram_auth_valid_q <= core_r4 == 1 && lc_state_q == LC_READY;
-                        resp_err_q <= core_r4 != 1 || lc_state_q != LC_READY;
-                        resp_err_code_q <= core_r4 == 1 && lc_state_q == LC_READY ? 0 : 5;
-                        if (core_r4 != 1) fault_q <= 1'b1;
-                        resp_len_q <= 0;
-                    end else if (cmd_op_q != 8'h31 && core_r4 != 1) begin
-                        resp_err_q <= 1'b1; resp_err_code_q <= core_r4[4:0]; resp_len_q <= 0;
+                        isram_auth_valid_q <= core_r4 == 64'd1 && lc_state_q == LC_READY;
+                        resp_err_q         <= core_r4 != 64'd1 || lc_state_q != LC_READY;
+                        resp_err_code_q    <= (core_r4 == 64'd1 && lc_state_q == LC_READY) ? 5'd0 : 5'd5;
+                        if (core_r4 != 64'd1) fault_q <= 1'b1;
+                        resp_len_q <= 8'd0;
+                    end else if (cmd_op_q != 8'h31 && core_r4 != 64'd1) begin
+                        resp_err_q <= 1'b1; resp_err_code_q <= core_r4[4:0]; resp_len_q <= 8'd0;
                     end else begin
-                        resp_err_q <= 0; resp_err_code_q <= 0; resp_len_q <= 160;
+                        resp_err_q <= 1'b0; resp_err_code_q <= 5'd0; resp_len_q <= 8'd160;
                     end
-                    host_irq_q      <= 1'b1;
+                    host_irq_q <= 1'b1;
                 end
             end
 
-            if (txn_ev && resp_len_q == 160 && !running_q && !frame_active_q && !resp_err_q && tx_widx_sck < 5'd16 && !scrub_active_q) begin
+            if (txn_ev && resp_len_q == 8'd160 && !running_q && !frame_active_q && !resp_err_q && tx_widx_sck < 5'd16 && !scrub_active_q) begin
                 dma_active_q   <= 1'b1; dma_is_isram_q <= 1'b0; dma_we_q <= 1'b0; dma_rd_tx_q <= 1'b1; dma_half_q <= 1'b0;
                 dma_base_q     <= {2'b11, tx_widx_sck[3:0], 3'd0}; dma_bstep_q <= 4'd0;
             end
         end
     end
 
-    wire jtag_tdo = jtag_mode ? (jtag_tdi_in ^ jtag_tms_in ^ jtag_tck_in) : 1'b0;
-    // Public challenge echo. Keep the nonce sampler private.
+    wire jtag_tdo = jtag_ok ? (jtag_tdi_in ^ jtag_tms_in ^ jtag_tck_in) : 1'b0;
     wire db_resp  = db_chal_in;
     wire nfc_mod  = nfc_ask_in & nfc_clk_in & verify_pin;
 
@@ -655,40 +702,40 @@ module qsag_ass2_enclave_top #(
         bidir_pu  = 38'd0; bidir_pd = 38'd0;
         bidir_cs  = 38'd0; bidir_sl = 38'd0;
 
-        bidir_out[7:0]  = host_dq_o;   bidir_oe[7:0]  = host_dq_oe; bidir_sl[7:0] = 8'hff;
-        bidir_out[15:8] = gpio_out_q;  bidir_oe[15:8] = gpio_oe_q;  bidir_pd[15:8] = ~gpio_oe_q;
+        bidir_out[7:0]  = host_dq_o;      bidir_oe[7:0]  = host_dq_oe; bidir_sl[7:0] = 8'hff;
+        bidir_out[15:8] = gpio_out_q;     bidir_oe[15:8] = gpio_oe_q;  bidir_pd[15:8] = ~gpio_oe_q;
 
-        bidir_out[16] = verify_pin;     bidir_oe[16] = 1'b1;
-        bidir_out[17] = fault_pin;      bidir_oe[17] = 1'b1;
+        bidir_out[16] = verify_pin;       bidir_oe[16] = 1'b1;
+        bidir_out[17] = fault_pin;        bidir_oe[17] = 1'b1;
         bidir_cs[18]  = 1'b1;
-        bidir_out[19] = host_rdy;       bidir_oe[19] = 1'b1;
-        bidir_out[20] = host_irq_q;     bidir_oe[20] = 1'b1;
-        bidir_out[21] = clk_div16_q[3]; bidir_oe[21] = 1'b1;
+        bidir_out[19] = host_rdy;         bidir_oe[19] = 1'b1;
+        bidir_out[20] = host_irq_q;       bidir_oe[20] = 1'b1;
+        bidir_out[21] = clk_div16_q[3];   bidir_oe[21] = 1'b1;
 
-        bidir_out[22] = fram_cs_n_q; bidir_oe[22] = 1'b1;
-        bidir_out[23] = fram_sck_q;  bidir_oe[23] = 1'b1;
-        bidir_out[24] = fram_mosi_q; bidir_oe[24] = 1'b1;
+        bidir_out[22] = fram_cs_n_q;      bidir_oe[22] = 1'b1;
+        bidir_out[23] = fram_sck_q;       bidir_oe[23] = 1'b1;
+        bidir_out[24] = fram_mosi_q;      bidir_oe[24] = 1'b1;
         bidir_pd[25]  = 1'b1;
 
-        bidir_cs[26]  = 1'b1; bidir_pu[26] = 1'b1;
+        bidir_cs[26]  = 1'b1;             bidir_pu[26] = 1'b1;
         bidir_pu[27]  = 1'b1;
-        bidir_out[28] = uart_tx_pin; bidir_oe[28] = 1'b1;
+        bidir_out[28] = uart_tx_pin;      bidir_oe[28] = 1'b1;
 
-        bidir_out[29] = db_resp; bidir_oe[29] = 1'b1;
+        bidir_out[29] = db_resp;          bidir_oe[29] = 1'b1;
         bidir_pd[30]  = 1'b1;
 
-        bidir_out[31] = nfc_mod; bidir_oe[31] = 1'b1;
+        bidir_out[31] = nfc_mod;          bidir_oe[31] = 1'b1;
         bidir_pu[32]  = 1'b1;
 
         bidir_out[34]   = jtag_tdo;
-        bidir_oe[34]    = jtag_mode;
-        bidir_pd[34]    = !jtag_mode;
+        bidir_oe[34]    = jtag_ok;
+        bidir_pd[34]    = !jtag_ok;
         bidir_pd[37:35] = 3'b111;
 
         if (!rst_n) bidir_oe = 38'd0;
         bidir_ie = ~bidir_oe;
     end
 
-    wire unused_top = ^{raw_bit, clk_ext_en, core_phys, cmd_flags_q[7:2], bidir_in[24:19],
-                        bidir_in[17:16], bidir_in[31], bidir_in[29], bidir_in[28], bidir_in[34]};
+    wire unused_top = ^{raw_bit, clk_ext_en, core_phys, cmd_flags_q[7:2], vault_we_lo, vault_we_hi,
+                        bidir_in[24:19], bidir_in[17:16], bidir_in[31], bidir_in[29], bidir_in[28], bidir_in[34]};
 endmodule

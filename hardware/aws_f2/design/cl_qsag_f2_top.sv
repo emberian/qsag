@@ -63,17 +63,28 @@ module cl_qsag_f2_top #(parameter int N_NI = 2, parameter logic [31:0] PCI_ID = 
   always_ff @(posedge clk or negedge rst_main_n)
     if (!rst_main_n) reset_pipe <= 0;
     else reset_pipe <= {reset_pipe[0],1'b1};
-  logic clk_ass2 = 0;
-  always_ff @(posedge clk) clk_ass2 <= !clk_ass2;
+  logic clk_ass2;
+`ifdef VERILATOR
+  always_ff @(posedge clk_main_a0 or negedge reset_pipe[1])
+    if (!reset_pipe[1]) clk_ass2 <= 0;
+    else clk_ass2 <= !clk_ass2;
+`else
+  BUFGCE_DIV #(.BUFGCE_DIVIDE(2), .IS_CE_INVERTED(1'b0),
+    .IS_CLR_INVERTED(1'b0), .IS_I_INVERTED(1'b0)) u_ass2_clock
+    (.I(clk_main_a0), .CE(1'b1), .CLR(!reset_pipe[1]), .O(clk_ass2));
+`endif
   logic erase, flr_seen, trigger;
   logic [14:0] erase_addr;
+  logic [31:0] scrub_epoch;
   wire bus_reset = !reset_pipe[1] || sh_cl_flr_assert;
   wire lock = bus_reset || erase || trigger;
   assign cl_sh_flr_done = reset_pipe[1] && sh_cl_flr_assert && flr_seen && !erase;
   always_ff @(posedge clk) begin
     flr_seen <= sh_cl_flr_assert && reset_pipe[1];
-    if (!reset_pipe[1] || (sh_cl_flr_assert && !flr_seen) || trigger) begin
-      erase <= 1; erase_addr <= 0;
+    if (!reset_pipe[1]) begin
+      erase <= 1; erase_addr <= 0; scrub_epoch <= 0;
+    end else if ((sh_cl_flr_assert && !flr_seen) || trigger) begin
+      erase <= 1; erase_addr <= 0; scrub_epoch <= scrub_epoch + 32'd1;
     end else if (erase) begin
       erase_addr <= erase_addr + 1'b1;
       if (&erase_addr) erase <= 0;
@@ -91,7 +102,9 @@ module cl_qsag_f2_top #(parameter int N_NI = 2, parameter logic [31:0] PCI_ID = 
   logic [IW-1:0] rsel;
   wire [1:0] wi = wa[21:20];
   wire [1:0] ri = ra[21:20];
-  wire [N_NI-1:0] idle, fail;
+  wire [N_NI-1:0] idle, fail, page_paused;
+  wire [15:0] page_window_base[N_NI];
+  wire [16:0] page_window_end[N_NI];
   wire [8:0] free_beats[N_NI];
   wire [31:0] checks[N_NI], retired[N_NI];
   wire [63:0] reply[N_NI];
@@ -131,11 +144,14 @@ module cl_qsag_f2_top #(parameter int N_NI = 2, parameter logic [31:0] PCI_ID = 
         writing <= 1; wa <= aw; wleft <= sh_cl_dma_pcis_awlen; cl_sh_dma_pcis_bid <= sh_cl_dma_pcis_awid;
         wbad <= lock || !valid_addr(aw, sh_cl_dma_pcis_awlen, sh_cl_dma_pcis_awsize, sh_cl_dma_pcis_awburst)
           || (aw[19:16] == 4'hc && {1'b0,sh_cl_dma_pcis_awlen} >= free_beats[IW'(aw[21:20])])
-          || (aw[19:16] != 4'hc && (aw[19] && aw[19:14] != 6'h20 || !idle[IW'(aw[21:20])]));
+          || (aw[19:16] != 4'hc && (aw[19] && aw[19:14] != 6'h20 || !idle[IW'(aw[21:20])]))
+          || (!aw[19] && page_paused[IW'(aw[21:20])] && (
+                {aw[18:6], 3'd0} < page_window_base[IW'(aw[21:20])] ||
+                ({1'b0, aw[18:6], 3'd0} + ({6'd0, sh_cl_dma_pcis_awlen, 3'd0} + 17'd8) > page_window_end[IW'(aw[21:20])])));
       end
       if (wfire) begin
         wa <= wa + 64; wleft <= wleft - 1'b1; wbad <= beat_bad;
-        if (wleft == 0) begin
+        if (wleft == 0 || sh_cl_dma_pcis_wlast) begin
           writing <= 0; cl_sh_dma_pcis_bvalid <= 1; cl_sh_dma_pcis_bresp <= beat_bad ? 2'd2 : 0;
         end
       end
@@ -154,19 +170,44 @@ module cl_qsag_f2_top #(parameter int N_NI = 2, parameter logic [31:0] PCI_ID = 
   end
 
   // AXI-Lite address and data channels have independent holding registers.
-  logic has_aw, has_w;
+  logic has_aw, has_w, rejected_write;
   logic [31:0] addr, wd;
   logic [3:0] ws;
+  wire zeroize_pending = has_aw && has_w && !cl_ocl_bvalid && addr == 'h28;
   assign cl_ocl_awready = reset_pipe[1] && !sh_cl_flr_assert && !has_aw && !cl_ocl_bvalid;
   assign cl_ocl_wready = reset_pipe[1] && !sh_cl_flr_assert && !has_w && !cl_ocl_bvalid;
-  assign cl_ocl_arready = reset_pipe[1] && !sh_cl_flr_assert && (!cl_ocl_rvalid || ocl_cl_rready);
-  wire write_req = has_aw && has_w && !cl_ocl_bvalid && !lock && (&ws);
+  assign cl_ocl_arready = reset_pipe[1] && !sh_cl_flr_assert && !trigger && !zeroize_pending && (!cl_ocl_rvalid || ocl_cl_rready);
+  wire write_req = has_aw && has_w && !cl_ocl_bvalid && !lock && !rejected_write && (&ws);
   wire [31:0] vat_status[3];
   wire [7:0] vat_rx[3];
   wire [2:0] vat_ctl[3];
   logic [N_NI-1:0] push;
   logic [2:0] ctrl_we, xfer_we;
   logic bell, csr_ok;
+  wire [31:0] anchor_status;
+  wire [511:0] vat_response[3];
+  wire [255:0] fram_seal_key[3];
+  wire [63:0] entropy_word[3];
+  wire entropy_epoch, keys_ready;
+  logic custody_used;
+  wire seed_open = keys_ready && !custody_used && !anchor_status[4];
+  wire seed_addr = addr >= 'h30 && addr <= 'h4c && addr[1:0] == 0;
+  wire seed_write = write_req && seed_open && seed_addr;
+  wire seed_complete;
+  wire seed_commit = write_req && seed_open && seed_complete && addr == 'h50 && wd == 1;
+  always_ff @(posedge clk)
+    if (lock) custody_used <= 0;
+    else if (|ctrl_we || |xfer_we) custody_used <= 1;
+  wire [9:0] bus_events = {
+    cl_ocl_awready && ocl_cl_awvalid, cl_ocl_wready && ocl_cl_wvalid,
+    cl_ocl_bvalid && ocl_cl_bready, cl_ocl_arready && ocl_cl_arvalid,
+    cl_ocl_rvalid && ocl_cl_rready, cl_sh_dma_pcis_awready && sh_cl_dma_pcis_awvalid,
+    wfire, cl_sh_dma_pcis_bvalid && sh_cl_dma_pcis_bready,
+    cl_sh_dma_pcis_arready && sh_cl_dma_pcis_arvalid, cl_sh_dma_pcis_rvalid && sh_cl_dma_pcis_rready};
+  qsag_f2_cloud_entropy_anchor u_entropy (.clk, .clk_ass2, .reset_n(reset_pipe[1]),
+    .lock, .bus_events, .seed_write, .seed_index(addr[4:2] ^ 3'd4), .seed_data(wd),
+    .seed_commit, .seed_complete, .status(anchor_status), .vat_response, .fram_seal_key,
+    .entropy_word, .entropy_epoch, .keys_ready);
   // Prevent a simultaneous AXI address acceptance from racing an OCL issue.
   wire dma_exclusive = port_busy || sh_cl_dma_pcis_awvalid || sh_cl_dma_pcis_arvalid;
   always_comb begin
@@ -181,13 +222,14 @@ module cl_qsag_f2_top #(parameter int N_NI = 2, parameter logic [31:0] PCI_ID = 
           csr_ok = bell;
         end
         default: begin
+          csr_ok = seed_write || seed_commit;
           for (int i=0; i<N_NI; i++) begin
             if (addr == (i+1)*4096 || addr == (i+1)*4096+4 || addr == (i+1)*4096+8) csr_ok = 1;
             if (addr == (i+1)*4096+12 && wd == 1 && idle[i] && !dma_exclusive) begin push[i]=1; csr_ok=1; end
           end
           for (int i=0; i<3; i++) begin
-            if (addr == (i+1)*65536 && wd < 8 && !vat_status[i][0]) begin ctrl_we[i]=1; csr_ok=1; end
-            if (addr == (i+1)*65536+4 && wd < 768 && vat_ctl[i] == 1 && !vat_status[i][0]) begin xfer_we[i]=1; csr_ok=1; end
+            if (addr == (i+1)*65536 && wd < 8 && keys_ready && !vat_status[i][0]) begin ctrl_we[i]=1; csr_ok=1; end
+            if (addr == (i+1)*65536+4 && wd < 768 && keys_ready && anchor_status[0] && vat_ctl[i] == 1 && !vat_status[i][0]) begin xfer_we[i]=1; csr_ok=1; end
           end
         end
       endcase
@@ -196,13 +238,21 @@ module cl_qsag_f2_top #(parameter int N_NI = 2, parameter logic [31:0] PCI_ID = 
   always_ff @(posedge clk) begin
     trigger <= 0;
     if (!reset_pipe[1] || sh_cl_flr_assert) begin
-      has_aw <= 0; has_w <= 0; cl_ocl_bvalid <= 0; cl_ocl_bresp <= 0;
+      has_aw <= 0; has_w <= 0; rejected_write <= 0; cl_ocl_bvalid <= 0; cl_ocl_bresp <= 0;
       addr <= 0; wd <= 0; ws <= 0;
     end else begin
       if (ocl_cl_bready) cl_ocl_bvalid <= 0;
       if (cl_ocl_awready && ocl_cl_awvalid) begin has_aw <= 1; addr <= ocl_cl_awaddr; end
       if (cl_ocl_wready && ocl_cl_wvalid) begin has_w <= 1; wd <= ocl_cl_wdata; ws <= ocl_cl_wstrb; end
+      // Either AXI half can arrive during a scrub and remain pending until
+      // afterwards. Drain that transaction with SLVERR and wipe WDATA now.
+      if (lock) begin
+        wd <= 0;
+        if (has_aw || has_w || (cl_ocl_awready && ocl_cl_awvalid) ||
+            (cl_ocl_wready && ocl_cl_wvalid)) rejected_write <= 1;
+      end
       if (has_aw && has_w && !cl_ocl_bvalid) begin
+        rejected_write <= 0;
         has_aw <= 0; has_w <= 0; cl_ocl_bvalid <= 1; cl_ocl_bresp <= csr_ok ? 0 : 2'd2;
         trigger <= csr_ok && addr == 'h28;
         wd <= 0;
@@ -228,14 +278,17 @@ module cl_qsag_f2_top #(parameter int N_NI = 2, parameter logic [31:0] PCI_ID = 
       .strb(writing ? sh_cl_dma_pcis_wstrb : 64'd0), .wdata(sh_cl_dma_pcis_wdata),
       .ring_base(ring_addr[13:6]), .ring_len(ring_len[8:0]),
       .mmio_cmd({arg[i][2][28:0],arg[i][1],arg[i][0]}),
-      .mem_q(mem_q[i]), .idle(idle[i]), .free_beats(free_beats[i]), .fail(fail[i]),
-      .checks(checks[i]), .retired(retired[i]), .reply(reply[i])
+      .mem_q(mem_q[i]), .idle(idle[i]), .fail(fail[i]), .page_paused(page_paused[i]),
+      .page_window_base(page_window_base[i]), .page_window_end(page_window_end[i]),
+      .free_beats(free_beats[i]), .checks(checks[i]), .retired(retired[i]), .reply(reply[i])
     );
   end
   wire [2:0] vat_fault, vat_pass, vat_tamper;
   for (genvar i=0; i<3; i++) begin : vats
-    (* KEEP_HIERARCHY="yes" *) qsag_f2_ass2_bridge #(.VAT_ID(i)) u_bridge (.clk, .clk_ass2, .lock, .erase, .erase_addr,
-      .ctrl_we(ctrl_we[i]), .xfer_we(xfer_we[i]), .data(wd[10:0]),
+    (* KEEP_HIERARCHY="yes" *) qsag_f2_ass2_bridge #(.VAT_ID(i)) u_bridge (.clk, .clk_ass2, .shell_reset_n(reset_pipe[1]), .lock, .erase, .erase_addr,
+      .cloud_response(vat_response[i]), .cloud_word(entropy_word[i]), .cloud_epoch(entropy_epoch),
+      .cloud_ok(anchor_status[0]), .cloud_rct(anchor_status[1]), .cloud_apt(anchor_status[2]),
+      .seal_key(fram_seal_key[i]), .keys_ready, .ctrl_we(ctrl_we[i]), .xfer_we(xfer_we[i]), .data(wd[10:0]),
       .status(vat_status[i]), .rx(vat_rx[i]), .control(vat_ctl[i]));
     assign {vat_tamper[i],vat_fault[i],vat_pass[i]} = vat_status[i][5:3];
   end
@@ -250,17 +303,15 @@ module cl_qsag_f2_top #(parameter int N_NI = 2, parameter logic [31:0] PCI_ID = 
       'h0: rd = `QSAG_MAGIC;
       'h4: rd = `QSAG_ABI;
       'h8: rd = N_NI;
-       `ifdef QSAG_F2_CLOUD_BRINGUP
-      'hc: rd = {1'b1,14'd0,lock,8'd3,8'd4};
- `else
       'hc: rd = {15'd0,lock,8'd3,8'd4};
- `endif
+      'h54: rd = lock ? 0 : anchor_status;
       'h10: rd = ring_addr;
       'h14: rd = ring_len;
       'h1c: for (int i=0; i<N_NI; i++) rd += retired[i];
       'h20: rd = cycles[31:0];
       'h24: rd = cycles[63:32];
-      'h28: rd = 32'(lock);
+      'h28: rd = 32'(lock || !keys_ready);
+      'h2c: rd = scrub_epoch;
       default: begin
         rd_ok = 0;
         for (int i=0; i<N_NI; i++) begin
