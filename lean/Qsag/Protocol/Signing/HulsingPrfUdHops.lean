@@ -1031,6 +1031,8 @@ def SmDtUdSampleOk (seedLen inputLen outLen q : Nat)
   (x.2.1.length = q ∧ ∀ m ∈ x.2.1, m.length = inputLen) ∧
   (x.2.2.length = q ∧ ∀ y ∈ x.2.2, y.length = outLen)
 
+#export_eqns SmDtUdSampleOk
+
 /-- Ideal `SM-DT-UD` challenger oracle: before `reveal`, the `i`-th distinct-tweak `.target` call
     returns the independent uniform digest `udDigest i` instead of `th seed tweak (hidden i)`. -/
 def smDtUdIdealOracle (q : Nat) (udDigest : Nat → Spec.Bytes) (st : Spec.TargetState) :
@@ -1066,6 +1068,30 @@ def smDtUdIdealGame {n : Nat} (hPos : 0 < n) (q : Nat)
             (fun ω i => (sample (π.chal ω)).2.1.getD i []) (fun ω => D (π.advc ω)))
           (smDtUdIdealGame hPos q (fun ω => (sample (π.chal ω)).1)
             (fun ω i => (sample (π.chal ω)).2.2.getD i []) (fun ω => D (π.advc ω)))) ε
+
+/-- Test a single challenge digest with the revealed seed. -/
+def udDigestTest (tweak : Spec.Bytes) (test : Spec.Bytes → Spec.Bytes → Bool) :
+    Spec.Code Spec.targetIface Bool :=
+  .call (.target tweak []) fun y => .call .reveal fun seed => .ret (test (seed.getD []) (y.getD []))
+
+theorem udDigestTest_real_win {n : Nat} (hPos : 0 < n)
+    (th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes) (seed : Fin n → Spec.Bytes)
+    (hidden : Fin n → Nat → Spec.Bytes) (tweak : Spec.Bytes)
+    (test : Fin n → Spec.Bytes → Spec.Bytes → Bool) (z : Fin n) :
+    (smDtUdRealGame hPos th 1 seed hidden (fun i => udDigestTest tweak (test i))).win z =
+      test z (seed z) (th (seed z) tweak (hidden z 0)) := by
+  simp only [smDtUdRealGame, udDigestTest, Spec.Code.play_call, Spec.smDtPreOracle_target,
+    Spec.smDtPreOracle_reveal, Spec.Code.play_ret, Option.getD]
+  rfl
+
+theorem udDigestTest_ideal_win {n : Nat} (hPos : 0 < n) (seed : Fin n → Spec.Bytes)
+    (digest : Fin n → Nat → Spec.Bytes) (tweak : Spec.Bytes)
+    (test : Fin n → Spec.Bytes → Spec.Bytes → Bool) (z : Fin n) :
+    (smDtUdIdealGame hPos 1 seed digest (fun i => udDigestTest tweak (test i))).win z =
+      test z (seed z) (digest z 0) := by
+  simp only [smDtUdIdealGame, udDigestTest, Spec.Code.play_call, smDtUdIdealOracle,
+    Spec.Code.play_ret, Option.getD]
+  rfl
 
 /-- At chain step `st = 0` and on FORS leaves, secret inputs are already uniform after Hop 2 (`0` UD loss). -/
 theorem smDtUd_zero_loss_refl {n : Nat} (G : Spec.FinGame n) :
@@ -1146,6 +1172,7 @@ theorem smDtUdHard_constHash_refuted {nC : Nat} (hPos : 0 < nC)
     exact Nat.ne_of_lt hOut hY0Len
 
 #verify_constructive
+  Qsag.udDigestTest_real_win Qsag.udDigestTest_ideal_win
   Qsag.prfSecHopDistinguisher_within
   Qsag.hulsing_hop2_prfSec_idealization
   Qsag.smDtUd_zero_loss_refl
@@ -1154,6 +1181,15 @@ theorem smDtUdHard_constHash_refuted {nC : Nat} (hPos : 0 < nC)
 
 #tooth_pair Qsag.hulsing_hop2_prfSec_idealization vs Qsag.prfMsg_empty_refuted
 #tooth_pair Qsag.hulsing_hop3_ud_chain_simulation vs Qsag.smDtUdHard_constHash_refuted
+
+theorem prfSecHopTree_pure (latch : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s : Spec.Bytes) (pk : PqPublicKey) (msg : Spec.Bytes → Spec.Bytes) (m : Spec.Bytes) (sig : PqHashSig) (lo : Nat) (log : List (Spec.Bytes × PqHashSig)) :
+    prfSecHopTreeCode latch suite p s pk msg (.pure (m,sig)) lo log =
+      .ret (verifyProductionPqHashSig suite p pk m sig && decide (m ∉ log.map Prod.fst)) := by rw [prfSecHopTreeCode]
+
+#verify_constructive prfSecHopTree_pure
+
+#export_eqns prfSecHopDistinguisher smDtUdRealGame smDtUdIdealGame
 
 end Qsag
 end

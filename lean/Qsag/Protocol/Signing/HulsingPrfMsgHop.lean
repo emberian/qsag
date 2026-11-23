@@ -765,5 +765,14 @@ theorem ExecEufCmaRandIdealGame_win {n qHash qSign : Nat} (latchOn : Bool) (hPos
 
 #tooth_pair Qsag.hulsing_hop1_prfMsg_idealization vs Qsag.prfMsg_empty_refuted
 
+theorem prfMsgHopTree_pure (latch : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s key : Spec.Bytes) (pk : PqPublicKey) (m : Spec.Bytes) (sig : PqHashSig) (lo : Nat) (log : List (Spec.Bytes × PqHashSig)) :
+    prfMsgHopTreeCode latch suite p s key pk (.pure (m,sig)) lo log =
+      .ret (verifyProductionPqHashSig suite p pk m sig && decide (m ∉ log.map Prod.fst)) := by rw [prfMsgHopTreeCode]
+
+#verify_constructive prfMsgHopTree_pure
+
+#export_eqns prfMsgHopDistinguisher
+
 end Qsag
 end

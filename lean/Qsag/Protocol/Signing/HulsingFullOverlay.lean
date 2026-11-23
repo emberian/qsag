@@ -681,8 +681,9 @@ theorem suiteTweakHash_chainF (suite : TweakableHashSuite) (seed : Spec.Bytes) (
     (x : Spec.Bytes) :
     suiteTweakHash suite seed (encodeChainFTweak adrs) x = thChainF suite seed adrs x := by
   unfold suiteTweakHash encodeChainFTweak
+  generalize hA : encodeAdrs adrs = bs
   dsimp only
-  rw [ite_eq_left rfl, decodeAdrsBytes_encodeAdrs, thChainF_eq, thCall_eq]
+  rw [ite_eq_left rfl, ← hA, decodeAdrsBytes_encodeAdrs, thChainF_eq, thCall_eq]
 
 theorem suiteTweakHash_multiRole (suite : TweakableHashSuite) (seed role : Spec.Bytes)
     (adrs : HashAdrs) (args : List (List UInt8)) :
@@ -690,27 +691,44 @@ theorem suiteTweakHash_multiRole (suite : TweakableHashSuite) (seed role : Spec.
       suite.rawHash (thPreimage role seed adrs args) := by
   have hLen : (encodeAdrs adrs).length = 32 := encodeAdrs_length adrs
   unfold suiteTweakHash encodeMultiRoleTweak
+  generalize hA : encodeAdrs adrs = bs at hLen ⊢
+  generalize hM : encodeMultiFrame args = ms
   dsimp only
   rw [ite_eq_right (by decide : ¬ ((0x01 : UInt8) = 0x00)), ite_eq_left rfl,
-    List.take_left' hLen, List.drop_left' hLen, decodeAdrsBytes_encodeAdrs,
+    List.take_left' hLen, List.drop_left' hLen, ← hA, ← hM, decodeAdrsBytes_encodeAdrs,
     decodeMultiFrameBytes_encodeMultiFrame]
+
+private theorem suiteTweakHash_mode02 (suite : TweakableHashSuite) (seed : Spec.Bytes)
+    (modeByte : UInt8) (ab mb cb : Spec.Bytes) (baseAdrs ctrAdrs : HashAdrs)
+    (rRand pkRoot cur ctrBe4 : List UInt8)
+    (h1 : decodeAdrsBytes ab = some baseAdrs)
+    (h2 : decodeMultiFrameBytes mb = some [rRand, pkRoot, cur, cb, ctrBe4])
+    (h3 : decodeAdrsBytes cb = some ctrAdrs) :
+    suiteTweakHash suite seed (0x02 :: modeByte :: ab) mb =
+      if modeByte = 0x01 then
+        suite.rawHash (thPreimage tagHMsg seed
+          { baseAdrs with hashStep := ctrAdrs.hashStep } [rRand, pkRoot, cur, ctrBe4])
+      else
+        suite.rawHash (thPreimage tagHInternal seed
+          { baseAdrs with hashStep := ctrAdrs.hashStep } [pkRoot, cur, ctrBe4]) := by
+  unfold suiteTweakHash
+  have n0 : ¬ ((0x02 : UInt8) = 0x00) := by decide
+  have n1 : ¬ ((0x02 : UInt8) = 0x01) := by decide
+  simp only [n0, n1, ↓reduceIte, h1, h2, h3]
 
 theorem suiteTweakHash_layerDigest (suite : TweakableHashSuite) (params : PqHashParams)
     (rRand seed pkRoot cur : List UInt8) (i : Nat) (T : UInt64) (KP : UInt32) (ctr : Nat) :
     suiteTweakHash suite seed (encodeLayerDigestTweak params i T KP)
         (encodeLayerDigestMsg rRand pkRoot cur ctr) =
       productionLayerDigest suite params rRand seed pkRoot cur i T KP ctr := by
-  unfold suiteTweakHash encodeLayerDigestTweak encodeLayerDigestMsg
-  dsimp only
-  rw [ite_eq_right (by decide : ¬ ((0x02 : UInt8) = 0x00)),
-    ite_eq_right (by decide : ¬ ((0x02 : UInt8) = 0x01)), ite_eq_left rfl]
-  rw [decodeAdrsBytes_encodeAdrs, decodeMultiFrameBytes_encodeMultiFrame]
-  dsimp only
-  rw [decodeAdrsBytes_encodeAdrs, productionLayerDigest_eq]
+  unfold encodeLayerDigestTweak encodeLayerDigestMsg
+  rw [suiteTweakHash_mode02 suite seed _ _ _ _ _ _ rRand pkRoot cur (be 4 ctr)
+    (decodeAdrsBytes_encodeAdrs _) (decodeMultiFrameBytes_encodeMultiFrame _)
+    (decodeAdrsBytes_encodeAdrs _)]
+  rw [productionLayerDigest_eq]
   cases hc : (params.statefulJorts && decide (i = 0))
   · simp only [Bool.false_eq_true, ↓reduceIte]
-    have hNe : ¬ ((0x00 : UInt8) = 0x01) := by decide
-    rw [ite_eq_right hNe, thHashInternalNode_eq, thCall_eq]
+    rw [ite_eq_right (by decide : ¬ ((0x00 : UInt8) = 0x01)), thHashInternalNode_eq, thCall_eq]
   · obtain ⟨_, hi0⟩ := Bool.and_eq_true_iff.mp hc
     have hi : i = 0 := of_decide_eq_true hi0
     subst hi
@@ -745,6 +763,7 @@ theorem tooth_suiteTweakHash_unknown_prefix_collides (suite : TweakableHashSuite
   Qsag.execEufCmaIdealPrf_extract_complete
   Qsag.suiteTweakHash_chainF
   Qsag.suiteTweakHash_multiRole
+  suiteTweakHash_mode02
   Qsag.suiteTweakHash_layerDigest
   Qsag.forsIndexedLeafHash_eq_chainF_adrs
   Qsag.tooth_suiteTweakHash_unknown_prefix_collides

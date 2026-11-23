@@ -1443,6 +1443,12 @@ def pow256 : Nat → Nat
   | 0 => 1
   | k + 1 => 256 * pow256 k
 
+theorem pow256_eq_pow : ∀ k : Nat, pow256 k = 256 ^ k
+  | 0 => rfl
+  | k+1 => by rw [pow256, pow256_eq_pow k, Nat.pow_succ, Nat.mul_comm]
+
+#verify_constructive pow256_eq_pow
+
 theorem pow256_pos : ∀ k : Nat, 0 < pow256 k
   | 0 => Nat.one_pos
   | k + 1 => Nat.mul_pos (by decide) (pow256_pos k)

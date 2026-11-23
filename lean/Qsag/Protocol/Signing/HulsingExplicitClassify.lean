@@ -24,6 +24,7 @@ set_option autoImplicit false
 structure ExplicitItsrCover (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig))
     (msgStar : List UInt8) (sigStar : PqHashSig) : Prop where
+  accepted : verifyProductionPqHashSig suite params pk msgStar sigStar = true
   stateless : params.statefulJorts = false
   trees_pos : 0 < params.forsTrees
   fresh : ∀ e ∈ log, e.1 ≠ msgStar
@@ -730,7 +731,7 @@ def execEufCmaIdealPrf_explicit_extract {n qHash qSign : Nat} (latchOn : Bool) (
                 rw [hHashSuite] at hLeafJ
                 refine .fors j hj hSt hLeafLt (by rw [hPkSov]; exact hIdxLtJ)
                   (fun e' he' => by rw [hPkSov]; exact hUn e' he') (by rw [hPkSov]; exact hLeafJ)
-              · refine .inl ⟨hSt, hTrees, hFresh, fun a ha => ?_⟩
+              · refine .inl ⟨hAcceptSuite, hSt, hTrees, hFresh, fun a ha => ?_⟩
                 unfold prodSigForsLeaves at ha
                 obtain ⟨j, hjR, rfl⟩ := List.mem_map.mp ha
                 have hj := List.mem_range.mp hjR
@@ -880,6 +881,19 @@ theorem tooth_stateful_no_explicitItsrCover (suite : TweakableHashSuite) (params
   Qsag.tooth_stateful_no_explicitItsrCover
 
 #tooth_pair Qsag.execEufCmaIdealPrf_explicit_classify vs Qsag.tooth_stateful_no_explicitItsrCover
+
+theorem extractIdealPrfTcrWitnessOpt_lost {qHash qSign : Nat} (latchOn : Bool)
+    (suite : TweakableHashSuite) (params : PqHashParams) (hw : params.w = 4 ∨ params.w = 16)
+    (pkSeed : List UInt8) (rfMsg secFn : Spec.Bytes → Spec.Bytes)
+    (hRf : ∀ x, x.length = 65 → (rfMsg x).length = 32)
+    (hOneTimeIfSt : params.statefulJorts = true → latchOn = true)
+    (A : SeedWithheldEufCmaAdv qHash qSign) (lost : (ExecEufCmaIdealPrfGame latchOn Nat.one_pos suite params (fun _ => pkSeed)
+      (fun _ => rfMsg) (fun _ => secFn) (fun _ => A)).win ⟨0, Nat.one_pos⟩ = false) :
+    extractIdealPrfTcrWitnessOpt latchOn suite params hw pkSeed rfMsg secFn hRf hOneTimeIfSt A = none := by
+  unfold extractIdealPrfTcrWitnessOpt
+  exact dite_eq_right (fun won => Bool.noConfusion (lost.symm.trans won))
+
+#verify_constructive extractIdealPrfTcrWitnessOpt_lost
 
 end Qsag
 end
