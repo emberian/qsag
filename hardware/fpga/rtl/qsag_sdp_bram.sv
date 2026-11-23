@@ -20,14 +20,24 @@ module qsag_sdp_bram #(
     wire [EFF_AW-1:0] eff_wa = EFF_AW'(wa);
     wire [EFF_AW-1:0] eff_ra = EFF_AW'(ra);
 
-    if (NO_RW_CHECK) begin : g_norw
-        (* ram_style = "block", no_rw_check *) logic [DW-1:0] mem [1 << EFF_AW];
-        always_ff @(posedge clk) begin
-            if (we) mem[eff_wa] <= wd;
-            rd <= mem[eff_ra];
+    localparam bit USE_BLOCK = FORCE_BRAM || (AW > 4);
+
+    if (USE_BLOCK) begin : g_blk
+        if (NO_RW_CHECK) begin : g_norw
+            (* ram_style = "block", no_rw_check *) logic [DW-1:0] mem [1 << EFF_AW];
+            always_ff @(posedge clk) begin
+                if (we) mem[eff_wa] <= wd;
+                rd <= mem[eff_ra];
+            end
+        end else begin : g_std
+            (* ram_style = "block" *) logic [DW-1:0] mem [1 << EFF_AW];
+            always_ff @(posedge clk) begin
+                if (we) mem[eff_wa] <= wd;
+                rd <= mem[eff_ra];
+            end
         end
-    end else begin : g_std
-        (* ram_style = "block" *) logic [DW-1:0] mem [1 << EFF_AW];
+    end else begin : g_dist
+        (* ram_style = "distributed" *) logic [DW-1:0] mem [1 << EFF_AW];
         always_ff @(posedge clk) begin
             if (we) mem[eff_wa] <= wd;
             rd <= mem[eff_ra];

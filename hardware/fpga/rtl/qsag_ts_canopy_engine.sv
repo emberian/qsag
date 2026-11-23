@@ -12,7 +12,10 @@
 // Profiles:
 //   PIPE_12=1, COMPACT_KEC=0 : internal 12-stage pipelined Keccak-p[1600,12] (VU9P_TURBO)
 //   PIPE_12=0, COMPACT_KEC=0 : shares top's parallel qsag_keccak_turboshake (XCUP_RING)
-//   PIPE_12=0, COMPACT_KEC=1 : shares top's 64-bit lane-sliced qsag_keccak_compact (ECP5_COMPACT)
+//   PIPE_12=0, COMPACT_KEC=1 : shares top's 64-bit lane-sliced qsag_keccak_compact (ECP5),
+//                              holding frontier/sibling BRAM outputs across `TS_CMP_LOAD` and
+//                              slicing to 64 bits before left/right muxing (`0` `left_q`/`right_q`
+//                              /`out_root` FFs, `root_rd_phase` streams root lanes to `g_y_bram`).
 module qsag_ts_canopy_engine #(
     parameter bit PIPE_12     = 1'b0,
     parameter bit COMPACT_KEC = 1'b0,
@@ -40,6 +43,7 @@ module qsag_ts_canopy_engine #(
     output logic                 busy,
     output logic                 done,
     output logic                 ok,
+    output logic                 root_rd_phase,
     output logic [255:0]         out_root,
     // Shared parallel Keccak port (used when !COMPACT_KEC && (!PIPE_12 || !turbo || is_root))
     output logic                 kec_start,
@@ -123,7 +127,7 @@ module qsag_ts_canopy_engine #(
         end
     endfunction
 
-    function automatic logic [63:0] frame_lane(
+    function automatic logic [63:0] frame_blk(
         input logic         is_root,
         input logic         turbo,
         input logic [31:0]  node_idx,
@@ -160,7 +164,30 @@ module qsag_ts_canopy_engine #(
                 default: blk = 64'd0;
             endcase
         end
-        frame_lane = canopy_mid(turbo, lane) ^ blk;
+        frame_blk = blk;
+    endfunction
+
+    function automatic logic [63:0] frame_lane(
+        input logic         is_root,
+        input logic         turbo,
+        input logic [31:0]  node_idx,
+        input logic [7:0]   log_leaves,
+        input logic [255:0] left,
+        input logic [255:0] right,
+        input logic [4:0]   lane
+    );
+        frame_lane = canopy_mid(turbo, lane) ^
+                     frame_blk(is_root, turbo, node_idx, log_leaves, left, right, lane);
+    endfunction
+
+    function automatic logic [63:0] slice_h24(input logic [255:0] h, input logic [2:0] idx);
+        case (idx)
+            3'd0:    slice_h24 = {40'd0, h[23:0]};
+            3'd1:    slice_h24 = h[87:24];
+            3'd2:    slice_h24 = h[151:88];
+            3'd3:    slice_h24 = h[215:152];
+            default: slice_h24 = {24'd0, h[255:216]};
+        endcase
     endfunction
 
     typedef enum logic [3:0] {
@@ -171,6 +198,7 @@ module qsag_ts_canopy_engine #(
     ts_state_e st;
 
     logic               turbo_q, order_bad, fail_q, k_lsb_q, is_root_q;
+    logic               use_coal_q, cur_odd_q;
     logic [5:0]         log_q, cur_depth;
     logic [FRONT_AW:0]  active_len, k, wr_issue;
     logic [SIB_AW:0]    sib_len, sib_cur;
@@ -179,6 +207,7 @@ module qsag_ts_canopy_engine #(
     logic [191:0]       cmp_dig_q;
     logic [FRONT_AW-1:0] wr_slot_q;
     logic [4:0]         lane_cnt, pipe_inflight;
+    logic [1:0]         ts_rd_cnt;
 
     // Internal 12-stage Keccak-p[1600,12] pipeline (instantiated only when PIPE_12 && !COMPACT_KEC).
     logic               p12_in_valid, p12_out_valid;
@@ -201,20 +230,21 @@ module qsag_ts_canopy_engine #(
     end
 
     // Frontier even/odd BRAMs (read active[k] and active[k+1] simultaneously).
-    logic              f_int_we;
+    logic                f_int_we;
     logic [FRONT_AW-1:0] f_int_wa;
-    logic [287:0]      f_int_wd;
-    logic              f_we;
+    logic [287:0]        f_int_wd;
+    logic                f_we;
     logic [FRONT_AW-1:0] f_wa;
-    logic [287:0]      f_wd, fev_rd, fod_rd;
-    logic [BAW-1:0]    fev_ra, fod_ra;
+    logic [287:0]        f_wd, fev_rd, fod_rd;
+    logic [BAW-1:0]      fev_ra, fod_ra;
 
     assign f_we = f_int_we || (tw_front_en && st == TS_IDLE);
     assign f_wa = f_int_we ? f_int_wa : tw_front_idx;
     assign f_wd = f_int_we ? f_int_wd : {tw_front_u, tw_front_dig};
 
     wire [FRONT_AW-1:0] k_idx = k[FRONT_AW-1:0];
-    assign fev_ra = (st == TS_ROOT_WAIT || (st == TS_IDLE && start && in_log_leaves == 6'd0))
+    assign fev_ra = (st == TS_ROOT_WAIT || st == TS_ROOT_LAUNCH || (COMPACT_KEC && is_root_q)
+                  || (st == TS_IDLE && start && in_log_leaves == 6'd0))
                   ? '0 : (k_idx[FRONT_AW-1:1] + BAW'(k_idx[0]));
     assign fod_ra = k_idx[FRONT_AW-1:1];
 
@@ -230,24 +260,17 @@ module qsag_ts_canopy_engine #(
         .clk(clk), .we(tw_sib_en && st == TS_IDLE), .wa(tw_sib_idx), .wd(tw_sib_dig),
         .ra(sib_cur[SIB_AW-1:0]), .rd(sib_rd));
 
-    wire [287:0] cur_entry = k_lsb_q ? fod_rd : fev_rd;
-    wire [287:0] nxt_entry = k_lsb_q ? fev_rd : fod_rd;
-    wire [31:0]  cur_u     = cur_entry[287:256];
-    wire [255:0] cur_h     = cur_entry[255:0];
-    wire [31:0]  nxt_u     = nxt_entry[287:256];
-    wire [255:0] nxt_h     = nxt_entry[255:0];
-    wire         has_next  = (k + (FRONT_AW+1)'(1) < active_len);
-    wire         coal      = has_next && (nxt_u == (cur_u ^ 32'd1));
-    wire [255:0] hsib      = coal ? nxt_h : sib_rd;
-    wire [255:0] pair_l    = cur_u[0] ? hsib  : cur_h;
-    wire [255:0] pair_r    = cur_u[0] ? cur_h : hsib;
-    wire [31:0]  parent_u  = {1'b0, cur_u[31:1]};
-    wire [FRONT_AW:0] k_after = coal ? (k + (FRONT_AW+1)'(2)) : (k + (FRONT_AW+1)'(1));
+    wire [31:0]       cur_u    = k_lsb_q ? fod_rd[287:256] : fev_rd[287:256];
+    wire [31:0]       nxt_u    = k_lsb_q ? fev_rd[287:256] : fod_rd[287:256];
+    wire              has_next = (k + (FRONT_AW+1)'(1) < active_len);
+    wire              coal     = has_next && (nxt_u == (cur_u ^ 32'd1));
+    wire [31:0]       parent_u = {1'b0, cur_u[31:1]};
+    wire [FRONT_AW:0] k_after  = coal ? (k + (FRONT_AW+1)'(2)) : (k + (FRONT_AW+1)'(1));
 
     // Combinational write port for internal parent updates.
-    logic        local_wr_en;
+    logic                local_wr_en;
     logic [FRONT_AW-1:0] local_wr_idx;
-    logic [287:0] local_wr_dat;
+    logic [287:0]        local_wr_dat;
     always_comb begin
         f_int_we = 1'b0;
         f_int_wa = '0;
@@ -263,25 +286,88 @@ module qsag_ts_canopy_engine #(
         end
     end
 
-    // Parallel Keccak state assembly (only elaborated when !COMPACT_KEC).
+    // Parallel vs compact framing.
+    logic [63:0]  cmid_q, cmp_blk64;
+    logic [255:0] par_pair_l, par_pair_r;
     if (!COMPACT_KEC) begin : g_par_frame
+        wire [255:0] cur_h = k_lsb_q ? fod_rd[255:0] : fev_rd[255:0];
+        wire [255:0] nxt_h = k_lsb_q ? fev_rd[255:0] : fod_rd[255:0];
+        wire [255:0] hsib  = coal ? nxt_h : sib_rd;
+        assign par_pair_l  = cur_u[0] ? hsib  : cur_h;
+        assign par_pair_r  = cur_u[0] ? cur_h : hsib;
         always_comb begin
             for (int l = 0; l < 25; l++) begin
                 kec_state_o[64*l +: 64] = frame_lane(
                     is_root_q, turbo_q, node_u_q, {2'b0, log_q}, left_q, right_q, 5'(l));
                 p12_in_state[64*l +: 64] = frame_lane(
-                    1'b0, 1'b1, parent_u, {2'b0, log_q}, pair_l, pair_r, 5'(l));
+                    1'b0, 1'b1, parent_u, {2'b0, log_q}, par_pair_l, par_pair_r, 5'(l));
             end
         end
-    end else begin : g_no_par_frame
+        assign cmid_q    = 64'd0;
+        assign cmp_blk64 = 64'd0;
+    end else begin : g_cmp_frame
         assign kec_state_o  = '0;
         assign p12_in_state = '0;
+        assign par_pair_l   = '0;
+        assign par_pair_r   = '0;
+        (* rom_style = "block" *) logic [63:0] cmid_rom [0:63];
+        initial begin
+            for (int t = 0; t < 2; t++)
+                for (int l = 0; l < 32; l++)
+                    cmid_rom[t * 32 + l] = (l < 25) ? canopy_mid(1'(t), 5'(l)) : 64'd0;
+        end
+        wire [4:0] cmid_raddr = (st == TS_CMP_LOAD)
+                              ? (kcmd_ready ? (lane_cnt + 5'd1) : lane_cnt)
+                              : 5'd0;
+        always_ff @(posedge clk) begin
+            cmid_q <= cmid_rom[{turbo_q, cmid_raddr}];
+        end
+
+        wire [7:0]  sfx        = turbo_q ? 8'h07 : 8'h04;
+        wire        want_right = (lane_cnt >= 5'd5);
+        wire [2:0]  sub_lane3  = lane_cnt[2:0] - 3'd4;
+        wire [2:0]  s_idx      = want_right ? sub_lane3 : lane_cnt[2:0];
+        wire [63:0] fev_s      = slice_h24(fev_rd[255:0], s_idx);
+        wire [63:0] fod_s      = slice_h24(fod_rd[255:0], s_idx);
+        wire [63:0] sib_s      = slice_h24(sib_rd,        s_idx);
+        wire        take_hsib  = want_right ^ cur_odd_q;
+        wire [63:0] chosen_64  = take_hsib
+                               ? (use_coal_q ? (k_lsb_q ? fev_s : fod_s) : sib_s)
+                               : (k_lsb_q ? fod_s : fev_s);
+        wire [23:0] right_lo24 = (!cur_odd_q)
+                               ? (use_coal_q ? (k_lsb_q ? fev_rd[23:0] : fod_rd[23:0]) : sib_rd[23:0])
+                               : (k_lsb_q ? fod_rd[23:0] : fev_rd[23:0]);
+
+        always_comb begin
+            if (is_root_q) begin
+                case (lane_cnt)
+                    5'd0:    cmp_blk64 = {fev_rd[47:0], 2'b00, log_q, 8'h01};
+                    5'd1:    cmp_blk64 = fev_rd[111:48];
+                    5'd2:    cmp_blk64 = fev_rd[175:112];
+                    5'd3:    cmp_blk64 = fev_rd[239:176];
+                    5'd4:    cmp_blk64 = {40'd0, sfx, fev_rd[255:240]};
+                    5'd16:   cmp_blk64 = 64'h8000_0000_0000_0000;
+                    default: cmp_blk64 = 64'd0;
+                endcase
+            end else begin
+                case (lane_cnt)
+                    5'd0:               cmp_blk64 = {chosen_64[23:0], node_u_q, 8'h00};
+                    5'd1, 5'd2, 5'd3:   cmp_blk64 = chosen_64;
+                    5'd4:               cmp_blk64 = {right_lo24, chosen_64[39:0]};
+                    5'd5, 5'd6, 5'd7:   cmp_blk64 = chosen_64;
+                    5'd8:               cmp_blk64 = {16'd0, sfx, chosen_64[39:0]};
+                    5'd16:              cmp_blk64 = 64'h8000_0000_0000_0000;
+                    default:            cmp_blk64 = 64'd0;
+                endcase
+            end
+        end
     end
 
-    assign busy      = (st != TS_IDLE);
-    assign kec_nr12  = turbo_q;
-    assign kcmd_nr12 = turbo_q;
-    assign kcmd_wdata = frame_lane(is_root_q, turbo_q, node_u_q, {2'b0, log_q}, left_q, right_q, lane_cnt);
+    assign busy          = (st != TS_IDLE);
+    assign root_rd_phase = COMPACT_KEC && (st == TS_CMP_RD) && is_root_q;
+    assign kec_nr12      = turbo_q;
+    assign kcmd_nr12     = turbo_q;
+    assign kcmd_wdata    = COMPACT_KEC ? (cmid_q ^ cmp_blk64) : 64'd0;
 
     always_comb begin
         kcmd_valid = 1'b0;
@@ -308,10 +394,13 @@ module qsag_ts_canopy_engine #(
     assign p12_in_tag   = {wr_issue[FRONT_AW-1:0], parent_u};
     wire [255:0] cmp_full_dig = {kcmd_rd_data, cmp_dig_q};
 
+    logic [255:0] out_root_reg;
+    assign out_root = COMPACT_KEC ? '0 : out_root_reg;
+
     always_ff @(posedge clk) begin
-        done         <= 1'b0;
-        kec_start    <= 1'b0;
-        local_wr_en  <= 1'b0;
+        done        <= 1'b0;
+        kec_start   <= 1'b0;
+        local_wr_en <= 1'b0;
         if (rst) begin
             st            <= TS_IDLE;
             ok            <= 1'b0;
@@ -320,6 +409,9 @@ module qsag_ts_canopy_engine #(
             pipe_inflight <= 5'd0;
             first_u       <= 32'd0;
             last_u        <= 32'd0;
+            ts_rd_cnt     <= 2'd0;
+            use_coal_q    <= 1'b0;
+            cur_odd_q     <= 1'b0;
         end else begin
             case ({launch_p12, p12_out_valid})
                 2'b10: pipe_inflight <= pipe_inflight + 5'd1;
@@ -343,11 +435,13 @@ module qsag_ts_canopy_engine #(
                         log_q      <= in_log_leaves;
                         active_len <= in_num_leaves;
                         sib_len    <= in_num_sibs;
-                        exp_root_q <= in_exp_root;
+                        if (!COMPACT_KEC) exp_root_q <= in_exp_root;
+                        else              exp_root_q <= '0;
                         cur_depth  <= in_log_leaves;
                         k          <= '0;
                         wr_issue   <= '0;
                         sib_cur    <= '0;
+                        is_root_q  <= 1'b0;
                         fail_q     <= order_bad
                                    || (in_log_leaves > 6'd28)
                                    || (in_num_leaves == '0)
@@ -370,26 +464,33 @@ module qsag_ts_canopy_engine #(
                 end
                 TS_DECIDE: begin
                     if (!coal && (sib_cur >= sib_len)) fail_q <= 1'b1;
-                    k        <= k_after;
-                    sib_cur  <= coal ? sib_cur : (sib_cur + (SIB_AW+1)'(1));
                     wr_issue <= wr_issue + (FRONT_AW+1)'(1);
 
                     if (PIPE_12 && !COMPACT_KEC && turbo_q) begin
+                        k       <= k_after;
+                        sib_cur <= coal ? sib_cur : (sib_cur + (SIB_AW+1)'(1));
                         if (k_after >= active_len) st <= TS_PIPE_DRAIN;
                         else                       st <= TS_RD_WAIT;
+                    end else if (COMPACT_KEC) begin
+                        is_root_q  <= 1'b0;
+                        use_coal_q <= coal;
+                        cur_odd_q  <= cur_u[0];
+                        node_u_q   <= parent_u;
+                        wr_slot_q  <= wr_issue[FRONT_AW-1:0];
+                        left_q     <= '0;
+                        right_q    <= '0;
+                        lane_cnt   <= 5'd0;
+                        st         <= TS_CMP_LOAD;
                     end else begin
-                        is_root_q <= 1'b0;
-                        node_u_q  <= parent_u;
-                        left_q    <= pair_l;
-                        right_q   <= pair_r;
-                        wr_slot_q <= wr_issue[FRONT_AW-1:0];
-                        if (COMPACT_KEC) begin
-                            lane_cnt <= 5'd0;
-                            st       <= TS_CMP_LOAD;
-                        end else begin
-                            kec_start <= 1'b1;
-                            st        <= TS_WAIT_KEC;
-                        end
+                        k          <= k_after;
+                        sib_cur    <= coal ? sib_cur : (sib_cur + (SIB_AW+1)'(1));
+                        is_root_q  <= 1'b0;
+                        node_u_q   <= parent_u;
+                        left_q     <= par_pair_l;
+                        right_q    <= par_pair_r;
+                        wr_slot_q  <= wr_issue[FRONT_AW-1:0];
+                        kec_start  <= 1'b1;
+                        st         <= TS_WAIT_KEC;
                     end
                 end
                 TS_PIPE_DRAIN: begin
@@ -405,10 +506,10 @@ module qsag_ts_canopy_engine #(
                 TS_WAIT_KEC: begin
                     if (kec_done) begin
                         if (is_root_q) begin
-                            out_root <= kec_digest_i;
-                            ok       <= !fail_q && (kec_digest_i == exp_root_q);
-                            done     <= 1'b1;
-                            st       <= TS_IDLE;
+                            out_root_reg <= kec_digest_i;
+                            ok           <= !fail_q && (kec_digest_i == exp_root_q);
+                            done         <= 1'b1;
+                            st           <= TS_IDLE;
                         end else begin
                             local_wr_en  <= 1'b1;
                             local_wr_idx <= wr_slot_q;
@@ -425,24 +526,34 @@ module qsag_ts_canopy_engine #(
                     end
                 end
                 TS_CMP_PERM: begin
-                    if (kcmd_ready) st <= TS_CMP_WAIT;
+                    if (kcmd_ready) begin
+                        if (!is_root_q) begin
+                            k       <= use_coal_q ? (k + (FRONT_AW+1)'(2)) : (k + (FRONT_AW+1)'(1));
+                            sib_cur <= use_coal_q ? sib_cur : (sib_cur + (SIB_AW+1)'(1));
+                        end
+                        st <= TS_CMP_WAIT;
+                    end
                 end
                 TS_CMP_WAIT: begin
                     if (kcmd_done) begin
-                        lane_cnt <= 5'd0;
-                        st       <= TS_CMP_RD;
+                        lane_cnt  <= 5'd0;
+                        ts_rd_cnt <= 2'd0;
+                        st        <= TS_CMP_RD;
                     end
                 end
                 TS_CMP_RD: begin
                     if (kcmd_ready && lane_cnt < 5'd4) lane_cnt <= lane_cnt + 5'd1;
                     if (kcmd_rd_valid) begin
+                        ts_rd_cnt <= ts_rd_cnt + 2'd1;
                         cmp_dig_q <= cmp_full_dig[255:64];
-                        if (lane_cnt == 5'd4) begin
+                        if (is_root_q && (kcmd_rd_data != in_exp_root[64*ts_rd_cnt +: 64]))
+                            fail_q <= 1'b1;
+                        if (ts_rd_cnt == 2'd3) begin
                             if (is_root_q) begin
-                                out_root <= cmp_full_dig;
-                                ok       <= !fail_q && (cmp_full_dig == exp_root_q);
-                                done     <= 1'b1;
-                                st       <= TS_IDLE;
+                                is_root_q <= 1'b0;
+                                ok        <= !fail_q && (kcmd_rd_data == in_exp_root[255:192]);
+                                done      <= 1'b1;
+                                st        <= TS_IDLE;
                             end else begin
                                 local_wr_en  <= 1'b1;
                                 local_wr_idx <= wr_slot_q;
@@ -461,13 +572,15 @@ module qsag_ts_canopy_engine #(
                         fail_q <= 1'b1;
                     end
                     is_root_q <= 1'b1;
-                    left_q    <= fev_rd[255:0];
-                    right_q   <= '0;
                     node_u_q  <= 32'd1;
                     if (COMPACT_KEC) begin
+                        left_q   <= '0;
+                        right_q  <= '0;
                         lane_cnt <= 5'd0;
                         st       <= TS_CMP_LOAD;
                     end else begin
+                        left_q    <= fev_rd[255:0];
+                        right_q   <= '0;
                         kec_start <= 1'b1;
                         st        <= TS_WAIT_KEC;
                     end
@@ -477,6 +590,10 @@ module qsag_ts_canopy_engine #(
         end
     end
 
+    /* verilator lint_off UNUSEDSIGNAL */
     logic unused_ok;
-    assign unused_ok = &{1'b0, kec_digest_i, kcmd_ready, kcmd_done, kcmd_rd_valid, kcmd_rd_data};
+    assign unused_ok = &{1'b0, kec_digest_i, kcmd_ready, kcmd_done, kcmd_rd_valid, kcmd_rd_data,
+                         exp_root_q, left_q, right_q, out_root_reg, par_pair_l, par_pair_r,
+                         use_coal_q, cur_odd_q, ts_rd_cnt, k_after};
+    /* verilator lint_on UNUSEDSIGNAL */
 endmodule
