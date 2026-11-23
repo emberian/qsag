@@ -1,6 +1,6 @@
 # ASS2-0P5 physical implementation
 
-The hbox run uses GF180MCU-D with the foundry 7-track 5 V library. The full run directory is `hbox:dregg180-astra:/work/ass2-pnr`. LibreLane and OpenROAD use eight threads. The chip implements two independent physical clocks, with a 40 ns core target and a 50 ns HOST_SCK target.
+The physical implementation run uses GF180MCU-D with the foundry 7-track 5 V library. The full run directory is `${QSAG_WORK_DIR:-/work/ass2-pnr}`. LibreLane and OpenROAD use eight threads. The chip implements two independent physical clocks, with a 40 ns core target and a 50 ns HOST_SCK target.
 
 ## Floorplan and pad ring
 
