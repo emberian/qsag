@@ -49,6 +49,9 @@ IMPORTS = [
     'Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness',
     'Qsag.Exec.PosixCrashWal',
     'Qsag.Protocol.Threshold.BaggyAndRss256Security',
+    'Qsag.Protocol.Signing.ProductionJortsBaggyBounds',
+    'Qsag.Protocol.Aggregation.SuccinctWhirExtractorAndIdealAggregate',
+    'Qsag.Protocol.Aggregation.ConcreteIvcDepth2Cert',
 ]
 
 HEADER = """module

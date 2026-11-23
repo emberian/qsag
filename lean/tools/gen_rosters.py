@@ -87,7 +87,6 @@ infra = [m for m in ordered if is_infrastructure(m)]
 # These modules run assurance commands over imports. AuditAxioms verifies that
 # every re-export module owns zero declarations in the compiled environment.
 check_only = {
-    "Qsag.Top.ApologyRetirements",
     "Qsag.Tests.ApologyRetirementTeeth",
     "Qsag.Tests.RecursiveAggregationTeeth",
 }

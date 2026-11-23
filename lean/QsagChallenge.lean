@@ -31,6 +31,9 @@ public import Qsag.Protocol.Migration.HdToprfAndMigrationSecurity
 public import Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness
 public import Qsag.Exec.PosixCrashWal
 public import Qsag.Protocol.Threshold.BaggyAndRss256Security
+public import Qsag.Protocol.Signing.ProductionJortsBaggyBounds
+public import Qsag.Protocol.Aggregation.SuccinctWhirExtractorAndIdealAggregate
+public import Qsag.Protocol.Aggregation.ConcreteIvcDepth2Cert
 
 public section
 namespace Qsag.Top
@@ -447,6 +450,76 @@ theorem production_euf_cma_advantage_bound {Ω : Type} (suite : TweakableHashSui
       (game ω).sigStar → isPre ω = true) :
     hitCount (fun ω => prodEufCmaWin suite params (game ω)) coins ≤
       hitCount isItsr coins + hitCount isTcr coins + hitCount isPre coins :=
+  by sorry
+
+theorem smDtOpenSeedTcrHard_implies_smDtTcrHard
+    {𝒜 : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    {th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes} {seedLen q : Nat} {ε : Spec.RatBound}
+    (hard : SmDtOpenSeedTcrHard 𝒜 th seedLen q ε) :
+    Spec.SmDtTcrHard (fun c => 𝒜 (precommitOnOpen false c)) th seedLen q ε :=
+  by sorry
+
+theorem hulsing_closed_multihop_euf_cma_bound {q : Nat} (E : SigningExperiment q) (latchOn : Bool)
+    (suite : TweakableHashSuite) (p : PqHashParams) (wf : p.productionWellFormed = true)
+    (trees : p.forsTrees ≤ 2 ^ 32) (cover prim : Spec.RatBound)
+    (H : SigningPrimitiveBounds E latchOn suite p cover prim) :
+    Spec.GameBound (execEufCmaGameWith latchOn E.pos suite p E.keygen E.adversary).winProb
+      (globalSlotBudget p q cover prim) :=
+  by sorry
+
+theorem baggyProd_stateless_exec_euf_cma_bound {q : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (cover prim : Spec.RatBound)
+    (H : BaggyPrimitiveAssumptions E suite cover prim) :
+    Spec.GameBound (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb
+      (globalSlotBudget baggyProdParams q cover prim) :=
+  by sorry
+
+theorem jortsProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 96)
+    (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero
+      (classical256PrimEps qEval)) :
+    (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  by sorry
+
+theorem jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 48)
+    (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero
+      (pqQrom256PrimEps qEval)) :
+    (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  by sorry
+
+theorem baggyProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 80)
+    (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
+      (classical256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  by sorry
+
+theorem baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 40)
+    (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
+      (pqQrom256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  by sorry
+
+theorem corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 12) (he : qEval ≤ 2 ^ 40)
+    (H : SigningPrimitiveBounds E false suite corduroyProdParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
+      (pqQrom256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite corduroyProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  by sorry
+
+theorem slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 25)
+    (H : SigningPrimitiveBounds E false suite slhDsaW16StatelessParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
+      (pqQrom256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite slhDsaW16StatelessParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
   by sorry
 
 /-! # Roster of `Qsag.Top.Custody` -/
@@ -1444,6 +1517,204 @@ theorem stepXmssRows_roundTrip (pk : AggValidatorPk) (msg : List UInt8) (sig : A
     (h : verifyAggNativeSig xmssPoseidon2Geom pk msg sig = true) :
     verifyAggNativeSig xmssPoseidon2Geom pk msg
       (stepXmssSig (stepOpSlotRow .xmssPoseidon2 (stepXmssRows pk (computeMessageMu pk msg) sig) 0)) = true :=
+  by sorry
+
+theorem quinticWhirFold2_evalCoeffs (x α : QuinticGoldilocks) (P : List QuinticGoldilocks)
+    (hx : x ≠ zero) :
+    SuccinctWhirAgg.quinticWhirFold2 x α (RoundPoly.evalCoeffs P x)
+      (RoundPoly.evalCoeffs P (neg x)) =
+      RoundPoly.evalCoeffs (SuccinctWhirAgg.foldPolyCoeffs α P) (mul x x) :=
+  by sorry
+
+theorem packedQuinticWhir_geometry (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28) :
+    let ss := (ZkHemV2Packed.packedProdSched n).stages
+    3 ≤ ss.length ∧ ss.length ≤ 4 ∧ ss.all (fun st =>
+      decide (0 < st.foldK ∧ st.logDomain + st.foldK ≤ 32 ∧ 0 < st.queryCount ∧
+        st.queryCount ≤ 267 ∧ 0 < st.oodCount ∧ st.oodCount ≤ 5)) = true :=
+  by sorry
+
+theorem zkHemV2MultiStage_geometry :
+    SuccinctWhirAgg.zkHemV2MultiStageSched.numRounds = 9 ∧
+    SuccinctWhirAgg.zkHemV2MultiStageSched.johnsonOk = true ∧
+    ([0, 1, 2, 3].map (SuccinctWhirAgg.domainLog SuccinctWhirAgg.zkHemV2MultiStageSched.stages)) =
+      [8, 7, 6, 5] :=
+  by sorry
+
+theorem measuredSuccinctWhirAggregate_refines_idealAggregate {nVal n : Nat}
+    (logCells : Nat) (profile : AggSigProfile) (fr : SuccinctWhirAgg.SuccinctWhirByteFraming)
+    (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (slotC : SuccinctWhirAgg.SlotLeafTableCodec)
+    (hPos : 0 < n) (H : Fin n → Spec.Bytes → Spec.Bytes) (Q : Nat)
+    (prover : Fin n → Spec.Code Spec.byteOracleIface
+      (Spec.AggregateStatement AggValidatorPk nVal × SuccinctWhirAgg.SuccinctWhirAggregateProof)) :
+    let extract := SuccinctWhirAgg.extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC
+    let single := verifyAggNativeSig (SuccinctWhirAgg.profileGeom profile)
+    let verify := SuccinctWhirAgg.verifySuccinctWhirAggregate (nVal := nVal) logCells profile fr
+    let games := SuccinctWhirAgg.measuredSlotGames logCells profile fr nodeDecode slotC hPos H Q prover
+    (∀ oracle trace, (Spec.verifiedAggregateMachine single verify extract oracle).AdmitsTrace trace →
+      (Spec.idealAggregateMachine single).AdmitsTrace
+        (Spec.projectTrace (Spec.verifiedAggregateVisIn extract) id trace)) ∧
+    Spec.GameBound (Spec.aggregateSoundnessGame hPos single verify extract Q H prover).winProb
+      (Spec.RatBound.add games.1.winProb games.2.winProb) :=
+  by sorry
+
+theorem succinctWhirAggregate_extractorSound {nVal nC : Nat}
+    (logCells : Nat) (profile : AggSigProfile) (prof : ZkHemV2Packed.WhirCommitmentProfile)
+    (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28)
+    (fr : SuccinctWhirAgg.SuccinctWhirByteFraming)
+    (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (slotC : SuccinctWhirAgg.SlotLeafTableCodec)
+    (oracle : Fin nC → Spec.Bytes → Spec.Bytes) (Q : Nat) (hQ : Q ≤ 2 ^ 64)
+    (hSlots : SuccinctWhirAgg.PackedSlotGameBounds (nVal := nVal) logCells profile prof fr
+      nodeDecode slotC oracle Q) :
+    let ε := SuccinctWhirAgg.toSpecRatBound
+      (RatBound.add (ZkHemV2Packed.packedProdQromError logCells Q)
+        (ZkHemV2Packed.merkleProfileQromBound prof Q))
+    Spec.AggregateExtractorSound
+      (Spec.StraightLineExtractor (SuccinctWhirAgg.decodeSlotLeafSig slotC)
+        SuccinctWhirAgg.succinctWhirProofSigs)
+      (verifyAggNativeSig (SuccinctWhirAgg.profileGeom profile))
+      (SuccinctWhirAgg.verifySuccinctWhirAggregate (nVal := nVal) logCells profile fr)
+      (SuccinctWhirAgg.extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC)
+      oracle Q ε ∧
+    ε.num * 2 ^ 128 < 1 * ε.den :=
+  by sorry
+
+theorem tooth_omitted_stage0_queries_or_ood_accepts_bogus_table {nC : Nat} (hPos : 0 < nC)
+    (logCells : Nat) (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (profile : AggSigProfile)
+    (fr : SuccinctWhirAgg.SuccinctWhirByteFraming) (slotC : SuccinctWhirAgg.SlotLeafTableCodec)
+    (tag : ∀ bs, slotC.decode (0 :: bs) = none)
+    (extract : List (Spec.Bytes × Spec.Bytes) → Spec.AggregateStatement AggValidatorPk 1 →
+      SuccinctWhirAgg.SuccinctWhirAggregateProof → Fin 1 → Option AggNativeSignature)
+    (oracle : Fin nC → Spec.Bytes → Spec.Bytes)
+    (width : ∀ c bs, (oracle c bs).length = SuccinctWhirAgg.packedChallengeBits / 8)
+    (answer : ∀ c bs, slotC.decode (oracle c bs) = none) (Q : Nat) (hQ : 1 ≤ Q)
+    {ε : Spec.RatBound} (hε : ε.num < ε.den) :
+    ¬ Spec.AggregateExtractorSound
+      (Spec.StraightLineExtractor (SuccinctWhirAgg.decodeSlotLeafSig slotC)
+        SuccinctWhirAgg.succinctWhirProofSigs)
+      (verifyAggNativeSig (SuccinctWhirAgg.profileGeom profile))
+      (SuccinctWhirAgg.verifySuccinctWhirOmitQueriesAndOod logCells profile fr)
+      extract oracle Q ε :=
+  by sorry
+
+theorem ivcRootProof_byteSize_independent_of_depth {params : MultiDepthQrom.IvcWhirParams}
+    (d₁ d₂ : Nat)
+    (r₁ : MultiDepthQrom.SuccinctIvcRootProof params d₁)
+    (r₂ : MultiDepthQrom.SuccinctIvcRootProof params d₂)
+    (h₁ : r₁.rootProof.wellFormed = true) (h₂ : r₂.rootProof.wellFormed = true) :
+    MultiDepthQrom.encodedByteLen r₁.rootProof = params.openingByteLen ∧
+    MultiDepthQrom.encodedByteLen r₂.rootProof = params.openingByteLen ∧
+    MultiDepthQrom.encodedByteLen r₁.rootProof = MultiDepthQrom.encodedByteLen r₂.rootProof :=
+  by sorry
+
+theorem extractMultiDepthQrom_inductive_sound {nVal : Nat}
+    (env : MultiDepthQrom.IvcExtractionContext nVal)
+    (hDep : SuccinctWhirAgg.IsDeployedAggProfile env.profile)
+    (H : Spec.Bytes → Spec.Bytes) (T : MultiDepthQrom.QromQueryTranscript)
+    (hNoColl : MultiDepthQrom.hasQueryCollision T = false)
+    (d : Nat) (stmt : MultiDepthQrom.IvcTreeStatement)
+    (pi : MultiDepthQrom.FixedShapeWhirProof env.cfg.params)
+    (hVer : MultiDepthQrom.verifyConcreteIvcRoot env.profile env.cfg H d stmt pi = true) :
+    (∃ shards : List (MultiDepthQrom.ExtractedLeafShard nVal),
+      MultiDepthQrom.extractMultiDepthQrom env H d T stmt pi = some shards ∧
+      shards.length = 2 ^ d ∧
+      shards.map MultiDepthQrom.ExtractedLeafShard.shardId = List.range' stmt.lo (2 ^ d) ∧
+      (shards.map MultiDepthQrom.ExtractedLeafShard.quorumCount).sum = stmt.totalQuorums ∧
+      ∀ shard ∈ shards,
+        MultiDepthQrom.ValidQuorumSignatures env.profile H stmt.policyRegistryRoot stmt.message shard) ∨
+    (∃ (nodeIdx : Nat) (lvl : Nat) (sNode : MultiDepthQrom.IvcTreeStatement)
+        (piNode : MultiDepthQrom.FixedShapeWhirProof env.cfg.params),
+      nodeIdx < MultiDepthQrom.treeNodeCount d ∧ lvl ≤ d ∧
+      MultiDepthQrom.treeNodeAt env H T d stmt pi nodeIdx = some (lvl, sNode, piNode) ∧
+      MultiDepthQrom.concreteIvcStepBad env H T lvl sNode piNode = true) :=
+  by sorry
+
+theorem multidepth_recursive_refines_idealAggregate {nVal : Nat}
+    (env : MultiDepthQrom.IvcExtractionContext nVal)
+    (hDep : SuccinctWhirAgg.IsDeployedAggProfile env.profile)
+    (H : Spec.Bytes → Spec.Bytes) (d : Nat)
+    (T : MultiDepthQrom.QromQueryTranscript) (stmt : MultiDepthQrom.IvcTreeStatement)
+    (rootProof : MultiDepthQrom.FixedShapeWhirProof env.cfg.params)
+    (shards : List (MultiDepthQrom.ExtractedLeafShard nVal))
+    (hEx : MultiDepthQrom.extractMultiDepthQrom env H d T stmt rootProof = some shards) :
+    (∀ sh ∈ shards,
+      Spec.ValidAggregateWitness (verifyAggNativeSig (SuccinctWhirAgg.profileGeom env.profile))
+        sh.stmt (fun i => some (SuccinctWhirAgg.extractSlotNativeSig env.profile sh.rows i.val))) ∧
+    (Spec.idealAggregateMachine
+      (verifyAggNativeSig (SuccinctWhirAgg.profileGeom env.profile))).ValidTrace []
+      (shards.map (fun sh =>
+        ((sh.stmt, fun i => some (SuccinctWhirAgg.extractSlotNativeSig env.profile sh.rows i.val)), ())))
+      (shards.map MultiDepthQrom.ExtractedLeafShard.stmt) :=
+  by sorry
+
+theorem multidepth_recursive_qrom_lt_2_neg_128
+    (prof : ZkHemV2Packed.WhirCommitmentProfile) {d Q : Nat} (hd : d ≤ 16) (hQ : Q ≤ 2 ^ 64) :
+    RatBound.lt
+      (RatBound.add
+        (RatBound.scale (MultiDepthQrom.treeNodeCount d)
+          (ClosedWhir.scheduleQromError ZkHemV2Packed.zkHemV2RecursiveMarginSched Q))
+        (ZkHemV2Packed.merkleProfileQromBound prof Q))
+      (RatBound.invPow2 128) :=
+  by sorry
+
+theorem realDepth2AcceptsAndExtracts_spec
+    (checked : MultiDepthQrom.realDepth2AcceptsAndExtracts = true) :
+    ∃ shards,
+      MultiDepthQrom.realDepth2Run =
+        some (MultiDepthQrom.realDepth2Stmt, MultiDepthQrom.realDepth2IvcProof,
+          MultiDepthQrom.realDepth2Transcript) ∧
+      MultiDepthQrom.hasQueryCollision MultiDepthQrom.realDepth2Transcript = false ∧
+      MultiDepthQrom.verifyConcreteIvcRoot MultiDepthQrom.realDepth2Env.profile
+        MultiDepthQrom.realDepth2Env.cfg MultiDepthQrom.ivcFastXof56
+        2 MultiDepthQrom.realDepth2Stmt MultiDepthQrom.realDepth2IvcProof = true ∧
+      MultiDepthQrom.extractMultiDepthQrom MultiDepthQrom.realDepth2Env MultiDepthQrom.ivcFastXof56
+        2 MultiDepthQrom.realDepth2Transcript MultiDepthQrom.realDepth2Stmt
+        MultiDepthQrom.realDepth2IvcProof = some shards ∧
+      shards.length = 4 ∧
+      shards.map MultiDepthQrom.ExtractedLeafShard.shardId = [0, 1, 2, 3] ∧
+      (shards.map MultiDepthQrom.ExtractedLeafShard.quorumCount).sum = 4 ∧
+      ∀ sh ∈ shards,
+        MultiDepthQrom.ValidQuorumSignatures MultiDepthQrom.realDepth2Env.profile
+          MultiDepthQrom.ivcFastXof56 MultiDepthQrom.realDepth2Stmt.policyRegistryRoot
+          MultiDepthQrom.realDepth2Stmt.message sh :=
+  by sorry
+
+theorem depth2_concrete_ivc_root_accepts :
+    MultiDepthQrom.verifyConcreteIvcRoot MultiDepthQrom.Depth2Cert.fastEnv.profile
+      MultiDepthQrom.Depth2Cert.fastEnv.cfg MultiDepthQrom.Depth2Cert.natXof56
+      2 MultiDepthQrom.Depth2Cert.rootStmt MultiDepthQrom.Depth2Cert.rootPi = true :=
+  by sorry
+
+theorem depth2_concrete_ivc_root_flip_rejected :
+    ¬ (MultiDepthQrom.verifyConcreteIvcRoot MultiDepthQrom.Depth2Cert.fastEnv.profile
+      MultiDepthQrom.Depth2Cert.fastEnv.cfg MultiDepthQrom.Depth2Cert.natXof56
+      2 MultiDepthQrom.Depth2Cert.rootStmt
+      (MultiDepthQrom.flipRootCoefficient MultiDepthQrom.Depth2Cert.rootPi) = true) :=
+  by sorry
+
+theorem depth2_concrete_ivc_ood_flip_rejected :
+    ¬ (MultiDepthQrom.verifyConcreteIvcRoot MultiDepthQrom.Depth2Cert.fastEnv.profile
+      MultiDepthQrom.Depth2Cert.fastEnv.cfg MultiDepthQrom.Depth2Cert.natXof56
+      2 MultiDepthQrom.Depth2Cert.rootStmt
+      (MultiDepthQrom.flipSecondStageOod MultiDepthQrom.Depth2Cert.rootPi) = true) :=
+  by sorry
+
+theorem depth2_concrete_ivc_parent_stitch_accepts :
+    MultiDepthQrom.parentStitchCheck MultiDepthQrom.Depth2Cert.fastEnv
+      MultiDepthQrom.Depth2Cert.natXof56 1 MultiDepthQrom.Depth2Cert.rootStmt
+      MultiDepthQrom.Depth2Cert.leftStmt MultiDepthQrom.Depth2Cert.rightStmt
+      MultiDepthQrom.Depth2Cert.leftPi MultiDepthQrom.Depth2Cert.rightPi
+      MultiDepthQrom.Depth2Cert.rootPi MultiDepthQrom.Depth2Cert.rootFold = true :=
+  by sorry
+
+theorem depth2_concrete_ivc_child_boundary_flip_rejected :
+    ¬ (MultiDepthQrom.parentStitchCheck MultiDepthQrom.Depth2Cert.fastEnv
+      MultiDepthQrom.Depth2Cert.natXof56 1 MultiDepthQrom.Depth2Cert.rootStmt
+      { MultiDepthQrom.Depth2Cert.leftStmt with hi := MultiDepthQrom.Depth2Cert.leftStmt.hi ^^^ 1 }
+      MultiDepthQrom.Depth2Cert.rightStmt MultiDepthQrom.Depth2Cert.leftPi
+      MultiDepthQrom.Depth2Cert.rightPi MultiDepthQrom.Depth2Cert.rootPi
+      MultiDepthQrom.Depth2Cert.rootFold = true) :=
   by sorry
 
 end Qsag.Top

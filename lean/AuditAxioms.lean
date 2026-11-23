@@ -71,9 +71,17 @@ import all Qsag.Oracle.SpongeTwoWayIndifferentiability
 import all Qsag.Oracle.TwoWayQipmCompression
 import all Qsag.Oracle.TwoWayQipmSwapAverage
 import all Qsag.Protocol.Aggregation.Aggregation
+import all Qsag.Protocol.Aggregation.BinaryFoldAgreement
 import all Qsag.Protocol.Aggregation.ClosedFsQromCompile
 import all Qsag.Protocol.Aggregation.ClosedWhirSchedule
 import all Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
+import all Qsag.Protocol.Aggregation.ConcreteIvcArgumentProver
+import all Qsag.Protocol.Aggregation.ConcreteIvcDepth2Cert
+import all Qsag.Protocol.Aggregation.ConcreteIvcOpeningProver
+import all Qsag.Protocol.Aggregation.ConcreteIvcSumcheck
+import all Qsag.Protocol.Aggregation.ConcreteIvcTranscript
+import all Qsag.Protocol.Aggregation.ConcreteIvcWhir
+import all Qsag.Protocol.Aggregation.ConcreteIvcWire
 import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import all Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness
 import all Qsag.Protocol.Aggregation.CrossProtocolAndDualOracleComposition
@@ -90,6 +98,7 @@ import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 import all Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 import all Qsag.Protocol.Aggregation.PublicHemQuintic128
 import all Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
+import all Qsag.Protocol.Aggregation.QuinticMultiStageWhir
 import all Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness
 import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
 import all Qsag.Protocol.Aggregation.SuccinctWhirExtractorAndIdealAggregate
@@ -118,6 +127,7 @@ import all Qsag.Protocol.Signing.Fips205
 import all Qsag.Protocol.Signing.FrontierCompact1122AndCorduroySecurity
 import all Qsag.Protocol.Signing.FullAdaptiveEufCma
 import all Qsag.Protocol.Signing.HashSigs
+import all Qsag.Protocol.Signing.HulsingClosedMultiHop
 import all Qsag.Protocol.Signing.HulsingExplicitClassify
 import all Qsag.Protocol.Signing.HulsingFullOverlay
 import all Qsag.Protocol.Signing.HulsingMultiHopReduction
@@ -269,7 +279,6 @@ import all Qsag.Machine.X86Syntax
 import all Qsag.Machine.X86VectorEval
 import all Qsag.Machine.Tactic.KernelRfl
 import all Qsag.Top.Aggregation
-import all Qsag.Top.ApologyRetirements
 import all Qsag.Top.Ass2
 import all Qsag.Top.CertCustodyAdaptiveBound
 import all Qsag.Top.ClosedProtocolReductions
@@ -376,7 +385,6 @@ run_cmd do
     `Qsag.Protocol.Threshold.RlweExtraction,
     `Qsag.Machine.MirSpecBridge,
     `Qsag.Machine.MirSpecBridgeWitnesses,
-    `Qsag.Top.ApologyRetirements,
     `Qsag.Tests.ApologyRetirementTeeth,
     `Qsag.Tests.RecursiveAggregationTeeth
   ]
@@ -445,9 +453,17 @@ run_cmd do
     `Qsag.Oracle.TwoWayQipmCompression,
     `Qsag.Oracle.TwoWayQipmSwapAverage,
     `Qsag.Protocol.Aggregation.Aggregation,
+    `Qsag.Protocol.Aggregation.BinaryFoldAgreement,
     `Qsag.Protocol.Aggregation.ClosedFsQromCompile,
     `Qsag.Protocol.Aggregation.ClosedWhirSchedule,
     `Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity,
+    `Qsag.Protocol.Aggregation.ConcreteIvcArgumentProver,
+    `Qsag.Protocol.Aggregation.ConcreteIvcDepth2Cert,
+    `Qsag.Protocol.Aggregation.ConcreteIvcOpeningProver,
+    `Qsag.Protocol.Aggregation.ConcreteIvcSumcheck,
+    `Qsag.Protocol.Aggregation.ConcreteIvcTranscript,
+    `Qsag.Protocol.Aggregation.ConcreteIvcWhir,
+    `Qsag.Protocol.Aggregation.ConcreteIvcWire,
     `Qsag.Protocol.Aggregation.ConcreteSecurityBudget,
     `Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness,
     `Qsag.Protocol.Aggregation.CrossProtocolAndDualOracleComposition,
@@ -464,6 +480,7 @@ run_cmd do
     `Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem,
     `Qsag.Protocol.Aggregation.PublicHemQuintic128,
     `Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration,
+    `Qsag.Protocol.Aggregation.QuinticMultiStageWhir,
     `Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness,
     `Qsag.Protocol.Aggregation.SuccinctAggregationIop,
     `Qsag.Protocol.Aggregation.SuccinctWhirExtractorAndIdealAggregate,
@@ -492,6 +509,7 @@ run_cmd do
     `Qsag.Protocol.Signing.FrontierCompact1122AndCorduroySecurity,
     `Qsag.Protocol.Signing.FullAdaptiveEufCma,
     `Qsag.Protocol.Signing.HashSigs,
+    `Qsag.Protocol.Signing.HulsingClosedMultiHop,
     `Qsag.Protocol.Signing.HulsingExplicitClassify,
     `Qsag.Protocol.Signing.HulsingFullOverlay,
     `Qsag.Protocol.Signing.HulsingMultiHopReduction,
