@@ -4,10 +4,12 @@
 // Parameterized across four silicon profiles sharing the identical software-visible ISA:
 //   1. VU9P_TURBO    : PROFILE_COMPACT=0, P2_UNROLLED=1, KECCAK_PIPE=1, CHAIN_SLOTW=8, FOLD_TAW=16
 //   2. XCUP_RING     : PROFILE_COMPACT=0, P2_UNROLLED=0, KECCAK_PIPE=0, CHAIN_SLOTW=5, FOLD_TAW=16
-//   3. ECP5_FULLRATE : PROFILE_COMPACT=1, ECP5_FULLRATE=1, FOLD_TAW=11, AW=16, BW=16
-//                      (fits ONE $45 Lattice ECP5-85F: 117/156 MULT18X18D = 75.0%, 1-MAC/clk Ext4 +
+//   3. ECP5_FULLRATE : PROFILE_COMPACT=1, ECP5_FULLRATE=1, FOLD_TAW=11 (or CHAIN_SLOTW=2, FOLD_TAW=9,
+//                      TS_SAW=9 in fmax_ecp5_fullrate_top), AW=16, BW=16
+//                      (fits ONE $45 Lattice ECP5-85F: 81/156 MULT18X18D, five-lane Fp5 +
 //                       1-Sbox/clk Poseidon2 + 30-clk/rnd 1-RAM Keccak + zk-Hem v2 F_{p^5})
-//   4. ECP5_COMPACT  : PROFILE_COMPACT=1, ECP5_FULLRATE=0, FOLD_TAW=11, AW=16, BW=16
+//   4. ECP5_COMPACT  : PROFILE_COMPACT=1, ECP5_FULLRATE=0, FOLD_TAW=11 (or CHAIN_SLOTW=2, FOLD_TAW=9,
+//                      TS_SAW=9 in fmax_compact_top), AW=16, BW=16
 //                      (ultra-compact 18/156 MULT18X18D = 11.5%, fits ECP5-25F/45F/85F)
 //
 // Register map (32-bit words, byte addresses):
@@ -18,7 +20,7 @@
 //   0x014 ARG32      RW  32-bit auxiliary argument (chain leaf heap idx / Canopy num_sibs)
 //   0x018 CHAIN_DONE R, 0x01C CHAIN_OK R, 0x024 CHAIN_BUSY R (low 32 chain slots)
 //   0x020 STREAM     RW  [31:28] destination (0=P2 chain, 1=TS Canopy frontier, 2=TS Canopy sibs,
-//                        8=Ext4 fold table), [19:0] write pointer
+//                        8=Fp5 fold table), [19:0] write pointer
 //   0x028 ID         R   0x51534E49 ("QSNI")
 //   0x02C P2_PERMS   R   Poseidon2 permutations completed
 //   0x100 + 8*i      RW  operand bank X[i], i < 32
@@ -31,15 +33,14 @@
 //   0x04 CHAIN_START        slot arg0, arg1[5:0] sponge steps, heap ARG32, init state X[0..11]
 //   0x05 CHAIN_WAIT         waits for all chain slots; ok = all finished chains matched exp_root
 //   0x06 CHAIN_READ         Y[0..11] = state of slot arg0
-//   0x10 EXT4_MAC           Y[0..3]  = X[0..3] * X[4..7] + X[8..11]
-//   0x11 SC_INIT            claim = X[0..3], clears sticky sumcheck failure
-//   0x12 SC_ROUND           arg0==0: deg-3 in X[0..19]; arg0>=1: streamed deg=arg0 on AXI4-Stream
+//   0x11 SC_INIT            claim = X[0..4], clears sticky sumcheck failure
+//   0x12 SC_ROUND           arg0==0: deg-3 in X[0..24]; arg0>=1: streamed deg=arg0 on AXI4-Stream
 //                           (beat 0 = challenge, beats 1..deg+1 = c[deg]..c[0]); checks g(0)+g(1)==claim
-//   0x13 FOLD_ROUND         single BRAM fold round with X[0..3]
+//   0x13 FOLD_ROUND         single BRAM fold round with X[0..4]
 //   0x14 FOLD_SETLEN        fold_log2n = arg0[5:0]
-//   0x15 FOLD_MULTI         arg0[3:0] = m (1..8) back-to-back fold rounds with X[0..4m-1]
-//   0x16 EXT4_BATCH         streams arg1 (1..65535) Ext4 MACs on AXI4-Stream (2 beats/MAC:
-//                           {b, a}, {exp_y, c}), hardware-checking every mac_y == exp_y
+//   0x15 FOLD_MULTI         arg0[3:0] = m (1..6) back-to-back fold rounds with X[0..5m-1]
+//   0x16 EXT5_BATCH         streams arg1 (1..65535) Fp5 MACs on AXI4-Stream (4 beats/MAC:
+//                           a, b, c, exp_y), hardware-checking every mac_y == exp_y
 //   0x17 EXT5_MAC           zk-Hem v2 F_p[X]/(X^5 - 3): Y[0..4] = X[0..4] * X[5..9] + X[10..14]
 //   0x18 EXT5_FROB          zk-Hem v2 Frobenius: Y[0..4] = phi^(arg0)(X[0..4]), X^p = zeta_5 * X
 //   0x20 KEC_LOAD           Keccak state = X[0..24]
@@ -90,10 +91,7 @@ module qsag_ni_fpga_top #(
     input  logic         s_axis_tvalid,
     output logic         s_axis_tready
 );
-    localparam logic [65:0] NEG_1P66     = 66'h3_0000_0000_FFFF_FFFF;
-    localparam bit          COMPACT_EXT4 = PROFILE_COMPACT && !ECP5_FULLRATE;
     localparam int          GF128_LAT    = qsag_ni_pkg::GF128_LAT;
-    localparam int          EXT_LAT      = qsag_ni_pkg::EXT4_MAC_LAT;
     localparam int          SLOTW        = CHAIN_SLOTW;
     localparam int          SLOTS        = 1 << SLOTW;
     localparam int          STEPW        = 6;
@@ -322,7 +320,11 @@ module qsag_ni_fpga_top #(
     endfunction
 
     // ------------------------------------------------------------------ registers & AXI4-Lite
-    logic [31:0][63:0] x_q;
+    logic [3:0][63:0] x_a, x_b, x_c;
+    logic [63:0] x_scalar;
+    logic x_read_pending, y_read_pending;
+    logic [1:0] y_wb_cnt, y_wb_idx;
+    logic p2_wb_y;
     logic [11:0][63:0] y_q;
     logic [31:0]       arg32_q, stream_q, op_cycles_q, perms_q, total_lo_q, total_hi_q;
     logic              total_cy_q;
@@ -336,15 +338,18 @@ module qsag_ni_fpga_top #(
     logic [3:0]  wr_strb;
     logic        wr_error;
 
-    assign s_axil_awready = !rst && !aw_full;
+    wire   y_wb_busy      = PROFILE_COMPACT && ((y_wb_cnt != 2'd0) || p2_wb_y);
+    wire   cmd_wb_stall   = y_wb_busy && (s_axil_awaddr == 12'h000);
+    assign s_axil_awready = !rst && !aw_full && !cmd_wb_stall;
     assign s_axil_wready  = !rst && !w_full;
-    assign s_axil_arready = !rst && !s_axil_rvalid && !(aw_full && w_full);
-    assign wr_fire  = aw_full && w_full && !s_axil_bvalid && !rst;
+    wire   y_wb_stall_ar  = y_wb_busy && (s_axil_araddr[11:8] == 4'h2);
+    assign s_axil_arready = !rst && !s_axil_rvalid && !x_read_pending && !y_read_pending && !y_wb_stall_ar && !(aw_full && w_full);
+    assign wr_fire  = aw_full && w_full && !s_axil_bvalid && !rst && !(y_wb_busy && (aw_word == 10'h000));
     assign rd_fire  = s_axil_arvalid && s_axil_arready;
     assign wr_word  = aw_word;
     assign rd_word  = s_axil_araddr[11:2];
     assign wr_error = (|wr_strb) && ((wr_word == 10'h000 && (wr_strb != 4'hf || op_busy))
-                                  || (op_busy && wr_word[9:6] == 4'h1));
+                                  || (op_busy && (wr_word[9:6] == 4'h1 || wr_word == 10'h005 || wr_word == 10'h008)));
     assign s_axil_rresp = 2'b00;
     assign cmd_fire = wr_fire && !wr_error && (&wr_strb) && (wr_word == 10'h000);
 
@@ -375,9 +380,7 @@ module qsag_ni_fpga_top #(
     // ------------------------------------------------------------------ operation FSM states
     typedef enum logic [5:0] {
         O_IDLE, O_P2_OFFER, O_P2_WAIT, O_CH_START, O_CH_WAIT, O_CH_READ,
-        O_MAC, O_EXT5_MAC, O_EXT5_FROB,
-        O_SC_SUM, O_SC_H, O_SC_STR, O_SC_STR_S2, O_SC_STR_WAIT,
-        O_FOLD, O_FOLD_NEXT, O_EBATCH, O_EBATCH_DRAIN,
+        O_FIELD_REG, O_FIELD_BEAT, O_FIELD_LOAD, O_FIELD_WAIT,
         O_KEC, O_KCMP_LOAD, O_KCMP_XOR, O_KCMP_PERM, O_KCMP_WAIT, O_KCMP_RD,
         O_KSP_COLLECT, O_KSP_PERM, O_KSP_CMP_INIT, O_KSP_CMP_XOR, O_KSP_CMP_PERM,
         O_KSP_CMP_WAIT, O_KSP_CMP_RD,
@@ -389,15 +392,23 @@ module qsag_ni_fpga_top #(
     logic             p2_in_valid, p2_in_ready, p2_in_jive, p2_out_valid, p2_busy;
     logic [767:0]     p2_in_state, p2_out_state;
     logic [TAGW-1:0]  p2_in_tag, p2_out_tag;
+    logic             p2_out_lane_valid;
+    logic [3:0]       p2_out_lane_idx;
+    logic [63:0]      p2_out_lane_data;
     /* verilator lint_off UNUSEDSIGNAL */
     logic             p2_out_jive;
     /* verilator lint_on UNUSEDSIGNAL */
 
     logic             op_job_valid, op_job_jive;
-    logic             eng_job_valid, eng_job_jive, eng_job_last;
+    logic             eng_job_valid, eng_job_jive, eng_job_last, eng_job_active;
+    logic             eng_job_lane_valid, eng_job_lane_last;
+    logic [63:0]      eng_job_lane_data;
     logic [767:0]     eng_job_state;
     logic [SLOTW-1:0] eng_job_slot;
-    logic             eng_start_valid, eng_start_ready, eng_rd_valid, eng_rd_done, eng_clr;
+    logic             eng_start_valid, eng_start_ready, eng_start_lane_ready, eng_rd_valid, eng_rd_done, eng_clr;
+    logic             eng_rd_lane_valid;
+    logic [3:0]       eng_rd_lane_idx;
+    logic [63:0]      eng_rd_lane_data;
     logic [767:0]     eng_rd_state;
     logic [191:0]     tree_key_q;
     logic [255:0]     expect_q;
@@ -406,27 +417,42 @@ module qsag_ni_fpga_top #(
     wire  [31:0]      chain_done32 = 32'(chain_done);
     wire  [31:0]      chain_ok32   = 32'(chain_ok);
 
+    assign p2_wb_y = PROFILE_COMPACT && p2_out_lane_valid && !p2_out_tag[TAGW-1];
+    wire p2_hold_wb = PROFILE_COMPACT && ((op_st == O_P2_WAIT) || p2_wb_y);
     logic arb_locked, arb_owner, select_eng;
-    assign select_eng = arb_locked ? arb_owner : eng_job_valid;
-    always_ff @(posedge clk) begin
-        if (rst) begin arb_locked <= 1'b0; arb_owner <= 1'b0; end
-        else if (p2_in_valid) begin
-            arb_locked <= !p2_in_ready;
-            if (!p2_in_ready) arb_owner <= select_eng;
+    if (PROFILE_COMPACT) begin : g_p2_arb_cmp
+        assign arb_locked  = 1'b0;
+        assign arb_owner   = 1'b0;
+        assign select_eng  = eng_job_active;
+        assign p2_in_valid = !p2_hold_wb && !eng_job_active && op_job_valid;
+        assign p2_in_state = {x_c, x_b, x_a};
+        assign p2_in_jive  = eng_job_active ? eng_job_jive : op_job_jive;
+        assign p2_in_tag   = eng_job_active ? {1'b1, eng_job_last, eng_job_slot} : '0;
+    end else begin : g_p2_arb_par
+        assign select_eng = arb_locked ? arb_owner : eng_job_valid;
+        always_ff @(posedge clk) begin
+            if (rst) begin arb_locked <= 1'b0; arb_owner <= 1'b0; end
+            else if (p2_in_valid) begin
+                arb_locked <= !p2_in_ready;
+                if (!p2_in_ready) arb_owner <= select_eng;
+            end
         end
+        assign p2_in_valid = select_eng ? eng_job_valid : op_job_valid;
+        assign p2_in_state = select_eng ? eng_job_state : {x_c, x_b, x_a};
+        assign p2_in_jive  = select_eng ? eng_job_jive  : op_job_jive;
+        assign p2_in_tag   = select_eng ? {1'b1, eng_job_last, eng_job_slot} : '0;
     end
-    assign p2_in_valid = select_eng ? eng_job_valid : op_job_valid;
-    assign p2_in_state = select_eng ? eng_job_state : x_q[11:0];
-    assign p2_in_jive  = select_eng ? eng_job_jive  : op_job_jive;
-    assign p2_in_tag   = select_eng ? {1'b1, eng_job_last, eng_job_slot} : '0;
 
     if (PROFILE_COMPACT) begin : g_compact_p2
         qsag_p2_compact #(.TAGW(TAGW), .AW(AW), .BW(BW), .USE_PIPE_SBOX(ECP5_FULLRATE)) u_p2 (
             .clk(clk), .rst(rst),
             .in_valid(p2_in_valid), .in_ready(p2_in_ready), .in_state(p2_in_state),
             .in_jive(p2_in_jive), .in_tag(p2_in_tag),
-            .out_valid(p2_out_valid), .out_state(p2_out_state), .out_jive(p2_out_jive),
-            .out_tag(p2_out_tag), .busy(p2_busy));
+            .in_lane_valid(eng_job_lane_valid), .in_lane_last(eng_job_lane_last), .in_lane_data(eng_job_lane_data),
+            .out_valid(p2_out_valid), .out_jive(p2_out_jive), .out_tag(p2_out_tag),
+            .out_lane_valid(p2_out_lane_valid), .out_lane_idx(p2_out_lane_idx), .out_lane_data(p2_out_lane_data),
+            .busy(p2_busy));
+        assign p2_out_state = '0;
     end else if (P2_UNROLLED) begin : g_pipe_p2
         qsag_poseidon2_12_pipe #(.TAGW(TAGW), .AW(AW), .BW(BW)) u_p2 (
             .clk(clk), .rst(rst), .in_valid(p2_in_valid && !rst), .in_state(p2_in_state),
@@ -442,8 +468,11 @@ module qsag_ni_fpga_top #(
                 default: ;
             endcase
         end
-        assign p2_in_ready = !rst;
-        assign p2_busy     = (active != '0) || p2_out_valid;
+        assign p2_in_ready       = !rst;
+        assign p2_busy           = (active != '0) || p2_out_valid;
+        assign p2_out_lane_valid = 1'b0;
+        assign p2_out_lane_idx   = 4'd0;
+        assign p2_out_lane_data  = 64'd0;
     end else begin : g_ring_p2
         qsag_poseidon2_12_fpga #(.TAGW(TAGW), .AW(AW), .BW(BW)) u_p2 (
             .clk(clk), .rst(rst),
@@ -451,12 +480,15 @@ module qsag_ni_fpga_top #(
             .in_jive(p2_in_jive), .in_tag(p2_in_tag),
             .out_valid(p2_out_valid), .out_state(p2_out_state), .out_jive(p2_out_jive),
             .out_tag(p2_out_tag), .busy(p2_busy));
+        assign p2_out_lane_valid = 1'b0;
+        assign p2_out_lane_idx   = 4'd0;
+        assign p2_out_lane_data  = 64'd0;
     end
 
     // ------------------------------------------------------------------ AXI4-Stream routing
     wire [3:0] stream_dst = stream_q[31:28];
-    wire       op_takes_stream = (op_st == O_SC_STR) || (op_st == O_SC_STR_S2) || (op_st == O_SC_STR_WAIT)
-                              || (op_st == O_EBATCH) || (op_st == O_EBATCH_DRAIN)
+    wire       op_takes_stream = ((op_st == O_FIELD_BEAT || op_st == O_FIELD_LOAD || op_st == O_FIELD_WAIT) &&
+                                  (cmd_op_q == 8'h16 || (cmd_op_q == 8'h12 && cmd_a0_q != 0)))
                               || (op_st == O_KSP_COLLECT) || (op_st == O_KSP_PERM)
                               || (op_st == O_KSP_CMP_INIT) || (op_st == O_KSP_CMP_XOR)
                               || (op_st == O_KSP_CMP_PERM) || (op_st == O_KSP_CMP_WAIT)
@@ -470,7 +502,7 @@ module qsag_ni_fpga_top #(
         case (stream_dst)
             4'h0: passive_ready = !chain_busy[stream_q[SLOTW+STEPW-1:STEPW]];
             4'h1, 4'h2: passive_ready = !ts_busy;
-            4'h8: passive_ready = !fold_busy && !fold_start;
+            4'h8: passive_ready = !fold_busy && !fold_start && !(op_busy && (cmd_op_q == 8'h13 || cmd_op_q == 8'h15));
             default: passive_ready = 1'b1;
         endcase
     end
@@ -486,154 +518,180 @@ module qsag_ni_fpga_top #(
         assign limb_bad[i] = (&v[63:32]) && (|v[31:0]);
     end
     wire stream_check_en = passive_stream && (stream_dst == 4'h0 || stream_dst == 4'h8);
-    wire stream_bad      = (stream_dst == 4'h8) ? (|limb_bad[3:0]) : (|limb_bad);
+    wire stream_bad      = (stream_dst == 4'h8) ? (|limb_bad[4:0]) : (|limb_bad);
+    wire active_stream_bad = stream_fire && op_st == O_FIELD_BEAT && (|limb_bad[4:0]);
 
-    qsag_p2_chain_engine #(.SLOTW(SLOTW), .STEPW(STEPW), .AW(AW)) u_chain (
+    logic [3:0] xa_bad, xb_bad, xc_bad;
+    for (genvar i = 0; i < 4; i++) begin : g_xcanon
+        assign xa_bad[i] = (&x_a[i][63:32]) && (|x_a[i][31:0]);
+        assign xb_bad[i] = (&x_b[i][63:32]) && (|x_b[i][31:0]);
+        assign xc_bad[i] = (&x_c[i][63:32]) && (|x_c[i][31:0]);
+    end
+
+    logic [3:0] rd_cnt;
+
+    qsag_p2_chain_engine #(.SLOTW(SLOTW), .STEPW(STEPW), .AW(AW), .COMPACT_64(PROFILE_COMPACT)) u_chain (
         .clk(clk), .rst(rst), .tree_key(tree_key_q), .exp_root(expect_q), .clr_maps(eng_clr),
         .bw_en(passive_stream && stream_dst == 4'h0),
         .bw_addr(stream_q[SLOTW+STEPW-1:0]),
         .bw_data(s_axis_tdata),
         .start_valid(eng_start_valid), .start_ready(eng_start_ready),
         .start_slot(cmd_a0_q[SLOTW-1:0]), .start_nsponge(cmd_a1_q[5:0]),
-        .start_heap(arg32_q), .start_state(x_q[11:0]),
+        .start_heap(arg32_q), .start_state(PROFILE_COMPACT ? 768'd0 : {x_c, x_b, x_a}),
+        .start_lane_valid(PROFILE_COMPACT && (op_st == O_CH_START)),
+        .start_lane_ready(eng_start_lane_ready),
+        .start_lane_idx(rd_cnt),
+        .start_lane_data(x_scalar),
         .rd_valid(eng_rd_valid), .rd_slot(cmd_a0_q[SLOTW-1:0]),
         .rd_done(eng_rd_done), .rd_state(eng_rd_state),
-        .job_valid(eng_job_valid), .job_ready(p2_in_ready && select_eng), .job_state(eng_job_state),
+        .rd_lane_valid(eng_rd_lane_valid), .rd_lane_idx(eng_rd_lane_idx), .rd_lane_data(eng_rd_lane_data),
+        .job_valid(eng_job_valid),
+        .job_ready(PROFILE_COMPACT ? (!p2_hold_wb && p2_in_ready && (op_st != O_P2_OFFER)) : (p2_in_ready && select_eng)),
+        .job_state(eng_job_state),
         .job_jive(eng_job_jive), .job_last(eng_job_last), .job_slot(eng_job_slot),
-        .res_valid(p2_out_valid && p2_out_tag[TAGW-1]), .res_last(p2_out_tag[SLOTW]),
-        .res_slot(p2_out_tag[SLOTW-1:0]), .res_state(p2_out_state),
+        .job_active(eng_job_active),
+        .job_lane_valid(eng_job_lane_valid), .job_lane_last(eng_job_lane_last), .job_lane_data(eng_job_lane_data),
+        .res_valid(!PROFILE_COMPACT && p2_out_valid && p2_out_tag[TAGW-1]),
+        .res_last(p2_out_tag[SLOTW]),
+        .res_slot(p2_out_tag[SLOTW-1:0]),
+        .res_state(PROFILE_COMPACT ? 768'd0 : p2_out_state),
+        .res_lane_valid(PROFILE_COMPACT && p2_out_lane_valid && p2_out_tag[TAGW-1]),
+        .res_lane_idx(p2_out_lane_idx),
+        .res_lane_data(p2_out_lane_data),
         .busy_map(chain_busy), .done_map(chain_done), .ok_map(chain_ok));
 
-    // ------------------------------------------------------------------ Ext4 MAC / Fold
-    logic         mac_valid, mac_done, mac_valid_fsm;
-    logic [255:0] fold_res, mac_a_fsm, mac_b_fsm, mac_c_fsm, mac_a, mac_b, mac_c, mac_y;
-    logic [5:0]   fold_log2n_q;
-    logic [2:0]   fold_idx;
-    logic [3:0]   fold_left;
-
-    // Streamed EXT4_BATCH state (inputs registered via mac_valid_fsm so s_axis_tready never drives u_ext4)
-    logic         eb_half, eb_wait_cmp, eb_fail_q;
-    logic [15:0]  eb_rem, eb_ret_rem;
-    logic [255:0] eb_exp_cmp_q, eb_exp_cmp_val;
-    logic [3:0][63:0] e5_tb_q;
-    logic [2:0]       e5_step, e5_k_q;
-    if (COMPACT_EXT4) begin : g_eb_cmp
-        assign eb_exp_cmp_val = eb_exp_cmp_q;
-    end else begin : g_eb_sr
-        logic [3:0] eb_cyc_q;
-        always_ff @(posedge clk) begin
-            if (rst) eb_cyc_q <= 4'd0;
-            else     eb_cyc_q <= eb_cyc_q + 4'd1;
+    wire [3:0] x_we = (wr_fire && !wr_error && wr_word[9:6] == 4'h1) ? wr_strb : 4'd0;
+    typedef enum logic [2:0] {F_A,F_B,F_C,F_R,F_EXPECT,F_CLAIM} field_input_t;
+    field_input_t field_input;
+    logic [2:0] field_lane, frob_lane, frob_k;
+    logic [4:0] field_base;
+    logic [7:0] coeff_left;
+    logic [15:0] batch_left;
+    logic [3:0] fold_left;
+    logic [5:0] fold_log2n_q;
+    logic [319:0] beat_q;
+    logic [63:0] claim_q[5], sc_sum[5], expected[5];
+    logic sc_fail_q, batch_fail;
+    logic mac_valid, mac_done, lane_valid, direct_bad;
+    logic [2:0] lane_idx;
+    logic [63:0] lane_data;
+    logic [319:0] wide_result;
+    wire is_sc = cmd_op_q == 8'h12;
+    wire is_batch = cmd_op_q == 8'h16;
+    wire is_frob = cmd_op_q == 8'h18;
+    wire from_stream = is_batch || (is_sc && cmd_a0_q != 0);
+    wire direct_mac = !PROFILE_COMPACT && cmd_op_q == 8'h17;
+    wire [63:0] field_word = from_stream ? beat_q[63:0] : x_scalar;
+    logic [63:0] operand;
+    always_comb begin
+        operand = field_word;
+        if (is_frob) begin
+            operand = 0;
+            if (field_lane == 0) case (field_input)
+                F_A: operand = x_scalar;
+                F_B: operand = zeta5_rom(mul_mod5(frob_lane,frob_k));
+                default: ;
+            endcase
         end
-        qsag_sdp_bram #(.AW(9), .DW(256), .NO_RW_CHECK(1'b1)) u_eb_exp (
-            .clk(clk),
-            .we((op_st == O_EBATCH) && stream_fire && eb_half),
-            .wa({5'd0, eb_cyc_q}),
-            .wd(s_axis_tdata[511:256]),
-            .ra({5'd0, eb_cyc_q - 4'(EXT_LAT)}),
-            .rd(eb_exp_cmp_val));
-        /* verilator lint_off UNUSEDSIGNAL */
-        wire unused_eb = &{1'b0, eb_exp_cmp_q};
-        /* verilator lint_on UNUSEDSIGNAL */
     end
-
-    assign mac_valid = mac_valid_fsm;
-    assign mac_a     = mac_a_fsm;
-    assign mac_b     = mac_b_fsm;
-    assign mac_c     = mac_c_fsm;
-
-    if (COMPACT_EXT4) begin : g_compact_ext4
-        qsag_ext4_compact_bfly #(.TAW(FOLD_TAW), .AW(AW), .BW(BW)) u_ext4 (
-            .clk(clk), .rst(rst),
-            .tw_en(passive_stream && stream_dst == 4'h8), .tw_idx(stream_q[FOLD_TAW-1:0]),
-            .tw_data(s_axis_tdata[255:0]),
-            .fold_start(fold_start), .fold_log2n(fold_log2n_q), .fold_r(x_q[{fold_idx, 2'b00} +: 4]),
-            .fold_busy(fold_busy), .fold_done(fold_done), .fold_res(fold_res),
-            .mac_valid(mac_valid), .mac_a(mac_a), .mac_b(mac_b), .mac_c(mac_c),
-            .mac_done(mac_done), .mac_y(mac_y));
-    end else begin : g_parallel_ext4
-        qsag_ext4_mac_bfly #(.TAW(FOLD_TAW), .AW(AW), .BW(BW)) u_ext4 (
-            .clk(clk), .rst(rst),
-            .tw_en(passive_stream && stream_dst == 4'h8), .tw_idx(stream_q[FOLD_TAW-1:0]),
-            .tw_data(s_axis_tdata[255:0]),
-            .fold_start(fold_start), .fold_log2n(fold_log2n_q), .fold_r(x_q[{fold_idx, 2'b00} +: 4]),
-            .fold_busy(fold_busy), .fold_done(fold_done), .fold_res(fold_res),
-            .mac_valid(mac_valid), .mac_a(mac_a), .mac_b(mac_b), .mac_c(mac_c),
-            .mac_done(mac_done), .mac_y(mac_y));
+    // A register write is forwarded after the synchronous X read has settled.
+    // Track each working limb independently. Field commands that reuse the banks
+    // invalidate them, so a later MAC with partially rewritten X reloads safely.
+    wire x_update = PROFILE_COMPACT && (|x_we) && wr_word[5:1] < 15;
+    logic x_pending, x_forward;
+    logic [3:0] x_pending_idx, x_forward_idx;
+    logic [14:0] loaded;
+    wire [14:0] forward_mask = x_forward ? 15'b1 << x_forward_idx : 15'd0;
+    wire operands_ready = &(loaded | forward_mask);
+    always_ff @(posedge clk) begin
+        x_pending <= x_update && !rst;
+        x_forward <= x_pending && !rst;
+        if (x_update) x_pending_idx <= wr_word[4:1];
+        x_forward_idx <= x_pending_idx;
+        if (rst || (cmd_fire && wr_data[7:0] >= 8'h11 && wr_data[7:0] <= 8'h18 &&
+                    (wr_data[7:0] != 8'h17 || !operands_ready))) loaded <= 0;
+        else loaded <= (loaded | forward_mask) & ~(x_update ? 15'b1 << wr_word[4:1] : 15'd0);
     end
-
-    // ------------------------------------------------------------------ Unified 2-Stage Sumcheck Adder
-    // Shared between `SC_ROUND` (arg0 == 0, stepping c3..c0 during Horner step 0 with 0 extra cycles)
-    // and streamed `SC_ROUND` (arg0 >= 1, arbitrary degree 1..9+).
-    // Stage 1: sc_raw_q <= a + b + (c0 ? b : 0) (< 3*2^64, <= 13 levels).
-    // Stage 2: fold 2-bit hi = sc_raw_q[65:64] via lo + hi*(2^32 - 1) (< 2*GL_P for all 2^66 inputs,
-    //          <= 15 levels) -> sc_sum_q.
-    // PROFILE_COMPACT folds the 4 limbs onto ONE rotating 64-bit lane (-3,300 LUT4, <= 15 levels).
-    localparam int          SC_LANES = PROFILE_COMPACT ? 1 : 4;
-    logic [255:0]           claim_q, sc_sum_q, sc_chal_q, sc_horner_q, sc_vec_q;
-    logic                   sc_fail_q, sc_s2_en, sc_is_c0_q, sc_c0_q;
-    logic [7:0]             sc_idx, sc_deg;
-    logic [3:0]             sc_h_sub;
-    logic [2:0]             sc_k;
-    logic [1:0]             sc_term;
-    logic [SC_LANES*66-1:0] sc_raw_d, sc_raw_q;
-    logic [SC_LANES*64-1:0] sc_can_d;
-    logic [255:0]           sc_add_b;
-    logic                   sc_add_c0;
-
-    if (!PROFILE_COMPACT) begin : g_sc_par_mux
-        always_comb begin
-            if (op_st == O_SC_SUM) begin
-                sc_add_b  = x_q[15:12];
-                sc_add_c0 = 1'b0;
-            end else if (op_st == O_SC_H) begin
-                case (sc_h_sub[2:1])
-                    2'd1:    begin sc_add_b = x_q[11:8]; sc_add_c0 = 1'b0; end
-                    2'd2:    begin sc_add_b = x_q[7:4];  sc_add_c0 = 1'b0; end
-                    default: begin sc_add_b = x_q[3:0];  sc_add_c0 = 1'b1; end
-                endcase
-            end else begin
-                sc_add_b  = s_axis_tdata[255:0];
-                sc_add_c0 = sc_is_c0_q;
+    wire [1:0] forward_sel = x_forward_idx < 5 ? 0 : x_forward_idx < 10 ? 1 : 2;
+    wire [2:0] forward_idx = x_forward_idx[2:0] - (forward_sel == 0 ? 0 : forward_sel == 1 ? 3'd5 : 3'd2);
+    logic [14:0] forward_bad;
+    always_ff @(posedge clk) if (x_forward) forward_bad[x_forward_idx] <= x_scalar >= qsag_ni_pkg::GL_P;
+    wire cached_bad = |(forward_bad & ~forward_mask) || (x_forward && x_scalar >= qsag_ni_pkg::GL_P);
+    wire feedback = is_sc && lane_valid && coeff_left != 0;
+    wire lane_we = x_forward || feedback || (op_st == O_FIELD_LOAD && field_input <= F_R);
+    wire [1:0] lane_sel = x_forward ? forward_sel : feedback ? 2'd0 : field_input[1:0];
+    wire [2:0] lane_addr = x_forward ? forward_idx : feedback ? lane_idx : field_lane;
+    wire [63:0] lane_in = x_forward ? x_scalar : feedback ? lane_data : operand;
+    wire table_we = passive_stream && stream_dst == 4'h8;
+    // Serial results feed both the Horner recurrence and the result window.
+    wire field_y_we = lane_valid && (!is_frob || lane_idx == 0) &&
+                      (!is_sc || coeff_left == 0) && (!is_batch || batch_left == 1);
+    wire [2:0] field_y_idx = is_frob ? frob_lane : lane_idx;
+    if (PROFILE_COMPACT) begin : g_compact_fp5
+        qsag_fp5_compact_bfly #(.TAW(FOLD_TAW),.AW(AW),.BW(BW),.PARALLEL_5(ECP5_FULLRATE)) u_fp5 (
+            .clk,.rst,.tw_en(table_we),.tw_idx(stream_q[FOLD_TAW-1:0]),.tw_data(s_axis_tdata[319:0]),
+            .mac_valid,.mac_done,.fold_start,.fold_busy,.fold_done,.fold_log2n(fold_log2n_q),
+            .in_lane_we(lane_we),.in_sel(lane_sel),.in_lane_idx(lane_addr),.in_lane_data(lane_in),
+            .out_lane_valid(lane_valid),.out_lane_idx(lane_idx),.out_lane_data(lane_data));
+        assign direct_bad = cached_bad;
+        assign wide_result = '0;
+    end else begin : g_parallel_fp5
+        logic [319:0] a,b,c,r,raw_y,fold_y,result;
+        logic raw_done,fold_raw_done,serializing,is_fold;
+        logic [2:0] index;
+        logic [1023:0] fast_words;
+        qsag_x_window #(.LANE_BITS(4)) u_fast (.clk,.wa(wr_word[5:0]),.we(x_we),.wd(wr_data),.ra(1'b0),.rd(fast_words));
+        logic [14:0] fast_bad;
+        for (genvar n=0;n<15;n++) begin : g_fast_canon
+            assign fast_bad[n] = fast_words[64*n+:64] >= qsag_ni_pkg::GL_P;
+        end
+        assign direct_bad = |fast_bad;
+        always_ff @(posedge clk) if (lane_we) case (lane_sel)
+            0: a[64*lane_addr+:64] <= lane_in;
+            1: b[64*lane_addr+:64] <= lane_in;
+            2: c[64*lane_addr+:64] <= lane_in;
+            3: r[64*lane_addr+:64] <= lane_in;
+        endcase
+        /* verilator lint_off PINCONNECTEMPTY */
+        qsag_ext5_mac_bfly #(.TAW(FOLD_TAW),.AW(AW),.BW(BW)) u_fp5 (
+            .clk,.rst,.tw_en(table_we),.tw_idx(stream_q[FOLD_TAW-1:0]),.tw_data(s_axis_tdata[319:0]),
+            .mac_valid,.mac_done(raw_done),.mac_a(direct_mac ? fast_words[319:0] : a),
+            .mac_b(direct_mac ? fast_words[639:320] : b),.mac_c(direct_mac ? fast_words[959:640] : c),
+            .mac_y(raw_y),.fold_start,.fold_busy,.fold_log2n(fold_log2n_q),.fold_r(r),
+            .fold_done(fold_raw_done),.fold_wr_last(),.fold_res(fold_y));
+        /* verilator lint_on PINCONNECTEMPTY */
+        always_ff @(posedge clk) begin
+            if (rst) serializing <= 0;
+            else if ((raw_done && !direct_mac) || fold_raw_done) begin
+                result <= fold_raw_done ? fold_y : raw_y;
+                index <= 0;
+                is_fold <= fold_raw_done;
+                serializing <= 1;
+            end else if (serializing) begin
+                index <= index + 1'b1;
+                result <= {64'd0,result[319:64]};
+                if (index == 4) serializing <= 0;
             end
         end
-    end else begin : g_sc_cmp_nomux
-        assign sc_add_b  = '0;
-        assign sc_add_c0 = 1'b0;
+        assign wide_result = raw_y;
+        assign mac_done = direct_mac ? raw_done : serializing && !is_fold && index == 4;
+        assign fold_done = serializing && is_fold && index == 4;
+        assign lane_valid = serializing;
+        assign lane_idx = index;
+        assign lane_data = result[63:0];
+        wire unused_fast = &{1'b0,fast_words[1023:960]};
     end
 
-    localparam int SC_CHUNK = (AW <= 16) ? 66 : 22;
-    for (genvar i = 0; i < SC_LANES; i++) begin : g_sc_pipe
-        wire [63:0] a_l = sc_sum_q[64*i +: 64];
-        wire [63:0] b_l = PROFILE_COMPACT ? sc_vec_q[63:0] : sc_add_b[64*i +: 64];
-        wire        c0l = PROFILE_COMPACT ? sc_c0_q        : sc_add_c0;
-        qsag_sum_csa #(.W(66), .N(3), .CHUNK(SC_CHUNK)) u_s1 (
-            .x({c0l ? {2'b0, b_l} : 66'd0, {2'b0, b_l}, {2'b0, a_l}}),
-            .y(sc_raw_d[66*i +: 66]));
-
-        wire [1:0]  hi = sc_raw_q[66*i + 64 +: 2];
-        wire [63:0] lo = sc_raw_q[66*i      +: 64];
-        if (AW <= 16) begin : g_sc_ecp5
-            wire [33:0] hi_f34 = (hi == 2'd0) ? 34'd0 : {hi - 2'd1, 30'h3FFF_FFFF, 2'd0 - hi};
-            /* verilator lint_off UNUSEDSIGNAL */
-            wire [64:0] r0 = {1'b0, lo} + {31'd0, hi_f34};
-            wire [65:0] r1 = {1'b0, r0} + NEG_1P66;
-            /* verilator lint_on UNUSEDSIGNAL */
-            assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
-        end else begin : g_sc_wide
-            /* verilator lint_off UNUSEDSIGNAL */
-            logic [65:0] r0, r1;
-            /* verilator lint_on UNUSEDSIGNAL */
-            wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
-            wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
-            qsag_sum_csa #(.W(66), .N(4), .CHUNK(SC_CHUNK)) u_r0 (.x(tr0), .y(r0));
-            qsag_sum_csa #(.W(66), .N(4), .CHUNK(SC_CHUNK)) u_r1 (.x(tr1), .y(r1));
-            assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
-        end
-    end
+    function automatic logic [63:0] field_add(input logic [63:0] a,b);
+        logic [64:0] s;
+        s = {1'b0,a} + {1'b0,b};
+        field_add = s >= {1'b0,qsag_ni_pkg::GL_P} ? s[63:0]-qsag_ni_pkg::GL_P : s[63:0];
+    endfunction
+    wire [64:0] claim_diff = {1'b0,claim_q[field_lane]} - {1'b0,operand};
+    wire [63:0] field_sub_claim = claim_diff[64] ? claim_diff[63:0] + qsag_ni_pkg::GL_P : claim_diff[63:0];
 
     // ------------------------------------------------------------------ Keccak + TS Canopy Engine
-    logic          ts_start, ts_done, ts_ok;
+    logic          ts_start, ts_done, ts_ok, ts_root_rd_phase;
     logic [255:0]  ts_out_root;
     logic          ts_kec_start, ts_kec_nr12;
     logic [1599:0] ts_kec_state;
@@ -654,7 +712,7 @@ module qsag_ni_fpga_top #(
     logic [15:0]   ksp_rem;
     logic [63:0]   ksp_lane16_q, ksp_flags_q;
     logic [399:0]  ksp_exp_q;
-    logic          ksp_fail_q;
+    logic          ksp_fail_q, ksp_cmp_word_bad;
     logic [511:0]  ksp_par_we_data;
     logic [1:0]    ksp_par_we;
 
@@ -676,18 +734,29 @@ module qsag_ni_fpga_top #(
             mid_rom_q <= mid_rom_mem[{mid_rom_sel, mid_rom_idx}];
         end
 
-        // Store the 1,024-bit KEC_STREAM_SPONGE rate buffer in DP16KD block RAM (AW=9 -> 0 LUTRAM).
+        // Store the 1,024-bit KEC_STREAM_SPONGE rate buffer (rows 0..1) and raw beat 2 (row 2).
         logic [511:0] ksp_bram_rd;
-        wire          ksp_bram_ra = (op_st == O_KSP_CMP_XOR)
-                                  ? (kcmp_idx[3] | (kcmd_ready && (kcmp_idx[2:0] == 3'd7)))
-                                  : 1'b0;
-        qsag_sdp_bram #(.AW(9), .DW(512), .NO_RW_CHECK(1'b1)) u_ksp_bram (
+        wire  [3:0]   ksp_bram_ra4 = (op_st == O_KSP_CMP_WAIT || op_st == O_KSP_CMP_RD)
+                                   ? 4'd2
+                                   : ((op_st == O_KSP_CMP_XOR)
+                                      ? {3'd0, kcmp_idx[3] | (kcmd_ready && (kcmp_idx[2:0] == 3'd7))}
+                                      : 4'd0);
+        qsag_sdp_bram #(.AW(4), .DW(512), .NO_RW_CHECK(1'b1)) u_ksp_bram (
             .clk(clk),
-            .we((op_st == O_KSP_COLLECT) && stream_fire && (ksp_beat < 2'd2)),
-            .wa({8'd0, ksp_beat[0]}),
+            .we((op_st == O_KSP_COLLECT) && stream_fire),
+            .wa({2'd0, ksp_beat}),
             .wd(s_axis_tdata),
-            .ra({8'd0, ksp_bram_ra}),
+            .ra(ksp_bram_ra4),
             .rd(ksp_bram_rd));
+        wire [2:0]  ksp_exp_idx  = rd_cnt[2:0] + 3'd2;
+        wire [63:0] ksp_exp_lane = ksp_bram_rd[64*ksp_exp_idx +: 64];
+        assign ksp_cmp_word_bad  = (rd_cnt < 4'd4)
+                                 ? ((ksp_flags_q[4] || ksp_flags_q[6]) && (kcmd_rd_data != ksp_exp_lane))
+                                 : ((rd_cnt < 4'd6)
+                                    ? (ksp_flags_q[6] && (kcmd_rd_data != ksp_exp_lane))
+                                    : ((rd_cnt == 4'd6)
+                                       ? (ksp_flags_q[6] && (kcmd_rd_data[15:0] != ksp_bram_rd[127:112]))
+                                       : 1'b0));
 
         logic        top_kcmd_valid, top_kcmd_nr12;
         logic [1:0]  top_kcmd_op;
@@ -699,7 +768,7 @@ module qsag_ni_fpga_top #(
             top_kcmd_op    = 2'd0;
             top_kcmd_nr12  = cmd_a0_q[0];
             top_kcmd_idx   = kcmp_idx;
-            top_kcmd_wdata = x_q[kcmp_idx];
+            top_kcmd_wdata = x_scalar;
             case (op_st)
                 O_KCMP_LOAD: begin
                     top_kcmd_valid = 1'b1;
@@ -758,6 +827,11 @@ module qsag_ni_fpga_top #(
         assign unused_par_k = &{1'b0, kec_start_top, kec_load, kec_nr12_top, ts_kec_start, ts_kec_nr12, ts_kec_state, ksp_par_we, ksp_par_we_data};
     end else begin : g_kec_parallel
         logic [1023:0] ksp_buf_q;
+        logic [767:0] kec_x_low_q;
+        always_ff @(posedge clk)
+            if (cmd_fire && (wr_data[7:0] == 8'h20 || wr_data[7:0] == 8'h21))
+                kec_x_low_q <= {x_c, x_b, x_a};
+
         logic [1599:0] kec_hold_q, kec_in, kec_state, ksp_base;
         always_ff @(posedge clk) begin
             if (ksp_par_we[0]) ksp_buf_q[511:0]   <= ksp_par_we_data;
@@ -775,7 +849,7 @@ module qsag_ni_fpga_top #(
                 kec_in[1087:0] = ksp_base[1087:0] ^ {ksp_lane16_q, ksp_buf_q};
             end else begin
                 kec_in = kec_hold_q;
-                if (!cmd_a0_q[1]) kec_in[1087:0] = kec_hold_q[1087:0] ^ x_q[16:0];
+                if (!cmd_a0_q[1]) kec_in[1087:0] = kec_hold_q[1087:0] ^ {x_b[0], x_a, kec_x_low_q};
             end
         end
         wire par_start = (op_st == O_TS_CANOPY) ? ts_kec_start : kec_start_top;
@@ -784,7 +858,7 @@ module qsag_ni_fpga_top #(
             .clk(clk), .rst(rst), .start(par_start), .nr12(par_nr12), .state_i(kec_in),
             .busy(kec_busy), .done(kec_done), .state_o(kec_state));
         always_ff @(posedge clk) begin
-            if (kec_load) kec_hold_q <= x_q[24:0];
+            if (kec_load) kec_hold_q <= {x_scalar, x_c, x_b, x_a, kec_x_low_q};
             else if (kec_done && op_st != O_TS_CANOPY) kec_hold_q <= kec_state;
         end
         assign kec_dig_out   = kec_state[255:0];
@@ -793,6 +867,7 @@ module qsag_ni_fpga_top #(
         assign kcmd_done     = 1'b0;
         assign kcmd_rd_valid = 1'b0;
         assign kcmd_rd_data  = '0;
+        assign ksp_cmp_word_bad = 1'b0;
         logic unused_cmp_k;
         assign unused_cmp_k = &{1'b0, ts_kcmd_valid, ts_kcmd_nr12, ts_kcmd_op, ts_kcmd_idx, ts_kcmd_wdata};
     end
@@ -816,8 +891,8 @@ module qsag_ni_fpga_top #(
         .in_log_leaves(cmd_a0_q[6:1]),
         .in_num_leaves(cmd_a1_q[TS_FAW:0]),
         .in_num_sibs  (arg32_q[TS_SAW:0]),
-        .in_exp_root  (x_q[3:0]),
-        .busy(ts_busy), .done(ts_done), .ok(ts_ok), .out_root(ts_out_root),
+        .in_exp_root  (x_a),
+        .busy(ts_busy), .done(ts_done), .ok(ts_ok), .root_rd_phase(ts_root_rd_phase), .out_root(ts_out_root),
         .kec_start(ts_kec_start), .kec_nr12(ts_kec_nr12), .kec_state_o(ts_kec_state),
         .kec_done(kec_done), .kec_digest_i(kec_dig_out),
         .kcmd_valid(ts_kcmd_valid), .kcmd_ready(kcmd_ready), .kcmd_op(ts_kcmd_op),
@@ -831,16 +906,16 @@ module qsag_ni_fpga_top #(
     if (PROFILE_COMPACT) begin : g_gf_cmp
         qsag_gf128_compact u_gf_cmp (
             .clk(clk), .rst(rst), .start(gf_start), .tower(cmd_a0_q[0]),
-            .a(x_q[1:0]), .b(x_q[3:2]), .done(gf_done), .r(gf_r));
+            .a(x_a[1:0]), .b(x_a[3:2]), .done(gf_done), .r(gf_r));
         /* verilator lint_off UNUSEDSIGNAL */
         wire unused_gf_cnt = &{1'b0, gf_cnt};
         /* verilator lint_on UNUSEDSIGNAL */
     end else begin : g_gf_par
         logic [127:0] gf_pa, gf_pb, gf_in_a, gf_in_b, gf_raw_r, gf_tow_r;
-        qsag_gf128_tower_map #(.INVERSE(0)) u_tow_a (.x(x_q[1:0]), .y(gf_pa));
-        qsag_gf128_tower_map #(.INVERSE(0)) u_tow_b (.x(x_q[3:2]), .y(gf_pb));
-        assign gf_in_a = cmd_a0_q[0] ? gf_pa : x_q[1:0];
-        assign gf_in_b = cmd_a0_q[0] ? gf_pb : x_q[3:2];
+        qsag_gf128_tower_map #(.INVERSE(0)) u_tow_a (.x(x_a[1:0]), .y(gf_pa));
+        qsag_gf128_tower_map #(.INVERSE(0)) u_tow_b (.x(x_a[3:2]), .y(gf_pb));
+        assign gf_in_a = cmd_a0_q[0] ? gf_pa : x_a[1:0];
+        assign gf_in_b = cmd_a0_q[0] ? gf_pb : x_a[3:2];
         qsag_gf128_clmul u_gf (.clk(clk), .a(gf_in_a), .b(gf_in_b), .r(gf_raw_r));
         qsag_gf128_tower_map #(.INVERSE(1)) u_tow_r (.x(gf_raw_r), .y(gf_tow_r));
         assign gf_r    = cmd_a0_q[0] ? gf_tow_r : gf_raw_r;
@@ -854,21 +929,15 @@ module qsag_ni_fpga_top #(
     always_comb begin
         op_stream_ready = 1'b0;
         case (op_st)
-            O_SC_STR:      op_stream_ready = 1'b1;
-            O_EBATCH:      op_stream_ready = !eb_wait_cmp;
+            O_FIELD_BEAT:  op_stream_ready = 1'b1;
             O_KSP_COLLECT: op_stream_ready = 1'b1;
             default:       op_stream_ready = 1'b0;
         endcase
     end
 
-    logic [1:0]   sc_step;
-    logic [3:0]   rd_cnt;
-    logic [447:0] ksp_dig_q;
-    wire [511:0]  ksp_full_dig = {kcmd_rd_data, ksp_dig_q};
-    wire          ksp_par_bad  = (ksp_flags_q[4] && (kec_dig_out != ksp_exp_q[255:0]))
-                              || (ksp_flags_q[6] && (kec_y_out[399:0] != ksp_exp_q));
-    wire          ksp_cmp_bad  = (ksp_flags_q[4] && (ksp_full_dig[255:0] != ksp_exp_q[255:0]))
-                              || (ksp_flags_q[6] && (ksp_full_dig[399:0] != ksp_exp_q));
+    logic [63:0] gf_high;
+    wire        ksp_par_bad = (ksp_flags_q[4] && (kec_dig_out != ksp_exp_q[255:0]))
+                           || (ksp_flags_q[6] && (kec_y_out[399:0] != ksp_exp_q));
 
     assign op_job_valid    = (op_st == O_P2_OFFER);
     assign op_job_jive     = (cmd_op_q == 8'h02);
@@ -877,39 +946,124 @@ module qsag_ni_fpga_top #(
 
     wire engines_busy = op_busy || p2_busy || (|chain_busy) || fold_busy || kec_busy || ts_busy;
 
-    // Native byte-enable writes on `x_q`; optional AXI4-Lite readback on non-compact profiles.
-    logic [31:0] x_rw_val;
+    // Read addresses are issued one edge before consumption. In idle A/B/C
+    // always present X[0..11], including the cycle a command commits. AXI
+    // buffer refill leaves at least one read edge after the last X write.
+    logic [2:0] xa_ra, xb_ra, xc_ra;
+    logic [4:0] xs_ra;
+    always_comb begin
+        xa_ra = 3'd0;
+        xb_ra = 3'd1;
+        xc_ra = 3'd2;
+        xs_ra = x_pending ? {1'b0,x_pending_idx} : 5'd0;
+        if (!PROFILE_COMPACT && cmd_fire && (wr_data[7:0] == 8'h20 || wr_data[7:0] == 8'h21)) begin
+            xa_ra = 3'd3;
+            xb_ra = 3'd4;
+            xc_ra = 3'd5;
+            xs_ra = 5'd24;
+        end
+        case (op_st)
+            O_CH_START: if (PROFILE_COMPACT) xs_ra = eng_start_lane_ready ? {1'b0, rd_cnt + 4'd1} : {1'b0, rd_cnt};
+            O_FIELD_REG: xs_ra = field_base;
+            O_FIELD_LOAD: xs_ra = is_frob ? field_base : field_base + {2'd0,field_lane} + 1'b1;
+            O_KCMP_LOAD, O_KCMP_XOR: xs_ra = kcmd_ready ? kcmp_idx + 5'd1 : kcmp_idx;
+            default: ;
+        endcase
+    end
+    if (PROFILE_COMPACT) begin : g_fixed_x
+        // Only the twelve fixed Poseidon lanes need simultaneous reads here.
+        logic [767:0] words;
+        for (genvar w=0; w<24; w++) begin : g_word
+            for (genvar b=0; b<4; b++) begin : g_byte
+                always_ff @(posedge clk)
+                    if (wr_word[5:0] == 6'(w) && x_we[b])
+                        words[32*w+8*b+:8] <= wr_data[8*b+:8];
+            end
+        end
+        assign {x_c,x_b,x_a} = words;
+    end else begin : g_wide_x
+        qsag_x_window u_xa (.clk, .wa(wr_word[5:0]), .we(x_we), .wd(wr_data), .ra(xa_ra), .rd(x_a));
+        qsag_x_window u_xb (.clk, .wa(wr_word[5:0]), .we(x_we), .wd(wr_data), .ra(xb_ra), .rd(x_b));
+        qsag_x_window u_xc (.clk, .wa(wr_word[5:0]), .we(x_we), .wd(wr_data), .ra(xc_ra), .rd(x_c));
+    end
+    qsag_x_window #(.LANE_BITS(0)) u_xs (
+        .clk, .wa(wr_word[5:0]), .we(x_we), .wd(wr_data), .ra(xs_ra), .rd(x_scalar));
+
+    wire y_start_gf = PROFILE_COMPACT && (op_st == O_GF) && gf_done;
+
+    logic [31:0] x_rw_val, y_rw_val;
+    wire x_read = !PROFILE_COMPACT && rd_fire && rd_word[9:6] == 4'h1;
+    wire y_read =  PROFILE_COMPACT && rd_fire && rd_word[9:6] == 4'h2 && rd_word[5:1] < 5'd12;
     if (!PROFILE_COMPACT) begin : g_x_rdback
-        assign x_rw_val = rd_word[0] ? x_q[rd_word[5:1]][63:32] : x_q[rd_word[5:1]][31:0];
-    end else begin : g_x_nordback
+        logic [63:0] limb;
+        logic high_half;
+        qsag_x_window #(.LANE_BITS(0)) u_xr (
+            .clk, .wa(wr_word[5:0]), .we(x_we), .wd(wr_data), .ra(rd_word[5:1]), .rd(limb));
+        always_ff @(posedge clk) if (x_read) high_half <= rd_word[0];
+        assign x_rw_val = high_half ? limb[63:32] : limb[31:0];
+        assign y_rw_val = 32'd0;
+    end else begin : g_y_bram
         assign x_rw_val = 32'd0;
+        logic        y_we_64, y_rd_hi_q;
+        logic [3:0]  y_wa_64;
+        logic [63:0] y_wd_64, y_rd_word64;
+        always_comb begin
+            y_we_64 = 1'b0;
+            y_wa_64 = 4'd0;
+            y_wd_64 = lane_data;
+            if (!rst) begin
+                if (field_y_we) begin
+                    y_we_64 = 1'b1;
+                    y_wa_64 = {1'b0,field_y_idx};
+                    y_wd_64 = lane_data;
+                end else if (y_start_gf) begin
+                    y_we_64 = 1'b1;
+                    y_wa_64 = 4'd0;
+                    y_wd_64 = gf_r[63:0] ^ x_b[0];
+                end else if (y_wb_cnt != 2'd0) begin
+                    y_we_64 = 1'b1;
+                    y_wa_64 = {2'd0, y_wb_idx};
+                    y_wd_64 = gf_high;
+                end else if (p2_wb_y) begin
+                    y_we_64 = 1'b1;
+                    y_wa_64 = p2_out_lane_idx;
+                    y_wd_64 = p2_out_lane_data;
+                end else if ((op_st == O_CH_READ) && eng_rd_lane_valid) begin
+                    y_we_64 = 1'b1;
+                    y_wa_64 = eng_rd_lane_idx;
+                    y_wd_64 = eng_rd_lane_data;
+                end else if (((op_st == O_KCMP_RD) || (op_st == O_KSP_CMP_RD) ||
+                              ((op_st == O_TS_CANOPY) && ts_root_rd_phase)) && kcmd_rd_valid) begin
+                    y_we_64 = 1'b1;
+                    y_wa_64 = rd_cnt;
+                    y_wd_64 = kcmd_rd_data;
+                end
+            end
+        end
+        (* ram_style = "block", no_rw_check *) logic [63:0] y_mem [0:511];
+        always_ff @(posedge clk) begin
+            if (y_we_64) y_mem[{5'd0, y_wa_64}] <= y_wd_64;
+            y_rd_word64 <= y_mem[{5'd0, rd_word[4:1]}];
+            if (y_read) y_rd_hi_q <= rd_word[0];
+        end
+        assign y_rw_val = y_rd_hi_q ? y_rd_word64[63:32] : y_rd_word64[31:0];
+    end
+    always_ff @(posedge clk) begin
+        x_read_pending <= !rst && x_read;
+        y_read_pending <= !rst && y_read;
     end
     assign ksp_par_we_data = s_axis_tdata;
     assign ksp_par_we[0]   = !PROFILE_COMPACT && (op_st == O_KSP_COLLECT) && stream_fire && (ksp_beat == 2'd0);
     assign ksp_par_we[1]   = !PROFILE_COMPACT && (op_st == O_KSP_COLLECT) && stream_fire && (ksp_beat == 2'd1);
 
     always_ff @(posedge clk) begin
-        if (wr_fire && !wr_error && (|wr_strb) && wr_word[9:6] == 4'h1) begin
-            for (int b = 0; b < 4; b++) begin
-                if (wr_strb[b]) begin
-                    if (wr_word[0]) x_q[wr_word[5:1]][32 + 8*b +: 8] <= wr_data[8*b +: 8];
-                    else            x_q[wr_word[5:1]][     8*b +: 8] <= wr_data[8*b +: 8];
-                end
-            end
-        end
-    end
-
-    always_ff @(posedge clk) begin
         fold_start    <= 1'b0;
-        mac_valid_fsm <= 1'b0;
+        mac_valid <= 1'b0;
         kec_start_top <= 1'b0;
         kec_load      <= 1'b0;
         ts_start      <= 1'b0;
         gf_start      <= 1'b0;
         eng_clr       <= 1'b0;
-        sc_s2_en      <= 1'b0;
-        if (!PROFILE_COMPACT && sc_s2_en) sc_sum_q <= 256'(sc_can_d);
-
         if (rst) begin
             op_st         <= O_IDLE;
             op_busy       <= 1'b0;
@@ -923,9 +1077,6 @@ module qsag_ni_fpga_top #(
             total_cy_q    <= 1'b0;
             perms_q       <= '0;
             sc_fail_q     <= 1'b0;
-            sc_s2_en      <= 1'b0;
-            eb_fail_q     <= 1'b0;
-            eb_wait_cmp   <= 1'b0;
             ksp_fail_q    <= 1'b0;
             fold_log2n_q  <= 6'd1;
             stream_q      <= '0;
@@ -933,6 +1084,8 @@ module qsag_ni_fpga_top #(
             s_axil_bvalid <= 1'b0;
             s_axil_bresp  <= 2'b00;
             s_axil_rvalid <= 1'b0;
+            y_wb_cnt      <= 2'd0;
+            y_wb_idx      <= 2'd0;
         end else begin
             // ---- AXI4-Lite
             if (s_axil_bvalid && s_axil_bready) s_axil_bvalid <= 1'b0;
@@ -950,7 +1103,15 @@ module qsag_ni_fpga_top #(
                     end
                 end
             end
-            if (rd_fire) begin
+            if (x_read_pending) begin
+                s_axil_rvalid <= 1'b1;
+                s_axil_rdata  <= x_rw_val;
+            end
+            if (y_read_pending) begin
+                s_axil_rvalid <= 1'b1;
+                s_axil_rdata  <= y_rw_val;
+            end
+            if (rd_fire && !x_read && !y_read) begin
                 s_axil_rvalid <= 1'b1;
                 s_axil_rdata  <= 32'd0;
                 case (rd_word)
@@ -967,21 +1128,19 @@ module qsag_ni_fpga_top #(
                     10'h00A: s_axil_rdata <= 32'h5153_4E49;
                     10'h00B: s_axil_rdata <= perms_q;
                     default: begin
-                        if (rd_word[9:6] == 4'h1)
-                            s_axil_rdata <= x_rw_val;
-                        else if (rd_word[9:6] == 4'h2 && rd_word[5:1] < 5'd12)
+                        if (!PROFILE_COMPACT && rd_word[9:6] == 4'h2 && rd_word[5:1] < 5'd12)
                             s_axil_rdata <= rd_word[0] ? y_q[rd_word[4:1]][63:32]
                                                        : y_q[rd_word[4:1]][31:0];
                     end
                 endcase
             end
 
-            // ---- Passive stream pointer update
+            // ---- Passive & active stream canonicality update
             if (passive_stream) begin
                 stream_q[19:0] <= stream_q[19:0] + 20'd1;
                 if (stream_check_en && stream_bad) err_noncanon <= 1'b1;
             end
-
+            if (active_stream_bad) err_noncanon <= 1'b1;
             // ---- Counters (64-bit total counter pipelined into two 32-bit halves)
             total_cy_q <= engines_busy && (total_lo_q == 32'hFFFF_FFFF);
             if (total_cy_q)   total_hi_q   <= total_hi_q + 32'd1;
@@ -989,14 +1148,6 @@ module qsag_ni_fpga_top #(
             if (op_busy)      op_cycles_q  <= op_cycles_q + 32'd1;
             if (p2_out_valid) perms_q      <= perms_q + 32'd1;
             if (fold_done)    fold_log2n_q <= fold_log2n_q - 6'd1;
-
-            // ---- Background retirement for EXT4_BATCH
-            if ((op_st == O_EBATCH || op_st == O_EBATCH_DRAIN) && mac_done) begin
-                y_q[3:0]   <= mac_y;
-                eb_ret_rem <= eb_ret_rem - 16'd1;
-                if (COMPACT_EXT4) eb_wait_cmp <= 1'b0;
-                if (mac_y != eb_exp_cmp_val) eb_fail_q <= 1'b1;
-            end
 
             // ---- Operations
             case (op_st)
@@ -1010,13 +1161,17 @@ module qsag_ni_fpga_top #(
                         op_ok       <= 1'b1;
                         op_cycles_q <= '0;
                         case (wr_data[7:0])
-                            8'h01, 8'h02: op_st <= O_P2_OFFER;
+                            8'h01, 8'h02: begin
+                                if (|xa_bad || |xb_bad || |xc_bad) err_noncanon <= 1'b1;
+                                op_st <= O_P2_OFFER;
+                            end
                             8'h03: begin
                                 if (|chain_busy) begin
                                     err_cmd <= 1'b1; op_ok <= 1'b0;
                                 end else if (!wr_data[9]) begin
-                                    tree_key_q <= x_q[2:0];
-                                    expect_q   <= x_q[7:4];
+                                    if (|xa_bad[2:0] || |xb_bad) err_noncanon <= 1'b1;
+                                    tree_key_q <= x_a[2:0];
+                                    expect_q   <= x_b;
                                 end
                                 eng_clr <= wr_data[8] && !(|chain_busy);
                                 op_st   <= O_FIN;
@@ -1025,79 +1180,65 @@ module qsag_ni_fpga_top #(
                                 if (chain_busy[wr_data[8 +: SLOTW]] ||
                                     (arg32_q <= 32'd1 && wr_data[21:16] == 6'd0)) begin
                                     err_cmd <= 1'b1; op_ok <= 1'b0; op_st <= O_FIN;
-                                end else op_st <= O_CH_START;
+                                end else begin
+                                    if (|xa_bad || |xb_bad || |xc_bad) err_noncanon <= 1'b1;
+                                    rd_cnt <= 4'd0;
+                                    op_st  <= O_CH_START;
+                                end
                             end
                             8'h05: op_st <= O_CH_WAIT;
                             8'h06: op_st <= O_CH_READ;
-                            8'h10: begin
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= x_q[3:0];
-                                mac_b_fsm     <= x_q[7:4];
-                                mac_c_fsm     <= x_q[11:8];
-                                op_st         <= O_MAC;
-                            end
                             8'h11: begin
-                                claim_q   <= x_q[3:0];
-                                sc_fail_q <= 1'b0;
-                                op_st     <= O_FIN;
+                                field_input <= F_CLAIM;
+                                field_base <= 0;
+                                sc_fail_q <= 0;
+                                op_st <= O_FIELD_REG;
                             end
                             8'h12: begin
-                                sc_sum_q <= '0;
-                                if (wr_data[15:8] == 8'd0) begin
-                                    op_st <= O_SC_SUM;
-                                end else begin
-                                    sc_deg     <= wr_data[15:8];
-                                    sc_idx     <= 8'd0;
-                                    sc_is_c0_q <= 1'b0;
-                                    op_st      <= O_SC_STR;
-                                end
+                                field_input <= F_B;
+                                field_base <= 20;
+                                coeff_left <= wr_data[15:8] == 0 ? 8'd3 : wr_data[15:8];
+                                op_st <= wr_data[15:8] == 0 ? O_FIELD_REG : O_FIELD_BEAT;
                             end
-                            8'h13: begin
-                                fold_start <= 1'b1;
-                                fold_idx   <= 3'd0;
-                                fold_left  <= 4'd1;
-                                op_st      <= O_FOLD;
+                            8'h13,8'h15: begin
+                                logic [5:0] n;
+                                logic [3:0] rounds;
+                                n = wr_data[7:0] == 8'h15 && wr_data[21:16] != 0 ? wr_data[21:16] : fold_log2n_q;
+                                rounds = wr_data[7:0] == 8'h13 ? 4'd1 : wr_data[11:8];
+                                if (rounds == 0 || rounds > 6 || n < {2'd0,rounds} || n > 6'(FOLD_TAW)) begin
+                                    err_cmd <= 1; op_ok <= 0; op_st <= O_FIN;
+                                end else begin
+                                    fold_log2n_q <= n;
+                                    fold_left <= rounds;
+                                    field_input <= F_R;
+                                    field_base <= 0;
+                                    op_st <= O_FIELD_REG;
+                                end
                             end
                             8'h14: begin
-                                fold_log2n_q <= wr_data[13:8];
-                                op_st        <= O_FIN;
-                            end
-                            8'h15: begin
-                                if (wr_data[21:16] != 6'd0) fold_log2n_q <= wr_data[21:16];
-                                fold_idx  <= 3'd0;
-                                fold_left <= wr_data[11:8];
-                                op_st     <= O_FOLD_NEXT;
+                                if (wr_data[13:8] == 0 || wr_data[13:8] > 6'(FOLD_TAW)) begin
+                                    err_cmd <= 1; op_ok <= 0;
+                                end else fold_log2n_q <= wr_data[13:8];
+                                op_st <= O_FIN;
                             end
                             8'h16: begin
-                                if (wr_data[31:16] == 16'd0) begin
-                                    op_st <= O_FIN;
-                                end else begin
-                                    eb_half     <= 1'b0;
-                                    eb_wait_cmp <= 1'b0;
-                                    eb_fail_q   <= 1'b0;
-                                    eb_rem      <= wr_data[31:16];
-                                    eb_ret_rem  <= wr_data[31:16];
-                                    op_st       <= O_EBATCH;
-                                end
+                                field_input <= F_A;
+                                batch_left <= wr_data[31:16];
+                                batch_fail <= 0;
+                                if (wr_data[31:16] == 0) begin
+                                    err_cmd <= 1; op_ok <= 0; op_st <= O_FIN;
+                                end else op_st <= O_FIELD_BEAT;
                             end
-                            8'h17: begin
-                                // Step 0: compute {3*b4, 3*b3, 3*b2, 3*b1} via scalar-vector Ext4 MAC.
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {192'd0, 64'd3};
-                                mac_b_fsm     <= {x_q[9], x_q[8], x_q[7], x_q[6]};
-                                mac_c_fsm     <= 256'd0;
-                                e5_step       <= 3'd0;
-                                op_st         <= O_EXT5_MAC;
-                            end
-                            8'h18: begin
-                                // Frobenius phi^k(X[0..4]): limb i scaled by zeta_5^((i*k) mod 5).
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {192'd0, x_q[0]};
-                                mac_b_fsm     <= {192'd0, 64'd1};
-                                mac_c_fsm     <= 256'd0;
-                                e5_k_q        <= mod5_u8(wr_data[15:8]);
-                                e5_step       <= 3'd0;
-                                op_st         <= O_EXT5_FROB;
+                            8'h17,8'h18: begin
+                                field_input <= F_A;
+                                field_base <= 0;
+                                frob_lane <= 0;
+                                frob_k <= mod5_u8(wr_data[15:8]);
+                                if ((!PROFILE_COMPACT || operands_ready) && wr_data[7:0] == 8'h17) begin
+                                    mac_valid <= 1;
+                                    if (direct_bad) err_noncanon <= 1;
+                                    op_st <= O_FIELD_WAIT;
+                                end else op_st <= O_FIELD_REG;
                             end
                             8'h20: begin
                                 if (PROFILE_COMPACT) begin
@@ -1129,6 +1270,7 @@ module qsag_ni_fpga_top #(
                                 end
                             end
                             8'h24: begin
+                                rd_cnt   <= 4'd0;
                                 ts_start <= 1'b1;
                                 op_st    <= O_TS_CANOPY;
                             end
@@ -1147,20 +1289,34 @@ module qsag_ni_fpga_top #(
                                 op_st        <= O_FIN;
                             end
                             default: begin
+                                err_cmd <= 1'b1;
                                 op_ok <= 1'b0;
                                 op_st <= O_FIN;
                             end
                         endcase
                     end
                 end
-                O_P2_OFFER: if (p2_in_ready && !select_eng) op_st <= O_P2_WAIT;
+                O_P2_OFFER: begin
+                    if (PROFILE_COMPACT ? (p2_in_ready && !p2_hold_wb && !eng_job_active)
+                                        : (p2_in_ready && !select_eng))
+                        op_st <= O_P2_WAIT;
+                end
                 O_P2_WAIT: begin
                     if (p2_out_valid && !p2_out_tag[TAGW-1]) begin
-                        y_q   <= p2_out_state;
+                        if (!PROFILE_COMPACT) y_q <= p2_out_state;
                         op_st <= O_FIN;
                     end
                 end
-                O_CH_START: if (eng_start_ready) op_st <= O_FIN;
+                O_CH_START: begin
+                    if (PROFILE_COMPACT) begin
+                        if (eng_start_lane_ready) begin
+                            if (rd_cnt == 4'd11) op_st  <= O_FIN;
+                            else                 rd_cnt <= rd_cnt + 4'd1;
+                        end
+                    end else if (eng_start_ready) begin
+                        op_st <= O_FIN;
+                    end
+                end
                 O_CH_WAIT: begin
                     if (chain_busy == '0) begin
                         op_ok <= ((chain_done & ~chain_ok) == '0);
@@ -1169,251 +1325,91 @@ module qsag_ni_fpga_top #(
                 end
                 O_CH_READ: begin
                     if (eng_rd_done) begin
-                        y_q   <= eng_rd_state;
+                        if (!PROFILE_COMPACT) y_q <= eng_rd_state;
                         op_st <= O_FIN;
                     end
                 end
-                O_MAC: begin
-                    if (mac_done) begin
-                        y_q[3:0] <= mac_y;
-                        op_st    <= O_FIN;
-                    end
+                O_FIELD_REG: begin field_lane <= 0; op_st <= O_FIELD_LOAD; end
+                O_FIELD_BEAT: if (stream_fire) begin
+                    beat_q <= s_axis_tdata[319:0];
+                    field_lane <= 0;
+                    op_st <= O_FIELD_LOAD;
                 end
-                O_EXT5_MAC: begin
-                    if (mac_done) begin
-                        e5_step <= e5_step + 3'd1;
-                        case (e5_step)
-                            3'd0: begin
-                                e5_tb_q       <= mac_y;
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {192'd0, x_q[0]};
-                                mac_b_fsm     <= {x_q[8], x_q[7], x_q[6], x_q[5]};
-                                mac_c_fsm     <= {x_q[13], x_q[12], x_q[11], x_q[10]};
+                O_FIELD_LOAD: begin
+                    if (from_stream) beat_q <= {64'd0,beat_q[319:64]};
+                    if (operand >= qsag_ni_pkg::GL_P) err_noncanon <= 1;
+                    if (field_input == F_CLAIM) claim_q[field_lane] <= operand;
+                    if (field_input == F_EXPECT) expected[field_lane] <= operand;
+                    if (is_sc && field_input == F_A) sc_sum[field_lane] <= operand;
+                    if (is_sc && field_input == F_C) sc_sum[field_lane] <= field_add(sc_sum[field_lane],operand);
+                    if (is_sc && field_input == F_C && coeff_left == 0 &&
+                        field_add(sc_sum[field_lane],operand) != field_sub_claim)
+                        sc_fail_q <= 1;
+                    field_lane <= field_lane + 1'b1;
+                    if (field_lane == 4) begin
+                        field_lane <= 0;
+                        op_st <= from_stream ? O_FIELD_BEAT : O_FIELD_REG;
+                        case (field_input)
+                            F_CLAIM: op_st <= O_FIN;
+                            F_R: begin fold_start <= 1; op_st <= O_FIELD_WAIT; end
+                            F_A: begin
+                                field_input <= is_sc ? F_C : F_B;
+                                if (is_sc) begin
+                                    coeff_left <= coeff_left - 1'b1;
+                                    field_base <= field_base - 5'd5;
+                                end else if (!is_frob) field_base <= 5;
                             end
-                            3'd1, 3'd2, 3'd3, 3'd4: begin
-                                y_q[3:0]      <= mac_y;
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {192'd0, x_q[{2'b00, e5_step}]};
-                                mac_b_fsm     <= {mac_b_fsm[191:0], e5_tb_q[3]};
-                                e5_tb_q       <= {e5_tb_q[2:0], 64'd0};
-                                mac_c_fsm     <= mac_y;
+                            F_B: begin
+                                field_input <= is_sc ? F_A : F_C;
+                                if (!is_frob) field_base <= is_sc ? 5'd15 : 5'd10;
                             end
-                            3'd5: begin
-                                // y[0..3] complete; limb 3 of Ext4(a[0..3], {b4,b3,b2,b1}) + c4 = c4 + a0*b4 + a1*b3 + a2*b2 + a3*b1!
-                                y_q[3:0]      <= mac_y;
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {x_q[3], x_q[2], x_q[1], x_q[0]};
-                                mac_b_fsm     <= {x_q[9], x_q[8], x_q[7], x_q[6]};
-                                mac_c_fsm     <= {x_q[14], 192'd0};
+                            F_C: begin
+                                if (is_batch) field_input <= F_EXPECT;
+                                else begin mac_valid <= 1; op_st <= O_FIELD_WAIT; end
                             end
-                            3'd6: begin
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {192'd0, x_q[4]};
-                                mac_b_fsm     <= {192'd0, x_q[5]};
-                                mac_c_fsm     <= {192'd0, mac_y[255:192]};
-                            end
-                            default: begin
-                                y_q[4] <= mac_y[63:0];
-                                op_st  <= O_FIN;
-                            end
+                            F_EXPECT: begin mac_valid <= 1; op_st <= O_FIELD_WAIT; end
+                            default: op_st <= O_FIN;
                         endcase
                     end
                 end
-                O_EXT5_FROB: begin
-                    if (mac_done) begin
-                        y_q[4:0] <= {mac_y[63:0], y_q[4:1]};
-                        if (e5_step == 3'd4) begin
-                            op_st <= O_FIN;
-                        end else begin
-                            logic [2:0] nxt_i;
-                            nxt_i         = e5_step + 3'd1;
-                            e5_step       <= nxt_i;
-                            mac_valid_fsm <= 1'b1;
-                            mac_a_fsm     <= {192'd0, x_q[{2'b00, nxt_i}]};
-                            mac_b_fsm     <= {192'd0, zeta5_rom(mul_mod5(nxt_i, e5_k_q))};
-                            mac_c_fsm     <= 256'd0;
-                        end
+                O_FIELD_WAIT: begin
+                    if (lane_valid) begin
+                        if (is_sc && coeff_left == 0) claim_q[lane_idx] <= lane_data;
+                        if (is_batch && expected[lane_idx] != lane_data) batch_fail <= 1;
+                        if (!PROFILE_COMPACT && field_y_we) y_q[{1'b0,field_y_idx}] <= lane_data;
                     end
-                end
-                O_SC_SUM: begin
-                    if (PROFILE_COMPACT) begin
-                        sc_vec_q <= x_q[15:12];
-                        sc_c0_q  <= 1'b0;
-                        sc_term  <= 2'd0;
-                        sc_k     <= 3'd0;
-                    end else begin
-                        sc_raw_q <= sc_raw_d;
-                        sc_s2_en <= 1'b1;
-                    end
-                    mac_valid_fsm <= 1'b1;
-                    mac_a_fsm     <= x_q[15:12];
-                    mac_b_fsm     <= x_q[19:16];
-                    mac_c_fsm     <= x_q[11:8];
-                    sc_step       <= 2'd0;
-                    sc_h_sub      <= 4'd1;
-                    op_st         <= O_SC_H;
-                end
-                O_SC_H: begin
-                    if (PROFILE_COMPACT) begin
-                        if (sc_k <= 3'd4) begin
-                            sc_raw_q <= sc_raw_d;
-                            sc_vec_q <= {64'd0, sc_vec_q[255:64]};
-                            sc_sum_q <= (sc_k == 3'd0) ? {sc_sum_q[63:0], sc_sum_q[255:64]}
-                                                       : {sc_can_d[63:0], sc_sum_q[255:64]};
-                            if (sc_k == 3'd4) begin
-                                case (sc_term)
-                                    2'd0: begin sc_vec_q <= x_q[11:8]; sc_c0_q <= 1'b0; sc_term <= 2'd1; sc_k <= 3'd0; end
-                                    2'd1: begin sc_vec_q <= x_q[7:4];  sc_c0_q <= 1'b0; sc_term <= 2'd2; sc_k <= 3'd0; end
-                                    2'd2: begin sc_vec_q <= x_q[3:0];  sc_c0_q <= 1'b1; sc_term <= 2'd3; sc_k <= 3'd0; end
-                                    default: sc_k <= 3'd5;
-                                endcase
-                            end else begin
-                                sc_k <= sc_k + 3'd1;
-                            end
-                        end else if (sc_k == 3'd5) begin
-                            sc_k <= 3'd6;
-                            if (sc_sum_q != claim_q) sc_fail_q <= 1'b1;
-                        end
-                    end else if (sc_h_sub < 4'd8) begin
-                        sc_h_sub <= sc_h_sub + 4'd1;
-                        if (!sc_h_sub[0]) begin
-                            sc_raw_q <= sc_raw_d;
-                            sc_s2_en <= 1'b1;
-                        end
-                    end else if (sc_h_sub == 4'd8) begin
-                        sc_h_sub <= 4'd9;
-                        if (sc_sum_q != claim_q) sc_fail_q <= 1'b1;
-                    end
-                    if (mac_done) begin
-                        if (sc_step == 2'd2) begin
-                            claim_q  <= mac_y;
-                            y_q[3:0] <= mac_y;
-                            op_ok    <= !sc_fail_q;
-                            op_st    <= O_FIN;
-                        end else begin
-                            mac_valid_fsm <= 1'b1;
-                            mac_a_fsm     <= mac_y;
-                            mac_b_fsm     <= x_q[19:16];
-                            mac_c_fsm     <= (sc_step == 2'd0) ? x_q[7:4] : x_q[3:0];
-                            sc_step       <= sc_step + 2'd1;
-                        end
-                    end
-                end
-                O_SC_STR: begin
-                    if (stream_fire) begin
-                        if (sc_idx == 8'd0) begin
-                            sc_chal_q  <= s_axis_tdata[255:0];
-                            sc_idx     <= 8'd1;
-                            sc_is_c0_q <= 1'b0;
-                        end else if (sc_idx == 8'd1) begin
-                            sc_horner_q <= s_axis_tdata[255:0];
-                            if (PROFILE_COMPACT) begin
-                                sc_vec_q <= s_axis_tdata[255:0];
-                                sc_c0_q  <= 1'b0;
-                                sc_k     <= 3'd0;
-                            end else begin
-                                sc_raw_q <= sc_raw_d;
-                                sc_s2_en <= 1'b1;
-                            end
-                            sc_idx     <= 8'd2;
-                            sc_is_c0_q <= (sc_deg == 8'd1);
-                            op_st      <= O_SC_STR_S2;
-                        end else begin
-                            if (PROFILE_COMPACT) begin
-                                sc_vec_q <= s_axis_tdata[255:0];
-                                sc_c0_q  <= sc_is_c0_q;
-                                sc_k     <= 3'd0;
-                            end else begin
-                                sc_raw_q <= sc_raw_d;
-                                sc_s2_en <= 1'b1;
-                            end
-                            mac_valid_fsm <= 1'b1;
-                            mac_a_fsm     <= sc_horner_q;
-                            mac_b_fsm     <= sc_chal_q;
-                            mac_c_fsm     <= s_axis_tdata[255:0];
-                            op_st         <= O_SC_STR_WAIT;
-                        end
-                    end
-                end
-                O_SC_STR_S2: begin
-                    if (PROFILE_COMPACT) begin
-                        sc_raw_q <= sc_raw_d;
-                        sc_vec_q <= {64'd0, sc_vec_q[255:64]};
-                        sc_sum_q <= (sc_k == 3'd0) ? {sc_sum_q[63:0], sc_sum_q[255:64]}
-                                                   : {sc_can_d[63:0], sc_sum_q[255:64]};
-                        if (sc_k == 3'd4) op_st <= O_SC_STR;
-                        else              sc_k  <= sc_k + 3'd1;
-                    end else begin
-                        op_st <= O_SC_STR;
-                    end
-                end
-                O_SC_STR_WAIT: begin
-                    if (PROFILE_COMPACT && sc_k <= 3'd4) begin
-                        sc_raw_q <= sc_raw_d;
-                        sc_vec_q <= {64'd0, sc_vec_q[255:64]};
-                        sc_sum_q <= (sc_k == 3'd0) ? {sc_sum_q[63:0], sc_sum_q[255:64]}
-                                                   : {sc_can_d[63:0], sc_sum_q[255:64]};
-                        sc_k <= sc_k + 3'd1;
-                    end
-                    if (mac_done) begin
-                        sc_horner_q <= mac_y;
-                        if (sc_is_c0_q) begin
-                            if (sc_sum_q != claim_q) sc_fail_q <= 1'b1;
-                            claim_q  <= mac_y;
-                            y_q[3:0] <= mac_y;
-                            op_ok    <= !sc_fail_q && (sc_sum_q == claim_q);
-                            op_st    <= O_FIN;
-                        end else begin
-                            sc_idx     <= sc_idx + 8'd1;
-                            sc_is_c0_q <= (sc_idx == sc_deg);
-                            op_st      <= O_SC_STR;
-                        end
-                    end
-                end
-                O_FOLD: begin
                     if (fold_done) begin
-                        y_q[3:0]  <= fold_res;
-                        fold_left <= fold_left - 4'd1;
-                        fold_idx  <= fold_idx + 3'd1;
-                        op_st     <= (fold_left == 4'd1) ? O_FIN : O_FOLD_NEXT;
-                    end
-                end
-                O_FOLD_NEXT: begin
-                    if (!fold_busy && !fold_start) begin
-                        fold_start <= 1'b1;
-                        op_st      <= O_FOLD;
-                    end
-                end
-                O_EBATCH: begin
-                    if (stream_fire) begin
-                        if (!eb_half) begin
-                            mac_a_fsm <= s_axis_tdata[255:0];
-                            mac_b_fsm <= s_axis_tdata[511:256];
-                            eb_half   <= 1'b1;
-                        end else begin
-                            eb_half       <= 1'b0;
-                            eb_exp_cmp_q  <= s_axis_tdata[511:256];
-                            mac_valid_fsm <= 1'b1;
-                            mac_c_fsm     <= s_axis_tdata[255:0];
-                            if (COMPACT_EXT4) eb_wait_cmp <= 1'b1;
-                            if (eb_rem == 16'd1) begin
-                                eb_rem <= 16'd0;
-                                op_st  <= O_EBATCH_DRAIN;
-                            end else begin
-                                eb_rem <= eb_rem - 16'd1;
-                            end
-                        end
-                    end
-                end
-                O_EBATCH_DRAIN: begin
-                    if (eb_ret_rem == 16'd0) begin
-                        op_ok <= !eb_fail_q;
+                        fold_left <= fold_left - 1'b1;
+                        field_base <= field_base + 5'd5;
+                        op_st <= fold_left == 1 ? O_FIN : O_FIELD_REG;
+                    end else if (mac_done) begin
                         op_st <= O_FIN;
+                        if (direct_mac) y_q[4:0] <= wide_result;
+                        if (is_sc) begin
+                            if (coeff_left == 0) op_ok <= !sc_fail_q;
+                            else begin
+                                coeff_left <= coeff_left - 1'b1;
+                                field_base <= field_base - 5'd5;
+                                op_st <= from_stream ? O_FIELD_BEAT : O_FIELD_REG;
+                            end
+                        end else if (is_batch) begin
+                            if (batch_left == 1) op_ok <= !batch_fail && expected[lane_idx] == lane_data;
+                            else begin
+                                batch_left <= batch_left - 1'b1;
+                                field_input <= F_A;
+                                op_st <= O_FIELD_BEAT;
+                            end
+                        end else if (is_frob && frob_lane != 4) begin
+                            frob_lane <= frob_lane + 1'b1;
+                            field_base <= field_base + 1'b1;
+                            field_input <= F_A;
+                            op_st <= O_FIELD_REG;
+                        end
                     end
                 end
                 O_KEC: begin
                     if (kec_done) begin
-                        y_q   <= kec_y_out;
+                        if (!PROFILE_COMPACT) y_q <= kec_y_out;
                         op_st <= O_FIN;
                     end
                 end
@@ -1442,7 +1438,7 @@ module qsag_ni_fpga_top #(
                 O_KCMP_RD: begin
                     if (kcmd_ready && kcmp_idx < 5'd12) kcmp_idx <= kcmp_idx + 5'd1;
                     if (kcmd_rd_valid) begin
-                        y_q <= {kcmd_rd_data, y_q[11:1]};
+                        if (!PROFILE_COMPACT) y_q <= {kcmd_rd_data, y_q[11:1]};
                         if (rd_cnt == 4'd11) op_st <= O_FIN;
                         else                 rd_cnt <= rd_cnt + 4'd1;
                     end
@@ -1456,8 +1452,9 @@ module qsag_ni_fpga_top #(
                         end else begin
                             ksp_lane16_q <= s_axis_tdata[63:0];
                             ksp_flags_q  <= s_axis_tdata[127:64];
-                            ksp_exp_q    <= {s_axis_tdata[127:112], s_axis_tdata[511:128]};
-                            ksp_beat     <= 2'd0;
+                            if (!PROFILE_COMPACT) ksp_exp_q <= {s_axis_tdata[127:112], s_axis_tdata[511:128]};
+                            else                  ksp_exp_q <= '0;
+                            ksp_beat <= 2'd0;
                             if (PROFILE_COMPACT) begin
                                 kcmp_idx <= 5'd0;
                                 op_st    <= s_axis_tdata[64] ? O_KSP_CMP_INIT : O_KSP_CMP_XOR;
@@ -1471,7 +1468,7 @@ module qsag_ni_fpga_top #(
                 end
                 O_KSP_PERM: begin
                     if (kec_done) begin
-                        y_q[7:0] <= kec_y_out[511:0];
+                        if (!PROFILE_COMPACT) y_q[7:0] <= kec_y_out[511:0];
                         if (ksp_par_bad) ksp_fail_q <= 1'b1;
                         if (ksp_rem == 16'd1) begin
                             op_ok <= !(ksp_fail_q || ksp_par_bad);
@@ -1511,12 +1508,10 @@ module qsag_ni_fpga_top #(
                 O_KSP_CMP_RD: begin
                     if (kcmd_ready && kcmp_idx < 5'd8) kcmp_idx <= kcmp_idx + 5'd1;
                     if (kcmd_rd_valid) begin
-                        ksp_dig_q <= ksp_full_dig[511:64];
+                        if (ksp_cmp_word_bad) ksp_fail_q <= 1'b1;
                         if (rd_cnt == 4'd7) begin
-                            y_q[7:0] <= ksp_full_dig;
-                            if (ksp_cmp_bad) ksp_fail_q <= 1'b1;
                             if (ksp_rem == 16'd1) begin
-                                op_ok <= !(ksp_fail_q || ksp_cmp_bad);
+                                op_ok <= !ksp_fail_q;
                                 op_st <= O_FIN;
                             end else begin
                                 ksp_rem <= ksp_rem - 16'd1;
@@ -1528,35 +1523,54 @@ module qsag_ni_fpga_top #(
                     end
                 end
                 O_TS_CANOPY: begin
+                    if (PROFILE_COMPACT && ts_root_rd_phase && kcmd_rd_valid)
+                        rd_cnt <= rd_cnt + 4'd1;
                     if (ts_done) begin
-                        y_q[3:0] <= ts_out_root;
-                        op_ok    <= ts_ok;
-                        op_st    <= O_FIN;
+                        if (!PROFILE_COMPACT) y_q[3:0] <= ts_out_root;
+                        op_ok <= ts_ok;
+                        op_st <= O_FIN;
                     end
                 end
                 O_GF: begin
                     if (!PROFILE_COMPACT) gf_cnt <= gf_cnt + 3'd1;
                     if (gf_done) begin
-                        y_q[1:0] <= gf_r ^ x_q[5:4];
-                        op_ok    <= ((gf_r ^ x_q[5:4]) == x_q[7:6]);
-                        op_st    <= O_FIN;
+                        if (!PROFILE_COMPACT) y_q[1:0] <= gf_r ^ x_b[1:0];
+                        op_ok <= ((gf_r ^ x_b[1:0]) == x_b[3:2]);
+                        op_st <= O_FIN;
                     end
                 end
                 O_FIN: begin
+                    if (cmd_op_q != 8'h3F && err_noncanon) op_ok <= 1'b0;
                     op_busy <= 1'b0;
                     op_done <= 1'b1;
                     op_st   <= O_IDLE;
                 end
                 default: op_st <= O_IDLE;
             endcase
+
+            if (PROFILE_COMPACT) begin
+                if (y_start_gf) begin
+                    gf_high      <= gf_r[127:64] ^ x_b[1];
+                    y_wb_cnt     <= 2'd1;
+                    y_wb_idx     <= 2'd1;
+                end else if (y_wb_cnt != 2'd0) begin
+                    y_wb_idx     <= y_wb_idx + 2'd1;
+                    y_wb_cnt     <= y_wb_cnt - 2'd1;
+                end
+            end
         end
     end
 
     /* verilator lint_off UNUSEDSIGNAL */
     logic unused_top;
     assign unused_top = &{1'b0, s_axil_awaddr[1:0], s_axil_araddr[1:0],
-                          stream_q[27:20], cmd_a0_q, cmd_a1_q, ksp_flags_q, sc_h_sub,
-                          sc_s2_en, sc_add_b, sc_add_c0, sc_vec_q, sc_c0_q, sc_k, sc_term,
-                          chain_busy, chain_done, chain_ok, kec_y_out};
+                          stream_q[27:20], cmd_a0_q, cmd_a1_q, ksp_flags_q, gf_high, wide_result, cached_bad, xa_ra, xb_ra, xc_ra,
+                          chain_busy, chain_done, chain_ok, kec_y_out, y_q, y_wb_cnt, y_wb_idx,
+                          arb_locked, arb_owner, select_eng, p2_out_state, eng_start_ready,
+                          eng_start_lane_ready, eng_rd_state, eng_rd_lane_valid, eng_rd_lane_idx,
+                          eng_rd_lane_data, eng_job_valid, eng_job_state, eng_job_active,
+                          eng_job_lane_valid, eng_job_lane_last, eng_job_lane_data,
+                          p2_out_lane_valid, p2_out_lane_idx, p2_out_lane_data,
+                          ts_root_rd_phase, ts_out_root, ksp_exp_q};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule

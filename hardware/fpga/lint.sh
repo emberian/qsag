@@ -13,8 +13,8 @@ for top in qsag_ni_fpga_top qsag_poseidon2_12_pipe qsag_gf128_tower_mul qsag_ext
     fi
 done
 for params in \
-    '-GPROFILE_COMPACT=1 -GFOLD_TAW=11 -GKECCAK_RPC=1 -GAW=16 -GBW=16' \
-    '-GPROFILE_COMPACT=1 -GECP5_FULLRATE=1 -GFOLD_TAW=11 -GKECCAK_RPC=1 -GAW=16 -GBW=16' \
+    '-DQSAG_ECP5_CARRY -GPROFILE_COMPACT=1 -GFOLD_TAW=11 -GKECCAK_RPC=1 -GAW=16 -GBW=16' \
+    '-DQSAG_ECP5_CARRY -GPROFILE_COMPACT=1 -GECP5_FULLRATE=1 -GFOLD_TAW=11 -GKECCAK_RPC=1 -GAW=16 -GBW=16' \
     '-GP2_UNROLLED=1 -GKECCAK_PIPE=1 -GCHAIN_SLOTW=8'; do
     verilator --lint-only -Wall -sv $SRC --top-module qsag_ni_fpga_top $params || rc=1
 done

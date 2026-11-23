@@ -16,13 +16,6 @@ module fmax_p2_sbox7 (input logic clk, input logic si, output logic so);
     qsag_p2_sbox7 #(.AW(16), .BW(16)) dut (.clk(clk), .x(sr), .y(y));
 endmodule
 
-module fmax_ext4_mac (input logic clk, input logic si, output logic so);
-    logic [767:0] sr;
-    logic [255:0] y;
-    always_ff @(posedge clk) begin sr <= {sr[766:0], si}; so <= ^y; end
-    qsag_ext4_mac #(.AW(16), .BW(16)) dut (
-        .clk(clk), .a(sr[255:0]), .b(sr[511:256]), .c(sr[767:512]), .y(y));
-endmodule
 
 module fmax_ext5_mac (input logic clk, input logic si, output logic so);
     logic [959:0] sr;
@@ -43,21 +36,6 @@ module fmax_p2_linear (input logic clk, input logic si, output logic so);
         so <= ^y;
     end
     qsag_p2_linear #(.FIXED(-1)) dut (.clk(clk), .x(sr), .mi(mi), .addend(ad), .y(y));
-endmodule
-
-module fmax_keccak #(parameter int RPC = 2) (input logic clk, input logic rst, input logic si, output logic so);
-    logic          rst_s0, rst_s1;
-    logic [1599:0] sr, st;
-    logic          busy, done, go;
-    always_ff @(posedge clk) begin
-        rst_s0 <= rst;
-        rst_s1 <= rst_s0;
-        sr     <= {sr[1598:0], si};
-        go     <= !busy && sr[1599];
-        so     <= ^st ^ done;
-    end
-    qsag_keccak_turboshake #(.RPC(RPC)) dut (
-        .clk(clk), .rst(rst_s1), .start(go), .nr12(sr[0]), .state_i(sr), .busy(busy), .done(done), .state_o(st));
 endmodule
 
 module fmax_keccak_compact (input logic clk, input logic rst, input logic si, output logic so);
@@ -111,8 +89,8 @@ module fmax_compact_top(input logic clk, input logic rst, input logic si, output
     wire unused_ok = &{1'b0, sr[578]};
 endmodule
 
-// Complete full-rate pipelined ECP5-85F accelerator (`117 / 156` MULT18X18D = 75.0%:
-// 81-DSP 1-MAC/clk Ext4 + 36-DSP 1-Sbox/clk Poseidon2 + 1-RAM 30-clk/rnd Keccak + zk-Hem v2).
+// Complete full-rate pipelined ECP5-85F accelerator (`81 / 156` MULT18X18D = 51.9%:
+// 45-DSP five-lane Fp5 + 36-DSP 1-Sbox/clk Poseidon2 + 1-RAM 30-clk/rnd Keccak + zk-Hem v2).
 module fmax_ecp5_fullrate_top(input logic clk, input logic rst, input logic si, output logic so);
     logic         rst_s0, rst_s1;
     logic [578:0] sr;

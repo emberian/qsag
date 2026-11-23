@@ -13,7 +13,6 @@ package qsag_ni_pkg;
     localparam int P2_RING_LEN  = P2_ROUND_LAT + 1;        // ring core: 16 cycles per pass (496/perm)
     localparam int P2_PASSES    = 31;                      // initial M_E + 8 external + 22 internal
     localparam int P2_PIPE_LAT  = 1 + P2_LIN_LAT + 30 * P2_ROUND_LAT; // unrolled pipe: 453 clocks
-    localparam int EXT4_MAC_LAT = 1 + MUL64_LAT + 1 + RED_LAT;        // 9-mul tower Karatsuba: 7
     localparam int EXT5_MAC_LAT = 1 + MUL64_LAT + 1 + RED_LAT;        // 14-mul Karatsuba F_p^5: 7
     localparam int GF128_LAT    = 3;                       // qsag_gf128_clmul
     /* verilator lint_on UNUSEDPARAM */

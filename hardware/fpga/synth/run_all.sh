@@ -10,17 +10,16 @@ run() {
         cat "build/synth/$tag.$fam.summary"
         return 0
     fi
-    SWARM_MEM_MAX=20G timeout --kill-after=10s 1200s synth/synth.sh "$fam" "$@" \
+    timeout --kill-after=10s 1200s synth/synth.sh "$fam" "$@" \
         || echo "== $1 ${2:-} [$fam] FAILED or timed out (rc=$?)"
 }
 run qsag_gl64_reduce
 run qsag_gl64_dsp_mul
 run qsag_p2_sbox7
 run qsag_p2_linear
-run qsag_ext4_mac
 run qsag_ext5_mac
-run qsag_ext4_mac_bfly qsag_ext4_mac_bfly_taw10 -chparam TAW 10
-run qsag_ext4_compact_bfly qsag_ext4_compact_bfly_taw11 -chparam TAW 11
+run qsag_ext5_mac_bfly qsag_ext5_mac_bfly_taw10 -chparam TAW 10
+run qsag_fp5_compact_bfly qsag_fp5_compact_bfly_taw11 -chparam TAW 11
 run qsag_keccak_turboshake qsag_keccak_rpc1 -chparam RPC 1
 run qsag_keccak_turboshake qsag_keccak_rpc2 -chparam RPC 2
 run qsag_keccak_compact
