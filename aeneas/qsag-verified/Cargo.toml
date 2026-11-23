@@ -8,6 +8,9 @@ description = "Standalone no_std safe Rust core primitives of qsag extracted via
 [dependencies]
 # Strictly zero external dependencies.
 
+[dev-dependencies]
+qsag-whir-verified = { path = "../qsag-whir-verified" }
+
 [[test]]
 name = "parity_qsag_core"
 harness = false
@@ -18,3 +21,6 @@ std = []
 
 # Keep MIR extraction independent of the production workspace.
 [workspace]
+
+[profile.release]
+overflow-checks = true

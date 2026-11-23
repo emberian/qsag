@@ -12,7 +12,11 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRATE_DIR="${SCRIPT_DIR}/qsag-verified"
 LEAN_DIR="${SCRIPT_DIR}/lean"
-LLBC_FILE="${SCRIPT_DIR}/qsag_verified.llbc"
+LLBC_FILE="${CRATE_DIR}/target/qsag_verified.llbc"
+cargo_runner=()
+if [[ -n "${AENEAS_CARGO_LOCK:-}" ]]; then
+  cargo_runner=(flock "${AENEAS_CARGO_LOCK}")
+fi
 
 if [[ -d "${HOME}/.cargo/bin" ]]; then
   export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -34,13 +38,13 @@ done
 echo "[1/4] Running Rust KAT, adversarial security, and qsag-core differential parity tests..."
 (
   cd "${CRATE_DIR}"
-  cargo test -- --nocapture
+  "${cargo_runner[@]}" cargo test --release -p qsag-verified
 )
 
 echo "[2/4] Extracting Rustc MIR to LLBC via Charon..."
 (
   cd "${CRATE_DIR}"
-  charon cargo --preset=aeneas --dest-file "${LLBC_FILE}" -- --lib
+  "${cargo_runner[@]}" charon cargo --preset=aeneas --dest-file "${LLBC_FILE}" -- --lib
 )
 
 echo "[3/4] Translating LLBC to pure Lean 4.35 via Aeneas..."

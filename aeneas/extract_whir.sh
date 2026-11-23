@@ -12,10 +12,18 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRATE_DIR="${SCRIPT_DIR}/qsag-whir-verified"
 LEAN_DIR="${SCRIPT_DIR}/lean-whir"
-LLBC_FILE="${SCRIPT_DIR}/qsag_whir_verified.llbc"
+mkdir -p "${LEAN_DIR}/.lake"
+EXTRACT_DIR="$(mktemp -d "${LEAN_DIR}/.lake/whir-extract.XXXXXXXX")"
+export TMPDIR="${EXTRACT_DIR}"
+LLBC_FILE="${EXTRACT_DIR}/qsag_whir_verified.llbc"
+LOCK="$(dirname "$(dirname "${SCRIPT_DIR}")")/cargo.lock"
+
+rust_build() {
+  flock "${LOCK}" "$@"
+}
 
 cleanup() {
-  rm -f "${LLBC_FILE}"
+  rm -rf -- "${EXTRACT_DIR}"
 }
 trap cleanup EXIT
 
@@ -39,30 +47,30 @@ done
 echo "[1/5] Running standalone Rust boundary tests..."
 (
   cd "${CRATE_DIR}"
-  cargo test -- --nocapture
+  rust_build cargo test --release -p qsag-whir-verified
 )
 
 echo "[2/5] Extracting Rustc MIR to LLBC via Charon..."
 (
   cd "${CRATE_DIR}"
-  charon cargo --preset=aeneas --dest-file "${LLBC_FILE}" -- --lib
+  rust_build charon cargo --preset=aeneas --dest-file "${LLBC_FILE}" -- --lib
 )
 
 echo "[3/5] Translating LLBC to pure Lean 4.35 via Aeneas..."
 (
   cd "${SCRIPT_DIR}"
-  aeneas -sequential -backend lean -split-files -dest "${LEAN_DIR}" -subdir QsagWhirVerified -no-progress-bar "${LLBC_FILE}"
+  aeneas -sequential -backend lean -split-files -dest "${EXTRACT_DIR}" -subdir QsagWhirVerified -no-progress-bar "${LLBC_FILE}"
 )
 
-for external in "${LEAN_DIR}/QsagWhirVerified/FunsExternal.lean" "${LEAN_DIR}/QsagWhirVerified/TypesExternal.lean"; do
-  if [[ -e "${external}" ]]; then
-    echo "ERROR: extraction produced an external-model dependency: ${external}" >&2
-    exit 1
-  fi
-done
+shopt -s nullglob
+externals=("${EXTRACT_DIR}/QsagWhirVerified/"*External*.lean)
+if (( ${#externals[@]} )); then
+  echo "ERROR: extraction produced external declarations: ${externals[*]}" >&2
+  exit 1
+fi
 
 # Normalize generated headers for Lean 4.35's module system without file-wide @[expose].
-python3 - "${LEAN_DIR}/QsagWhirVerified" <<'PY_HEADERS'
+python3 - "${EXTRACT_DIR}/QsagWhirVerified" <<'PY_HEADERS'
 from pathlib import Path
 import re
 import sys
@@ -96,7 +104,7 @@ for name in ("Types.lean", "Funs.lean"):
         # Publish kernel-checked equations rather than importing private bodies in clients.
         imports.append("Qsag.Tactic.AssuranceKit")
         definitions = re.findall(r"(?m)^(?:@\[[^]]*\]\s*)?def\s+([A-Za-z_][A-Za-z0-9_'.]*)", body_text)
-        if len(definitions) != 54 or len(set(definitions)) != 54:
+        if len(definitions) != 86 or len(set(definitions)) != 86:
             raise SystemExit("Unexpected WHIR extraction API inventory")
         body_text += ("\npublic section\n#export_eqns " +
                       " ".join("qsag_whir_verified." + n for n in definitions) + "\nend\n")
@@ -104,6 +112,14 @@ for name in ("Types.lean", "Funs.lean"):
                     + "".join(f"public import {module}\n" for module in imports)
                     + "public section\n" + body_text)
 PY_HEADERS
+
+for name in Types Funs; do
+  cp "${EXTRACT_DIR}/QsagWhirVerified/${name}.lean" "${LEAN_DIR}/QsagWhirVerified/${name}.lean"
+done
+
+if [[ "${1:-}" == "--extract-only" ]]; then
+  exit 0
+fi
 
 echo "[4/5] Verifying Aeneas prelude, extracted MIR functions, and refinement theorems via Lake..."
 (
@@ -116,12 +132,12 @@ echo "[4/5] Verifying Aeneas prelude, extracted MIR functions, and refinement th
 echo "[5/5] Checking production linkage, hierarchical composition, and lint policy..."
 (
   cd "${SCRIPT_DIR}/.."
-  cargo test -p qsag-agg --lib extracted_quintic_whir_kernels_match_production_fp5_and_canopy
-  cargo test -p qsag-agg --lib zk_hem::v2::pcs::tests
-  cargo test -p qsag-agg --lib hem_quintic::tests
-  cargo test -p qsag-agg --lib recursive::tests
-  cargo clippy -p qsag-agg --all-targets -- -D warnings
-  cargo check -p qsag-agg --no-default-features
+  rust_build cargo test --release -p qsag-agg --lib extracted_quintic_whir_kernels_match_production_fp5_and_canopy
+  rust_build cargo test --release -p qsag-agg --lib zk_hem::v2::pcs::tests
+  rust_build cargo test --release -p qsag-agg --lib hem_quintic
+  rust_build cargo test --release -p qsag-agg --lib recursive::tests
+  rust_build cargo clippy -p qsag-agg --all-targets -- -D warnings
+  rust_build cargo check -p qsag-agg --no-default-features
 )
 
 python3 "${SCRIPT_DIR}/../scripts/check_extraction_provenance.py" --record --crate qsag-whir-verified
