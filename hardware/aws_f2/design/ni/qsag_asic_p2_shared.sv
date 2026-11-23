@@ -1,15 +1,9 @@
-// QSAG-NI shared field & 4-way C-slowed Poseidon2/Canopy datapath:
-//   * Nine shared 3-way 32x32/33x33 Solinas-Karatsuba Goldilocks Dadda-CSA multipliers serve:
-//       - 1-clock GoldilocksExt4 multiply-add  E0 <- E0 * E1 + E2  (9 Tower Karatsuba products)
-//       - 1-clock GoldilocksExt4 base-scalar multiply  E0 <- E0 * st[4]  (4 products)
-//       - 1-clock Goldilocks base multiply  st[0] <- st[0] * st[1]  (1 product)
-//       - Width-12 Poseidon2 S-boxes split cleanly into `9 + 3` (`lanes 0..8` then `lanes 9..11`)
-//         in both 1-slot mode (`op_perm` / `op_canopy`) and 4-way C-slowed batch mode
-//         (`op_perm4` / `op_canopy4`), matching 9-mul `Ext4` 100% with zero idle multipliers!
+// Nine Goldilocks products implement Poseidon2-12 in a 9+3 lane schedule.
+// Product zero is shared with GLMUL and the quintic sequencer.
 `default_nettype none
 `include "qsag_asic_gen_params.svh"
 
-module qsag_asic_ext4_p2_shared (
+module qsag_asic_p2_shared (
   input  wire         clk,
   input  wire         rst,
   // Operations (accepted in S_IDLE)
@@ -17,10 +11,6 @@ module qsag_asic_ext4_p2_shared (
   input  wire         op_canopy,    // 1-slot Canopy node on slot 0
   input  wire         op_perm4,     // 4-way C-slowed Poseidon2-12 across slots 0..3
   input  wire         op_canopy4,   // 4-way C-slowed Canopy node across slots 0..3
-  input  wire         op_emuladd,   // slot 0: E0 <- E0 * E1 + E2  (1 clock, 9 trees)
-  input  wire         op_emulbase,  // slot 0: E0 <- E0 * st[4]    (1 clock, 4 trees)
-  input  wire         op_eadd,      // slot 0: E0 <- E0 + E2       (1 clock)
-  input  wire         op_esub,      // slot 0: E0 <- E0 - E2       (1 clock)
   input  wire         op_glmul,     // slot 0: st[0] <- st[0]*st[1](1 clock)
   input  wire         fp5_active,
   input  wire [63:0]  fp5_a, fp5_b,
@@ -30,6 +20,7 @@ module qsag_asic_ext4_p2_shared (
   input  wire [11:0]  wr_en,
   input  wire [767:0] wr_data,
   input  wire [1:0]   rd_slot,
+  output wire [2047:0] auto_regs,   // Existing slots 1..3, exposed for the exclusive verifier owner.
   output wire [767:0] st_o,         // slot 0 flat view
   output wire [767:0] st_rd_o,      // rd_slot flat view
   output wire         busy,
@@ -60,6 +51,9 @@ module qsag_asic_ext4_p2_shared (
   logic [6:0]  pcyc;
   logic        canopy_q;
 
+  for (genvar r=0; r<32; r++) begin : g_auto_reg
+    assign auto_regs[64*r +: 64]=st_b[1+r/12][r%12];
+  end
   for (genvar l = 0; l < 12; l++) begin : g_st_out
     assign st_o[64*l +: 64]    = st_b[0][l];
     assign st_rd_o[64*l +: 64] = st_b[rd_slot][l];
@@ -90,11 +84,6 @@ module qsag_asic_ext4_p2_shared (
   wire [2:0] f4_me_q  = sub[5:3] - 3'd1;
   wire [1:0] f4_me_s  = f4_me_q[1:0];
 
-  // ---------------------------------------------------------------- 9-product Karatsuba inputs
-  wire [575:0] ka, kb;
-  qsag_ext4_kara_inputs u_ka (.a(st_o[255:0]),   .q(ka));
-  qsag_ext4_kara_inputs u_kb (.a(st_o[511:256]), .q(kb));
-
   // ---------------------------------------------------------------- 9 shared Solinas-Karatsuba trees
   logic [63:0] ma [9];
   logic [63:0] mb [9];
@@ -102,15 +91,12 @@ module qsag_asic_ext4_p2_shared (
 
   always_comb begin
     for (int m = 0; m < 9; m++) begin
-      ma[m] = ka[64*m +: 64];
-      mb[m] = kb[64*m +: 64];
+      ma[m] = 64'd0;
+      mb[m] = 64'd0;
       unique case (state_m[m])
         S_IDLE: begin
           if (fp5_active && m == 0) begin
             ma[0] = fp5_a; mb[0] = fp5_b;
-          end else if (op_emulbase && (m < 4)) begin
-            ma[m] = st_b[0][m];
-            mb[m] = st_b[0][4];
           end else if (op_glmul && (m == 0)) begin
             ma[0] = st_b[0][0];
             mb[0] = st_b[0][1];
@@ -151,18 +137,15 @@ module qsag_asic_ext4_p2_shared (
   end
 
   for (genvar m = 0; m < 9; m++) begin : g_mul
-    qsag_gl64_mul_csa u_mul (.a(ma[m]), .b(mb[m]), .r(pr[m]));
+`ifdef QSAG_F2_NI
+    qsag_gl64_mul_ref
+`else
+    qsag_gl64_mul_csa
+`endif
+    u_mul (.a(ma[m]), .b(mb[m]), .r(pr[m]));
   end
 
   assign fp5_product = pr[0];
-
-  // 9-product Karatsuba reconstruction
-  wire [575:0] kp;
-  wire [255:0] kr;
-  for (genvar m = 0; m < 9; m++) begin : g_kp
-    assign kp[64*m +: 64] = pr[m];
-  end
-  qsag_ext4_kara_combine u_kc (.p(kp), .z(st_o[767:512]), .r(kr));
 
   // ---------------------------------------------------------------- Poseidon2 linear layers
   logic [4:0] rc_slot;
@@ -205,13 +188,13 @@ module qsag_asic_ext4_p2_shared (
   qsag_p2_mi_tail  u_mi_tail  (.x_hi(tail_in), .s_tail(mi_s_tail));
   qsag_p2_mi_apply u_mi_apply (.x0(mi_x0), .x_hi(mi_xhi), .s_tail(mi_stail), .rc(rc), .y(mi_out));
 
-  // ---------------------------------------------------------------- Four modular adders (Ext4 +/- and Canopy FF)
+  // ---------------------------------------------------------------- Four Canopy feed-forward adders
   wire [1:0]  ff_s = (state == S4_FF) ? sub[1:0] : 2'd0;
   wire [63:0] as_r [4];
   for (genvar i = 0; i < 4; i++) begin : g_as
     wire [63:0] as_a = st_b[ff_s][i];
-    wire [63:0] as_b = (state == S1_FF || state == S4_FF) ? ff_b[ff_s][i] : st_b[0][8 + i];
-    qsag_gl64_addsub u_as (.a(as_a), .b(as_b), .sub(op_esub && state == S_IDLE), .r(as_r[i]));
+    wire [63:0] as_b = ff_b[ff_s][i];
+    qsag_gl64_addsub u_as (.a(as_a), .b(as_b), .sub(1'b0), .r(as_r[i]));
   end
 
   task automatic set_state(input state_t ns);
@@ -223,6 +206,12 @@ module qsag_asic_ext4_p2_shared (
   always_ff @(posedge clk) begin
     done <= 1'b0;
     if (rst) begin
+      for (int s=0; s<4; s++) begin
+        for (int l=0; l<12; l++) st_b[s][l] <= 0;
+        for (int l=0; l<4; l++) ff_b[s][l] <= 0;
+        p_sq[s] <= 0; p_p3[s] <= 0; p_p4[s] <= 0; p_p7[s] <= 0; s_tail_q[s] <= 0;
+      end
+      for (int l=0; l<12; l++) begin t_b[l] <= 0; me_pipe[l] <= 0; end
       set_state(S_IDLE);
       rnd      <= '0;
       sub      <= '0;
@@ -241,12 +230,6 @@ module qsag_asic_ext4_p2_shared (
             set_state(S4_INIT);
             sub      <= 6'd0;
             canopy_q <= op_canopy4;
-          end else if (op_emuladd) begin
-            for (int i = 0; i < 4; i++) st_b[0][i] <= kr[64*i +: 64];
-          end else if (op_emulbase) begin
-            for (int i = 0; i < 4; i++) st_b[0][i] <= pr[i];
-          end else if (op_eadd || op_esub) begin
-            for (int i = 0; i < 4; i++) st_b[0][i] <= as_r[i];
           end else if (op_glmul) begin
             st_b[0][0] <= pr[0];
           end

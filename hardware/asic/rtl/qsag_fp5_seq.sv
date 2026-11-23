@@ -70,7 +70,11 @@ module qsag_fp5_seq (
   end
 
   always_ff @(posedge clk) begin
-    if (rst) begin state <= IDLE; bad <= 0; end
+    if (rst) begin
+      state <= IDLE; bad <= 0; mode <= 0; remaining <= 0; acc <= 0;
+      src <= 0; dst <= 0; check_ptr <= 0; origin <= 0; k <= 0; i <= 0; repetition <= 0;
+      for (int n=0; n<5; n++) result[n] <= 0;
+    end
     else case (state)
       IDLE: if (start) begin
         mode <= op; remaining <= count; src <= base; origin <= base; dst <= dest;
