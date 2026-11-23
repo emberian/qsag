@@ -27,30 +27,10 @@ static inline uint64_t gl_red136(uint8_t t, u128 lo) {
     return (uint64_t)(((u128)(uint64_t)(lo % GLP) + (u128)gl_mul(t, two128)) % GLP);
 }
 
-// ---- GoldilocksExt4 = F_p[v]/(v^4 - 7); limbs [c0.c0, c0.c1, c1.c0, c1.c1] = [1, v^2, v, v^3].
-typedef std::array<uint64_t, 4> E4;
-static inline E4 e4_mul_add(const E4& a, const E4& b, const E4& c) {
-    static const int PIDX[4] = {0, 2, 1, 3};
-    uint64_t pa[4], pb[4], pc[4], po[4];
-    for (int s = 0; s < 4; s++) { pa[PIDX[s]] = a[s]; pb[PIDX[s]] = b[s]; pc[PIDX[s]] = c[s]; }
-    for (int k = 0; k < 4; k++) {
-        uint64_t acc = gl_red(pc[k]);
-        for (int i = 0; i < 4; i++) {
-            if (i <= k) acc = gl_add(acc, gl_mul(pa[i], pb[k - i]));
-            else        acc = gl_add(acc, gl_mul(7, gl_mul(pa[i], pb[k + 4 - i])));
-        }
-        po[k] = acc;
-    }
-    E4 o;
-    for (int s = 0; s < 4; s++) o[s] = po[PIDX[s]];
-    return o;
-}
-static inline E4 e4_add(const E4& a, const E4& b) { E4 o; for (int i = 0; i < 4; i++) o[i] = gl_add(a[i], b[i]); return o; }
-static inline E4 e4_sub(const E4& a, const E4& b) { E4 o; for (int i = 0; i < 4; i++) o[i] = gl_sub(a[i], b[i]); return o; }
-static inline E4 e4_mul(const E4& a, const E4& b) { return e4_mul_add(a, b, E4{0, 0, 0, 0}); }
-
 // ---- Fp5 = F_p[X]/(X^5 - 3), canonical flat power basis [c0, c1, c2, c3, c4] (zk_hem/v2/field5.rs).
 typedef std::array<uint64_t, 5> E5;
+static inline E5 e5_add(E5 a,const E5& b) { for (int i=0;i<5;++i) a[i]=gl_add(a[i],b[i]); return a; }
+static inline E5 e5_sub(E5 a,const E5& b) { for (int i=0;i<5;++i) a[i]=gl_sub(a[i],b[i]); return a; }
 static const uint64_t ZETA5_POW[5] = {
     0x0000000000000001ULL,
     0x0e736627a0aeb983ULL,
@@ -291,6 +271,5 @@ struct Rng {
         uint64_t r = next();
         return (r & 7) == 0 ? E[(r >> 8) % 12] : next();
     }
-    E4 e4() { return E4{gl(), gl(), gl(), gl()}; }
     E5 e5() { return E5{gl(), gl(), gl(), gl(), gl()}; }
 };

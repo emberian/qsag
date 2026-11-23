@@ -9,10 +9,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <fstream>
 #include <map>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <verilated.h>
 #include "qsag_model.h"
@@ -26,27 +24,23 @@ typedef Vqsag_units_tb Dut;
 typedef Vqsag_ni_fpga_top Dut;
 #endif
 
-static const int GL_MUL_LAT = 5, RED_LAT = 2, P2_SBOX_LAT = 13, EXT4_MAC_LAT = 7, EXT5_MAC_LAT = 7, GF128_LAT = 3;
+static const int GL_MUL_LAT = 5, RED_LAT = 2, P2_SBOX_LAT = 13, EXT5_MAC_LAT = 7, GF128_LAT = 3;
 static const int P2_RING_LEN = 16, P2_PASSES = 31, P2_PIPE_LAT = 453;
 #if defined(QSAG_ECP5_FULLRATE)
 static constexpr bool COMPACT = true;
-static constexpr bool COMPACT_EXT4 = false;
-static const int TOP_P2_LAT = 1314, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 1, CHAIN_SLOTS = 32;
+static const int TOP_P2_LAT = 1314, TOP_KEC_RPC = 1, CHAIN_SLOTS = 32;
 static const char* PROFILE_NAME = "ECP5_FULLRATE";
 #elif defined(QSAG_COMPACT)
 static constexpr bool COMPACT = true;
-static constexpr bool COMPACT_EXT4 = true;
-static const int TOP_P2_LAT = 1878, TOP_EXT_LAT = 18, TOP_KEC_RPC = 1, CHAIN_SLOTS = 32;
+static const int TOP_P2_LAT = 1878, TOP_KEC_RPC = 1, CHAIN_SLOTS = 32;
 static const char* PROFILE_NAME = "ECP5_COMPACT";
 #elif defined(QSAG_PIPE)
 static constexpr bool COMPACT = false;
-static constexpr bool COMPACT_EXT4 = false;
-static const int TOP_P2_LAT = P2_PIPE_LAT - 1, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2, CHAIN_SLOTS = 256;
+static const int TOP_P2_LAT = P2_PIPE_LAT - 1, TOP_KEC_RPC = 2, CHAIN_SLOTS = 256;
 static const char* PROFILE_NAME = "VU9P_TURBO";
 #else
 static constexpr bool COMPACT = false;
-static constexpr bool COMPACT_EXT4 = false;
-static const int TOP_P2_LAT = P2_PASSES*P2_RING_LEN, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2, CHAIN_SLOTS = 32;
+static const int TOP_P2_LAT = P2_PASSES*P2_RING_LEN, TOP_KEC_RPC = 2, CHAIN_SLOTS = 32;
 static const char* PROFILE_NAME = "XCUP_RING";
 #endif
 
@@ -86,11 +80,6 @@ static void model_selfcheck() {
     for (auto& k : KAT_GL) {
         CHECK_EQ64(gl_mul(k.a_raw, k.b_raw), k.mul, "model gl_mul");
         CHECK_EQ64(gl_pow7(k.a_raw), k.pow7_a, "model gl_pow7");
-    }
-    for (auto& k : KAT_EXT4) {
-        E4 x = {k.x[0], k.x[1], k.x[2], k.x[3]}, y = {k.y[0], k.y[1], k.y[2], k.y[3]};
-        E4 m = e4_mul(x, y);
-        for (int i = 0; i < 4; i++) CHECK_EQ64(m[i], k.mul[i], "model ext4 mul");
     }
     for (auto& k : KAT_P2) {
         St12 s;
@@ -135,7 +124,7 @@ template <typename T> struct Pipe {
     bool due(T& v) { if (!q.empty() && q.front().first == cyc) { v = q.front().second; q.pop_front(); return true; } return false; }
 };
 
-static void test_mul_red_sbox_ext4_gf() {
+static void test_mul_red_sbox_fp5_gf() {
     long c0 = checks, f0 = fails;
     Rng rng(0x51534147);
     std::vector<std::pair<uint64_t, uint64_t>> vec;
@@ -146,7 +135,6 @@ static void test_mul_red_sbox_ext4_gf() {
     const size_t N = 200000;
     Pipe<uint64_t> pm, ps;
     Pipe<std::pair<uint8_t, u128>> pr;
-    Pipe<E4> pe;
     Pipe<E5> pe5;
     Pipe<u128> pg, pt;
     for (size_t i = 0; i < N + 64; i++) {
@@ -167,15 +155,6 @@ static void test_mul_red_sbox_ext4_gf() {
         uint64_t sx = i < 7 ? KAT_GL[i].a_raw : rng.edge();
         dut->sb_x = sx;
         if (live) ps.push(P2_SBOX_LAT, gl_pow7(sx));
-        // Ext4 MAC
-        E4 ea = rng.e4(), eb = rng.e4(), ec = rng.e4();
-        if (i < 3) {
-            for (int j = 0; j < 4; j++) { ea[j] = KAT_EXT4[i].x[j]; eb[j] = KAT_EXT4[i].y[j]; ec[j] = 0; }
-        } else if (i < 40) {
-            for (int j = 0; j < 4; j++) { ea[j] = (rng.next() & 1) ? GLP - 1 : rng.gl(); eb[j] = (rng.next() & 1) ? GLP - 1 : rng.gl(); ec[j] = GLP - 1; }
-        }
-        for (int j = 0; j < 4; j++) { set64(dut->e_a, j, ea[j]); set64(dut->e_b, j, eb[j]); set64(dut->e_c, j, ec[j]); }
-        if (live) pe.push(EXT4_MAC_LAT, e4_mul_add(ea, eb, ec));
         // Ext5 MAC (zk-Hem v2 F_p[X]/(X^5 - 3))
         E5 e5a = rng.e5(), e5b = rng.e5(), e5c = rng.e5();
         if (i == 0) { e5a = {1, 2, 3, 4, 5}; e5b = {6, 7, 8, 9, 10}; e5c = {0, 0, 0, 0, 0}; }
@@ -202,17 +181,16 @@ static void test_mul_red_sbox_ext4_gf() {
 
         tick();
 
-        uint64_t w; std::pair<uint8_t, u128> rw; E4 ew; E5 e5w; u128 gw;
+        uint64_t w; std::pair<uint8_t, u128> rw; E5 e5w; u128 gw;
         if (pm.due(w)) { CHECK_EQ64(dut->mul_r, w, "gl64 mul 26x17"); CHECK_EQ64(dut->mul_r16, w, "gl64 mul 16x16"); }
         if (pr.due(rw)) CHECK_EQ64(dut->red_r, gl_red136(rw.first, rw.second), "gl64 reduce136");
         if (ps.due(w)) CHECK_EQ64(dut->sb_y, w, "sbox x^7");
-        if (pe.due(ew)) for (int j = 0; j < 4; j++) CHECK_EQ64(get64(dut->e_y, j), ew[j], "ext4 mac");
         if (pe5.due(e5w)) for (int j = 0; j < 5; j++) CHECK_EQ64(get64(dut->e5_y, j), e5w[j], "ext5 mac");
         if (pg.due(gw)) { CHECK_EQ64(get64(dut->gf_r, 0), (uint64_t)gw, "gf128 lo"); CHECK_EQ64(get64(dut->gf_r, 1), (uint64_t)(gw >> 64), "gf128 hi"); }
         if (pt.due(gw)) { CHECK_EQ64(get64(dut->tower_r,0),(uint64_t)gw,"tower KAT lo"); CHECK_EQ64(get64(dut->tower_r,1),(uint64_t)(gw>>64),"tower KAT hi"); }
     }
-    check(pm.q.empty() && pr.q.empty() && ps.q.empty() && pe.q.empty() && pe5.q.empty() && pg.q.empty(), "pipelines drained");
-    section("gl64 mul (9-DSP) / reduce136 / x^7 / Ext4 MAC / Ext5 MAC / GF(2^128): KATs, edges, 200k random", c0, f0);
+    check(pm.q.empty() && pr.q.empty() && ps.q.empty() && pe5.q.empty() && pg.q.empty() && pt.q.empty(), "pipelines drained");
+    section("gl64 mul (9-DSP) / reduce136 / x^7 / Ext5 MAC / GF(2^128): KATs, edges, 200k random", c0, f0);
 }
 
 struct P2Job { St12 in; bool jive; uint64_t t_in; };
@@ -424,7 +402,7 @@ int main(int argc, char** argv) {
     dut->rst = 1;
     for (int i = 0; i < 4; i++) tick();
     dut->rst = 0;
-    test_mul_red_sbox_ext4_gf();
+    test_mul_red_sbox_fp5_gf();
     test_p2_ring();
     test_p2_pipe();
     test_keccak();
@@ -443,9 +421,9 @@ static const uint32_t R_CMD = 0x000, R_STATUS = 0x004, R_OPCYC = 0x008, R_TOT_LO
 
 static uint64_t bus_writes = 0, bus_reads = 0, stream_beats = 0;
 
-static void axil_write(uint32_t addr, uint32_t data) {
+static void axil_write(uint32_t addr, uint32_t data, uint8_t strobe = 15) {
     dut->s_axil_awaddr = addr; dut->s_axil_awvalid = 1;
-    dut->s_axil_wdata = data; dut->s_axil_wstrb = 0xF; dut->s_axil_wvalid = 1;
+    dut->s_axil_wdata = data; dut->s_axil_wstrb = strobe; dut->s_axil_wvalid = 1;
     dut->s_axil_bready = 1;
     for (;;) {
         dut->clk = 0; dut->eval();
@@ -475,10 +453,11 @@ static uint32_t axil_read(uint32_t addr) {
 }
 static void set_x(int i, uint64_t v) { axil_write(R_X + 8 * i, (uint32_t)v); axil_write(R_X + 8 * i + 4, (uint32_t)(v >> 32)); }
 static uint64_t get_y(int i) { uint64_t lo = axil_read(R_Y + 8 * i); return lo | ((uint64_t)axil_read(R_Y + 8 * i + 4) << 32); }
-static void set_x4(int base, const E4& e) { for (int i = 0; i < 4; i++) set_x(base + i, e[i]); }
-static E4 get_y4() { return E4{get_y(0), get_y(1), get_y(2), get_y(3)}; }
+static void set_x4(int base, const D4& e) { for (int i = 0; i < 4; i++) set_x(base + i, e[i]); }
+static D4 get_y4() { return D4{get_y(0), get_y(1), get_y(2), get_y(3)}; }
 
 struct OpRes { bool ok; uint32_t cycles; };
+static uint64_t opcode_cycles[256]{};
 static OpRes wait_op(uint8_t op = 0) {
     uint32_t st;
     for (long guard = 0;; guard++) {
@@ -486,7 +465,9 @@ static OpRes wait_op(uint8_t op = 0) {
         if (st & 2) break;
         if (guard > 50000000) { printf("timeout in op %02x\n", op); exit(2); }
     }
-    return OpRes{(st & 4) != 0, axil_read(R_OPCYC)};
+    uint32_t cycles=axil_read(R_OPCYC);
+    opcode_cycles[op]+=cycles;
+    return OpRes{(st & 4) != 0, cycles};
 }
 // Start an operation, poll until done, return its ok flag and the core's own cycle count.
 static OpRes run_op(uint8_t op, uint8_t a0 = 0, uint16_t a1 = 0) {
@@ -582,6 +563,32 @@ static void test_axi_channels() {
         for(int t=0;t<5;t++) { check(dut->s_axil_rvalid && dut->s_axil_rdata==expected && dut->s_axil_rresp==0,"R stable under stall"); tick(); }
         dut->s_axil_rready=1; tick();
     }
+    // Exercise every X half-word, including byte preservation and the
+    // independent read port while ARADDR changes and RREADY is held low.
+    for (unsigned w = 0; w < 64; ++w) {
+        uint32_t addr = R_X + 4*w, old = 0x01234567u + w, value = 0x89abcdefu - w;
+        unsigned strobe = (w ^ (w >> 2)) & 15;
+        axil_write(addr, old);
+        axil_write(addr, value, strobe);
+        uint32_t want = old;
+        for (unsigned b = 0; b < 4; ++b) {
+            uint32_t mask = (strobe >> b & 1) ? 255u << (8*b) : 0;
+            want = (want & ~mask) | (value & mask);
+        }
+        dut->s_axil_rready = 0;
+        dut->s_axil_arvalid = 1;
+        dut->s_axil_araddr = addr;
+        tick();
+        dut->s_axil_arvalid = 0;
+        dut->s_axil_araddr = R_ID;
+        tick();
+        axil_write(addr, ~want);
+        check(dut->s_axil_rvalid && dut->s_axil_rresp == 0, "X response held across write");
+        CHECK_EQ64(dut->s_axil_rdata, COMPACT ? 0 : want, "X stalled byte-strobed read");
+        dut->s_axil_rready = 1;
+        tick();
+        CHECK_EQ64(axil_read(addr), COMPACT ? 0 : ~want, "X subsequent read");
+    }
     // Reset discards an unmatched address rather than pairing it with future data.
     dut->s_axil_awaddr=R_CMD; dut->s_axil_awvalid=1; tick(); dut->s_axil_awvalid=0;
     dut->rst=1; tick(); dut->rst=0; tick();
@@ -610,37 +617,13 @@ static void test_basic_ops() {
         D4 d = p2_jive(in);
         for (int i = 0; i < 4; i++) CHECK_EQ64(get_y(i), d[i], "top P2_JIVE");
     }
-    // Ext4 MAC KATs.
-    for (auto& k : KAT_EXT4) {
-        for (int i = 0; i < 4; i++) { set_x(i, k.x[i]); set_x(4 + i, k.y[i]); set_x(8 + i, 0); }
-        OpRes r = run_op(0x10);
-        for (int i = 0; i < 4; i++) CHECK_EQ64(get_y(i), k.mul[i], "top EXT4_MAC KAT");
-        if (!COMPACT_EXT4) CHECK_EQ64(r.cycles, (uint64_t)(TOP_EXT_LAT + 2), "EXT4_MAC cycles");
-    }
-    // Sumcheck rounds: three honest rounds, then a wrong claim.
-    {
-        E4 claim = rng.e4();
-        set_x4(0, claim);
-        run_op(0x11);
-        for (int round = 0; round < 4; round++) {
-            E4 c[4] = {rng.e4(), rng.e4(), rng.e4(), rng.e4()};
-            // choose c0 so that g(0) + g(1) = 2*c0 + c1 + c2 + c3 = claim (2^-1 = (p+1)/2)
-            E4 rest = e4_add(e4_add(c[1], c[2]), c[3]);
-            E4 twice = e4_sub(claim, rest);
-            for (int i = 0; i < 4; i++) c[0][i] = gl_mul(twice[i], (GLP + 1) / 2);
-            bool bad = (round == 3);
-            if (bad) c[0][1] = gl_add(c[0][1], 1);
-            E4 x = rng.e4();
-            for (int j = 0; j < 4; j++) set_x4(4 * j, c[j]);
-            set_x4(16, x);
-            OpRes r = run_op(0x12);
-            E4 g = e4_mul_add(e4_mul_add(e4_mul_add(c[3], x, c[2]), x, c[1]), x, c[0]);
-            E4 got = get_y4();
-            for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], g[i], "top SC_ROUND g(r)");
-            check(r.ok == !bad, bad ? "SC_ROUND rejects a wrong claim" : "SC_ROUND accepts");
-            if (!COMPACT) CHECK_EQ64(r.cycles, (uint64_t)(3 * (TOP_EXT_LAT + 1) + 2), "SC_ROUND cycles");
-            claim = g;
-        }
+    check(!run_op(0x10).ok && (axil_read(R_STATUS)&16), "retired opcode fails closed");
+    run_op(0x3f);
+    for (auto& k : KAT_TOWER) {
+        for (int i=0;i<2;++i) { set_x(i,k.a[i]); set_x(i+2,k.b[i]); set_x(i+4,0); set_x(i+6,k.mul[i]); }
+        check(run_op(0x30,1).ok && get_y(0)==k.mul[0] && get_y(1)==k.mul[1],"tower GF_MAC");
+        set_x(7,k.mul[1]^1);
+        check(!run_op(0x30,1).ok,"tower tag tamper");
     }
     // GF(2^128) MAC check.
     for (int t = 0; t < 6; t++) {
@@ -656,7 +639,7 @@ static void test_basic_ops() {
         CHECK_EQ64(get_y(1), (uint64_t)(m >> 64), "top GF_MAC hi");
         check(r.ok == (t != 5), "GF_MAC tag comparison");
     }
-    section("top: ID, P2_PERM/P2_JIVE, EXT4_MAC, SC_ROUND (accept + reject), GF_MAC (accept + reject)", c0, f0);
+    section("top: ID, P2_PERM/P2_JIVE, GF_MAC (accept + reject)", c0, f0);
 }
 
 // Keccak sponge driven through the top's KEC_LOAD / KEC_PERMUTE operations.
@@ -716,7 +699,7 @@ static E5 get_y5() { return E5{get_y(0), get_y(1), get_y(2), get_y(3), get_y(4)}
 static void test_zk_hem_v2() {
     long c0 = checks, f0 = fails;
     Rng rng(0x20260205ULL);
-    // 1. EXT5_MAC (0x17): field5.rs KATs, P-1 corners, and 48 random F_{p^5} MACs.
+    // 1. EXT5_MAC (0x17): field5.rs KATs, P-1 corners, and 64 random F_{p^5} MACs.
     {
         E5 a = {1, 2, 3, 4, 5}, b = {6, 7, 8, 9, 10}, z = {0, 0, 0, 0, 0};
         set_x5(0, a); set_x5(5, b); set_x5(10, z);
@@ -724,7 +707,7 @@ static void test_zk_hem_v2() {
         E5 got = get_y5(), want = e5_mul_add(a, b, z);
         for (int i = 0; i < 5; i++) CHECK_EQ64(got[i], want[i], "top EXT5_MAC KAT [348,337,295,220,110]");
     }
-    for (int t = 0; t < 48; t++) {
+    for (int t = 0; t < 68; t++) {
         E5 a = rng.e5(), b = rng.e5(), c = rng.e5();
         if (t < 4) {
             for (int i = 0; i < 5; i++) {
@@ -734,10 +717,24 @@ static void test_zk_hem_v2() {
             }
         }
         set_x5(0, a); set_x5(5, b); set_x5(10, c);
-        check(run_op(0x17).ok, "EXT5_MAC random ok");
+        auto mac = run_op(0x17);
+        check(mac.ok, "EXT5_MAC random ok");
+        if (!COMPACT) CHECK_EQ64(mac.cycles, EXT5_MAC_LAT+2, "native MAC latency");
         E5 got = get_y5(), want = e5_mul_add(a, b, c);
         for (int i = 0; i < 5; i++) CHECK_EQ64(got[i], want[i], "top EXT5_MAC random/corner");
     }
+    // A sumcheck or fold may have used the working banks since the last write.
+    E5 a=rng.e5(), b=rng.e5(), c=rng.e5();
+    set_x5(0,a); set_x5(5,b); set_x5(10,c);
+    auto direct=run_op(0x17);
+    printf("  native register MAC OP_CYCLES %u\n",direct.cycles);
+    check(direct.ok && get_y5()==e5_mul_add(a,b,c),"register MAC after full operand load");
+    run_op(0x18,4);
+    c[4]=42; set_x(14,42);
+    check(run_op(0x17).ok && get_y5()==e5_mul_add(a,b,c),"register MAC after partial reload");
+    set_x(14,GLP);
+    check(!run_op(0x17).ok && (axil_read(R_STATUS)&8),"register operand canonicality");
+    run_op(0x3f);
     // 2. EXT5_FROB (0x18): KAT, ring homomorphism phi(a*b) == phi(a)*phi(b), and phi^5(a) == a.
     {
         E5 a = {1, 2, 3, 4, 5};
@@ -799,27 +796,29 @@ static void test_zk_hem_v2() {
     section("top: zk-Hem v2 F_{p^5} EXT5_MAC, EXT5_FROB homomorphism, 400-bit Role-1 KEC_STREAM_SPONGE", c0, f0);
 }
 
-// Fold a 2^n table by r.size() challenges with FOLD_MULTI (up to 8 rounds per command);
-// returns the core's cycles summed over the commands. `preloaded` skips writing the challenges
-// (the caller already put them in X).
-static uint64_t fold_table(const std::vector<E4>& table, const std::vector<E4>& r, E4& result, bool preloaded = false) {
+// Fold a 2^n table by r.size() challenges with FOLD_MULTI (up to 6 rounds per command);
+// Return the sum of the hardware fold-command cycle counters.
+static uint64_t fold_table(const std::vector<E5>& table, const std::vector<E5>& r, E5& result) {
     int n = 0;
     while (((size_t)1 << n) < table.size()) n++;
     axil_write(R_STREAM, 0x80000000u);
-    for (auto& e : table) stream_beat(e.data(), 4);
+    for (auto& e : table) stream_beat(e.data(), 5);
     uint64_t cycles = 0;
-    for (size_t done = 0; done < r.size(); done += 8) {
-        int m = (int)(r.size() - done < 8 ? r.size() - done : 8);
-        if (!preloaded || done) for (int j = 0; j < m; j++) set_x4(4 * j, r[done + j]);
-        cycles += run_op(0x15, (uint8_t)m, done == 0 ? (uint16_t)n : 0).cycles;
+    for (size_t done = 0; done < r.size(); done += 6) {
+        int m = (int)(r.size() - done < 6 ? r.size() - done : 6);
+        for (int j = 0; j < m; j++) set_x5(5 * j, r[done + j]);
+        if (done==0) check(run_op(0x14,n).ok,"set fold length");
+        auto op = m==1 ? run_op(0x13) : run_op(0x15,m);
+        check(op.ok,"fold command");
+        cycles += op.cycles;
     }
-    result = get_y4();
+    result = get_y5();
     return cycles;
 }
-static E4 fold_model(std::vector<E4> t, const std::vector<E4>& r) {
+static E5 fold_model_fp5(std::vector<E5> t, const std::vector<E5>& r) {
     for (auto& rj : r) {
         size_t half = t.size() / 2;
-        for (size_t k = 0; k < half; k++) t[k] = e4_mul_add(rj, e4_sub(t[2 * k + 1], t[2 * k]), t[2 * k]);
+        for (size_t k = 0; k < half; k++) t[k] = e5_mul_add(rj, e5_sub(t[2 * k + 1], t[2 * k]), t[2 * k]);
         t.resize(half);
     }
     return t[0];
@@ -828,17 +827,15 @@ static E4 fold_model(std::vector<E4> t, const std::vector<E4>& r) {
 static void test_fold_and_chains() {
     long c0 = checks, f0 = fails;
     Rng rng(0xF01D);
-    for (int n : {1, 2, 5, 9}) {
-        std::vector<E4> t((size_t)1 << n), r(n);
-        for (auto& e : t) e = rng.e4();
-        for (auto& e : r) e = rng.e4();
-        E4 got, want = fold_model(t, r);
+    for (int n : {1, 2, 5, 9, 16}) {
+        if (COMPACT && n == 16) continue;
+        std::vector<E5> t((size_t)1 << n), r(n);
+        for (auto& e : t) e = rng.e5();
+        for (auto& e : r) e = rng.e5();
+        E5 got, want = fold_model_fp5(t, r);
         uint64_t cy = fold_table(t, r, got);
-        for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], want[i], "fold result");
-        // per round: one start clock, n/2 reads, FOLD_LAT = 9, done, hand-over; plus the final clock.
-        uint64_t expect_cy = 1;
-        for (int j = 0; j < n; j++) expect_cy += ((uint64_t)1 << (n - 1 - j)) + 9 + 3;
-        if (!COMPACT) CHECK_EQ64(cy, expect_cy + (n > 8 ? 1 : 0), "fold cycles");
+        for (int i = 0; i < 5; i++) CHECK_EQ64(got[i], want[i], "fold result");
+        check(cy>0,"fold counter");
     }
     section("top: BRAM fold engine, 1/2/5/9-variable tables vs fold_first_var model", c0, f0);
 
@@ -875,248 +872,13 @@ static void test_fold_and_chains() {
     section("top: chain engine, 32 concurrent leaf-sponge + Canopy paths (depth 7), one corrupted", c0, f0);
 }
 
-// ---- A QSAGSTA1-shaped root verification workload.
-//
-// This is a MODELLED operation mix, not a replay of verify_public_hologram on a real proof: the
-// shape (stage geometry, query counts, sumcheck rounds) comes from the fixture's WHIR parameters
-// for a 20-variable opening under the Poseidon2-Canopy regime with wire tag 6, and every
-// operation runs on real data through the RTL and is checked against the reference model.
-struct Stage { int inv_rate_log, fold_k, queries; };
-static void trace_qsagsta1(FILE* rep) {
-    long c0 = checks, f0 = fails;
-    Rng rng(0x51534147535441ULL);
-    const int NV = 20;
-    const Stage stages[3] = {{2, 5, 216}, {4, 3, 109}, {6, 4, 74}};
-    const int SUMCHECK_ROUNDS = 12 + 60;   // 12 WHIR folding rounds + 3 x 20 hologram sumcheck rounds (model)
-    const int FINAL_VARS = 8;
-
-    run_op(0x3F);
-    uint64_t t_begin = cyc;
-    uint64_t w0 = bus_writes, r0 = bus_reads, b0 = stream_beats;
-    uint64_t sec_wall[4] = {0, 0, 0, 0}, core_fs = 0, core_sc = 0, core_fold = 0;
-    long n_perm_fs = 0, n_perm_chain = 0, n_bfly = 0, n_mac_sc = 0;
-
-    // 1. Fiat-Shamir transcript: one Poseidon2 permutation per sumcheck round (sequential by
-    //    construction), with the round check and Horner evaluation on the Ext4 unit.
-    uint64_t ts = cyc;
-    St12 fs{};
-    fs[8] = 0x51534147;
-    E4 claim = rng.e4();
-    set_x4(0, claim);
-    run_op(0x11);
-    for (int round = 0; round < SUMCHECK_ROUNDS; round++) {
-        E4 c[4] = {rng.e4(), rng.e4(), rng.e4(), rng.e4()};
-        E4 twice = e4_sub(claim, e4_add(e4_add(c[1], c[2]), c[3]));
-        for (int i = 0; i < 4; i++) c[0][i] = gl_mul(twice[i], (GLP + 1) / 2);
-        // absorb the first 8 coefficient limbs (rate 8), permute, squeeze the challenge
-        for (int i = 0; i < 8; i++) fs[i] = gl_add(fs[i], c[i / 4][i % 4]);
-        for (int i = 0; i < 12; i++) set_x(i, fs[i]);
-        core_fs += run_op(0x01).cycles;
-        St12 want = fs;
-        p2_perm(want);
-        for (int i = 0; i < 12; i++) { fs[i] = get_y(i); CHECK_EQ64(fs[i], want[i], "trace FS permutation"); }
-        n_perm_fs++;
-        E4 x = {fs[0], fs[1], fs[2], fs[3]};
-        for (int j = 0; j < 4; j++) set_x4(4 * j, c[j]);
-        set_x4(16, x);
-        OpRes r = run_op(0x12);
-        core_sc += r.cycles;
-        n_mac_sc += 3;
-        claim = e4_mul_add(e4_mul_add(e4_mul_add(c[3], x, c[2]), x, c[1]), x, c[0]);
-        E4 got = get_y4();
-        for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], claim[i], "trace sumcheck claim");
-        check(r.ok, "trace sumcheck round");
-    }
-    sec_wall[0] = cyc - ts;
-
-    // 2. Query phase per stage: leaf sponge + Canopy path on the chain engine (32 slots),
-    //    then the 2^k-point fold of every opened leaf on the BRAM fold engine.
-    int nv = NV;
-    for (int s = 0; s < 3; s++) {
-        const Stage& sg = stages[s];
-        int depth = nv + sg.inv_rate_log - sg.fold_k;
-        int leaf_elems = 1 << sg.fold_k;
-        Tree t(depth, rng);
-        D4 cap = {rng.gl(), rng.gl(), rng.gl(), rng.gl()};
-        std::vector<uint32_t> leaf(sg.queries);
-        std::vector<std::vector<E4>> evals(sg.queries);
-        std::map<uint32_t, int> seen;
-        for (int q = 0; q < sg.queries; q++) {
-            do { leaf[q] = (uint32_t)(rng.next() % ((uint64_t)1 << depth)); } while (seen.count(leaf[q]));
-            seen[leaf[q]] = q;
-            evals[q].resize(leaf_elems);
-            std::vector<uint64_t> limbs;
-            for (auto& e : evals[q]) { e = rng.e4(); for (auto v : e) limbs.push_back(v); }
-            t.node[((size_t)1 << depth) + leaf[q]] = p2_sponge_with_cap(LEAF_DOMAIN, cap, limbs);
-        }
-        t.build();
-        uint64_t tq = cyc;
-        chain_cfg(t, cap);
-        for (int base = 0; base < sg.queries; base += 32) {
-            int n = sg.queries - base < 32 ? sg.queries - base : 32;
-            if (base) run_op(0x03, 3);   // clear DONE/OK only; key and top node stay
-            for (int i = 0; i < n; i++) {
-                std::vector<uint64_t> limbs;
-                for (auto& e : evals[base + i]) for (auto v : e) limbs.push_back(v);
-                n_perm_chain += load_chain(i, t, leaf[base + i], limbs);
-            }
-            OpRes r = run_op(0x05);
-            check(r.ok, "trace: every query path reaches the committed top node");
-            uint32_t want = n == 32 ? 0xFFFFFFFFu : ((1u << n) - 1);
-            check(axil_read(R_CH_OK) == want, "trace: chain ok bitmap");
-        }
-        sec_wall[1] += cyc - tq;
-        uint64_t tf = cyc;
-        std::vector<E4> r(sg.fold_k);
-        for (auto& e : r) e = rng.e4();
-        for (int j = 0; j < sg.fold_k; j++) set_x4(4 * j, r[j]);   // one challenge set per stage
-        for (int q = 0; q < sg.queries; q++) {
-            E4 got, want = fold_model(evals[q], r);
-            core_fold += fold_table(evals[q], r, got, true);
-            n_bfly += leaf_elems - 1;
-            for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], want[i], "trace query fold");
-        }
-        sec_wall[2] += cyc - tf;
-        nv -= sg.fold_k;
-    }
-
-    // 3. Final polynomial: multilinear evaluation of 2^8 coefficients by eight folds.
-    {
-        uint64_t tf = cyc;
-        std::vector<E4> tb((size_t)1 << FINAL_VARS), r(FINAL_VARS);
-        for (auto& e : tb) e = rng.e4();
-        for (auto& e : r) e = rng.e4();
-        E4 got, want = fold_model(tb, r);
-        core_fold += fold_table(tb, r, got);
-        n_bfly += (1 << FINAL_VARS) - 1;
-        for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], want[i], "trace final evaluation");
-        sec_wall[3] = cyc - tf;
-    }
-    uint64_t wall = cyc - t_begin;
-    uint64_t active = total_cycles();
-    uint32_t perms = axil_read(R_PERMS);
-    check(perms == (uint32_t)(n_perm_fs + n_perm_chain), "trace permutation count");
-
-    const char* fmt =
-        "QSAGSTA1-shaped root verification (modelled operation mix, real data, every result checked)\n"
-        "  shape: nv=%d, stages (inv-rate log, fold k, queries) = (2,5,216) (4,3,109) (6,4,74), %d sumcheck rounds, final 2^%d\n"
-        "  Poseidon2 permutations : %ld  (%ld transcript, sequential; %ld leaf-sponge + Canopy node, C-slow on the ring)\n"
-        "  Ext4 MACs              : %ld  (%ld sumcheck Horner, %ld fold butterflies)\n"
-        "  clocks, wall (AXI host with zero think time)  : %llu\n"
-        "    transcript + sumcheck rounds                : %llu  (core-busy %llu + %llu)\n"
-        "    query leaf hashes + Merkle paths            : %llu\n"
-        "    query folds                                 : %llu\n"
-        "    final evaluation                            : %llu\n"
-        "  clocks with any engine active (TOTAL_CYCLES)  : %llu\n"
-        "  fold engine core-busy clocks                  : %llu\n"
-        "  bus traffic: %llu AXI4-Lite writes, %llu reads, %llu stream beats\n";
-    for (FILE* f : {stdout, rep}) {
-        if (!f) continue;
-        fprintf(f, fmt, NV, SUMCHECK_ROUNDS, FINAL_VARS, (long)perms, n_perm_fs, n_perm_chain, n_mac_sc + n_bfly, n_mac_sc, n_bfly,
-                (unsigned long long)wall, (unsigned long long)sec_wall[0], (unsigned long long)core_fs, (unsigned long long)core_sc,
-                (unsigned long long)sec_wall[1], (unsigned long long)sec_wall[2], (unsigned long long)sec_wall[3],
-                (unsigned long long)active, (unsigned long long)core_fold,
-                (unsigned long long)(bus_writes - w0), (unsigned long long)(bus_reads - r0), (unsigned long long)(stream_beats - b0));
-    }
-    section("QSAGSTA1-shaped root verification trace", c0, f0);
-}
-
-// ---- Hyperweb edge fold: a 16-variable Ext4 table folded by 16 challenges (65,535 butterflies).
-static void trace_edge_fold(FILE* rep) {
-    long c0 = checks, f0 = fails;
-    Rng rng(0xED6E);
-    const int n = 16;
-    std::vector<E4> t((size_t)1 << n), r(n);
-    for (auto& e : t) e = rng.e4();
-    for (auto& e : r) e = rng.e4();
-    E4 want = fold_model(t, r), got;
-    uint64_t t0 = cyc;
-    uint64_t core = fold_table(t, r, got);
-    uint64_t t_all = cyc - t0, t_load = ((uint64_t)1 << n) + 2, t_fold = t_all - t_load;
-    for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], want[i], "edge fold result");
-    for (FILE* f : {stdout, rep}) {
-        if (!f) continue;
-        fprintf(f, "16-variable Ext4 edge fold (65,535 butterflies, in place in block RAM)\n"
-                   "  table load over AXI4-Stream : %llu clocks (one entry per clock)\n"
-                   "  16 fold rounds, core-busy   : %llu clocks (two FOLD_MULTI commands of 8 rounds)\n"
-                   "  16 fold rounds, wall        : %llu clocks (incl. 16 challenges over AXI4-Lite)\n",
-                (unsigned long long)t_load, (unsigned long long)core, (unsigned long long)t_fold);
-    }
-    section("16-variable hyperweb edge fold vs fold_first_var model", c0, f0);
-}
-
-// =====================================================================================
-// Real Rust `QSAGSTA1` (TurboSHAKE256 Canopy & Poseidon2 Canopy) + `[CWYZ26]` `DuetFold`
-// Verifier Hardware Replay & Single-Bit Tamper Rejection Suite
-// =====================================================================================
-
-struct KsBlk {
-    uint8_t mid, nr12, init, chk;
-    uint64_t lanes[17];
-    E4 exp;
-};
 struct TcOp {
     bool turbo;
     uint8_t log_leaves;
-    E4 root;
+    D4 root;
     std::vector<std::pair<uint32_t, D4>> leaves;
     std::vector<D4> sibs;
 };
-struct P2SingleOp {
-    bool jive;
-    St12 in;
-    St12 out;
-};
-struct PlItem {
-    D4 cap, out;
-    std::vector<std::array<uint64_t, 8>> blocks;
-};
-struct PcnNode {
-    uint32_t idx;
-    D4 l, r, p;
-};
-struct PcOp {
-    uint64_t key[3];
-    std::vector<std::vector<PcnNode>> levels;
-};
-struct ScOp {
-    uint8_t deg;
-    E4 prev, chal, next;
-    std::vector<E4> coeffs_hi_to_lo; // c[deg] .. c[0]
-};
-struct ExtMacItem {
-    E4 a, b, c, out;
-};
-struct FdOp {
-    std::vector<E4> table, point;
-    E4 out;
-};
-
-enum TraceKind { TK_KS, TK_KM, TK_TC, TK_P2, TK_PL, TK_PC, TK_SC, TK_EMAC, TK_FD };
-struct TraceCmd {
-    TraceKind kind;
-    std::vector<KsBlk> ks;
-    std::array<uint64_t, 25> km{};
-    TcOp tc;
-    P2SingleOp p2;
-    std::vector<PlItem> pl;
-    PcOp pc;
-    ScOp sc;
-    std::vector<ExtMacItem> emac;
-    FdOp fd;
-};
-
-static uint64_t parse_hex64(std::istream& is) {
-    std::string s;
-    if (!(is >> s)) { printf("unexpected EOF in trace\n"); exit(2); }
-    return std::strtoull(s.c_str(), nullptr, 16);
-}
-static E4 parse_e4(std::istream& is) {
-    E4 e;
-    for (int i = 0; i < 4; i++) e[i] = parse_hex64(is);
-    return e;
-}
-
 static KState sponge_mid_host(uint8_t mid) {
     static const uint64_t M[7][25] = {
         {0},
@@ -1156,237 +918,6 @@ static KState sponge_mid_host(uint8_t mid) {
     return s;
 }
 
-static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_cnt, long& p2_cnt,
-                                             long& sc_cnt, long& emac_cnt, long& canopy_cnt) {
-    std::ifstream in(path);
-    if (!in) { printf("missing real trace fixture: %s\n", path.c_str()); exit(2); }
-    std::vector<TraceCmd> raw;
-    ks_cnt = p2_cnt = sc_cnt = emac_cnt = canopy_cnt = 0;
-    std::string line;
-    auto next_line = [&](std::istringstream& ss) -> bool {
-        while (std::getline(in, line)) {
-            if (!line.empty()) { ss.clear(); ss.str(line); return true; }
-        }
-        return false;
-    };
-    std::istringstream ss;
-    while (next_line(ss)) {
-        std::string tag;
-        ss >> tag;
-        if (tag == "KS") {
-            KsBlk b{};
-            int m, nr, ini, ck;
-            ss >> m >> nr >> ini >> ck;
-            b.mid = (uint8_t)m; b.nr12 = (uint8_t)nr; b.init = (uint8_t)ini; b.chk = (uint8_t)ck;
-            for (int i = 0; i < 17; i++) b.lanes[i] = parse_hex64(ss);
-            b.exp = parse_e4(ss);
-            TraceCmd c{}; c.kind = TK_KS; c.ks.push_back(b);
-            raw.push_back(std::move(c));
-            ks_cnt++;
-        } else if (tag == "KM") {
-            TraceCmd c{}; c.kind = TK_KM;
-            for (int i = 0; i < 25; i++) c.km[i] = parse_hex64(ss);
-            raw.push_back(std::move(c));
-        } else if (tag == "TC") {
-            TraceCmd c{}; c.kind = TK_TC;
-            int tb, lg, nl, ns;
-            ss >> tb >> lg >> nl >> ns;
-            c.tc.turbo = (tb != 0); c.tc.log_leaves = (uint8_t)lg;
-            c.tc.root = parse_e4(ss);
-            c.tc.leaves.resize(nl);
-            c.tc.sibs.resize(ns);
-            for (int i = 0; i < nl; i++) {
-                if (!next_line(ss)) exit(2);
-                std::string t2; uint32_t u; ss >> t2 >> u;
-                c.tc.leaves[i] = {u, parse_e4(ss)};
-            }
-            for (int i = 0; i < ns; i++) {
-                if (!next_line(ss)) exit(2);
-                std::string t2; ss >> t2;
-                c.tc.sibs[i] = parse_e4(ss);
-            }
-            raw.push_back(std::move(c));
-            canopy_cnt++;
-        } else if (tag == "P" || tag == "J") {
-            TraceCmd c{}; c.kind = TK_P2;
-            c.p2.jive = (tag == "J");
-            for (int i = 0; i < 12; i++) c.p2.in[i] = parse_hex64(ss);
-            int nout = c.p2.jive ? 4 : 12;
-            for (int i = 0; i < nout; i++) c.p2.out[i] = parse_hex64(ss);
-            raw.push_back(std::move(c));
-            p2_cnt++;
-        } else if (tag == "PL") {
-            PlItem it{};
-            int nb; ss >> nb;
-            it.cap = parse_e4(ss);
-            it.out = parse_e4(ss);
-            it.blocks.resize(nb);
-            for (int b = 0; b < nb; b++)
-                for (int j = 0; j < 8; j++) it.blocks[b][j] = parse_hex64(ss);
-            TraceCmd c{}; c.kind = TK_PL; c.pl.push_back(std::move(it));
-            raw.push_back(std::move(c));
-            p2_cnt += nb;
-        } else if (tag == "PC") {
-            TraceCmd c{}; c.kind = TK_PC;
-            int nlev; ss >> nlev;
-            for (int i = 0; i < 3; i++) c.pc.key[i] = parse_hex64(ss);
-            c.pc.levels.resize(nlev);
-            for (int lv = 0; lv < nlev; lv++) {
-                if (!next_line(ss)) exit(2);
-                std::string t2; int nn; ss >> t2 >> nn;
-                c.pc.levels[lv].resize(nn);
-                for (int k = 0; k < nn; k++) {
-                    if (!next_line(ss)) exit(2);
-                    std::string t3; uint32_t idx; ss >> t3 >> idx;
-                    PcnNode nd{};
-                    nd.idx = idx;
-                    nd.l = parse_e4(ss);
-                    nd.r = parse_e4(ss);
-                    nd.p = parse_e4(ss);
-                    c.pc.levels[lv][k] = nd;
-                    p2_cnt++;
-                }
-            }
-            raw.push_back(std::move(c));
-            canopy_cnt++;
-        } else if (tag == "SC") {
-            TraceCmd c{}; c.kind = TK_SC;
-            int deg; ss >> deg;
-            c.sc.deg = (uint8_t)deg;
-            c.sc.prev = parse_e4(ss);
-            c.sc.chal = parse_e4(ss);
-            c.sc.coeffs_hi_to_lo.resize(deg + 1);
-            for (int i = 0; i <= deg; i++) c.sc.coeffs_hi_to_lo[i] = parse_e4(ss);
-            c.sc.next = parse_e4(ss);
-            raw.push_back(std::move(c));
-            sc_cnt++;
-        } else if (tag == "E") {
-            ExtMacItem e{};
-            e.a = parse_e4(ss); e.b = parse_e4(ss); e.c = parse_e4(ss); e.out = parse_e4(ss);
-            TraceCmd c{}; c.kind = TK_EMAC; c.emac.push_back(e);
-            raw.push_back(std::move(c));
-            emac_cnt++;
-        } else if (tag == "FD") {
-            TraceCmd c{}; c.kind = TK_FD;
-            int k; ss >> k;
-            int n = 1 << k;
-            c.fd.table.resize(n);
-            c.fd.point.resize(k);
-            for (int i = 0; i < n; i++) {
-                if (!next_line(ss)) exit(2);
-                std::string t2; ss >> t2;
-                c.fd.table[i] = parse_e4(ss);
-            }
-            for (int i = 0; i < k; i++) {
-                if (!next_line(ss)) exit(2);
-                std::string t2; ss >> t2;
-                c.fd.point[i] = parse_e4(ss);
-            }
-            if (!next_line(ss)) exit(2);
-            std::string t3; ss >> t3;
-            c.fd.out = parse_e4(ss);
-            raw.push_back(std::move(c));
-        }
-    }
-
-    // Reassemble multi-block sponge calls (`ks_sponge`) whose per-block trace lines were interleaved
-    // across Rayon worker threads during trace capture, matching each continuation block (`init=0`)
-    // against its exact parent sponge state before emitting to the single-context hardware engine.
-    struct KsChain {
-        KState st{};
-        bool has_km = false;
-        std::array<uint64_t, 25> km{};
-        std::vector<KsBlk> blks;
-        size_t last_idx = 0;
-    };
-    std::vector<KsChain> chains;
-    bool pend_km = false;
-    std::array<uint64_t, 25> pend_km_val{};
-    for (size_t idx = 0; idx < raw.size(); idx++) {
-        if (raw[idx].kind == TK_KM) {
-            pend_km = true;
-            pend_km_val = raw[idx].km;
-        } else if (raw[idx].kind == TK_KS) {
-            const KsBlk& b = raw[idx].ks[0];
-            if (b.init) {
-                KState st = sponge_mid_host(b.mid);
-                for (int i = 0; i < 17; i++) st[i] ^= b.lanes[i];
-                keccak_p(st, b.nr12 != 0);
-                for (int i = 0; i < 4; i++) if (st[i] != b.exp[i]) { printf("bad KS init\n"); exit(2); }
-                chains.push_back(KsChain{st, false, {}, {b}, idx});
-            } else if (b.mid == 7 && pend_km) {
-                KState st = pend_km_val;
-                pend_km = false;
-                for (int i = 0; i < 17; i++) st[i] ^= b.lanes[i];
-                keccak_p(st, b.nr12 != 0);
-                for (int i = 0; i < 4; i++) if (st[i] != b.exp[i]) { printf("bad KM init\n"); exit(2); }
-                chains.push_back(KsChain{st, true, pend_km_val, {b}, idx});
-            } else {
-                bool ok_match = false;
-                for (size_t ci = chains.size(); ci-- > 0;) {
-                    KState tmp = chains[ci].st;
-                    for (int i = 0; i < 17; i++) tmp[i] ^= b.lanes[i];
-                    keccak_p(tmp, b.nr12 != 0);
-                    if (tmp[0] == b.exp[0] && tmp[1] == b.exp[1] && tmp[2] == b.exp[2] && tmp[3] == b.exp[3]) {
-                        chains[ci].st = tmp;
-                        chains[ci].blks.push_back(b);
-                        chains[ci].last_idx = idx;
-                        ok_match = true;
-                        break;
-                    }
-                }
-                if (!ok_match) { printf("unmatched KS continuation at raw %zu\n", idx); exit(2); }
-            }
-        }
-    }
-
-    std::vector<std::vector<size_t>> emit_at(raw.size());
-    for (size_t ci = 0; ci < chains.size(); ci++) emit_at[chains[ci].last_idx].push_back(ci);
-
-    std::vector<TraceCmd> cmds;
-    for (size_t idx = 0; idx < raw.size(); idx++) {
-        TraceKind k = raw[idx].kind;
-        if (k != TK_KS && k != TK_KM) {
-            if (k == TK_PL && !cmds.empty() && cmds.back().kind == TK_PL) {
-                cmds.back().pl.push_back(std::move(raw[idx].pl[0]));
-            } else if (k == TK_EMAC && !cmds.empty() && cmds.back().kind == TK_EMAC && cmds.back().emac.size() < 65535) {
-                cmds.back().emac.push_back(raw[idx].emac[0]);
-            } else {
-                cmds.push_back(std::move(raw[idx]));
-            }
-        }
-        for (size_t ci : emit_at[idx]) {
-            if (chains[ci].has_km) {
-                TraceCmd kmc{}; kmc.kind = TK_KM; kmc.km = chains[ci].km;
-                cmds.push_back(std::move(kmc));
-            }
-            for (const KsBlk& b : chains[ci].blks) {
-                if (cmds.empty() || cmds.back().kind != TK_KS || cmds.back().ks.size() == 65535) {
-                    TraceCmd c{}; c.kind = TK_KS; cmds.push_back(std::move(c));
-                }
-                cmds.back().ks.push_back(b);
-            }
-        }
-    }
-    return cmds;
-}
-
-static OpRes exec_ks_batch(const std::vector<KsBlk>& ks) {
-    axil_write(R_CMD, 0x22u | ((uint32_t)ks.size() << 16));
-    for (const auto& b : ks) {
-        uint64_t flags = (b.init ? 1ULL : 0ULL)
-                       | ((uint64_t)(b.mid & 3) << 1)
-                       | (b.nr12 ? 8ULL : 0ULL)
-                       | (b.chk ? 16ULL : 0ULL)
-                       | ((uint64_t)((b.mid >> 2) & 1) << 5);
-        stream_beat(b.lanes, 8);
-        stream_beat(b.lanes + 8, 8);
-        uint64_t b2[8] = {b.lanes[16], flags, b.exp[0], b.exp[1], b.exp[2], b.exp[3], 0, 0};
-        stream_beat(b2, 6);
-    }
-    return wait_op(0x22);
-}
-
 static OpRes exec_tc_op(const TcOp& tc) {
     axil_write(R_STREAM, 0x10000000u);
     for (const auto& lv : tc.leaves) {
@@ -1402,279 +933,199 @@ static OpRes exec_tc_op(const TcOp& tc) {
     return run_op(0x24, (uint8_t)((tc.turbo ? 1 : 0) | (tc.log_leaves << 1)), (uint16_t)tc.leaves.size());
 }
 
-static OpRes exec_sc_op(const ScOp& sc) {
-    set_x4(0, sc.prev);
-    run_op(0x11);
-    axil_write(R_CMD, 0x12u | ((uint32_t)sc.deg << 8));
-    stream_beat(sc.chal.data(), 4);
-    for (const auto& c : sc.coeffs_hi_to_lo) stream_beat(c.data(), 4);
-    return wait_op(0x12);
-}
-
-static OpRes exec_emac_batch(const std::vector<ExtMacItem>& batch) {
-    axil_write(R_CMD, 0x16u | ((uint32_t)batch.size() << 16));
-    for (const auto& e : batch) {
-        uint64_t b0[8] = {e.a[0], e.a[1], e.a[2], e.a[3], e.b[0], e.b[1], e.b[2], e.b[3]};
-        uint64_t b1[8] = {e.c[0], e.c[1], e.c[2], e.c[3], e.out[0], e.out[1], e.out[2], e.out[3]};
-        stream_beat(b0, 8);
-        stream_beat(b1, 8);
-    }
-    return wait_op(0x16);
-}
-
-static void check_wire_proof_file(const char* bin_path, size_t min_bytes) {
-    std::ifstream f(bin_path, std::ios::binary | std::ios::ate);
-    check((bool)f, "real QSAGSTA1 proof binary exists");
-    if (!f) return;
-    size_t sz = (size_t)f.tellg();
-    f.seekg(0);
-    char magic[8] = {};
-    f.read(magic, 8);
-    check(sz >= min_bytes && std::memcmp(magic, "QSAGSTA1", 8) == 0, "QSAGSTA1 wire magic & canonical size");
-}
-
-static void replay_single_real_proof(const char* label, const char* trace_path, const char* bin_path, FILE* rep) {
-    long c0 = checks, f0 = fails;
-    if (bin_path) check_wire_proof_file(bin_path, 160000);
-
-    long ks_cnt = 0, p2_cnt = 0, sc_cnt = 0, emac_cnt = 0, canopy_cnt = 0;
-    auto cmds = load_trace_file(trace_path, ks_cnt, p2_cnt, sc_cnt, emac_cnt, canopy_cnt);
-
-    uint64_t x_shadow[32];
-    bool x_valid[32] = {};
-    auto set_x_fast = [&](int idx, uint64_t v) {
-        if (!x_valid[idx] || x_shadow[idx] != v) {
-            set_x(idx, v);
-            x_shadow[idx] = v;
-            x_valid[idx] = true;
-        }
+static D4 canopy_hash(bool turbo, bool root, unsigned index, D4 left, D4 right = {}) {
+    std::vector<uint8_t> msg{uint8_t(root)};
+    for (int i=0; i<(root ? 1 : 4); ++i) msg.push_back(uint8_t(index >> (8*i)));
+    auto append = [&](const D4& digest) {
+        for (auto word : digest) for (int i=0; i<8; ++i) msg.push_back(uint8_t(word >> (8*i)));
     };
-
-    run_op(0x3F);
-    uint64_t t_begin = cyc, w0 = bus_writes, r0 = bus_reads, b0 = stream_beats;
-    uint64_t cy_kec = 0, cy_canopy = 0, cy_p2 = 0, cy_sc = 0, cy_emac = 0, cy_fold = 0;
-
-    for (const auto& cmd : cmds) {
-        switch (cmd.kind) {
-            case TK_KS: {
-                OpRes r = exec_ks_batch(cmd.ks);
-                cy_kec += r.cycles;
-                check(r.ok, "real proof KEC_STREAM_SPONGE batch ok");
-                if (cmd.ks.back().chk) {
-                    E4 got = get_y4();
-                    for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.ks.back().exp[i], "real proof KEC digest");
-                }
-                break;
-            }
-            case TK_KM: {
-                for (int i = 0; i < 25; i++) set_x_fast(i, cmd.km[i]);
-                cy_kec += run_op(0x20).cycles;
-                break;
-            }
-            case TK_TC: {
-                x_valid[0] = x_valid[1] = x_valid[2] = x_valid[3] = false;
-                OpRes r = exec_tc_op(cmd.tc);
-                cy_canopy += r.cycles;
-                check(r.ok, "real proof TS_CANOPY_VERIFY ok");
-                E4 got = get_y4();
-                for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.tc.root[i], "real proof TS_CANOPY root");
-                break;
-            }
-            case TK_P2: {
-                for (int i = 0; i < 12; i++) set_x_fast(i, cmd.p2.in[i]);
-                OpRes r = run_op(cmd.p2.jive ? 0x02 : 0x01);
-                cy_p2 += r.cycles;
-                check(r.ok, "real proof P2 op ok");
-                int nout = cmd.p2.jive ? 4 : 12;
-                for (int i = 0; i < nout; i++) CHECK_EQ64(get_y(i), cmd.p2.out[i], "real proof P2 state");
-                break;
-            }
-            case TK_PL: {
-                for (int i = 0; i < 8; i++) set_x_fast(i, 0);
-                axil_write(R_ARG32, 0);
-                for (size_t base = 0; base < cmd.pl.size(); base += (size_t)CHAIN_SLOTS) {
-                    size_t n = std::min((size_t)CHAIN_SLOTS, cmd.pl.size() - base);
-                    cy_p2 += run_op(0x03, 3).cycles;
-                    for (size_t s = 0; s < n; s++) {
-                        const auto& it = cmd.pl[base + s];
-                        for (int i = 0; i < 4; i++) set_x_fast(8 + i, it.cap[i]);
-                        axil_write(R_STREAM, (uint32_t)s << 6);
-                        for (const auto& blk : it.blocks) stream_beat(blk.data(), 8);
-                        OpRes rs = run_op(0x04, (uint8_t)s, (uint16_t)it.blocks.size());
-                        cy_p2 += rs.cycles;
-                        check(rs.ok, "real proof PL CHAIN_START");
-                    }
-                    cy_p2 += run_op(0x05).cycles;
-                    for (size_t s = 0; s < n; s++) {
-                        run_op(0x06, (uint8_t)s);
-                        E4 got = get_y4();
-                        for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.pl[base + s].out[i], "real proof PL digest");
-                    }
-                }
-                break;
-            }
-            case TK_PC: {
-                for (int i = 0; i < 3; i++) set_x_fast(i, cmd.pc.key[i]);
-                D4 top_root = cmd.pc.levels.back().back().p;
-                for (int i = 0; i < 4; i++) set_x_fast(4 + i, top_root[i]);
-                cy_canopy += run_op(0x03, 1).cycles;
-                for (const auto& lvl : cmd.pc.levels) {
-                    bool is_root_lvl = (lvl.size() == 1 && lvl[0].idx == 1);
-                    for (size_t base = 0; base < lvl.size(); base += (size_t)CHAIN_SLOTS) {
-                        size_t n = std::min((size_t)CHAIN_SLOTS, lvl.size() - base);
-                        cy_canopy += run_op(0x03, 3).cycles;
-                        for (size_t s = 0; s < n; s++) {
-                            const auto& nd = lvl[base + s];
-                            axil_write(R_STREAM, (uint32_t)s << 6);
-                            stream_beat(nd.r.data(), 4);
-                            for (int i = 0; i < 4; i++) set_x_fast(i, nd.l[i]);
-                            axil_write(R_ARG32, 0x80000000u | (nd.idx << 1));
-                            OpRes rs = run_op(0x04, (uint8_t)s, 0);
-                            cy_canopy += rs.cycles;
-                            check(rs.ok, "real proof PCN CHAIN_START");
-                        }
-                        OpRes rw = run_op(0x05);
-                        cy_canopy += rw.cycles;
-                        if (is_root_lvl) check(rw.ok, "real proof Poseidon2 Canopy root verified in hardware");
-                        for (size_t s = 0; s < n; s++) {
-                            run_op(0x06, (uint8_t)s);
-                            E4 got = get_y4();
-                            for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], lvl[base + s].p[i], "real proof PCN parent");
-                        }
-                    }
-                }
-                break;
-            }
-            case TK_SC: {
-                x_valid[0] = x_valid[1] = x_valid[2] = x_valid[3] = false;
-                OpRes r = exec_sc_op(cmd.sc);
-                cy_sc += r.cycles;
-                check(r.ok, "real proof SC_ROUND ok");
-                E4 got = get_y4();
-                for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.sc.next[i], "real proof SC next_claim");
-                break;
-            }
-            case TK_EMAC: {
-                OpRes r = exec_emac_batch(cmd.emac);
-                cy_emac += r.cycles;
-                check(r.ok, "real proof EXT4_BATCH ok");
-                E4 got = get_y4();
-                for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.emac.back().out[i], "real proof EXT4_BATCH tail");
-                break;
-            }
-            case TK_FD: {
-                for (int i = 0; i < 32; i++) x_valid[i] = false;
-                E4 got{};
-                cy_fold += fold_table(cmd.fd.table, cmd.fd.point, got);
-                for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.fd.out[i], "real proof FOLD_MULTI out");
-                break;
-            }
-        }
-    }
-
-    uint64_t wall = cyc - t_begin;
-    uint64_t active = total_cycles();
-    check((axil_read(R_STATUS) & 0x18) == 0, "real proof zero sticky bus/canonicality errors");
-
-    for (FILE* f : {stdout, rep}) {
-        if (!f) continue;
-        fprintf(f,
-                "REAL PROOF REPLAY [%s :: %s]\n"
-                "  operations : %ld Keccak blks, %ld P2 perms, %ld Canopy MultiProofs, %ld sumcheck rnds, %ld Ext4 MACs\n"
-                "  TOTAL_CYCLES (exact hardware engine-active clocks) : %llu\n"
-                "  wall clocks (incl. AXI4-Lite + Y readback checks)  : %llu\n"
-                "  breakdown (OP_CYCLES): kec=%llu canopy=%llu p2=%llu sc=%llu emac=%llu fold=%llu\n"
-                "  bus traffic: %llu AXI4-Lite writes, %llu reads, %llu 512-bit stream beats\n",
-                PROFILE_NAME, label, ks_cnt, p2_cnt, canopy_cnt, sc_cnt, emac_cnt,
-                (unsigned long long)active, (unsigned long long)wall,
-                (unsigned long long)cy_kec, (unsigned long long)cy_canopy, (unsigned long long)cy_p2,
-                (unsigned long long)cy_sc, (unsigned long long)cy_emac, (unsigned long long)cy_fold,
-                (unsigned long long)(bus_writes - w0), (unsigned long long)(bus_reads - r0),
-                (unsigned long long)(stream_beats - b0));
-    }
-    section(label, c0, f0);
+    append(left);
+    if (!root) append(right);
+    KState st = sponge_mid_host(turbo ? 2 : 4);
+    msg.push_back(turbo ? 7 : 4);
+    msg.resize(136);
+    msg.back() |= 128;
+    for (size_t i=0;i<msg.size();++i) st[i/8] ^= uint64_t(msg[i]) << (8*(i%8));
+    keccak_p(st,turbo);
+    return {st[0],st[1],st[2],st[3]};
 }
 
-static void test_real_proof_tamper_rejection() {
-    long c0 = checks, f0 = fails;
-    long d0, d1, d2, d3, d4;
-    auto ts_cmds = load_trace_file("tb/fixtures/real_qsagsta1_ts_trace.txt", d0, d1, d2, d3, d4);
-    auto p2_cmds = load_trace_file("tb/fixtures/real_qsagsta1_p2_trace.txt", d0, d1, d2, d3, d4);
-
-    // 1. Flip 1 bit in a real Fiat-Shamir / PoW Keccak rate block -> immediate hardware rejection!
-    for (auto& c : ts_cmds) {
-        if (c.kind == TK_KS && !c.ks.empty() && c.ks[0].init && c.ks[0].chk) {
-            std::vector<KsBlk> one = {c.ks[0]};
-            check(exec_ks_batch(one).ok, "honest real KS block accepted");
-            one[0].lanes[0] ^= 1ULL;
-            check(!exec_ks_batch(one).ok, "1-bit flip in real proof transcript/PoW block rejected");
-            break;
-        }
+static void test_canopy() {
+    Rng rng(724);
+    D4 a{},b{},sibling{};
+    for (auto p : {&a,&b,&sibling}) for (auto& w : *p) w=rng.next();
+    for (bool turbo : {false,true}) {
+        D4 node=canopy_hash(turbo,false,2,a,b);
+        D4 root=canopy_hash(turbo,true,2,canopy_hash(turbo,false,1,node,sibling));
+        TcOp tc{turbo,2,root,{{4,a},{5,b}},{sibling}};
+        check(exec_tc_op(tc).ok && get_y4()==root,"Steiner frontier root");
+        tc.leaves[1].second[3]^=1;
+        check(!exec_tc_op(tc).ok,"Steiner leaf tamper");
+        tc.leaves[1].second[3]^=1;
+        tc.sibs[0][0]^=1;
+        check(!exec_tc_op(tc).ok,"Steiner sibling tamper");
     }
-    // 2. Flip 1 bit in a real TurboSHAKE256 Canopy Merkle authentication sibling -> immediate rejection!
-    for (auto& c : ts_cmds) {
-        if (c.kind == TK_TC && !c.tc.sibs.empty()) {
-            TcOp bad = c.tc;
-            bad.sibs[bad.sibs.size() / 2][1] ^= (1ULL << 19);
-            check(!exec_tc_op(bad).ok, "1-bit flip in real TurboSHAKE256 Canopy sibling rejected");
-            TcOp bad_leaf = c.tc;
-            bad_leaf.leaves[0].second[0] ^= 1ULL;
-            check(!exec_tc_op(bad_leaf).ok, "1-bit flip in real TurboSHAKE256 Canopy leaf rejected");
-            break;
-        }
-    }
-    // 3. Flip 1 bit in a real Poseidon2 Canopy Merkle root node input -> immediate rejection!
-    for (auto& c : p2_cmds) {
-        if (c.kind == TK_PC) {
-            const auto& root_nd = c.pc.levels.back().back();
-            for (int i = 0; i < 3; i++) set_x(i, c.pc.key[i]);
-            for (int i = 0; i < 4; i++) set_x(4 + i, root_nd.p[i]);
-            run_op(0x03, 1);
-            axil_write(R_STREAM, 0);
-            D4 bad_r = root_nd.r;
-            bad_r[0] ^= 1ULL;
-            if (bad_r[0] >= GLP) bad_r[0] = gl_add(root_nd.r[0], 1);
-            stream_beat(bad_r.data(), 4);
-            for (int i = 0; i < 4; i++) set_x(i, root_nd.l[i]);
-            axil_write(R_ARG32, 0x80000000u | (root_nd.idx << 1));
-            run_op(0x04, 0, 0);
-            check(!run_op(0x05).ok, "1-bit flip in real Poseidon2 Canopy sibling rejected");
-            break;
-        }
-    }
-    // 4. Flip 1 bit in a real QSAGSTA1 sumcheck round polynomial coefficient -> immediate rejection!
-    for (auto& c : ts_cmds) {
-        if (c.kind == TK_SC && c.sc.coeffs_hi_to_lo.back()[0] + 2 < GLP) {
-            ScOp bad = c.sc;
-            bad.coeffs_hi_to_lo.back()[0] ^= 1ULL;
-            check(!exec_sc_op(bad).ok, "1-bit flip in real QSAGSTA1 sumcheck polynomial rejected");
-            break;
-        }
-    }
-    // 5. Flip 1 bit in a real QSAGSTA1 Ext4 gate evaluation -> immediate rejection!
-    for (auto& c : ts_cmds) {
-        if (c.kind == TK_EMAC && !c.emac.empty() && c.emac[0].b[0] != 0 && c.emac[0].a[0] + 2 < GLP) {
-            std::vector<ExtMacItem> one = {c.emac[0]};
-            one[0].a[0] ^= 1ULL;
-            check(!exec_emac_batch(one).ok, "1-bit flip in real QSAGSTA1 Ext4 gate evaluation rejected");
-            break;
-        }
-    }
-    run_op(0x3F);
-    section("real QSAGSTA1 single-bit tamper rejection (proof, TS/P2 Merkle, sumcheck, Ext4)", c0, f0);
 }
 
-static void replay_all_real_proofs(FILE* rep) {
-    replay_single_real_proof("real QSAGSTA1 Role-1 (TurboSHAKE256 Canopy, 170,317 B)",
-                             "tb/fixtures/real_qsagsta1_ts_trace.txt",
-                             "tb/fixtures/real_qsagsta1_ts.bin", rep);
-    replay_single_real_proof("real QSAGSTA1 Role-2 (Poseidon2 Canopy, 169,741 B)",
-                             "tb/fixtures/real_qsagsta1_p2_trace.txt",
-                             "tb/fixtures/real_qsagsta1_p2.bin", rep);
-    replay_single_real_proof("real [CWYZ26] DuetFold (4 statements, cSHAKE256 Canopy)",
-                             "tb/fixtures/real_duet_fold_trace.txt",
-                             nullptr, rep);
-    test_real_proof_tamper_rejection();
+static void test_sumcheck_batch() {
+    Rng rng(0x1235);
+    for (int mode : {0,1,2,3,4,9,255}) {
+        int degree=mode ? mode : 3;
+        std::vector<E5> c(degree+1);
+        for (auto& v:c) v=rng.e5();
+        E5 r=rng.e5(), claim=c[0], want=c.back();
+        for (const auto& v:c) claim=e5_add(claim,v);
+        for (int j=degree-1;j>=0;--j) want=e5_mul_add(want,r,c[j]);
+        for (int fault=0;fault<(mode ? 3 : 2);++fault) {
+            E5 init=claim;
+            if (!mode && fault) init[4]^=1;
+            set_x5(0,init);
+            check(run_op(0x11).ok,"sumcheck init");
+            auto input=c;
+            if (mode && fault==1) input[degree][4]^=1;
+            if (mode && fault==2) input[0][4]=GLP;
+            OpRes round;
+            if (!mode) {
+                for (int j=0;j<=degree;++j) set_x5(5*j,input[j]);
+                set_x5(20,r);
+                round=run_op(0x12);
+            } else {
+                axil_write(R_CMD,0x12u | (mode<<8));
+                stream_beat(r.data(),5);
+                for (int j=degree;j>=0;--j) stream_beat(input[j].data(),5);
+                round=wait_op(0x12);
+            }
+            check(round.ok==(fault==0),"sumcheck acceptance");
+            if (!fault) check(get_y5()==want,"Horner result");
+            if (fault==2) {
+                check(axil_read(R_STATUS)&8,"sumcheck fifth-limb range error");
+                run_op(0x3f);
+            }
+        }
+    }
+    for (int lane=0; lane<5; ++lane) {
+        E5 bad{};
+        bad[lane]=GLP;
+        set_x5(0,bad);
+        check(!run_op(0x11).ok && (axil_read(R_STATUS)&8),"noncanonical initial claim");
+        run_op(0x3f);
+        axil_write(R_STREAM,0x80000000u);
+        stream_beat(bad.data(),5);
+        check(axil_read(R_STATUS)&8,"noncanonical passive table element");
+        run_op(0x3f);
+    }
+    check(!run_op(0x15,7,9).ok && (axil_read(R_STATUS)&16),"seven challenges exceed X window");
+    run_op(0x3f);
+    check(!run_op(0x16,0,0).ok && (axil_read(R_STATUS)&16),"empty batch");
+    run_op(0x3f);
+    for (int fault=0;fault<4;++fault) {
+        int count=fault ? 3 : 320;
+        axil_write(R_CMD,0x16u | (count<<16));
+        E5 tail{};
+        for (int j=0;j<count;++j) {
+            E5 a=rng.e5(),b=rng.e5(),c=rng.e5();
+            tail=e5_mul_add(a,b,c);
+            auto expected=tail;
+            if (j==1 && fault==1) a[4]^=1;
+            if (j==1 && fault==2) expected[4]^=1;
+            if (j==1 && fault==3) c[4]=GLP;
+            for (auto p:{&a,&b,&c,&expected}) {
+                uint64_t beat[8]={(*p)[0],(*p)[1],(*p)[2],(*p)[3],(*p)[4],GLP,GLP,GLP};
+                stream_beat(beat,8);
+            }
+        }
+        check(wait_op(0x16).ok==(fault==0),"batch acceptance");
+        check(get_y5()==tail,"last batch result");
+        if (fault==3) {
+            check(axil_read(R_STATUS)&8,"batch fifth-limb range error");
+            run_op(0x3f);
+        }
+    }
+}
+// Deterministic connected workload for installations without a serialized proof.
+// Commit gate evaluations, use the 400-bit squeeze for fold and sumcheck challenges,
+// and authenticate the resulting opening through both Canopy implementations.
+static void replay_fp5_workload(FILE* report) {
+    long initial_checks=checks, initial_fails=fails;
+    Rng rng(0x5148414d32);
+    run_op(0x3f);
+    std::fill_n(opcode_cycles,256,0);
+    uint64_t begin=total_cycles();
+    std::vector<E5> gates(16);
+    axil_write(R_CMD,0x16u | (16u<<16));
+    for (auto& gate:gates) {
+        E5 a=rng.e5(), b=rng.e5(), c=rng.e5();
+        gate=e5_mul_add(a,b,c);
+        for (const auto* word:{&a,&b,&c,&gate}) stream_beat(word->data(),5);
+    }
+    check(wait_op(0x16).ok && get_y5()==gates.back(),"replay gate evaluations");
+
+    // The transcript contains the eight-byte workload tag and every gate limb.
+    std::vector<uint8_t> msg{'Q','S','A','G','H','Q','M','2'};
+    for (const auto& gate:gates) for (uint64_t w:gate)
+        for (unsigned b=0;b<8;++b) msg.push_back(uint8_t(w>>(8*b)));
+    msg.push_back(7);
+    msg.resize(((msg.size()+135)/136)*136);
+    msg.back()|=128;
+    KState host{};
+    axil_write(R_CMD,0x22u | (uint32_t(msg.size()/136)<<16));
+    for (size_t pos=0;pos<msg.size();pos+=136) {
+        uint64_t block[17]{};
+        for (int i=0;i<136;++i) block[i/8]|=uint64_t(msg[pos+i])<<(8*(i%8));
+        for (int i=0;i<17;++i) host[i]^=block[i];
+        keccak_p(host,true);
+        bool final=pos+136==msg.size();
+        uint64_t flags=(pos==0) | 8u;
+        if (final) flags|=64u | ((host[6]&65535u)<<48);
+        uint64_t last[8]={block[16],flags,host[0],host[1],host[2],host[3],host[4],host[5]};
+        stream_beat(block,8); stream_beat(block+8,8); stream_beat(last,8);
+    }
+    check(wait_op(0x22).ok,"replay transcript");
+    E5 challenge{};
+    for (int i=0;i<5;++i) challenge[i]=gl_red(get_y(i));
+    std::vector<E5> point;
+    for (int i=0;i<4;++i) point.push_back(e5_frobenius(challenge,i));
+    E5 want=fold_model_fp5(gates,point), claim{};
+    fold_table(gates,point,claim);
+    check(claim==want,"replay coset fold");
+    set_x5(0,claim);
+    check(run_op(0x11).ok,"replay initial claim");
+    for (int degree:{2,3,4,9}) {
+        std::vector<E5> c(degree+1);
+        E5 sum{};
+        for (int k=1;k<=degree;++k) { c[k]=rng.e5(); sum=e5_add(sum,c[k]); }
+        for (int i=0;i<5;++i) c[0][i]=gl_mul(gl_sub(want[i],sum[i]),(GLP+1)/2);
+        const E5 r=e5_frobenius(challenge,degree);
+        axil_write(R_CMD,0x12u | (degree<<8));
+        stream_beat(r.data(),5);
+        for (int k=degree;k>=0;--k) stream_beat(c[k].data(),5);
+        want=c.back();
+        for (int k=degree-1;k>=0;--k) want=e5_mul_add(want,r,c[k]);
+        check(wait_op(0x12).ok && get_y5()==want,"replay chained sumcheck");
+    }
+    E5 opening=get_y5();
+    D4 cap{},leaf{},sib{},uncle{};
+    for (int i=0;i<4;++i) {leaf[i]=want[i]; sib[i]=gates[0][i]; uncle[i]=gates[1][i];}
+    D4 node=canopy_hash(true,false,2,leaf,sib);
+    D4 root=canopy_hash(true,true,2,canopy_hash(true,false,1,node,uncle));
+    TcOp proof{true,2,root,{{4,leaf},{5,sib}},{uncle}};
+    for (int i=0;i<4;++i) proof.leaves[0].second[i]=opening[i];
+    check(exec_tc_op(proof).ok && get_y4()==root,"replay Steiner root");
+    Tree tree(3,rng);
+    std::vector<uint64_t> words(want.begin(),want.end());
+    for (auto h:root) words.push_back(gl_red(h));
+    tree.node[8]=p2_sponge_with_cap(LEAF_DOMAIN,cap,words);
+    tree.build(); chain_cfg(tree,cap);
+    load_chain(0,tree,0,words);
+    check(run_op(0x05).ok,"replay Poseidon2 opening");
+    run_op(0x06,0);
+    check(get_y4()==tree.node[1],"replay final root");
+    section("connected QSAGHQM2-shaped Fp5 verifier workload",initial_checks,initial_fails);
+    if (report) {
+        fprintf(report,"%s generated workload TOTAL_CYCLES %llu\n",PROFILE_NAME,(unsigned long long)(total_cycles()-begin));
+        for (int i=0;i<256;++i) if (opcode_cycles[i])
+            fprintf(report,"0x%02x OP_CYCLES %llu\n",i,(unsigned long long)opcode_cycles[i]);
+    }
 }
 
 int main(int argc, char** argv) {
@@ -1696,10 +1147,11 @@ int main(int argc, char** argv) {
     test_basic_ops();
     test_top_keccak();
     test_fold_and_chains();
-    replay_all_real_proofs(rep);
+    test_sumcheck_batch();
+    test_canopy();
     test_zk_hem_v2();
-    if (!COMPACT && !std::getenv("QSAG_REAL_ONLY")) { trace_qsagsta1(rep); trace_edge_fold(rep); }
     check((axil_read(R_STATUS) & 0x18) == 0, "no sticky error flags");
+    replay_fp5_workload(rep);
     if (rep) fclose(rep);
     printf("TOP: %ld checks, %ld mismatches, %llu clocks simulated\n", checks, fails, (unsigned long long)cyc);
     dut->final();

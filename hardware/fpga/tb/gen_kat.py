@@ -14,13 +14,6 @@ for e in g:
     o.append("  {%s, %s, %s, %s}," % (u(e["a_raw"]), u(e["b_raw"]), u(e["mul"]), u(e["pow7_a"])))
 o.append("};")
 
-o.append("struct KatExt4 { uint64_t x[4], y[4], mul[4]; };")
-o.append("static const KatExt4 KAT_EXT4[] = {")
-for e in d["goldilocks_ext4"]:
-    f = lambda k: "{" + ", ".join(u(v) for v in e[k]) + "}"
-    o.append("  {%s, %s, %s}," % (f("x"), f("y"), f("mul")))
-o.append("};")
-
 o.append("struct KatP2 { uint64_t in[12], out[12]; };")
 o.append("static const KatP2 KAT_P2[] = {")
 for e in d["poseidon2_12"]:

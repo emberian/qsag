@@ -13,11 +13,6 @@ module qsag_units_tb (
     // S-box
     input  logic [63:0]   sb_x,
     output logic [63:0]   sb_y,
-    // Ext4 MAC
-    input  logic [255:0]  e_a,
-    input  logic [255:0]  e_b,
-    input  logic [255:0]  e_c,
-    output logic [255:0]  e_y,
     // Ext5 MAC (zk-Hem v2 F_p[X]/(X^5 - 3))
     input  logic [319:0]  e5_a,
     input  logic [319:0]  e5_b,
@@ -74,7 +69,6 @@ module qsag_units_tb (
     qsag_gl64_dsp_mul #(.AW(16), .BW(16)) u_mul16 (.clk(clk), .a(mul_a), .b(mul_b), .r(mul_r16));
     qsag_gl64_reduce u_red (.clk(clk), .x(red_x), .r(red_r));
     qsag_p2_sbox7 u_sbox (.clk(clk), .x(sb_x), .y(sb_y));
-    qsag_ext4_mac u_ext4 (.clk(clk), .a(e_a), .b(e_b), .c(e_c), .y(e_y));
     qsag_ext5_mac u_ext5 (.clk(clk), .a(e5_a), .b(e5_b), .c(e5_c), .y(e5_y));
 
     qsag_poseidon2_12_fpga #(.TAGW(16)) u_ring (
