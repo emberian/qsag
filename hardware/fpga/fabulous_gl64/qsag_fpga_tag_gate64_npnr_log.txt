@@ -100,7 +100,7 @@ Info:   clk-to-q  1.00  1.00 Source $abc$10703$lut$aiger$o191.Q
 Info:    routing  11.10  12.10 Net top_i.w_0[0] (1,19) -> (1,12)
 Info:                          Sink $abc$10703$lut$aiger10702$1298.I0
 Info:                          Defined in:
-Info:                               /home/build/wave-e12-obend/fabulous_gl64/proj/user_design/qsag_fpga_tag_gate64.sv:9.16-9.19
+Info:                               /work/qsag-fpga/fabulous_gl64/proj/user_design/qsag_fpga_tag_gate64.sv:9.16-9.19
 Info:      logic  3.00  15.10 Source $abc$10703$lut$aiger10702$1298.O
 Info:    routing  2.10  17.20 Net $abc$10703$aiger10702$1298 (1,12) -> (1,12)
 Info:                          Sink $abc$10703$lut$aiger10702$1304.I0

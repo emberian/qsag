@@ -403,7 +403,8 @@ def check_lean(proposals):
         for name, text in proposals:
             path = Path(scratch)/f'SydTvGenerated_{name}.lean'
             path.write_text(text)
-            wrapper = ['swarm-build'] if shutil.which('swarm-build') else []
+            wrap_env = os.environ.get('QSAG_BUILD_WRAPPER', '').strip()
+            wrapper = wrap_env.split() if wrap_env else []
             run = subprocess.run(wrapper + ['lake', 'env', 'lean', str(path)], cwd=ROOT/'lean',
                                  text=True, capture_output=True, timeout=540)
             output = run.stdout + run.stderr
