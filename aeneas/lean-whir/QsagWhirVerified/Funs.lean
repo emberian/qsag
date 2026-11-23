@@ -23,51 +23,255 @@ set_option maxRecDepth 2048
 namespace qsag_whir_verified
 
 /-- [qsag_whir_verified::GOLDILOCKS_P]
-    Source: 'src/lib.rs', lines 5:0-5:52
+    Source: 'src/lib.rs', lines 12:0-12:52
     Visibility: public -/
 @[global_simps, irreducible]
 def GOLDILOCKS_P : Std.U64 := 18446744069414584321#u64
 
 /-- [qsag_whir_verified::MAX_U64_WORD]
-    Source: 'src/lib.rs', lines 8:0-8:52
+    Source: 'src/lib.rs', lines 15:0-15:52
     Visibility: public -/
 @[global_simps, irreducible]
 def MAX_U64_WORD : Std.U64 := 18446744073709551615#u64
 
-/-- [qsag_whir_verified::TAG_CANOPY_MERKLE_INTERNAL]
-    Source: 'src/lib.rs', lines 11:0-11:45
+/-- [qsag_whir_verified::FP5_NONRESIDUE_W]
+    Source: 'src/lib.rs', lines 18:0-18:36
     Visibility: public -/
-@[global_simps, irreducible] def TAG_CANOPY_MERKLE_INTERNAL : Std.U8 := 0#u8
+@[global_simps, irreducible] def FP5_NONRESIDUE_W : Std.U64 := 3#u64
+
+/-- [qsag_whir_verified::FROBENIUS_ZETA5_1]
+    Source: 'src/lib.rs', lines 21:0-21:61
+    Visibility: public -/
+@[global_simps, irreducible]
+def FROBENIUS_ZETA5_1 : Std.U64 := 1041288259238279555#u64
+
+/-- [qsag_whir_verified::FROBENIUS_ZETA5_2]
+    Source: 'src/lib.rs', lines 23:0-23:62
+    Visibility: public -/
+@[global_simps, irreducible]
+def FROBENIUS_ZETA5_2 : Std.U64 := 15820824984080659046#u64
+
+/-- [qsag_whir_verified::FROBENIUS_ZETA5_3]
+    Source: 'src/lib.rs', lines 25:0-25:59
+    Visibility: public -/
+@[global_simps, irreducible]
+def FROBENIUS_ZETA5_3 : Std.U64 := 211587555138949697#u64
+
+/-- [qsag_whir_verified::FROBENIUS_ZETA5_4]
+    Source: 'src/lib.rs', lines 27:0-27:61
+    Visibility: public -/
+@[global_simps, irreducible]
+def FROBENIUS_ZETA5_4 : Std.U64 := 1373043270956696022#u64
+
+/-- [qsag_whir_verified::QSAGHQM2_PROFILE_TURBO400]
+    Source: 'src/lib.rs', lines 30:0-30:44
+    Visibility: public -/
+@[global_simps, irreducible] def QSAGHQM2_PROFILE_TURBO400 : Std.U8 := 1#u8
+
+/-- [qsag_whir_verified::QSAGHQM2_PROFILE_GL24]
+    Source: 'src/lib.rs', lines 32:0-32:40
+    Visibility: public -/
+@[global_simps, irreducible] def QSAGHQM2_PROFILE_GL24 : Std.U8 := 2#u8
+
+/-- [qsag_whir_verified::MIN_QUINTIC_LOG_CELLS]
+    Source: 'src/lib.rs', lines 35:0-35:42
+    Visibility: public -/
+@[global_simps, irreducible] def MIN_QUINTIC_LOG_CELLS : Std.U32 := 16#u32
+
+/-- [qsag_whir_verified::MAX_QUINTIC_LOG_CELLS]
+    Source: 'src/lib.rs', lines 37:0-37:42
+    Visibility: public -/
+@[global_simps, irreducible] def MAX_QUINTIC_LOG_CELLS : Std.U32 := 28#u32
+
+/-- [qsag_whir_verified::MAX_CANOPY_LOG_LEAVES]
+    Source: 'src/lib.rs', lines 39:0-39:42
+    Visibility: public -/
+@[global_simps, irreducible] def MAX_CANOPY_LOG_LEAVES : Std.U32 := 28#u32
+
+/-- [qsag_whir_verified::copy_fp5]:
+    Source: 'src/lib.rs', lines 82:0-90:1 -/
+def copy_fp5 (x : Fp5) : Result Fp5 := do
+  ok x
+
+/-- [qsag_whir_verified::load_le_u64_40]:
+    Source: 'src/lib.rs', lines 93:0-105:1 -/
+def load_le_u64_40
+  (bytes : Array Std.U8 40#usize) (off : Std.Usize) : Result Std.U64 := do
+  if off > 32#usize
+  then ok 0#u64
+  else
+    let i ← Array.index_usize bytes off
+    let i1 ← lift (UScalar.cast .U64 i)
+    let i2 ← off + 1#usize
+    let i3 ← Array.index_usize bytes i2
+    let i4 ← lift (UScalar.cast .U64 i3)
+    let i5 ← i4 <<< 8#i32
+    let i6 ← lift (i1 ||| i5)
+    let i7 ← off + 2#usize
+    let i8 ← Array.index_usize bytes i7
+    let i9 ← lift (UScalar.cast .U64 i8)
+    let i10 ← i9 <<< 16#i32
+    let i11 ← lift (i6 ||| i10)
+    let i12 ← off + 3#usize
+    let i13 ← Array.index_usize bytes i12
+    let i14 ← lift (UScalar.cast .U64 i13)
+    let i15 ← i14 <<< 24#i32
+    let i16 ← lift (i11 ||| i15)
+    let i17 ← off + 4#usize
+    let i18 ← Array.index_usize bytes i17
+    let i19 ← lift (UScalar.cast .U64 i18)
+    let i20 ← i19 <<< 32#i32
+    let i21 ← lift (i16 ||| i20)
+    let i22 ← off + 5#usize
+    let i23 ← Array.index_usize bytes i22
+    let i24 ← lift (UScalar.cast .U64 i23)
+    let i25 ← i24 <<< 40#i32
+    let i26 ← lift (i21 ||| i25)
+    let i27 ← off + 6#usize
+    let i28 ← Array.index_usize bytes i27
+    let i29 ← lift (UScalar.cast .U64 i28)
+    let i30 ← i29 <<< 48#i32
+    let i31 ← lift (i26 ||| i30)
+    let i32 ← off + 7#usize
+    let i33 ← Array.index_usize bytes i32
+    let i34 ← lift (UScalar.cast .U64 i33)
+    let i35 ← i34 <<< 56#i32
+    ok (i31 ||| i35)
+
+/-- [qsag_whir_verified::load_le_u64_56]:
+    Source: 'src/lib.rs', lines 108:0-120:1 -/
+def load_le_u64_56
+  (bytes : Array Std.U8 56#usize) (off : Std.Usize) : Result Std.U64 := do
+  if off > 48#usize
+  then ok 0#u64
+  else
+    let i ← Array.index_usize bytes off
+    let i1 ← lift (UScalar.cast .U64 i)
+    let i2 ← off + 1#usize
+    let i3 ← Array.index_usize bytes i2
+    let i4 ← lift (UScalar.cast .U64 i3)
+    let i5 ← i4 <<< 8#i32
+    let i6 ← lift (i1 ||| i5)
+    let i7 ← off + 2#usize
+    let i8 ← Array.index_usize bytes i7
+    let i9 ← lift (UScalar.cast .U64 i8)
+    let i10 ← i9 <<< 16#i32
+    let i11 ← lift (i6 ||| i10)
+    let i12 ← off + 3#usize
+    let i13 ← Array.index_usize bytes i12
+    let i14 ← lift (UScalar.cast .U64 i13)
+    let i15 ← i14 <<< 24#i32
+    let i16 ← lift (i11 ||| i15)
+    let i17 ← off + 4#usize
+    let i18 ← Array.index_usize bytes i17
+    let i19 ← lift (UScalar.cast .U64 i18)
+    let i20 ← i19 <<< 32#i32
+    let i21 ← lift (i16 ||| i20)
+    let i22 ← off + 5#usize
+    let i23 ← Array.index_usize bytes i22
+    let i24 ← lift (UScalar.cast .U64 i23)
+    let i25 ← i24 <<< 40#i32
+    let i26 ← lift (i21 ||| i25)
+    let i27 ← off + 6#usize
+    let i28 ← Array.index_usize bytes i27
+    let i29 ← lift (UScalar.cast .U64 i28)
+    let i30 ← i29 <<< 48#i32
+    let i31 ← lift (i26 ||| i30)
+    let i32 ← off + 7#usize
+    let i33 ← Array.index_usize bytes i32
+    let i34 ← lift (UScalar.cast .U64 i33)
+    let i35 ← i34 <<< 56#i32
+    ok (i31 ||| i35)
 
 /-- [qsag_whir_verified::decode_canonical_u64]:
-    Source: 'src/lib.rs', lines 14:0-16:1
+    Source: 'src/lib.rs', lines 123:0-125:1
     Visibility: public -/
 def decode_canonical_u64 (x : Std.U64) : Result (Option Std.U64) := do
   if x < GOLDILOCKS_P
   then ok (some x)
   else ok none
 
-/-- [qsag_whir_verified::decode_canonical_ext4]:
-    Source: 'src/lib.rs', lines 27:0-33:1
+/-- [qsag_whir_verified::decode_canonical_fp5_limbs]:
+    Source: 'src/lib.rs', lines 128:0-145:1
     Visibility: public -/
-def decode_canonical_ext4
-  (a : Std.U64) (b : Std.U64) (c : Std.U64) (d : Std.U64) :
-  Result (Option Ext4)
+def decode_canonical_fp5_limbs
+  (c0 : Std.U64) (c1 : Std.U64) (c2 : Std.U64) (c3 : Std.U64) (c4 : Std.U64) :
+  Result (Option Fp5)
   := do
-  if a < GOLDILOCKS_P
+  if c0 < GOLDILOCKS_P
   then
-    if b < GOLDILOCKS_P
+    if c1 < GOLDILOCKS_P
     then
-      if c < GOLDILOCKS_P
-      then if d < GOLDILOCKS_P
-           then ok (some { a, b, c, d })
-           else ok none
+      if c2 < GOLDILOCKS_P
+      then
+        if c3 < GOLDILOCKS_P
+        then
+          if c4 < GOLDILOCKS_P
+          then ok (some { c0, c1, c2, c3, c4 })
+          else ok none
+        else ok none
       else ok none
     else ok none
   else ok none
 
+/-- [qsag_whir_verified::decode_canonical_fp5]:
+    Source: 'src/lib.rs', lines 148:0-156:1
+    Visibility: public -/
+def decode_canonical_fp5
+  (bytes : Array Std.U8 40#usize) : Result (Option Fp5) := do
+  let i ← load_le_u64_40 bytes 0#usize
+  let i1 ← load_le_u64_40 bytes 8#usize
+  let i2 ← load_le_u64_40 bytes 16#usize
+  let i3 ← load_le_u64_40 bytes 24#usize
+  let i4 ← load_le_u64_40 bytes 32#usize
+  decode_canonical_fp5_limbs i i1 i2 i3 i4
+
+/-- [qsag_whir_verified::decode_canonical_gl24_limbs]:
+    Source: 'src/lib.rs', lines 159:0-188:1
+    Visibility: public -/
+def decode_canonical_gl24_limbs
+  (l0 : Std.U64) (l1 : Std.U64) (l2 : Std.U64) (l3 : Std.U64) (l4 : Std.U64)
+  (l5 : Std.U64) (l6 : Std.U64) :
+  Result (Option Gl24Digest)
+  := do
+  if l0 < GOLDILOCKS_P
+  then
+    if l1 < GOLDILOCKS_P
+    then
+      if l2 < GOLDILOCKS_P
+      then
+        if l3 < GOLDILOCKS_P
+        then
+          if l4 < GOLDILOCKS_P
+          then
+            if l5 < GOLDILOCKS_P
+            then
+              if l6 < GOLDILOCKS_P
+              then ok (some { l0, l1, l2, l3, l4, l5, l6 })
+              else ok none
+            else ok none
+          else ok none
+        else ok none
+      else ok none
+    else ok none
+  else ok none
+
+/-- [qsag_whir_verified::decode_canonical_gl24_digest]:
+    Source: 'src/lib.rs', lines 191:0-201:1
+    Visibility: public -/
+def decode_canonical_gl24_digest
+  (bytes : Array Std.U8 56#usize) : Result (Option Gl24Digest) := do
+  let i ← load_le_u64_56 bytes 0#usize
+  let i1 ← load_le_u64_56 bytes 8#usize
+  let i2 ← load_le_u64_56 bytes 16#usize
+  let i3 ← load_le_u64_56 bytes 24#usize
+  let i4 ← load_le_u64_56 bytes 32#usize
+  let i5 ← load_le_u64_56 bytes 40#usize
+  let i6 ← load_le_u64_56 bytes 48#usize
+  decode_canonical_gl24_limbs i i1 i2 i3 i4 i5 i6
+
 /-- [qsag_whir_verified::add]:
-    Source: 'src/lib.rs', lines 35:0-37:1
+    Source: 'src/lib.rs', lines 204:0-206:1
     Visibility: public -/
 def add (a : Std.U64) (b : Std.U64) : Result Std.U64 := do
   let i ← lift (UScalar.cast .U128 a)
@@ -78,7 +282,7 @@ def add (a : Std.U64) (b : Std.U64) : Result Std.U64 := do
   ok (UScalar.cast .U64 i4)
 
 /-- [qsag_whir_verified::sub]:
-    Source: 'src/lib.rs', lines 39:0-42:1
+    Source: 'src/lib.rs', lines 209:0-212:1
     Visibility: public -/
 def sub (a : Std.U64) (b : Std.U64) : Result Std.U64 := do
   let reduced_b ← b % GOLDILOCKS_P
@@ -86,7 +290,7 @@ def sub (a : Std.U64) (b : Std.U64) : Result Std.U64 := do
   add a i
 
 /-- [qsag_whir_verified::mul]:
-    Source: 'src/lib.rs', lines 44:0-46:1
+    Source: 'src/lib.rs', lines 215:0-217:1
     Visibility: public -/
 def mul (a : Std.U64) (b : Std.U64) : Result Std.U64 := do
   let i ← lift (UScalar.cast .U128 a)
@@ -96,330 +300,325 @@ def mul (a : Std.U64) (b : Std.U64) : Result Std.U64 := do
   let i4 ← i2 % i3
   ok (UScalar.cast .U64 i4)
 
-/-- [qsag_whir_verified::ext_eq]:
-    Source: 'src/lib.rs', lines 48:0-50:1
+/-- [qsag_whir_verified::fp5_zero]:
+    Source: 'src/lib.rs', lines 220:0-228:1
     Visibility: public -/
-def ext_eq (x : Ext4) (y : Ext4) : Result Bool := do
-  if x.a = y.a
+def fp5_zero : Result Fp5 := do
+  ok { c0 := 0#u64, c1 := 0#u64, c2 := 0#u64, c3 := 0#u64, c4 := 0#u64 }
+
+/-- [qsag_whir_verified::fp5_one]:
+    Source: 'src/lib.rs', lines 231:0-239:1
+    Visibility: public -/
+def fp5_one : Result Fp5 := do
+  ok { c0 := 1#u64, c1 := 0#u64, c2 := 0#u64, c3 := 0#u64, c4 := 0#u64 }
+
+/-- [qsag_whir_verified::fp5_from_base]:
+    Source: 'src/lib.rs', lines 242:0-250:1
+    Visibility: public -/
+def fp5_from_base (x : Std.U64) : Result Fp5 := do
+  let i ← x % GOLDILOCKS_P
+  ok { c0 := i, c1 := 0#u64, c2 := 0#u64, c3 := 0#u64, c4 := 0#u64 }
+
+/-- [qsag_whir_verified::fp5_eq]:
+    Source: 'src/lib.rs', lines 253:0-255:1
+    Visibility: public -/
+def fp5_eq (x : Fp5) (y : Fp5) : Result Bool := do
+  if x.c0 = y.c0
   then
-    if x.b = y.b
-    then if x.c = y.c
-         then ok (x.d = y.d)
-         else ok false
+    if x.c1 = y.c1
+    then
+      if x.c2 = y.c2
+      then if x.c3 = y.c3
+           then ok (x.c4 = y.c4)
+           else ok false
+      else ok false
     else ok false
   else ok false
 
-/-- [qsag_whir_verified::ext_add]:
-    Source: 'src/lib.rs', lines 52:0-59:1
+/-- [qsag_whir_verified::fp5_add]:
+    Source: 'src/lib.rs', lines 258:0-266:1
     Visibility: public -/
-def ext_add (x : Ext4) (y : Ext4) : Result Ext4 := do
-  let i ← add x.a y.a
-  let i1 ← add x.b y.b
-  let i2 ← add x.c y.c
-  let i3 ← add x.d y.d
-  ok { a := i, b := i1, c := i2, d := i3 }
+def fp5_add (x : Fp5) (y : Fp5) : Result Fp5 := do
+  let i ← add x.c0 y.c0
+  let i1 ← add x.c1 y.c1
+  let i2 ← add x.c2 y.c2
+  let i3 ← add x.c3 y.c3
+  let i4 ← add x.c4 y.c4
+  ok { c0 := i, c1 := i1, c2 := i2, c3 := i3, c4 := i4 }
 
-/-- [qsag_whir_verified::ext_sub]:
-    Source: 'src/lib.rs', lines 61:0-68:1
+/-- [qsag_whir_verified::fp5_sub]:
+    Source: 'src/lib.rs', lines 269:0-277:1
     Visibility: public -/
-def ext_sub (x : Ext4) (y : Ext4) : Result Ext4 := do
-  let i ← sub x.a y.a
-  let i1 ← sub x.b y.b
-  let i2 ← sub x.c y.c
-  let i3 ← sub x.d y.d
-  ok { a := i, b := i1, c := i2, d := i3 }
+def fp5_sub (x : Fp5) (y : Fp5) : Result Fp5 := do
+  let i ← sub x.c0 y.c0
+  let i1 ← sub x.c1 y.c1
+  let i2 ← sub x.c2 y.c2
+  let i3 ← sub x.c3 y.c3
+  let i4 ← sub x.c4 y.c4
+  ok { c0 := i, c1 := i1, c2 := i2, c3 := i3, c4 := i4 }
 
-/-- [qsag_whir_verified::ext_scale]:
-    Source: 'src/lib.rs', lines 70:0-77:1
+/-- [qsag_whir_verified::fp5_neg]:
+    Source: 'src/lib.rs', lines 280:0-282:1
     Visibility: public -/
-def ext_scale (x : Ext4) (y : Std.U64) : Result Ext4 := do
-  let i ← mul x.a y
-  let i1 ← mul x.b y
-  let i2 ← mul x.c y
-  let i3 ← mul x.d y
-  ok { a := i, b := i1, c := i2, d := i3 }
+def fp5_neg (x : Fp5) : Result Fp5 := do
+  let f ← fp5_zero
+  fp5_sub f x
 
-/-- [qsag_whir_verified::ext_mul]:
-    Source: 'src/lib.rs', lines 79:0-98:1
+/-- [qsag_whir_verified::fp5_scale]:
+    Source: 'src/lib.rs', lines 285:0-293:1
     Visibility: public -/
-def ext_mul (x : Ext4) (y : Ext4) : Result Ext4 := do
-  let i ← mul x.a y.a
-  let i1 ← mul x.b y.d
-  let i2 ← mul x.c y.c
+def fp5_scale (x : Fp5) (s : Std.U64) : Result Fp5 := do
+  let i ← mul x.c0 s
+  let i1 ← mul x.c1 s
+  let i2 ← mul x.c2 s
+  let i3 ← mul x.c3 s
+  let i4 ← mul x.c4 s
+  ok { c0 := i, c1 := i1, c2 := i2, c3 := i3, c4 := i4 }
+
+/-- [qsag_whir_verified::fp5_mul]:
+    Source: 'src/lib.rs', lines 296:0-335:1
+    Visibility: public -/
+def fp5_mul (x : Fp5) (y : Fp5) : Result Fp5 := do
+  let i ← mul x.c0 y.c0
+  let i1 ← mul x.c1 y.c4
+  let i2 ← mul x.c2 y.c3
   let i3 ← add i1 i2
-  let i4 ← mul x.d y.b
-  let i5 ← add i3 i4
-  let i6 ← mul 7#u64 i5
-  let i7 ← add i i6
-  let i8 ← mul x.a y.b
-  let i9 ← mul x.b y.a
-  let i10 ← add i8 i9
-  let i11 ← mul x.c y.d
-  let i12 ← mul x.d y.c
-  let i13 ← add i11 i12
-  let i14 ← mul 7#u64 i13
-  let i15 ← add i10 i14
-  let i16 ← mul x.a y.c
-  let i17 ← mul x.b y.b
-  let i18 ← add i16 i17
-  let i19 ← mul x.c y.a
-  let i20 ← add i18 i19
-  let i21 ← mul x.d y.d
-  let i22 ← mul 7#u64 i21
-  let i23 ← add i20 i22
-  let i24 ← mul x.a y.d
-  let i25 ← mul x.b y.c
-  let i26 ← add i24 i25
-  let i27 ← mul x.c y.b
-  let i28 ← mul x.d y.a
-  let i29 ← add i27 i28
-  let i30 ← add i26 i29
-  ok { a := i7, b := i15, c := i23, d := i30 }
+  let i4 ← mul x.c3 y.c2
+  let i5 ← mul x.c4 y.c1
+  let i6 ← add i4 i5
+  let i7 ← add i3 i6
+  let i8 ← mul FP5_NONRESIDUE_W i7
+  let i9 ← add i i8
+  let i10 ← mul x.c0 y.c1
+  let i11 ← mul x.c1 y.c0
+  let i12 ← add i10 i11
+  let i13 ← mul x.c2 y.c4
+  let i14 ← mul x.c3 y.c3
+  let i15 ← add i13 i14
+  let i16 ← mul x.c4 y.c2
+  let i17 ← add i15 i16
+  let i18 ← mul FP5_NONRESIDUE_W i17
+  let i19 ← add i12 i18
+  let i20 ← mul x.c0 y.c2
+  let i21 ← mul x.c1 y.c1
+  let i22 ← add i20 i21
+  let i23 ← mul x.c2 y.c0
+  let i24 ← add i22 i23
+  let i25 ← mul x.c3 y.c4
+  let i26 ← mul x.c4 y.c3
+  let i27 ← add i25 i26
+  let i28 ← mul FP5_NONRESIDUE_W i27
+  let i29 ← add i24 i28
+  let i30 ← mul x.c0 y.c3
+  let i31 ← mul x.c1 y.c2
+  let i32 ← add i30 i31
+  let i33 ← mul x.c2 y.c1
+  let i34 ← mul x.c3 y.c0
+  let i35 ← add i33 i34
+  let i36 ← add i32 i35
+  let i37 ← mul x.c4 y.c4
+  let i38 ← mul FP5_NONRESIDUE_W i37
+  let i39 ← add i36 i38
+  let i40 ← mul x.c0 y.c4
+  let i41 ← mul x.c1 y.c3
+  let i42 ← add i40 i41
+  let i43 ← mul x.c2 y.c2
+  let i44 ← mul x.c3 y.c1
+  let i45 ← add i43 i44
+  let i46 ← add i42 i45
+  let i47 ← mul x.c4 y.c0
+  let i48 ← add i46 i47
+  ok { c0 := i9, c1 := i19, c2 := i29, c3 := i39, c4 := i48 }
 
-/-- [qsag_whir_verified::affine_combine]:
-    Source: 'src/lib.rs', lines 100:0-102:1
+/-- [qsag_whir_verified::fp5_frobenius]:
+    Source: 'src/lib.rs', lines 338:0-346:1
     Visibility: public -/
-def affine_combine
-  (even : Ext4) (odd : Ext4) (alpha : Ext4) : Result Ext4 := do
-  let e ← ext_mul alpha even
-  ext_add odd e
+def fp5_frobenius (x : Fp5) : Result Fp5 := do
+  let i ← x.c0 % GOLDILOCKS_P
+  let i1 ← mul x.c1 FROBENIUS_ZETA5_1
+  let i2 ← mul x.c2 FROBENIUS_ZETA5_2
+  let i3 ← mul x.c3 FROBENIUS_ZETA5_3
+  let i4 ← mul x.c4 FROBENIUS_ZETA5_4
+  ok { c0 := i, c1 := i1, c2 := i2, c3 := i3, c4 := i4 }
 
-/-- [qsag_whir_verified::duet_fold]:
-    Source: 'src/lib.rs', lines 104:0-124:1
+/-- [qsag_whir_verified::affine_combine_fp5]:
+    Source: 'src/lib.rs', lines 349:0-351:1
     Visibility: public -/
-def duet_fold
-  (v0 : Ext4) (v1 : Ext4) (inv_two_y0 : Std.U64) (inv_two : Std.U64)
-  (alpha : Ext4) :
-  Result Ext4
+def affine_combine_fp5
+  (even : Fp5) (odd : Fp5) (alpha : Fp5) : Result Fp5 := do
+  let f ← fp5_mul alpha even
+  fp5_add odd f
+
+/-- [qsag_whir_verified::duet_fold_fp5]:
+    Source: 'src/lib.rs', lines 355:0-359:1
+    Visibility: public -/
+def duet_fold_fp5
+  (v0 : Fp5) (v1 : Fp5) (inv_two_y0 : Std.U64) (inv_two : Std.U64)
+  (alpha : Fp5) :
+  Result Fp5
   := do
-  let e ← ext_add v0 v1
-  let even ← ext_scale e inv_two
-  let e1 ← ext_sub v0 v1
-  let odd ← ext_scale e1 inv_two_y0
-  affine_combine even odd alpha
+  let f ← copy_fp5 v0
+  let f1 ← copy_fp5 v1
+  let f2 ← fp5_add f f1
+  let even ← fp5_scale f2 inv_two
+  let f3 ← fp5_sub v0 v1
+  let odd ← fp5_scale f3 inv_two_y0
+  affine_combine_fp5 even odd alpha
 
-/-- [qsag_whir_verified::verify_affine_duet_fold_step]:
-    Source: 'src/lib.rs', lines 126:0-138:1
+/-- [qsag_whir_verified::verify_affine_duet_fold_step_fp5]:
+    Source: 'src/lib.rs', lines 362:0-374:1
     Visibility: public -/
-def verify_affine_duet_fold_step
-  (v0 : Ext4) (v1 : Ext4) (inv_two_y0 : Std.U64) (inv_two : Std.U64)
-  (alpha : Ext4) (claimed_folded : Ext4) :
+def verify_affine_duet_fold_step_fp5
+  (v0 : Fp5) (v1 : Fp5) (inv_two_y0 : Std.U64) (inv_two : Std.U64)
+  (alpha : Fp5) (claimed_folded : Fp5) :
   Result Bool
   := do
-  let e ← duet_fold v0 v1 inv_two_y0 inv_two alpha
-  ext_eq e claimed_folded
+  let f ← duet_fold_fp5 v0 v1 inv_two_y0 inv_two alpha
+  fp5_eq f claimed_folded
 
-/-- [qsag_whir_verified::cwyz_duet_fold]:
-    Source: 'src/lib.rs', lines 142:0-183:1
+/-- [qsag_whir_verified::cwyz_duet_fold_fp5]:
+    Source: 'src/lib.rs', lines 379:0-393:1
     Visibility: public -/
-def cwyz_duet_fold
-  (v0 : Ext4) (v1 : Ext4) (inv_two_y0 : Std.U64) (inv_two : Std.U64)
-  (y0_sq : Std.U64) (theta : Ext4) (alpha : Ext4) (beta : Ext4) :
-  Result Ext4
+def cwyz_duet_fold_fp5
+  (v0 : Fp5) (v1 : Fp5) (inv_two_y0 : Std.U64) (inv_two : Std.U64)
+  (y0_sq : Std.U64) (theta : Fp5) (alpha : Fp5) (beta : Fp5) :
+  Result Fp5
   := do
-  let e ← ext_add v0 v1
-  let even ← ext_scale e inv_two
-  let e1 ← ext_sub v0 v1
-  let odd ← ext_scale e1 inv_two_y0
-  let e2 ← ext_mul theta odd
-  let mixed ← ext_add even e2
-  let e3 ← ext_scale beta y0_sq
-  let e4 ← ext_add alpha e3
-  affine_combine mixed odd e4
+  let f ← copy_fp5 v0
+  let f1 ← copy_fp5 v1
+  let f2 ← fp5_add f f1
+  let even ← fp5_scale f2 inv_two
+  let f3 ← fp5_sub v0 v1
+  let odd ← fp5_scale f3 inv_two_y0
+  let f4 ← copy_fp5 odd
+  let f5 ← fp5_mul theta f4
+  let mixed ← fp5_add even f5
+  let f6 ← fp5_scale beta y0_sq
+  let f7 ← fp5_add alpha f6
+  affine_combine_fp5 mixed odd f7
 
-/-- [qsag_whir_verified::fold_duet_affine_ext4]:
-    Source: 'src/lib.rs', lines 189:0-200:1
+/-- [qsag_whir_verified::verify_cwyz_duet_fold_step_fp5]:
+    Source: 'src/lib.rs', lines 397:0-412:1
     Visibility: public -/
-def fold_duet_affine_ext4
-  (v0 : Ext4) (v1 : Ext4) (inv_two_xk : Std.U64) (inv_two : Std.U64)
-  (xk_sq : Std.U64) (theta : Ext4) (alpha : Ext4) (beta : Ext4) :
-  Result Ext4
-  := do
-  cwyz_duet_fold v0 v1 inv_two_xk inv_two xk_sq theta alpha beta
-
-/-- [qsag_whir_verified::verify_cwyz_duet_fold_step]:
-    Source: 'src/lib.rs', lines 204:0-219:1
-    Visibility: public -/
-def verify_cwyz_duet_fold_step
-  (v0 : Ext4) (v1 : Ext4) (inv_two_y0 : Std.U64) (inv_two : Std.U64)
-  (y0_sq : Std.U64) (theta : Ext4) (alpha : Ext4) (beta : Ext4)
-  (claimed_folded : Ext4) :
+def verify_cwyz_duet_fold_step_fp5
+  (v0 : Fp5) (v1 : Fp5) (inv_two_y0 : Std.U64) (inv_two : Std.U64)
+  (y0_sq : Std.U64) (theta : Fp5) (alpha : Fp5) (beta : Fp5)
+  (claimed_folded : Fp5) :
   Result Bool
   := do
-  let e ← cwyz_duet_fold v0 v1 inv_two_y0 inv_two y0_sq theta alpha beta
-  ext_eq e claimed_folded
+  let f ← cwyz_duet_fold_fp5 v0 v1 inv_two_y0 inv_two y0_sq theta alpha beta
+  fp5_eq f claimed_folded
 
-/-- [qsag_whir_verified::cwyz_bridge_claim_step]:
-    Source: 'src/lib.rs', lines 225:0-266:1
+/-- [qsag_whir_verified::cwyz_bridge_claim_step_fp5]:
+    Source: 'src/lib.rs', lines 418:0-439:1
     Visibility: public -/
-def cwyz_bridge_claim_step
-  (w0 : Ext4) (w1 : Ext4) (w2 : Ext4) (w3 : Ext4) (w4 : Ext4) (claim : Ext4)
-  (phi : Ext4) (theta : Ext4) (alpha : Ext4) (beta : Ext4) :
-  Result Ext4
+def cwyz_bridge_claim_step_fp5
+  (w0 : Fp5) (w1 : Fp5) (w2 : Fp5) (w3 : Fp5) (w4 : Fp5) (claim : Fp5)
+  (phi : Fp5) (theta : Fp5) (alpha : Fp5) (beta : Fp5) :
+  Result Fp5
   := do
-  let e ← ext_mul phi w1
-  let f ← ext_add w0 e
-  let e1 ← ext_sub claim w0
-  let e2 ← ext_mul phi e1
-  let g ← ext_add w2 e2
-  let e3 ← ext_mul theta g
-  let e4 ← ext_add f e3
-  let e5 ← ext_mul alpha e4
-  let core_term ← ext_add g e5
-  let e6 ← ext_mul theta w4
-  let e7 ← ext_add w3 e6
-  let shift_term ← ext_mul beta e7
-  ext_add core_term shift_term
+  let w0_copy ← copy_fp5 w0
+  let phi_copy ← copy_fp5 phi
+  let f ← fp5_mul phi w1
+  let f1 ← fp5_add w0 f
+  let f2 ← fp5_sub claim w0_copy
+  let f3 ← fp5_mul phi_copy f2
+  let g ← fp5_add w2 f3
+  let g_copy ← copy_fp5 g
+  let theta_copy ← copy_fp5 theta
+  let f4 ← fp5_mul theta g_copy
+  let f5 ← fp5_add f1 f4
+  let f6 ← fp5_mul alpha f5
+  let core_term ← fp5_add g f6
+  let f7 ← fp5_mul theta_copy w4
+  let f8 ← fp5_add w3 f7
+  let shift_term ← fp5_mul beta f8
+  fp5_add core_term shift_term
 
-/-- [qsag_whir_verified::verify_cwyz_bridge_claim_step]:
-    Source: 'src/lib.rs', lines 270:0-287:1
+/-- [qsag_whir_verified::verify_cwyz_bridge_claim_step_fp5]:
+    Source: 'src/lib.rs', lines 443:0-460:1
     Visibility: public -/
-def verify_cwyz_bridge_claim_step
-  (w0 : Ext4) (w1 : Ext4) (w2 : Ext4) (w3 : Ext4) (w4 : Ext4) (claim : Ext4)
-  (phi : Ext4) (theta : Ext4) (alpha : Ext4) (beta : Ext4)
-  (claimed_next : Ext4) :
+def verify_cwyz_bridge_claim_step_fp5
+  (w0 : Fp5) (w1 : Fp5) (w2 : Fp5) (w3 : Fp5) (w4 : Fp5) (claim : Fp5)
+  (phi : Fp5) (theta : Fp5) (alpha : Fp5) (beta : Fp5) (claimed_next : Fp5) :
   Result Bool
   := do
-  let e ← cwyz_bridge_claim_step w0 w1 w2 w3 w4 claim phi theta alpha beta
-  ext_eq e claimed_next
+  let f ←
+    cwyz_bridge_claim_step_fp5 w0 w1 w2 w3 w4 claim phi theta alpha beta
+  fp5_eq f claimed_next
 
-/-- [qsag_whir_verified::eval_quadratic_sumcheck_wire]:
-    Source: 'src/lib.rs', lines 291:0-319:1
+/-- [qsag_whir_verified::eval_quadratic_sumcheck_wire_fp5]:
+    Source: 'src/lib.rs', lines 464:0-472:1
     Visibility: public -/
-def eval_quadratic_sumcheck_wire
-  (c0 : Ext4) (c2 : Ext4) (sum_claim : Ext4) (r : Ext4) : Result Ext4 := do
-  let two_c0 ← ext_add c0 c0
-  let e ← ext_sub sum_claim two_c0
-  let c1 ← ext_sub e c2
-  let e1 ← ext_mul c2 r
-  let e2 ← ext_add e1 c1
-  let e3 ← ext_mul e2 r
-  ext_add e3 c0
+def eval_quadratic_sumcheck_wire_fp5
+  (c0 : Fp5) (c2 : Fp5) (sum_claim : Fp5) (r : Fp5) : Result Fp5 := do
+  let c0_a ← copy_fp5 c0
+  let c2_a ← copy_fp5 c2
+  let r_a ← copy_fp5 r
+  let two_c0 ← fp5_add c0 c0_a
+  let f ← fp5_sub sum_claim two_c0
+  let c1 ← fp5_sub f c2
+  let f1 ← fp5_mul c2_a r
+  let f2 ← fp5_add f1 c1
+  let f3 ← fp5_mul f2 r_a
+  fp5_add f3 c0_a
 
-/-- [qsag_whir_verified::affine_cascade_claim_step]:
-    Source: 'src/lib.rs', lines 322:0-333:1
-    Visibility: public -/
-def affine_cascade_claim_step
-  (acc : Ext4) (w0 : Ext4) (w1 : Ext4) (eval_at_point : Ext4)
-  (shifted_eval : Ext4) :
-  Result Ext4
-  := do
-  let e ← ext_mul w0 eval_at_point
-  let e1 ← ext_add acc e
-  let e2 ← ext_mul w1 shifted_eval
-  ext_add e1 e2
-
-/-- [qsag_whir_verified::eval_ext4_univariate_at_base]: loop body 0:
-    Source: 'src/lib.rs', lines 344:4-356:5
+/-- [qsag_whir_verified::eval_fp5_univariate_at_base]: loop body 0:
+    Source: 'src/lib.rs', lines 478:4-482:5
     Visibility: public -/
 @[rust_loop_body]
-def eval_ext4_univariate_at_base_loop.body
-  (coeffs : Slice Ext4) (z : Std.U64) (acc : Ext4) (rem : Std.Usize) :
-  Result (ControlFlow (Ext4 × Std.Usize) Ext4)
+def eval_fp5_univariate_at_base_loop.body
+  (coeffs : Slice Fp5) (z : Std.U64) (acc : Fp5) (rem : Std.Usize) :
+  Result (ControlFlow (Fp5 × Std.Usize) Fp5)
   := do
   if rem > 0#usize
   then
     let rem1 ← rem - 1#usize
     let c ← Slice.index_usize coeffs rem1
-    let e ← ext_scale acc z
-    let acc1 ← ext_add e c
+    let f ← fp5_scale acc z
+    let f1 ← copy_fp5 c
+    let acc1 ← fp5_add f f1
     ok (cont (acc1, rem1))
   else ok (done acc)
 
-/-- [qsag_whir_verified::eval_ext4_univariate_at_base]: loop 0:
-    Source: 'src/lib.rs', lines 344:4-356:5
+/-- [qsag_whir_verified::eval_fp5_univariate_at_base]: loop 0:
+    Source: 'src/lib.rs', lines 478:4-482:5
     Visibility: public -/
 @[rust_loop]
-def eval_ext4_univariate_at_base_loop
-  (coeffs : Slice Ext4) (z : Std.U64) (acc : Ext4) (rem : Std.Usize) :
-  Result Ext4
+def eval_fp5_univariate_at_base_loop
+  (coeffs : Slice Fp5) (z : Std.U64) (acc : Fp5) (rem : Std.Usize) :
+  Result Fp5
   := do
   loop
-    (fun (acc1, rem1) => eval_ext4_univariate_at_base_loop.body coeffs z acc1
+    (fun (acc1, rem1) => eval_fp5_univariate_at_base_loop.body coeffs z acc1
       rem1)
     (acc, rem)
 
-/-- [qsag_whir_verified::eval_ext4_univariate_at_base]:
-    Source: 'src/lib.rs', lines 336:0-358:1
+/-- [qsag_whir_verified::eval_fp5_univariate_at_base]:
+    Source: 'src/lib.rs', lines 475:0-484:1
     Visibility: public -/
-def eval_ext4_univariate_at_base
-  (coeffs : Slice Ext4) (z : Std.U64) : Result Ext4 := do
+def eval_fp5_univariate_at_base
+  (coeffs : Slice Fp5) (z : Std.U64) : Result Fp5 := do
+  let acc ← fp5_zero
   let rem := Slice.len coeffs
-  eval_ext4_univariate_at_base_loop coeffs z
-    { a := 0#u64, b := 0#u64, c := 0#u64, d := 0#u64 } rem
+  eval_fp5_univariate_at_base_loop coeffs z acc rem
 
-/-- [qsag_whir_verified::eval_univariate_ext4_at_base]:
-    Source: 'src/lib.rs', lines 363:0-365:1
+/-- [qsag_whir_verified::verify_fp5_univariate_at_base_pin]:
+    Source: 'src/lib.rs', lines 487:0-489:1
     Visibility: public -/
-def eval_univariate_ext4_at_base
-  (coeffs : Slice Ext4) (z : Std.U64) : Result Ext4 := do
-  eval_ext4_univariate_at_base coeffs z
+def verify_fp5_univariate_at_base_pin
+  (coeffs : Slice Fp5) (z : Std.U64) (expected : Fp5) : Result Bool := do
+  let f ← eval_fp5_univariate_at_base coeffs z
+  fp5_eq f expected
 
-/-- [qsag_whir_verified::verify_ext4_univariate_at_base_pin]:
-    Source: 'src/lib.rs', lines 368:0-370:1
+/-- [qsag_whir_verified::verify_ood_pin_eq_fp5]:
+    Source: 'src/lib.rs', lines 492:0-494:1
     Visibility: public -/
-def verify_ext4_univariate_at_base_pin
-  (coeffs : Slice Ext4) (z : Std.U64) (expected : Ext4) : Result Bool := do
-  let e ← eval_ext4_univariate_at_base coeffs z
-  ext_eq e expected
-
-/-- [qsag_whir_verified::verify_stage_pow_mask]:
-    Source: 'src/lib.rs', lines 373:0-378:1
-    Visibility: public -/
-def verify_stage_pow_mask
-  (word : Std.U64) (pow_bits : Std.U32) : Result Bool := do
-  if pow_bits > 32#u32
-  then ok false
-  else
-    let i ← 1#u64 <<< pow_bits
-    let i1 ← i - 1#u64
-    let i2 ← lift (word &&& i1)
-    ok (i2 = 0#u64)
-
-/-- [qsag_whir_verified::verify_ood_pin_eq]: loop body 0:
-    Source: 'src/lib.rs', lines 386:4-393:1
-    Visibility: public -/
-@[rust_loop_body]
-def verify_ood_pin_eq_loop.body
-  (expected : Slice Std.U64) (supplied : Slice Std.U64) (i : Std.Usize) :
-  Result (ControlFlow Std.Usize Bool)
-  := do
-  let i1 := Slice.len expected
-  if i < i1
-  then
-    let i2 ← Slice.index_usize expected i
-    let i3 ← Slice.index_usize supplied i
-    if i2 != i3
-    then ok (done false)
-    else let i4 ← i + 1#usize
-         ok (cont i4)
-  else ok (done true)
-
-/-- [qsag_whir_verified::verify_ood_pin_eq]: loop 0:
-    Source: 'src/lib.rs', lines 386:4-393:1
-    Visibility: public -/
-@[rust_loop]
-def verify_ood_pin_eq_loop
-  (expected : Slice Std.U64) (supplied : Slice Std.U64) (i : Std.Usize) :
-  Result Bool
-  := do
-  loop
-    (fun i1 => verify_ood_pin_eq_loop.body expected supplied i1)
-    i
-
-/-- [qsag_whir_verified::verify_ood_pin_eq]:
-    Source: 'src/lib.rs', lines 381:0-393:1
-    Visibility: public -/
-def verify_ood_pin_eq
-  (expected : Slice Std.U64) (supplied : Slice Std.U64) : Result Bool := do
-  let i := Slice.len expected
-  let i1 := Slice.len supplied
-  if i != i1
-  then ok false
-  else verify_ood_pin_eq_loop expected supplied 0#usize
+def verify_ood_pin_eq_fp5 (expected : Fp5) (supplied : Fp5) : Result Bool := do
+  fp5_eq expected supplied
 
 /-- [qsag_whir_verified::canonical_query_group_idx]:
-    Source: 'src/lib.rs', lines 396:0-402:1
+    Source: 'src/lib.rs', lines 497:0-503:1
     Visibility: public -/
 def canonical_query_group_idx
   (raw_idx : Std.U64) (groups : Std.U64) : Result (Option Std.U64) := do
@@ -428,13 +627,13 @@ def canonical_query_group_idx
   else let i ← raw_idx % groups
        ok (some i)
 
-/-- [qsag_whir_verified::step_merkle_pair_order]:
-    Source: 'src/lib.rs', lines 411:0-433:1
+/-- [qsag_whir_verified::step_merkle_pair_order_400]:
+    Source: 'src/lib.rs', lines 506:0-526:1
     Visibility: public -/
-def step_merkle_pair_order
-  (idx : Std.U64) (level : Std.U32) (node : Array Std.U8 32#usize)
-  (sibling : Array Std.U8 32#usize) :
-  Result (Option MerklePair)
+def step_merkle_pair_order_400
+  (idx : Std.U64) (level : Std.U32) (node : Array Std.U8 50#usize)
+  (sibling : Array Std.U8 50#usize) :
+  Result (Option MerklePair400)
   := do
   if level >= 64#u32
   then ok none
@@ -442,15 +641,40 @@ def step_merkle_pair_order
     let i ← idx >>> level
     let i1 ← lift (i &&& 1#u64)
     if i1 = 0#u64
-    then
-      ok (some
-        { tag := TAG_CANOPY_MERKLE_INTERNAL, left := node, right := sibling })
-    else
-      ok (some
-        { tag := TAG_CANOPY_MERKLE_INTERNAL, left := sibling, right := node })
+    then ok (some { left := node, right := sibling })
+    else ok (some { left := sibling, right := node })
+
+/-- [qsag_whir_verified::step_merkle_pair_order_gl24]:
+    Source: 'src/lib.rs', lines 529:0-559:1
+    Visibility: public -/
+def step_merkle_pair_order_gl24
+  (idx : Std.U64) (level : Std.U32) (node : Gl24Digest) (sibling : Gl24Digest)
+  :
+  Result (Option MerklePairGl24)
+  := do
+  if level >= 64#u32
+  then ok none
+  else
+    let o ←
+      decode_canonical_gl24_limbs node.l0 node.l1 node.l2 node.l3 node.l4
+        node.l5 node.l6
+    match o with
+    | none => ok none
+    | some canon_node =>
+      let o1 ←
+        decode_canonical_gl24_limbs sibling.l0 sibling.l1 sibling.l2 
+          sibling.l3 sibling.l4 sibling.l5 sibling.l6
+      match o1 with
+      | none => ok none
+      | some canon_sibling =>
+        let i ← idx >>> level
+        let i1 ← lift (i &&& 1#u64)
+        if i1 = 0#u64
+        then ok (some { left := canon_node, right := canon_sibling })
+        else ok (some { left := canon_sibling, right := canon_node })
 
 /-- [qsag_whir_verified::checked_quorum_sum]: loop body 0:
-    Source: 'src/lib.rs', lines 1:0-467:1
+    Source: 'src/lib.rs', lines 1:0-593:1
     Visibility: public -/
 @[rust_loop_body]
 def checked_quorum_sum_loop.body
@@ -488,7 +712,7 @@ def checked_quorum_sum_loop.body
     else ok (done (some total))
 
 /-- [qsag_whir_verified::checked_quorum_sum]: loop 0:
-    Source: 'src/lib.rs', lines 1:0-467:1
+    Source: 'src/lib.rs', lines 1:0-593:1
     Visibility: public -/
 @[rust_loop]
 def checked_quorum_sum_loop
@@ -503,7 +727,7 @@ def checked_quorum_sum_loop
     (total, min_total, i)
 
 /-- [qsag_whir_verified::checked_quorum_sum]:
-    Source: 'src/lib.rs', lines 439:0-467:1
+    Source: 'src/lib.rs', lines 565:0-593:1
     Visibility: public -/
 def checked_quorum_sum
   (counts : Slice Std.U64) (minimums : Slice Std.U64)
@@ -525,8 +749,124 @@ def checked_quorum_sum
         checked_quorum_sum_loop counts minimums minimum_global 0#u64 0#u64
           0#usize
 
+/-- [qsag_whir_verified::verify_qsaghqm2_header]:
+    Source: 'src/lib.rs', lines 600:0-634:1
+    Visibility: public -/
+def verify_qsaghqm2_header
+  (magic : Array Std.U8 8#usize) (profile_tag : Std.U8)
+  (active_signers : Std.U64) (num_validators : Std.U64)
+  (declared_payload_len : Std.U64) (actual_payload_len : Std.U64) :
+  Result (Option Qsaghqm2Header)
+  := do
+  let i ← Array.index_usize magic 0#usize
+  if i != 81#u8
+  then ok none
+  else
+    let i1 ← Array.index_usize magic 1#usize
+    if i1 != 83#u8
+    then ok none
+    else
+      let i2 ← Array.index_usize magic 2#usize
+      if i2 != 65#u8
+      then ok none
+      else
+        let i3 ← Array.index_usize magic 3#usize
+        if i3 != 71#u8
+        then ok none
+        else
+          let i4 ← Array.index_usize magic 4#usize
+          if i4 != 72#u8
+          then ok none
+          else
+            let i5 ← Array.index_usize magic 5#usize
+            if i5 != 81#u8
+            then ok none
+            else
+              let i6 ← Array.index_usize magic 6#usize
+              if i6 != 77#u8
+              then ok none
+              else
+                let i7 ← Array.index_usize magic 7#usize
+                if i7 != 50#u8
+                then ok none
+                else
+                  if profile_tag != QSAGHQM2_PROFILE_TURBO400
+                  then
+                    if profile_tag != QSAGHQM2_PROFILE_GL24
+                    then ok none
+                    else
+                      if active_signers = 0#u64
+                      then ok none
+                      else
+                        if active_signers > num_validators
+                        then ok none
+                        else
+                          if declared_payload_len = 0#u64
+                          then ok none
+                          else
+                            if declared_payload_len != actual_payload_len
+                            then ok none
+                            else
+                              ok (some
+                                {
+                                  profile_tag,
+                                  active_signers,
+                                  payload_len := declared_payload_len
+                                })
+                  else
+                    if active_signers = 0#u64
+                    then ok none
+                    else
+                      if active_signers > num_validators
+                      then ok none
+                      else
+                        if declared_payload_len = 0#u64
+                        then ok none
+                        else
+                          if declared_payload_len != actual_payload_len
+                          then ok none
+                          else
+                            ok (some
+                              {
+                                profile_tag,
+                                active_signers,
+                                payload_len := declared_payload_len
+                              })
+
+/-- [qsag_whir_verified::verify_quintic_schedule_envelope]:
+    Source: 'src/lib.rs', lines 640:0-657:1
+    Visibility: public -/
+def verify_quintic_schedule_envelope
+  (log_cells : Std.U32) (early_stop_vars : Std.U32) (folded_vars_sum : Std.U32)
+  (num_stages : Std.U32) :
+  Result Bool
+  := do
+  if log_cells < MIN_QUINTIC_LOG_CELLS
+  then ok false
+  else
+    if log_cells > MAX_QUINTIC_LOG_CELLS
+    then ok false
+    else
+      let expected_stages ←
+        if log_cells <= 22#u32
+        then ok 3#u32
+        else ok 4#u32
+      if num_stages != expected_stages
+      then ok false
+      else
+        if early_stop_vars = 0#u32
+        then ok false
+        else
+          if early_stop_vars > 8#u32
+          then ok false
+          else
+            if folded_vars_sum > log_cells
+            then ok false
+            else let i ← early_stop_vars + folded_vars_sum
+                 ok (i = log_cells)
+
 end qsag_whir_verified
 
 public section
-#export_eqns qsag_whir_verified.GOLDILOCKS_P qsag_whir_verified.MAX_U64_WORD qsag_whir_verified.TAG_CANOPY_MERKLE_INTERNAL qsag_whir_verified.decode_canonical_u64 qsag_whir_verified.decode_canonical_ext4 qsag_whir_verified.add qsag_whir_verified.sub qsag_whir_verified.mul qsag_whir_verified.ext_eq qsag_whir_verified.ext_add qsag_whir_verified.ext_sub qsag_whir_verified.ext_scale qsag_whir_verified.ext_mul qsag_whir_verified.affine_combine qsag_whir_verified.duet_fold qsag_whir_verified.verify_affine_duet_fold_step qsag_whir_verified.cwyz_duet_fold qsag_whir_verified.fold_duet_affine_ext4 qsag_whir_verified.verify_cwyz_duet_fold_step qsag_whir_verified.cwyz_bridge_claim_step qsag_whir_verified.verify_cwyz_bridge_claim_step qsag_whir_verified.eval_quadratic_sumcheck_wire qsag_whir_verified.affine_cascade_claim_step qsag_whir_verified.eval_ext4_univariate_at_base_loop.body qsag_whir_verified.eval_ext4_univariate_at_base_loop qsag_whir_verified.eval_ext4_univariate_at_base qsag_whir_verified.eval_univariate_ext4_at_base qsag_whir_verified.verify_ext4_univariate_at_base_pin qsag_whir_verified.verify_stage_pow_mask qsag_whir_verified.verify_ood_pin_eq_loop.body qsag_whir_verified.verify_ood_pin_eq_loop qsag_whir_verified.verify_ood_pin_eq qsag_whir_verified.canonical_query_group_idx qsag_whir_verified.step_merkle_pair_order qsag_whir_verified.checked_quorum_sum_loop.body qsag_whir_verified.checked_quorum_sum_loop qsag_whir_verified.checked_quorum_sum
+#export_eqns qsag_whir_verified.GOLDILOCKS_P qsag_whir_verified.MAX_U64_WORD qsag_whir_verified.FP5_NONRESIDUE_W qsag_whir_verified.FROBENIUS_ZETA5_1 qsag_whir_verified.FROBENIUS_ZETA5_2 qsag_whir_verified.FROBENIUS_ZETA5_3 qsag_whir_verified.FROBENIUS_ZETA5_4 qsag_whir_verified.QSAGHQM2_PROFILE_TURBO400 qsag_whir_verified.QSAGHQM2_PROFILE_GL24 qsag_whir_verified.MIN_QUINTIC_LOG_CELLS qsag_whir_verified.MAX_QUINTIC_LOG_CELLS qsag_whir_verified.MAX_CANOPY_LOG_LEAVES qsag_whir_verified.copy_fp5 qsag_whir_verified.load_le_u64_40 qsag_whir_verified.load_le_u64_56 qsag_whir_verified.decode_canonical_u64 qsag_whir_verified.decode_canonical_fp5_limbs qsag_whir_verified.decode_canonical_fp5 qsag_whir_verified.decode_canonical_gl24_limbs qsag_whir_verified.decode_canonical_gl24_digest qsag_whir_verified.add qsag_whir_verified.sub qsag_whir_verified.mul qsag_whir_verified.fp5_zero qsag_whir_verified.fp5_one qsag_whir_verified.fp5_from_base qsag_whir_verified.fp5_eq qsag_whir_verified.fp5_add qsag_whir_verified.fp5_sub qsag_whir_verified.fp5_neg qsag_whir_verified.fp5_scale qsag_whir_verified.fp5_mul qsag_whir_verified.fp5_frobenius qsag_whir_verified.affine_combine_fp5 qsag_whir_verified.duet_fold_fp5 qsag_whir_verified.verify_affine_duet_fold_step_fp5 qsag_whir_verified.cwyz_duet_fold_fp5 qsag_whir_verified.verify_cwyz_duet_fold_step_fp5 qsag_whir_verified.cwyz_bridge_claim_step_fp5 qsag_whir_verified.verify_cwyz_bridge_claim_step_fp5 qsag_whir_verified.eval_quadratic_sumcheck_wire_fp5 qsag_whir_verified.eval_fp5_univariate_at_base_loop.body qsag_whir_verified.eval_fp5_univariate_at_base_loop qsag_whir_verified.eval_fp5_univariate_at_base qsag_whir_verified.verify_fp5_univariate_at_base_pin qsag_whir_verified.verify_ood_pin_eq_fp5 qsag_whir_verified.canonical_query_group_idx qsag_whir_verified.step_merkle_pair_order_400 qsag_whir_verified.step_merkle_pair_order_gl24 qsag_whir_verified.checked_quorum_sum_loop.body qsag_whir_verified.checked_quorum_sum_loop qsag_whir_verified.checked_quorum_sum qsag_whir_verified.verify_qsaghqm2_header qsag_whir_verified.verify_quintic_schedule_envelope
 end

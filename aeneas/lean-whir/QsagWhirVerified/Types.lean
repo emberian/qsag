@@ -20,21 +20,48 @@ set_option maxRecDepth 2048
 
 namespace qsag_whir_verified
 
-/-- [qsag_whir_verified::Ext4]
-    Source: 'src/lib.rs', lines 19:0-24:1
+/-- [qsag_whir_verified::Fp5]
+    Source: 'src/lib.rs', lines 43:0-49:1
     Visibility: public -/
-structure Ext4 where
-  a : Std.U64
-  b : Std.U64
-  c : Std.U64
-  d : Std.U64
+structure Fp5 where
+  c0 : Std.U64
+  c1 : Std.U64
+  c2 : Std.U64
+  c3 : Std.U64
+  c4 : Std.U64
 
-/-- [qsag_whir_verified::MerklePair]
-    Source: 'src/lib.rs', lines 404:0-408:1
+/-- [qsag_whir_verified::MerklePair400]
+    Source: 'src/lib.rs', lines 52:0-55:1
     Visibility: public -/
-structure MerklePair where
-  tag : Std.U8
-  left : Array Std.U8 32#usize
-  right : Array Std.U8 32#usize
+structure MerklePair400 where
+  left : Array Std.U8 50#usize
+  right : Array Std.U8 50#usize
+
+/-- [qsag_whir_verified::Gl24Digest]
+    Source: 'src/lib.rs', lines 58:0-66:1
+    Visibility: public -/
+structure Gl24Digest where
+  l0 : Std.U64
+  l1 : Std.U64
+  l2 : Std.U64
+  l3 : Std.U64
+  l4 : Std.U64
+  l5 : Std.U64
+  l6 : Std.U64
+
+/-- [qsag_whir_verified::MerklePairGl24]
+    Source: 'src/lib.rs', lines 69:0-72:1
+    Visibility: public -/
+structure MerklePairGl24 where
+  left : Gl24Digest
+  right : Gl24Digest
+
+/-- [qsag_whir_verified::Qsaghqm2Header]
+    Source: 'src/lib.rs', lines 75:0-79:1
+    Visibility: public -/
+structure Qsaghqm2Header where
+  profile_tag : Std.U8
+  active_signers : Std.U64
+  payload_len : Std.U64
 
 end qsag_whir_verified
