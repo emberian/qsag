@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -eo pipefail
-source /work/wave-e5/dev_env.sh
+[[ -z "${QSAG_ENV_SCRIPT:-}" ]] || source "$QSAG_ENV_SCRIPT"
 set -u
 cd "$(dirname "$0")"
 mapdir=${1:-../synth/results/gf180}
@@ -8,7 +8,7 @@ label=${2:-$(basename "$mapdir")}
 out="$PWD/build/$label"
 mkdir -p "$out" logs
 exec > >(tee "logs/$label.log") 2>&1
-pdk=${PDK_REF:-/work/ass2-pnr/pdk/gf180mcuD/libs.ref}
+pdk=${PDK_REF:-${PDK_ROOT:-/opt/pdk}/gf180mcuD/libs.ref}
 scdir="$pdk/gf180mcu_fd_sc_mcu7t5v0/verilog"
 cells="$scdir/gf180mcu_fd_sc_mcu7t5v0.v"
 ram="$pdk/gf180mcu_fd_ip_sram/verilog/gf180mcu_fd_ip_sram__sram512x8m8wm1.v"

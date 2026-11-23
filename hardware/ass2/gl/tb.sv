@@ -16,7 +16,6 @@ module tb;
     `include "physical.svh"
     `include "rom_oracle.svh"
     `define DRAM dut.\u_dsram.u_macro 
-    `define IRAM dut.\u_isram.u_macro 
     wire [273:0] outputs = {input_pu, input_pd, bidir_out, bidir_oe,
                             bidir_cs, bidir_sl, bidir_ie, bidir_pu, bidir_pd};
     integer edges=0, reset_rises=0;
@@ -30,7 +29,7 @@ module tb;
     // The clock only moves inside tick. SPI setup, sampling and falling edges
     // are separated from core rising edges and from cell propagation delays.
     task tick(input integer n);
-        repeat(n) begin #60; clk=1; #60; clk=0; end
+        repeat(n) begin #25; clk=1; #25; clk=0; end
     endtask
     task spi_wait(input bit running);
         if (running) tick(4); else #80;
@@ -87,7 +86,7 @@ module tb;
         recv_word(width,w); check64("IDENT banner",w,64'h3038314432535341);
 
         recv_word(width,w); check64("IDENT ARCH_ID",w,64'h4153533200000001);
-        recv_word(width,w); check64("IDENT LC/status/count",w,64'd0);
+        recv_word(width,w); check64("IDENT LC/status/count",w,64'h00000000c0000000);
         recv_word(width,w); check64("IDENT cycles",w,0);
         end_frame();
         $display("IDENT x%0d PASS header + 4 words, status valid count=0",width);
@@ -111,8 +110,8 @@ module tb;
         verdict_latency=$realtime-tamper_time;
     integer retired=0;
     always @(posedge clk) if (watch_rom && dut.\u_core.u_instret.en ) begin
-        check64("resident retirement PC",dut.core_pc,ident_pc(retired));
-        $display("I-ROM retire[%0d] PC=%h",retired,dut.core_pc);
+        check64("resident retirement PC",{47'd0,dut.core_pc[16:0]},ident_pc(retired));
+        $display("I-ROM retire[%0d] PC=%h",retired,{47'd0,dut.core_pc[16:0]});
         retired++;
     end
     integer fast_edges=0, slow_edges=0;
@@ -121,30 +120,31 @@ module tb;
     initial begin
         #2;
         for (int a=0;a<512;a++) begin
-            `DRAM .mem[a]='x; `IRAM .mem[a]='x;
+            `DRAM .mem[a]='x;
         end
-        `DRAM .qo_reg='x; `IRAM .qo_reg='x;
+        `DRAM .qo_reg='x;
         #10;
-        if (ff_q !== {$bits(ff_q){1'bx}} || secret_q !== {2560{1'bx}})
+        if (!all_ffs_x() || secret_q !== {2560{1'bx}} || vault_q !== {448{1'bx}})
             $fatal(1,"mapped storage did not start X");
         for (int a=0;a<512;a++)
-            if (`DRAM .mem[a] !== 8'hxx || `IRAM .mem[a] !== 8'hxx)
+            if (`DRAM .mem[a] !== 8'hxx)
                 $fatal(1,"cold SRAM byte %0d",a);
-        $display("COLD: %0d flip-flops, 2560 secret Qs and 1024 SRAM bytes X",$bits(ff_q));
+        $display("COLD: %0d flip-flops, 2560 regbank + 448 vault secret Qs and 512 D-SRAM bytes X",NUM_FFS);
         clk=0; rst_n=1; input_in=4'h8; inputs=0; inputs[26]=1; inputs[27]=1;
-        host_drive=0; host_data=0; #60; rst_n=0; #60;
-        tick(4); #30;
+        host_drive=0; host_data=0; #20; rst_n=0; #20;
+        tick(4); #10;
         check64("reset OE",bidir_oe,0);
-        check64("reset SRAM deselect",{ `DRAM .CEN, `IRAM .CEN },3);
-        if (ro_gate !== {514{1'b1}}) $fatal(1,"reset did not resolve every physical ring");
-        if (secret_q !== '0) $fatal(1,"reset secret Q");
-        rst_n=1; #40;
-        for (scrub_cycles=0;scrub_cycles<512;scrub_cycles++) begin
+        check64("reset SRAM deselect", `DRAM .CEN, 1);
+        if (!all_ros_one()) $fatal(1,"reset did not resolve every physical ring");
+        if (secret_q !== '0 || vault_q !== '0) $fatal(1,"reset secret/vault Q");
+        rst_n=1; #10;
+        for (scrub_cycles=0;scrub_cycles<200000 && bidir_out[19]===1'b0;scrub_cycles++) begin
             if ((^outputs) === 1'bx) $fatal(1,"released output X/Z: %h",outputs);
-            check64("scrub VERIFY/FAULT/RDY",{bidir_out[16],bidir_out[17],bidir_out[19]},0);
-            tick(1);
+            check64("scrub+POST VERIFY/FAULT/RDY",{bidir_out[16],bidir_out[17],bidir_out[19]},0);
+            tick(1); #1;
         end
-        #40;
+        #10;
+        if (scrub_cycles < 512) $fatal(1,"HOST_RDY asserted too early (%0d clocks)",scrub_cycles);
         if ((^outputs) === 1'bx) $fatal(1,"ready output X/Z: %h",outputs);
         check64("ready VERIFY/FAULT/RDY",{bidir_out[16],bidir_out[17],bidir_out[19]},1);
         for (int a=0;a<512;a++)
@@ -152,7 +152,7 @@ module tb;
                 if (!bad_boot_bytes) $display("First failed boot scrub D-SRAM[%0d]=%h",a,`DRAM .mem[a]);
                 bad_boot_bytes++;
             end
-        $display("RESET 274 known output bits; VERIFY/FAULT/RDY=001 after 512 clocks");
+        $display("RESET 274 known output bits; full FIPS POST KAT + D-SRAM scrub -> VERIFY/FAULT/RDY=001 after %0d clocks",scrub_cycles);
         if (bad_boot_bytes) $display("GATE 1 FAIL %0d/512 boot scrub bytes uncleared",bad_boot_bytes);
         else $display("GATE 1 PASS 512 zero D-SRAM bytes");
         saved=edges;
@@ -197,14 +197,14 @@ module tb;
         prefix(8'h80,1); send_word(64'h0000_000018_01_30_51,8);
         send_word(64'h00050000_00000001,8); send_word(0,8); send_word(0,8);
         end_frame(); read_start(8); recv_word(8,w); end_frame();
-        check64("unprovisioned loader rejected",w,64'h0004_000000_80_b0_51);
+        check64("unbooted loader opcode rejected",w,64'h000d_000000_80_b0_51);
         seed_rows();
         if (secret_q !== {2560{1'b1}}) $fatal(1,"seed failed, ones=%0d",$countones(secret_q));
         check64("pre-tamper VERIFY/FAULT",{bidir_out[16],bidir_out[17]},2);
         saved=edges;
         tamper_time=$realtime; watch_wipe=1;
         inputs[26]=0; #40;
-        if (secret_q !== '0) $fatal(1,"tamper Qs not all zero");
+        if (secret_q !== '0 || vault_q !== '0) $fatal(1,"tamper Qs not all zero");
         check64("tamper VERIFY/FAULT",{bidir_out[16],bidir_out[17]},1);
         check64("tamper verdict drivers",bidir_oe[17:16],3);
         #120;
