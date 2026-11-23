@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Hem post-quantum K-to-1 hash signature aggregation over GoldilocksExt4: multilinear sumcheck with WHIR rate-escalated Steiner multiproofs"
+description = "Hem post-quantum K-to-1 hash signature aggregation over Quintic Goldilocks Fp5: multilinear sumcheck with WHIR rate-escalated Canopy multiproofs and [DKT26] recursive IVC"
 
 [features]
 default = ["std"]
@@ -16,8 +16,8 @@ vulkan = ["std", "dep:qsag-accel", "qsag-accel/vulkan"]
 qsag-cred = { path = "../qsag-cred", default-features = false }
 qsag-core = { path = "../qsag-core", default-features = false }
 qsag-accel = { path = "../qsag-accel", optional = true, default-features = false }
-qsag-whir-verified = { path = "../../aeneas/qsag-whir-verified", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }
+qsag-whir-verified = { path = "../../aeneas/qsag-whir-verified", default-features = false }
 
 [dev-dependencies]
 # Reference implementation whose internal matrix is analysed by its own unit tests.

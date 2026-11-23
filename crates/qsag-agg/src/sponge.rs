@@ -1,13 +1,10 @@
 //! Sponge primitives (`Keccak-f[1600]`, `SHAKE256`, `cSHAKE256` with compile-time static
 //! midstates `CANOPY_MIDSTATE` and 4-way SIMD `keccak_f1600_x4`, Width-12 `Poseidon2` over
-//! `Goldilocks` and `GoldilocksExt4`) and compile-time typestate Fenzi
-//! instance-bound `FiatShamirTranscript<Phase>`.
+//! `Goldilocks` width-12 and width-24 `Poseidon2` permutations).
 
-use alloc::vec;
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 
-use crate::field::{Goldilocks, GoldilocksExt4, GoldilocksOps as _};
+use crate::field::{Goldilocks, GoldilocksOps as _};
 
 // ============================================================================
 // 1. Self-Delimiting LEB128 Multi-Field Framing (`encode_multi_frame`)
@@ -207,9 +204,8 @@ pub const POW_CUSTOM: &[u8] = b"QSAG.PCS.POW2/v1";
 pub const POW_MIDSTATE: [u64; 25] = cshake256_static_midstate(POW_CUSTOM);
 
 /// RFC 9861 12-round `Keccak-p[1600, 12]` permutation (rounds `12..24` of `KECCAK_RC`).
-/// Used by Role-1 outer WHIR commitments and PoW grinding (zero AIR constraints).
-/// The permutation alone does not establish a WHIR security bound; see
-/// [`crate::pcs::WhirSecurityRegime`] for query budgets and bounded-query assumptions.
+/// Used by 400-bit `TurboSHAKE256` Canopy commitments and transcripts (`zk_hem::v2` and
+/// `hem_quintic`, zero AIR constraints); see [`crate::zk_hem::v2::bounds`] for query budgets.
 /// It uses half the rounds of Keccak-f[1600]; throughput depends on the workload.
 #[inline(always)]
 pub const fn keccak_p1600_12(state: &mut [u64; 25]) {
@@ -1302,79 +1298,6 @@ pub fn poseidon2_apply_mi(st: &mut [Goldilocks; 12]) {
     st[11] = st[11].shl_small::<10>() + s;
 }
 
-#[inline(always)]
-pub const fn poseidon2_sbox7_ext4(x: GoldilocksExt4) -> GoldilocksExt4 {
-    let x2 = x.square();
-    let x3 = x2.const_mul(x);
-    let x4 = x2.square();
-    x3.const_mul(x4)
-}
-
-/// Unrolled 4-lane butterfly for `M_4 = circ(2, 3, 1, 1)` over `GoldilocksExt4` (`0` muls).
-#[inline(always)]
-fn apply_m4_ext4(b: [GoldilocksExt4; 4]) -> [GoldilocksExt4; 4] {
-    let t01 = b[0] + b[1];
-    let t23 = b[2] + b[3];
-    let t0123 = t01 + t23;
-    let t01123 = t0123 + b[1];
-    let t01233 = t0123 + b[3];
-    [
-        t01123 + t01,
-        t01123 + b[2].shl_small::<1>(),
-        t01233 + t23,
-        t01233 + b[0].shl_small::<1>(),
-    ]
-}
-
-#[inline(always)]
-pub fn poseidon2_apply_me_ext4(st: &mut [GoldilocksExt4; 12]) {
-    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
-    *st = [
-        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
-    ];
-    let y0 = apply_m4_ext4([st[0], st[1], st[2], st[3]]);
-    let y1 = apply_m4_ext4([st[4], st[5], st[6], st[7]]);
-    let y2 = apply_m4_ext4([st[8], st[9], st[10], st[11]]);
-    let s0 = (y0[0] + y1[0]) + y2[0];
-    let s1 = (y0[1] + y1[1]) + y2[1];
-    let s2 = (y0[2] + y1[2]) + y2[2];
-    let s3 = (y0[3] + y1[3]) + y2[3];
-    st[0] = y0[0] + s0;
-    st[1] = y0[1] + s1;
-    st[2] = y0[2] + s2;
-    st[3] = y0[3] + s3;
-    st[4] = y1[0] + s0;
-    st[5] = y1[1] + s1;
-    st[6] = y1[2] + s2;
-    st[7] = y1[3] + s3;
-    st[8] = y2[0] + s0;
-    st[9] = y2[1] + s1;
-    st[10] = y2[2] + s2;
-    st[11] = y2[3] + s3;
-    *st = [
-        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
-    ];
-}
-
-/// Unrolled internal diffusion over `GoldilocksExt4` (`0` muls: shift/add power-of-two diagonal).
-#[inline(always)]
-pub fn poseidon2_apply_mi_ext4(st: &mut [GoldilocksExt4; 12]) {
-    let s = (((st[0] + st[1]) + (st[2] + st[3])) + ((st[4] + st[5]) + (st[6] + st[7])))
-        + ((st[8] + st[9]) + (st[10] + st[11]));
-    st[0] = s - st[0].shl_small::<6>();
-    st[1] += s;
-    st[2] = st[2].shl_small::<1>() + s;
-    st[3] = st[3].shl_small::<2>() + s;
-    st[4] = st[4].shl_small::<3>() + s;
-    st[5] = st[5].shl_small::<4>() + s;
-    st[6] = st[6].shl_small::<5>() + s;
-    st[7] = st[7].shl_small::<6>() + s;
-    st[8] = st[8].shl_small::<7>() + s;
-    st[9] = st[9].shl_small::<8>() + s;
-    st[10] = st[10].shl_small::<9>() + s;
-    st[11] = st[11].shl_small::<10>() + s;
-}
-
 /// Raw-word kernel of [`poseidon2_perm12`].
 ///
 /// Between layers a lane is any `u64` representative modulo `p`. Each linear layer is
@@ -1636,12 +1559,10 @@ pub fn poseidon2_compress12_ff(
 // ============================================================================
 
 /// Pairwise-disjoint canonical `< p` domain tags separating `Poseidon2` Canopy salt derivation,
-/// Round-0 single/batch leaves, Stage-`k` `Ext4` leaves, 2-to-1 internal nodes, root binding,
-/// and algebraic Fiat–Shamir transcript phases/operations.
+/// Round-0 single/batch leaves, 2-to-1 internal nodes, and root binding.
 pub const P2_DOMAIN_CANOPY_SALT: u64 = 0x5032_434E_534C_5401; // "P2CNSLT\x01"
 pub const P2_DOMAIN_CANOPY_LEAF_R0: u64 = 0x5032_434E_4C46_3001; // "P2CNLF0\x01"
 pub const P2_DOMAIN_CANOPY_LEAF_BATCH: u64 = 0x5032_434E_4C46_4201; // "P2CNLFB\x01"
-pub const P2_DOMAIN_CANOPY_LEAF_EXT4: u64 = 0x5032_434E_4C46_4501; // "P2CNLFE\x01"
 /// High 32 bits `"P2ND"` combined via bitwise OR with `node_idx: u32` (`< p` for every `u32`).
 pub const P2_DOMAIN_CANOPY_NODE_HI: u64 = 0x5032_4E44_0000_0000; // "P2ND\0\0\0\0"
 pub const P2_DOMAIN_CANOPY_ROOT: u64 = 0x5032_434E_524F_4F54; // "P2CNROOT"
@@ -1652,7 +1573,6 @@ pub const P2_DOMAIN_FS_BIND_INST: u64 = 0x5032_4653_4249_4E53; // "P2FSBINS"
 pub const P2_DOMAIN_FS_ABSORB_BYTES: u64 = 0x5032_4653_4142_5954; // "P2FSABYT"
 pub const P2_DOMAIN_FS_ABSORB_LIMBS: u64 = 0x5032_4653_414C_4D42; // "P2FSALMB"
 pub const P2_DOMAIN_FS_SQUEEZE_BASE: u64 = 0x5032_4653_5351_4253; // "P2FSSQBS"
-pub const P2_DOMAIN_FS_SQUEEZE_EXT4: u64 = 0x5032_4653_5351_4534; // "P2FSSQE4"
 pub const P2_DOMAIN_FS_SQUEEZE_IDX: u64 = 0x5032_4653_5351_4958; // "P2FSSQIX"
 pub const P2_DOMAIN_FS_POW: u64 = 0x5032_4653_504F_5701; // "P2FSPOW\x01"
 
@@ -1824,528 +1744,13 @@ pub fn poseidon2_canopy_root(
     )
 }
 
-// ============================================================================
-// 4. Typestate Fenzi Instance-Bound Fiat–Shamir Transcript
-// ============================================================================
-
-// The phase markers are the sealed `qsag-core` typestate: `Unbound` (nothing bound),
-// `RelationBound` (relation bound, instance pending) and `InstanceBound` (both bound; only this
-// phase can absorb prover messages and squeeze challenges).
-pub use qsag_core::sponge::{InstanceBound, RelationBound, TranscriptPhase, Unbound};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TranscriptBackend {
-    Cshake256,
-    TurboShake256,
-    Poseidon2 { p2_chain: [Goldilocks; 4] },
-}
-
-/// Anti-grinding Fiat–Shamir transcript parameterized by compile-time phase `P`.
-///
-/// Follows Fenzi et al. (`IACR 2025`): challenges cannot be squeezed at compile time until
-/// BOTH `.bind_relation(...)` AND `.bind_instance(...)` have been executed on self-delimiting
-/// multi-field frames, eliminating weak-Fiat–Shamir last-round grinding attacks.
-///
-/// Supports `cSHAKE256` (default, bit-identical for standard byte-hash WHIR regimes), RFC 9861
-/// 12-round `TurboSHAKE256` (selected automatically when `schedule.regime.uses_turboshake_canopy()`
-/// is `true` for Role-1 outer WHIR commitments/transcripts), and algebraic Width-12 Rate-8
-/// `Poseidon2` (selected when `schedule.regime.uses_poseidon2_canopy()` is `true`).
-pub struct FiatShamirTranscript<P: TranscriptPhase> {
-    chain_digest: [u8; 32],
-    backend: TranscriptBackend,
-    turboshake_pow: bool,
-    pow_bits: u32,
-    counter: u64,
-    _phase: PhantomData<P>,
-}
-
-impl<P: TranscriptPhase> Clone for FiatShamirTranscript<P> {
-    #[inline]
-    fn clone(&self) -> Self {
-        Self {
-            chain_digest: self.chain_digest,
-            backend: self.backend,
-            turboshake_pow: self.turboshake_pow,
-            pow_bits: self.pow_bits,
-            counter: self.counter,
-            _phase: PhantomData,
-        }
-    }
-}
-
-const FS_CUSTOM: &[u8] = b"QSAG.AGG.FS_TRANSCRIPT/v1";
-const FS_MIDSTATE: [u64; 25] = cshake256_static_midstate(FS_CUSTOM);
-const TURBOSHAKE_FS_CUSTOM: &[u8] = b"QSAG.AGG.TURBOFS_TRANSCRIPT/v1";
-const TURBOSHAKE_FS_MIDSTATE: [u64; 25] = turboshake256_static_midstate(TURBOSHAKE_FS_CUSTOM);
-
-impl FiatShamirTranscript<Unbound> {
-    /// Initialize a fresh unbound Fiat–Shamir transcript.
-    pub fn new() -> Self {
-        let init = cshake256_from_midstate_32(&FS_MIDSTATE, b"INIT");
-        Self {
-            chain_digest: init,
-            backend: TranscriptBackend::Cshake256,
-            turboshake_pow: false,
-            pow_bits: crate::pcs::PCS_POW_BITS,
-            counter: 0,
-            _phase: PhantomData,
-        }
-    }
-
-    /// Bind protocol relation identifier & public circuit/WHIR PCS parameters.
-    pub fn bind_relation(
-        self,
-        relation_tag: &[u8],
-        params_bytes: &[u8],
-        schedule: &crate::pcs::WhirSchedule,
-    ) -> FiatShamirTranscript<RelationBound> {
-        let pow_bits = schedule.regime.pow_bits();
-        let turboshake_pow = schedule.regime.uses_turboshake_canopy();
-        let sched_bytes = schedule.to_bytes();
-        if schedule.regime.uses_poseidon2_canopy() {
-            let mut limbs = Vec::with_capacity(
-                4 + relation_tag.len().div_ceil(7)
-                    + params_bytes.len().div_ceil(7)
-                    + sched_bytes.len().div_ceil(7),
-            );
-            push_packed_bytes_7_limbs(&mut limbs, relation_tag);
-            push_packed_bytes_7_limbs(&mut limbs, params_bytes);
-            push_packed_bytes_7_limbs(&mut limbs, &sched_bytes);
-            limbs.push(Goldilocks::from_u64_reduced(pow_bits as u64));
-            let init_cap = [
-                Goldilocks::from_u64_reduced(P2_DOMAIN_FS_INIT),
-                Goldilocks::ZERO,
-                Goldilocks::ZERO,
-                Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
-            ];
-            let p2_chain = poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_BIND_REL, init_cap, &limbs);
-            return FiatShamirTranscript {
-                chain_digest: limbs4_to_le_bytes32(p2_chain),
-                backend: TranscriptBackend::Poseidon2 { p2_chain },
-                turboshake_pow,
-                pow_bits,
-                counter: 0,
-                _phase: PhantomData,
-            };
-        }
-
-        let mut encoded = sched_bytes;
-        encoded.extend_from_slice(&pow_bits.to_le_bytes());
-        if turboshake_pow {
-            let init_turbo = turboshake256_from_midstate_32(&TURBOSHAKE_FS_MIDSTATE, b"INIT");
-            let frame = encode_multi_frame(&[
-                b"BIND_RELATION_HEM_WHIR_EXT4_V5",
-                &init_turbo,
-                relation_tag,
-                params_bytes,
-                &encoded,
-            ]);
-            return FiatShamirTranscript {
-                chain_digest: turboshake256_from_midstate_32(&TURBOSHAKE_FS_MIDSTATE, &frame),
-                backend: TranscriptBackend::TurboShake256,
-                turboshake_pow: true,
-                pow_bits,
-                counter: 0,
-                _phase: PhantomData,
-            };
-        }
-
-        let frame = encode_multi_frame(&[
-            b"BIND_RELATION_HEM_WHIR_EXT4_V5",
-            &self.chain_digest,
-            relation_tag,
-            params_bytes,
-            &encoded,
-        ]);
-        FiatShamirTranscript {
-            chain_digest: cshake256_from_midstate_32(&FS_MIDSTATE, &frame),
-            backend: TranscriptBackend::Cshake256,
-            turboshake_pow,
-            pow_bits,
-            counter: 0,
-            _phase: PhantomData,
-        }
-    }
-}
-
-impl Default for FiatShamirTranscript<Unbound> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FiatShamirTranscript<RelationBound> {
-    /// Algebraic `Poseidon2` relation chain state (`Some` iff `schedule.regime.uses_poseidon2_canopy()`).
-    #[inline]
-    pub fn poseidon2_chain(&self) -> Option<[Goldilocks; 4]> {
-        match self.backend {
-            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => None,
-            TranscriptBackend::Poseidon2 { p2_chain } => Some(p2_chain),
-        }
-    }
-
-    /// Bind the complete public statement (`committee_root`, `bitmap`, `signing_mode`, `profile`).
-    pub fn bind_instance(self, instance_fields: &[&[u8]]) -> FiatShamirTranscript<InstanceBound> {
-        match self.backend {
-            TranscriptBackend::Poseidon2 { p2_chain } => {
-                let cap_hint: usize = instance_fields
-                    .iter()
-                    .map(|f| 1 + f.len().div_ceil(7))
-                    .sum();
-                let mut limbs = Vec::with_capacity(1 + cap_hint);
-                limbs.push(Goldilocks::from_u64_reduced(instance_fields.len() as u64));
-                for f in instance_fields {
-                    push_packed_bytes_7_limbs(&mut limbs, f);
-                }
-                let next_chain =
-                    poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_BIND_INST, p2_chain, &limbs);
-                FiatShamirTranscript {
-                    chain_digest: limbs4_to_le_bytes32(next_chain),
-                    backend: TranscriptBackend::Poseidon2 {
-                        p2_chain: next_chain,
-                    },
-                    turboshake_pow: self.turboshake_pow,
-                    pow_bits: self.pow_bits,
-                    counter: 0,
-                    _phase: PhantomData,
-                }
-            }
-            TranscriptBackend::TurboShake256 => {
-                let inner = encode_multi_frame(instance_fields);
-                let frame = encode_multi_frame(&[b"BIND_INSTANCE", &self.chain_digest, &inner]);
-                FiatShamirTranscript {
-                    chain_digest: turboshake256_from_midstate_32(&TURBOSHAKE_FS_MIDSTATE, &frame),
-                    backend: TranscriptBackend::TurboShake256,
-                    turboshake_pow: self.turboshake_pow,
-                    pow_bits: self.pow_bits,
-                    counter: 0,
-                    _phase: PhantomData,
-                }
-            }
-            TranscriptBackend::Cshake256 => {
-                let inner = encode_multi_frame(instance_fields);
-                let frame = encode_multi_frame(&[b"BIND_INSTANCE", &self.chain_digest, &inner]);
-                FiatShamirTranscript {
-                    chain_digest: cshake256_from_midstate_32(&FS_MIDSTATE, &frame),
-                    backend: TranscriptBackend::Cshake256,
-                    turboshake_pow: self.turboshake_pow,
-                    pow_bits: self.pow_bits,
-                    counter: 0,
-                    _phase: PhantomData,
-                }
-            }
-        }
-    }
-}
-
-impl FiatShamirTranscript<InstanceBound> {
-    /// Per-stage Proof-of-Work grinding bits bound into this transcript's relation (`0` or `16`).
-    #[inline]
-    pub fn pow_bits(&self) -> u32 {
-        self.pow_bits
-    }
-
-    /// Whether Proof-of-Work grinding uses 12-round `TurboSHAKE256` (`TURBOSHAKE_POW_MIDSTATE`).
-    #[inline]
-    pub fn uses_turboshake_pow(&self) -> bool {
-        self.turboshake_pow
-    }
-
-    /// Whether this transcript operates in algebraic `Poseidon2` mode.
-    #[inline]
-    pub fn uses_poseidon2(&self) -> bool {
-        matches!(self.backend, TranscriptBackend::Poseidon2 { .. })
-    }
-
-    /// Current algebraic `Poseidon2` chain state (`Some` iff `uses_poseidon2()`).
-    #[inline]
-    pub fn poseidon2_chain(&self) -> Option<[Goldilocks; 4]> {
-        match self.backend {
-            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => None,
-            TranscriptBackend::Poseidon2 { p2_chain } => Some(p2_chain),
-        }
-    }
-
-    /// Absorb canonical `Goldilocks` limbs directly in `Poseidon2` mode (or their canonical LE
-    /// byte encoding in `cSHAKE256` / `TurboSHAKE256` mode).
-    pub fn absorb_limbs(&mut self, label: &[u8], payload_limbs: &[Goldilocks]) {
-        match &mut self.backend {
-            TranscriptBackend::Poseidon2 { p2_chain } => {
-                let mut limbs =
-                    Vec::with_capacity(1 + label.len().div_ceil(7) + payload_limbs.len());
-                push_packed_bytes_7_limbs(&mut limbs, label);
-                limbs.extend_from_slice(payload_limbs);
-                let next =
-                    poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_ABSORB_LIMBS, *p2_chain, &limbs);
-                *p2_chain = next;
-                self.chain_digest = limbs4_to_le_bytes32(next);
-                self.counter = 0;
-            }
-            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
-                let mut bytes = Vec::with_capacity(8 * payload_limbs.len());
-                for &limb in payload_limbs {
-                    bytes.extend_from_slice(&limb.to_le_bytes());
-                }
-                self.absorb(label, &bytes);
-            }
-        }
-    }
-
-    /// Absorb a labeled prover message / byte frame.
-    pub fn absorb(&mut self, label: &[u8], payload: &[u8]) {
-        match &mut self.backend {
-            TranscriptBackend::Poseidon2 { p2_chain } => {
-                let mut limbs =
-                    Vec::with_capacity(2 + label.len().div_ceil(7) + payload.len().div_ceil(7));
-                push_packed_bytes_7_limbs(&mut limbs, label);
-                push_packed_bytes_7_limbs(&mut limbs, payload);
-                let next =
-                    poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_ABSORB_BYTES, *p2_chain, &limbs);
-                *p2_chain = next;
-                self.chain_digest = limbs4_to_le_bytes32(next);
-                self.counter = 0;
-            }
-            TranscriptBackend::TurboShake256 => {
-                let frame = encode_multi_frame(&[b"ABSORB", &self.chain_digest, label, payload]);
-                self.chain_digest = turboshake256_from_midstate_32(&TURBOSHAKE_FS_MIDSTATE, &frame);
-                self.counter = 0;
-            }
-            TranscriptBackend::Cshake256 => {
-                let frame = encode_multi_frame(&[b"ABSORB", &self.chain_digest, label, payload]);
-                self.chain_digest = cshake256_from_midstate_32(&FS_MIDSTATE, &frame);
-                self.counter = 0;
-            }
-        }
-    }
-
-    /// Absorb an `Ext4` element (`4` native `Goldilocks` limbs in `Poseidon2` mode; canonical 32B LE in byte-sponge modes).
-    pub fn absorb_ext4(&mut self, label: &[u8], val: GoldilocksExt4) {
-        match self.backend {
-            TranscriptBackend::Poseidon2 { .. } => self.absorb_limbs(label, &val.to_limbs()),
-            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
-                self.absorb(label, &val.to_le_bytes())
-            }
-        }
-    }
-
-    /// Absorb a slice of `Ext4` elements (`4 * vals.len()` native `Goldilocks` limbs in `Poseidon2` mode;
-    /// bit-identical `32 * vals.len()` LE byte slice in byte-sponge modes).
-    pub fn absorb_ext4_slice(&mut self, label: &[u8], vals: &[GoldilocksExt4]) {
-        match self.backend {
-            TranscriptBackend::Poseidon2 { .. } => {
-                let mut limbs = Vec::with_capacity(4 * vals.len());
-                for v in vals {
-                    limbs.extend_from_slice(&v.to_limbs());
-                }
-                self.absorb_limbs(label, &limbs);
-            }
-            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
-                let mut bytes = Vec::with_capacity(32 * vals.len());
-                for v in vals {
-                    bytes.extend_from_slice(&v.to_le_bytes());
-                }
-                self.absorb(label, &bytes);
-            }
-        }
-    }
-
-    /// Absorb a `CanopyCommitment` (`[root_limbs[0..4], log_leaves]` in `Poseidon2` mode; 33B wire in byte-sponge modes).
-    /// Returns `false` in `Poseidon2` mode if `comm.root` does not decode to 4 canonical `< p` limbs.
-    pub fn absorb_canopy_commitment(
-        &mut self,
-        label: &[u8],
-        comm: &crate::pcs::CanopyCommitment,
-    ) -> bool {
-        match self.backend {
-            TranscriptBackend::Poseidon2 { .. } => {
-                let Some(r4) = bytes32_to_limbs4_le_canonical(&comm.root) else {
-                    return false;
-                };
-                self.absorb_limbs(
-                    label,
-                    &[
-                        r4[0],
-                        r4[1],
-                        r4[2],
-                        r4[3],
-                        Goldilocks::from_u64_reduced(comm.log_leaves as u64),
-                    ],
-                );
-                true
-            }
-            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
-                self.absorb(label, &comm.to_bytes());
-                true
-            }
-        }
-    }
-
-    /// Absorb a `u32` scalar (`1` `Goldilocks` limb in `Poseidon2` mode; 4B LE in byte-sponge modes).
-    pub fn absorb_u32(&mut self, label: &[u8], val: u32) {
-        match self.backend {
-            TranscriptBackend::Poseidon2 { .. } => {
-                self.absorb_limbs(label, &[Goldilocks::from_u64_reduced(val as u64)]);
-            }
-            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
-                self.absorb(label, &val.to_le_bytes())
-            }
-        }
-    }
-
-    /// Absorb a `u64` scalar (`[lo32, hi32]` canonical `Goldilocks` limbs in `Poseidon2` mode; 8B LE in byte-sponge modes).
-    pub fn absorb_u64(&mut self, label: &[u8], val: u64) {
-        match self.backend {
-            TranscriptBackend::Poseidon2 { .. } => {
-                self.absorb_limbs(
-                    label,
-                    &[
-                        Goldilocks::from_u64_reduced(val & 0xFFFF_FFFF),
-                        Goldilocks::from_u64_reduced(val >> 32),
-                    ],
-                );
-            }
-            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
-                self.absorb(label, &val.to_le_bytes())
-            }
-        }
-    }
-
-    /// Squeeze an unbiased `Goldilocks` challenge.
-    pub fn squeeze_base(&mut self, label: &[u8]) -> Goldilocks {
-        if let TranscriptBackend::Poseidon2 { p2_chain } = self.backend {
-            let mut limbs = Vec::with_capacity(2 + label.len().div_ceil(7));
-            push_packed_bytes_7_limbs(&mut limbs, label);
-            limbs.push(Goldilocks::from_u64_reduced(self.counter));
-            self.counter += 1;
-            return poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_SQUEEZE_BASE, p2_chain, &limbs)[0];
-        }
-
-        let is_turbo = matches!(self.backend, TranscriptBackend::TurboShake256);
-        let mut sub_try: u64 = 0;
-        loop {
-            let ctr_bytes = self.counter.to_le_bytes();
-            let try_bytes = sub_try.to_le_bytes();
-            let frame = encode_multi_frame(&[
-                b"SQUEEZE_F",
-                &self.chain_digest,
-                label,
-                &ctr_bytes,
-                &try_bytes,
-            ]);
-            let mut raw = [0u8; 8];
-            if is_turbo {
-                turboshake256_from_midstate_into(&TURBOSHAKE_FS_MIDSTATE, &frame, &mut raw);
-            } else {
-                cshake256_from_midstate_into(&FS_MIDSTATE, &frame, &mut raw);
-            }
-            let cand = u64::from_le_bytes(raw);
-            if let Some(f) = Goldilocks::from_canonical_u64(cand) {
-                self.counter += 1;
-                return f;
-            }
-            sub_try += 1;
-        }
-    }
-
-    /// Squeeze an unbiased `GoldilocksExt4` challenge ($\ge 255.99$ bits of min-entropy).
-    pub fn squeeze_ext4(&mut self, label: &[u8]) -> GoldilocksExt4 {
-        if let TranscriptBackend::Poseidon2 { p2_chain } = self.backend {
-            let mut limbs = Vec::with_capacity(2 + label.len().div_ceil(7));
-            push_packed_bytes_7_limbs(&mut limbs, label);
-            limbs.push(Goldilocks::from_u64_reduced(self.counter));
-            self.counter += 1;
-            let out4 = poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_SQUEEZE_EXT4, p2_chain, &limbs);
-            return GoldilocksExt4::from_limbs(out4);
-        }
-
-        let l0 = self.squeeze_base(label);
-        let l1 = self.squeeze_base(label);
-        let l2 = self.squeeze_base(label);
-        let l3 = self.squeeze_base(label);
-        GoldilocksExt4::from_limbs([l0, l1, l2, l3])
-    }
-
-    /// Squeeze `count` independent `GoldilocksExt4` challenges.
-    pub fn squeeze_ext4_vec(&mut self, label: &[u8], count: usize) -> Vec<GoldilocksExt4> {
-        (0..count).map(|_| self.squeeze_ext4(label)).collect()
-    }
-
-    /// Squeeze `num_queries` uniform indices in `0..half_domain_len` (`half_domain_len` power of 2).
-    pub fn squeeze_query_indices(
-        &mut self,
-        label: &[u8],
-        half_domain_len: usize,
-        num_queries: usize,
-    ) -> Vec<usize> {
-        assert!(half_domain_len.is_power_of_two());
-
-        if let TranscriptBackend::Poseidon2 { p2_chain } = self.backend {
-            assert!(half_domain_len <= (1usize << 28));
-            let mask = (half_domain_len - 1) as u64;
-            let call_ctr = self.counter;
-            self.counter += 1;
-            let mut label_prefix = Vec::with_capacity(3 + label.len().div_ceil(7));
-            push_packed_bytes_7_limbs(&mut label_prefix, label);
-            label_prefix.push(Goldilocks::from_u64_reduced(call_ctr));
-            label_prefix.push(Goldilocks::ZERO);
-            let sub_slot = label_prefix.len() - 1;
-
-            let mut out = Vec::with_capacity(num_queries);
-            let mut sub_idx: u64 = 0;
-            while out.len() < num_queries {
-                label_prefix[sub_slot] = Goldilocks::from_u64_reduced(sub_idx);
-                sub_idx += 1;
-                let h4 =
-                    poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_SQUEEZE_IDX, p2_chain, &label_prefix);
-                for limb in h4 {
-                    if out.len() == num_queries {
-                        break;
-                    }
-                    let u = limb.to_canonical_u64();
-                    // Goldilocks p - 1 = 2^32 * (2^32 - 1) is divisible by 2^L for every L <= 32,
-                    // so rejecting the single point u == p - 1 yields an exact uniform distribution!
-                    if u < crate::field::GOLDILOCKS_PRIME - 1 {
-                        out.push((u & mask) as usize);
-                    }
-                }
-            }
-            return out;
-        }
-
-        let ctr_bytes = self.counter.to_le_bytes();
-        self.counter += 1;
-        let frame = encode_multi_frame(&[b"SQUEEZE_IDX", &self.chain_digest, label, &ctr_bytes]);
-        let mut raw = vec![0u8; 8 * num_queries];
-        if matches!(self.backend, TranscriptBackend::TurboShake256) {
-            turboshake256_from_midstate_into(&TURBOSHAKE_FS_MIDSTATE, &frame, &mut raw);
-        } else {
-            cshake256_from_midstate_into(&FS_MIDSTATE, &frame, &mut raw);
-        }
-        raw.as_chunks::<8>()
-            .0
-            .iter()
-            .map(|&b| {
-                qsag_whir_verified::canonical_query_group_idx(
-                    u64::from_le_bytes(b),
-                    half_domain_len as u64,
-                )
-                .expect("nonempty query domain") as usize
-            })
-            .collect()
-    }
-
-    /// Current transcript binding digest.
-    pub fn transcript_digest(&self) -> [u8; 32] {
-        self.chain_digest
-    }
-}
-
 /// The internal diffusion matrix used here is the one whose invertibility and
 /// invariant-subspace properties are established by the unit tests of
 /// `qsag_accel::poseidon2` (see `POSEIDON2_INTERNAL_DIAG` there). These tests pin that identity.
 #[cfg(test)]
 mod internal_matrix_tests {
     use super::*;
+    use alloc::vec;
     use qsag_accel::poseidon2::{POSEIDON2_INTERNAL_DIAG, poseidon2_perm12 as reference_perm12};
 
     fn expected_entry(row: usize, col: usize) -> u64 {
@@ -2363,30 +1768,13 @@ mod internal_matrix_tests {
             let mut base = [Goldilocks::ZERO; 12];
             base[col] = Goldilocks::ONE;
             poseidon2_apply_mi(&mut base);
-            // Both extension-field variants must act as the same matrix on each coordinate.
-
-            let mut ext4 = [GoldilocksExt4::ZERO; 12];
-            ext4[col] = GoldilocksExt4::from_limbs([
-                Goldilocks::ONE,
-                Goldilocks::from_u64_reduced(3),
-                Goldilocks::from_u64_reduced(5),
-                Goldilocks::from_u64_reduced(11),
-            ]);
-            poseidon2_apply_mi_ext4(&mut ext4);
-
-            for row in 0..12 {
+            for (row, actual) in base.iter().enumerate() {
                 let entry = expected_entry(row, col);
-                let g_entry = Goldilocks::from_u64_reduced(entry);
                 assert_eq!(
-                    base[row].to_canonical_u64(),
+                    actual.to_canonical_u64(),
                     entry,
                     "row {row}, column {col}"
                 );
-                let limbs = ext4[row].to_limbs();
-                assert_eq!(limbs[0], g_entry);
-                assert_eq!(limbs[1], g_entry * Goldilocks::from_u64_reduced(3));
-                assert_eq!(limbs[2], g_entry * Goldilocks::from_u64_reduced(5));
-                assert_eq!(limbs[3], g_entry * Goldilocks::from_u64_reduced(11));
             }
         }
     }
@@ -2695,21 +2083,17 @@ mod canonical_compression_tests {
         );
     }
     #[test]
-    fn external_layer_matches_dense_kronecker_matrix_in_base_and_ext4() {
+    fn external_layer_matches_dense_kronecker_matrix_in_base() {
         let m4 = [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]];
         for j in 0..12 {
             let mut st = [Goldilocks::ZERO; 12];
             st[j] = Goldilocks::ONE;
-            let mut ext = [GoldilocksExt4::ZERO; 12];
-            ext[j] = GoldilocksExt4::from_limbs([Goldilocks::ONE; 4]);
             poseidon2_apply_me(&mut st);
-            poseidon2_apply_me_ext4(&mut ext);
             for i in 0..12 {
                 let entry = Goldilocks::from_u64_reduced(
                     m4[i / 3][j / 3] * if i % 3 == j % 3 { 2 } else { 1 },
                 );
                 assert_eq!(st[i], entry);
-                assert_eq!(ext[i].to_limbs(), [entry; 4]);
             }
         }
     }
