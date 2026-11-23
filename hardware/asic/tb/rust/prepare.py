@@ -1,10 +1,12 @@
-"""Install verification-only hooks in the designated hbox build copy."""
+"""Install verification-only hooks in the designated Rust build copy."""
 from pathlib import Path
+import os
 import sys
 
 root = Path(sys.argv[1]).resolve()
-if root != Path("/var/tmp/deep5-qsagni/rust-unified"):
-    raise SystemExit("prepare the hbox source copy under /var/tmp/deep5-qsagni/rust-unified")
+expected = Path(os.environ.get("QSAG_ASIC_RUST_ROOT") or Path(__file__).resolve().parents[4]).resolve()
+if root != expected:
+    raise SystemExit(f"prepare the Rust source copy at {expected} (set QSAG_ASIC_RUST_ROOT)")
 here = Path(__file__).resolve().parent
 crate = root / "crates/qsag-agg"
 v2 = crate / "src/zk_hem/v2"
@@ -22,7 +24,7 @@ def install(source, dest):
 
 install(here/"port.rs",v2/"port.rs")
 for name in ["kat","live"]:
-    install(here/f"{name}.rs",crate/f"examples/deep5_{name}.rs")
+    install(here/f"{name}.rs",crate/f"examples/qsag_ni_{name}.rs")
 edit(v2.with_suffix(".rs"),"pub mod hash;", "pub mod hash;\npub mod port;")
 for name,domain in [("tree_into",6),("fs_into",7)]:
     sig=f"fn {name}(self, input: &[u8], out: &mut [u8]) {{"
