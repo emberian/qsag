@@ -10,7 +10,7 @@ module qsag_ass2_cg_dff #(parameter int W = 64) (
     output logic [W-1:0] q
 );
 `ifdef GF180_SRAM_MACRO
-    localparam int N_GRP = (W + 15) / 16;
+    localparam int N_GRP = (W + 31) / 32;
     wire [N_GRP-1:0] gclk;
     for (genvar g = 0; g < N_GRP; g++) begin : g_icg
         (* keep *) gf180mcu_fd_sc_mcu7t5v0__icgtp_2 u_icg (
@@ -19,7 +19,7 @@ module qsag_ass2_cg_dff #(parameter int W = 64) (
     end
     for (genvar i = 0; i < W; i++) begin : g_ff
         (* keep *) gf180mcu_fd_sc_mcu7t5v0__dffrnq_1 u_ff (
-            .CLK(gclk[i / 16]), .D(d[i]), .RN(rst_n), .Q(q[i])
+            .CLK(gclk[i / 32]), .D(d[i]), .RN(rst_n), .Q(q[i])
         );
     end
 `else
