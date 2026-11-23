@@ -1,50 +1,53 @@
-// GoldilocksExt4 MAC and radix-2 fold butterfly over a block-RAM table.
+// GoldilocksFp5 MAC and radix-2 fold butterfly over a block-RAM table.
 //
-// Fold (WHIR fold / sumcheck table halving, crates/qsag-agg fold_first_var_in_place_ext4):
+// Fold:
 //     table[k] <- table[2k] + r * (table[2k+1] - table[2k]),   k = 0 .. n/2 - 1
 // The table of 2^TAW entries lives in two simple dual-port block RAMs (even and odd indices),
 // both read synchronously, so one butterfly enters the pipeline every clock and the fold is
 // in place: result k is written FOLD_LAT clocks after entries 2k, 2k+1 were read, and address
 // k/2 of either bank is read before any result that lands on it is written. A round over n
-// entries takes n/2 + FOLD_LAT clocks. The last result (n = 2) is also latched in `fold_res`.
+// entries takes n/2 + FOLD_LAT clocks. The last result (n = 2) is also latched in `fold_res`
+// when `KEEP_FOLD_RES=1` (or captured directly on `fold_wr_last` when `KEEP_FOLD_RES=0`).
 //
-// The same 9-multiply Karatsuba MAC is offered to the surrounding logic on `mac_*`.
+// The same 14-multiply quintic MAC is offered to the surrounding logic on `mac_*`.
 // Table entries and operands must be canonical.
-module qsag_ext4_mac_bfly #(
-    parameter int TAW = 10,
-    parameter int AW = 26,
-    parameter int BW = 17
+module qsag_ext5_mac_bfly #(
+    parameter int TAW           = 10,
+    parameter int AW            = 26,
+    parameter int BW            = 17,
+    parameter bit KEEP_FOLD_RES = 1'b1
 ) (
     input  logic           clk,
     input  logic           rst,
     // table load
     input  logic           tw_en,
     input  logic [TAW-1:0] tw_idx,
-    input  logic [255:0]   tw_data,
+    input  logic [319:0]   tw_data,
     // fold round
     input  logic           fold_start,
     input  logic [5:0]     fold_log2n,
-    input  logic [255:0]   fold_r,
+    input  logic [319:0]   fold_r,
     output logic           fold_busy,
     output logic           fold_done,
-    output logic [255:0]   fold_res,
+    output logic           fold_wr_last,
+    output logic [319:0]   fold_res,
     // shared MAC port: y = a*b + c
     input  logic           mac_valid,
-    input  logic [255:0]   mac_a,
-    input  logic [255:0]   mac_b,
-    input  logic [255:0]   mac_c,
+    input  logic [319:0]   mac_a,
+    input  logic [319:0]   mac_b,
+    input  logic [319:0]   mac_c,
     output logic           mac_done,
-    output logic [255:0]   mac_y
+    output logic [319:0]   mac_y
 );
     localparam logic [63:0] GL_P = qsag_ni_pkg::GL_P;
-    localparam int EXT4_MAC_LAT = qsag_ni_pkg::EXT4_MAC_LAT;
+    localparam int EXT5_MAC_LAT = qsag_ni_pkg::EXT5_MAC_LAT;
     localparam int BAW      = TAW - 1;
-    localparam int FOLD_LAT = 2 + EXT4_MAC_LAT;   // RAM read, subtract, MAC
+    localparam int FOLD_LAT = 2 + EXT5_MAC_LAT;   // RAM read, subtract, MAC
 
     // Fold control.
     logic [TAW-1:0] k, k_last;
     logic           rd_act;
-    logic [255:0]   r_q;
+    logic [319:0]   r_q;
 
     logic [FOLD_LAT-1:0]     fv_sr;      // butterfly valid
     logic [FOLD_LAT-1:0]     fl_sr;      // last butterfly of the round
@@ -79,25 +82,26 @@ module qsag_ext4_mac_bfly #(
     // Table banks.
     logic            wr_v;
     logic [TAW-1:0]  wr_k;
-    logic [255:0]    ev_rd, od_rd, wr_data;
+    logic [319:0]    ev_rd, od_rd, wr_data;
     logic            bw_en;
     logic [TAW-1:0]  bw_idx;
-    assign wr_v   = fv_sr[FOLD_LAT-1];
-    assign wr_k   = fk_sr[(FOLD_LAT-1)*TAW +: TAW];
-    assign bw_en  = wr_v || tw_en;
-    assign bw_idx = wr_v ? wr_k : tw_idx;
+    assign wr_v         = fv_sr[FOLD_LAT-1];
+    assign wr_k         = fk_sr[(FOLD_LAT-1)*TAW +: TAW];
+    assign bw_en        = wr_v || tw_en;
+    assign bw_idx       = wr_v ? wr_k : tw_idx;
+    assign fold_wr_last = wr_v && fl_sr[FOLD_LAT-1];
 
-    qsag_sdp_bram #(.AW(BAW), .DW(256), .NO_RW_CHECK(1'b1)) u_even (
+    qsag_sdp_bram #(.AW(BAW), .DW(320), .NO_RW_CHECK(1'b1)) u_even (
         .clk(clk), .we(bw_en && !bw_idx[0]), .wa(bw_idx[TAW-1:1]), .wd(wr_data),
         .ra(k[BAW-1:0]), .rd(ev_rd));
-    qsag_sdp_bram #(.AW(BAW), .DW(256), .NO_RW_CHECK(1'b1)) u_odd (
+    qsag_sdp_bram #(.AW(BAW), .DW(320), .NO_RW_CHECK(1'b1)) u_odd (
         .clk(clk), .we(bw_en && bw_idx[0]), .wa(bw_idx[TAW-1:1]), .wd(wr_data),
         .ra(k[BAW-1:0]), .rd(od_rd));
 
     // d = odd - even (mod p), parallel speculative subtract + split carry (no cascaded carry chain!).
     localparam int SUB_CHUNK = 16;
-    logic [255:0] d_q, e_q;
-    for (genvar i = 0; i < 4; i++) begin : g_sub
+    logic [319:0] d_q, e_q;
+    for (genvar i = 0; i < 5; i++) begin : g_sub
         wire [63:0] od_i = od_rd[64*i +: 64];
         wire [63:0] ev_i = ev_rd[64*i +: 64];
         if (AW <= 16) begin : g_sub_ecp5
@@ -119,24 +123,28 @@ module qsag_ext4_mac_bfly #(
 
     // Shared MAC.
     logic                    f_in;
-    logic [EXT4_MAC_LAT-1:0] mv_sr;
-    logic [255:0]            ma, mb, mc, my;
+    logic [EXT5_MAC_LAT-1:0] mv_sr;
+    logic [319:0]            ma, mb, mc, my;
     assign f_in = fv_sr[1];
     assign ma = f_in ? r_q : mac_a;
     assign mb = f_in ? d_q : mac_b;
     assign mc = f_in ? e_q : mac_c;
-    qsag_ext4_mac #(.AW(AW), .BW(BW)) u_mac (.clk(clk), .a(ma), .b(mb), .c(mc), .y(my));
+    qsag_ext5_mac #(.AW(AW), .BW(BW)) u_mac (.clk(clk), .a(ma), .b(mb), .c(mc), .y(my));
     always_ff @(posedge clk) begin
         if (rst) mv_sr <= '0;
-        else     mv_sr <= {mv_sr[EXT4_MAC_LAT-2:0], mac_valid && !fold_busy};
+        else     mv_sr <= {mv_sr[EXT5_MAC_LAT-2:0], mac_valid && !fold_busy};
     end
-    assign mac_done = mv_sr[EXT4_MAC_LAT-1];
+    assign mac_done = mv_sr[EXT5_MAC_LAT-1];
     assign mac_y    = my;
     assign wr_data  = wr_v ? my : tw_data;
 
     always_ff @(posedge clk) begin
         if (rst) fold_done <= 1'b0;
-        else     fold_done <= wr_v && fl_sr[FOLD_LAT-1];
-        if (wr_v) fold_res <= my;
+        else     fold_done <= fold_wr_last;
+    end
+    if (KEEP_FOLD_RES) begin : g_fold_res
+        always_ff @(posedge clk) if (wr_v) fold_res <= my;
+    end else begin : g_no_fold_res
+        assign fold_res = '0;
     end
 endmodule
