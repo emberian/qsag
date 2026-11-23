@@ -1,31 +1,36 @@
-// Eight independent byte sums, with a three-level group carry prefix.
-// The group generate comparison excludes carry-in; equality propagates it.
+// 6-level bit-parallel Kogge-Stone 64-bit adder (`< 6.5 ns` SS).
+// Marked `(* keep_hierarchy *)` so synthesis/ABC preserves the parallel-prefix tree.
+(* keep_hierarchy *)
 module qsag_ass2_add64 (
-    input wire [63:0] a, b,
-    input wire cin,
+    input  wire [63:0] a, b,
+    input  wire        cin,
     output wire [63:0] sum,
-    output wire cout
+    output wire        cout
 );
-    wire [7:0] g [4], p [4];
-    wire [8:0] c;
+    wire [63:0] g [7];
+    wire [63:0] p [7];
+    wire [64:0] c;
+
+    assign g[0] = a & b;
+    assign p[0] = a ^ b;
     assign c[0] = cin;
-    for (genvar k=0; k<8; k++) begin : g_byte
-        wire [7:0] x = a[8*k+:8], y = b[8*k+:8];
-        assign g[0][k] = x > ~y;
-        assign p[0][k] = &(x | y);
-        assign sum[8*k+:8] = x + y + {7'd0,c[k]};
-        assign c[k+1] = g[3][k] || (p[3][k] && cin);
-    end
-    for (genvar j=0; j<3; j++) begin : g_level
-        for (genvar k=0; k<8; k++) begin : g_prefix
-            if (k < (1<<j)) begin : g_copy
-                assign g[j+1][k] = g[j][k];
-                assign p[j+1][k] = p[j][k];
-            end else begin : g_join
-                assign g[j+1][k] = g[j][k] || (p[j][k] && g[j][k-(1<<j)]);
-                assign p[j+1][k] = p[j][k] && p[j][k-(1<<j)];
+
+    for (genvar s = 0; s < 6; s++) begin : g_stage
+        localparam int D = 1 << s;
+        for (genvar i = 0; i < 64; i++) begin : g_bit
+            if (i < D) begin : g_pass
+                assign g[s + 1][i] = g[s][i];
+                assign p[s + 1][i] = p[s][i];
+            end else begin : g_merge
+                assign g[s + 1][i] = g[s][i] | (p[s][i] & g[s][i - D]);
+                assign p[s + 1][i] = p[s][i] & p[s][i - D];
             end
         end
     end
-    assign cout = c[8];
+
+    for (genvar i = 0; i < 64; i++) begin : g_sum
+        assign c[i + 1] = g[6][i] | (p[6][i] & cin);
+        assign sum[i]   = p[0][i] ^ c[i];
+    end
+    assign cout = c[64];
 endmodule
