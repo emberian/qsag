@@ -42,6 +42,7 @@ public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 public import Qsag.Protocol.Credentials.BlindVcCollisionFinder
 public import Qsag.Protocol.Credentials.RepetitionCutAndChoose
 public import Qsag.Protocol.Credentials.ToprfMachine
+public import Qsag.Protocol.Credentials.ToprfSpdzArithmeticRefinement
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -1220,6 +1221,21 @@ theorem inhabited_piToprfCredService_issuance :
   Qsag.Top.tooth_degenerate_moduleSis_noRows_refuted
   Qsag.Top.inhabited_blindVc_cut_and_choose_gameBound
   Qsag.Top.inhabited_piToprfCredService_issuance
+
+#verify_kernel
+  Qsag.SpdzToprf.piToprfRealSpdzGuarded_dataRefines
+
+#verify_constructive
+  Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery
+  Qsag.SpdzToprf.piToprfRealSpdz_sound_or_mac_forgery
+  Qsag.SpdzToprf.evalFooled_macKey_unique
+  Qsag.SpdzToprf.spdz_mac_forgery_game_bound
+  Qsag.SpdzToprf.goldilocksExt2_card_bits
+  Qsag.SpdzToprf.spdzEval_macKey_zero_leakage
+  Qsag.SpdzToprf.piToprfRealSpdz_macKey_zero_leakage
+  Qsag.SpdzToprf.spdzEval_honest_complete
+  Qsag.SpdzToprf.piToprfRealSpdz_issue_accept_checks
+  Qsag.SpdzToprf.piToprfRealSpdz_issue_binding_or_collision
 
 #verify_inhabited Qsag.Top.blindVc_cut_and_choose_gameBound
   Qsag.Top.inhabited_blindVc_cut_and_choose_gameBound

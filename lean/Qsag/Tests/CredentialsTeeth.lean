@@ -44,15 +44,15 @@ def teethEchoChalHash (mu : List UInt8) (_w1 : Fin 4 → NatTree 8) : List UInt8
 def teethRawMessageSig : ThresholdSignSig :=
   ⟨teethZeroFields.message, fun _ => PolyTree.zero 8, mldsaZeroHints204, 0⟩
 
-/-- The check that feeds the raw message to the algebraic core as `μ` (the wrapper before this
-stage) accepts `teethRawMessageSig`. -/
+/-- The check that feeds the raw message directly to the algebraic core as `μ` (bypassing
+message-representative hashing) accepts `teethRawMessageSig`. -/
 theorem teeth_raw_message_check_accepts :
     mldsaVerify teethEchoChalHash (fun _ => PolyTree.zero 8) (fun _ _ => PolyTree.zero 8)
       (fun _ => PolyTree.zero 8) teethZeroFields.message
       teethRawMessageSig.cTilde teethRawMessageSig.z teethRawMessageSig.h = true :=
   mldsaVerify_echo_zero_accepts teethZeroFields.message
 
-/-- **BACKLOG-57 tooth.** A concrete signature accepted when the raw message stands in for the
+/-- **Message-representative tooth.** A concrete signature accepted when the raw message stands in for the
 message representative is rejected once the FIPS 204 representative is computed, for every
 issuer key. -/
 theorem tooth_raw_message_signature_rejected_by_fips204_check :

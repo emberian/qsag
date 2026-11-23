@@ -378,5 +378,17 @@ end AuthBound
 #tooth_pair Qsag.Top.prfCertCustody_forgery_carries_prf_tag vs
   Qsag.Top.tooth_prfCertLayer_wrong_tag_rejected
 
+#verify_constructive
+  Qsag.KeyHidingCustody.tagForge_prf_hop
+  Qsag.KeyHidingCustody.encFreshTagGame_random_function_bound
+  Qsag.KeyHidingCustody.prfCustodyTag_unforgeable
+  Qsag.KeyHidingCustody.custodianKeys_forgery_union_bound
+  Qsag.KeyHidingCustody.prfTag_view_key_hiding
+
+#verify_kernel
+  Qsag.Top.rssSharedRelease_refines_reference
+  Qsag.Top.thresholdServiceShared_refines_ideal
+  Qsag.Top.thresholdDurableShared_refines_ideal
+
 end Qsag.Top
 end

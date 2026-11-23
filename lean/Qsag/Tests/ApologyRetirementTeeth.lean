@@ -24,7 +24,9 @@ share a domain operation and that the tooth has a refutation-shaped conclusion).
   bound fails for a one-function support; a certificate with a wrong PRF tag is refused.
 -/
 
-public import Qsag.Top.ApologyRetirements
+public import Qsag.Top.Signing
+public import Qsag.Top.Credentials
+public import Qsag.Top.CustodyKeyHidingBound
 import Qsag.Tactic.AssuranceKit
 
 public section
