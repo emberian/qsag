@@ -1,8 +1,8 @@
 # ASS2 architectural cosimulation
 
-On bb2, run `bash sim/run_cosim.sh` from the ASS2 directory. It runs the Python known-answer tests, generates 1,024 seeded programs plus four firmware cases, lints the enclave, builds the core with Verilator, and checks each instruction boundary. The simulated bus has an 8 KiB synchronous SRAM, registered read data and eight byte-write strobes. Each program starts from reset. A retire or trap pulse ends a step, regardless of the number of physical clocks it took.
+On a Linux host, run `bash sim/run_cosim.sh` from the ASS2 directory. It runs the Python known-answer tests, generates 1,024 seeded programs plus four firmware cases, lints the enclave, builds the core with Verilator, and checks each instruction boundary. The simulated bus has an 8 KiB synchronous SRAM, registered read data and eight byte-write strobes. Each program starts from reset. A retire or trap pulse ends a step, regardless of the number of physical clocks it took.
 
-To retain the corpus and replay the same instructions through the Rust VM, run the following on bb2. Set `ASS2_CRATE` to the full workspace's `crates/qsag-ass2` directory when the simulation tree is staged separately.
+To retain the corpus and replay the same instructions through the Rust VM, run the following on a Linux host. Set `ASS2_CRATE` to the full workspace's `crates/qsag-ass2` directory when the simulation tree is staged separately.
 
 ```bash
 python3 sim/gen_cosim_vectors.py suite.vec \
@@ -29,7 +29,7 @@ The Python model checks both Poseidon permutation widths against their full sequ
 
 ## Firmware inputs
 
-The four small flat SRAM images include executable code and populated test mailboxes captured before execution from the firmware lane's `firmware_kat.rs` public test vectors. The source KAT suite passed on bb2 when the fixtures were captured. They exercise the depth-four Canopy proof at leaf index 3, the dual-MAC/WOTS case at layer 13 and digit 1, the seven-limb Jive compression with tweaks 100 and 200, and the first deterministic sumcheck transcript. All four finish with R4 equal to one. Use additional `--firmware` arguments for other flat images.
+The four small flat SRAM images include executable code and populated test mailboxes captured before execution from the `qsag-ass2` `firmware_kat.rs` public test vectors. They exercise the depth-four Canopy proof at leaf index 3, the dual-MAC/WOTS case at layer 13 and digit 1, the seven-limb Jive compression with tweaks 100 and 200, and the first deterministic sumcheck transcript. All four finish with R4 equal to one. Use additional `--firmware` arguments for other flat images.
 
 ## Recorded run
 

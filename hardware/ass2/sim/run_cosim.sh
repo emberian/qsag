@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-[[ $(uname -s) == Linux ]] || { echo "Run on bb2" >&2; exit 2; }
+[[ $(uname -s) == Linux ]] || { echo "Run on a Linux host" >&2; exit 2; }
 here=$(cd "$(dirname "$0")" && pwd)
 rtl=$(cd "$here/../rtl" && pwd)
-export PATH="/home/build/qsag-ni-asic/tools/oss-cad-suite/bin:$PATH"
+export PATH="${OSS_CAD_BIN:-/opt/oss-cad-suite/bin}:$PATH"
 work=$(mktemp -d "${TMPDIR:-/tmp}/ass2-verilator.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
 source "$here/../synth/rtl_sources.sh"

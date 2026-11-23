@@ -12,7 +12,7 @@ module ass2_cosim_top (
 );
     wire [63:0] u_phys, u_r4;
     wire [7:0]  u_dbg_b;
-    wire        u_tamp, u_zpulse, u_dbg_we, u_dbg_rd;
+    wire        u_tamp, u_zpulse, u_dbg_we, u_dbg_rd, u_mfetch, u_mbyte;
     qsag_ass2_core dut(
         .clk, .rst_n, .start_i, .tamper_zeroize_n(1'b1), .jtag_test_mode_i(1'b0),
         .zeroize_first_i(1'b0), .dbg_halt_i(1'b0), .start_pc_i(64'b0),
@@ -23,9 +23,11 @@ module ass2_cosim_top (
         .pc_o, .ecause_o, .instret_o, .cycles_o,
         .phys_cycles_o(u_phys), .r4_o(u_r4),
         .tampered_o(u_tamp), .dbg_we_o(u_dbg_we), .dbg_byte_o(u_dbg_b),
-        .dbg_in_i(64'b0), .dbg_rd_o(u_dbg_rd)
+        .dbg_in_i(64'b0), .dbg_rd_o(u_dbg_rd),
+        .post_clear_i(1'b0), .applet_exec_i(1'b0), .ring3_enter_i(1'b0),
+        .mem_fetch_o(u_mfetch), .mem_byte_o(u_mbyte)
     );
-    wire unused_cosim = ^{u_phys, u_r4, u_dbg_b, u_tamp, u_zpulse, u_dbg_we, u_dbg_rd};
+    wire unused_cosim = ^{u_phys, u_r4, u_dbg_b, u_tamp, u_zpulse, u_dbg_we, u_dbg_rd, u_mfetch, u_mbyte};
     assign regs = dut.regs;
     assign spg  = dut.spg;
 endmodule

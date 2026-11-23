@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-[[ $(uname -s) == Linux ]] || { echo "Run on bb2" >&2; exit 2; }
+[[ $(uname -s) == Linux ]] || { echo "Run on a Linux host" >&2; exit 2; }
 here=$(cd "$(dirname "$0")" && pwd)
 crate=$(cd "${ASS2_CRATE:-$here/../../../crates/qsag-ass2}" && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/ass2-rust.XXXXXXXX")

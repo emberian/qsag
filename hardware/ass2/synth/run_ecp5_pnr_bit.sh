@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-[[ $(uname -s) == Linux ]] || { echo "Run on bb2" >&2; exit 2; }
+[[ $(uname -s) == Linux ]] || { echo "Run on a Linux host" >&2; exit 2; }
 here=$(cd "$(dirname "$0")" && pwd)
 rtl=$(cd "$here/../rtl" && pwd)
 top=ecp5_top_wrap
 [[ -s "$rtl/qsag_ass2_enclave_top.sv" ]] || { echo "Missing $rtl/qsag_ass2_enclave_top.sv" >&2; exit 2; }
-export PATH="/home/build/qsag-ni-asic/tools/oss-cad-suite/bin:$PATH"
+export PATH="${OSS_CAD_BIN:-/opt/oss-cad-suite/bin}:$PATH"
 mkdir -p "${OUT:-$here/out/ecp5}"
 cd "${OUT:-$here/out/ecp5}"
 # Slang handles the SystemVerilog packages and unpacked arrays. The native

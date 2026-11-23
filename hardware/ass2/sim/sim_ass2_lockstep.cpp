@@ -1,5 +1,9 @@
 // Replay gen_cosim_vectors.py records through a synchronous, byte-strobed SRAM.
 #include "Vass2_cosim_top.h"
+#include "verilated.h"
+#if VM_COVERAGE
+#include "verilated_cov.h"
+#endif
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -153,4 +157,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     std::cout << cases << " programs, " << steps << " RTL architectural steps passed\n";
+#if VM_COVERAGE
+    VerilatedCov::write("coverage.dat");
+#endif
 }
