@@ -1834,3 +1834,912 @@ abbrev PrfTcrReductionFor (latchOn : Bool) (params : PqHashParams)
       (multiHopFullKeygen π1 π2 π3 sampleMsg sampleSec seedS) (multiHopFullAdv π1 π2 π3 adv)).winProb
       ((((coverBound.add εTcr).add pre.winProb).add εPrfSec).add εPrfMsg)
 
+theorem hulsing_prf_tcr_residual_bound (latchOn : Bool) (params : PqHashParams)
+    (hOneTimeIfSt : params.statefulJorts = true → latchOn = true)
+    (hw : params.w = 4 ∨ params.w = 16) :
+    PrfTcrReductionFor latchOn params hOneTimeIfSt hw := by
+  intro n nC1 nR1 nC2 nR2 nSeed nA qHash qSign hPos suite seedLen keyLen qPrfMsg qPrfSec qTcr
+    hqPrfMsg hqPrfSec hqTcr π1 π2 π3 sampleMsg hSampleMsg sampleSec hSampleSec seedS hSeed adv
+    𝒜Msg 𝒜Sec hClassMsg hClassSec 𝒜Tcr hClassTcr εPrfMsg εPrfSec εTcr hPrfMsg hPrfSec hTcr
+  intro events cover pre coverBound
+  have coverLe : Spec.GameBound cover.winProb coverBound := by
+    dsimp only [coverBound]
+    split
+    · rename_i absent
+      exact Spec.FinGame.bound_zero_of_forall_lose cover fun _ => idealPrfBreakEvents_noFors _ _ _ absent _ _ _ _
+    · exact Spec.RatBound.le_refl _
+  exact hulsing_full_multihop_euf_cma_bound_with latchOn hPos suite params hOneTimeIfSt hw
+    seedLen keyLen qPrfMsg qPrfSec qTcr hqPrfMsg hqPrfSec hqTcr π1 π2 π3 sampleMsg hSampleMsg
+    sampleSec hSampleSec seedS hSeed adv hClassMsg hClassSec hClassTcr cover.win pre.win
+    (fun _ => idealPrfBreakEvents_fst_of _ _ _ _ _ _ _) (fun _ => idealPrfBreakEvents_snd_of _ _ _ _ _ _ _)
+    hPrfMsg hPrfSec coverLe hTcr (Spec.RatBound.le_refl _)
+
+#verify_constructive hulsing_idealPrf_cover_bound logPrehashCollision_none cleanCover_ideal_bound average_challenger_bound
+
+#export_eqns puncturePrf wotsPrfCell cellWotsNode pinnedWotsNode wotsSlotLoss puncturedDigestGame
+
+#verify_constructive itsr_commit_at_index sampleSum_term_le itsr_tape_guess_bound memoItsr_committed_guess_bound
+
+#verify_constructive valuedCache_add memoItsr_log_extends prefix_index slotsAgree_add memoItsr_failed_replay
+
+#verify_constructive itsr_erased_coordinate_count powItsr_pos memoItsr_fresh_cover_bound signingPrfInput_prehash_eq representedLog_resume memoItsr_represented memoItsrAdv_fresh_cover_wins
+
+#verify_constructive pair_ext uniformOn_itsrVecSampler uniformOn_samplePair uniform_singleHidden
+  uniformOn_mkPreSampler uniformOn_mkUdSampler idealPrfBreakEvents_noFors
+  hulsing_prf_tcr_residual_bound fin_choice exchangePrfEntry_invol exchangePrfEntry_mem
+  hulsing_wots_pk_dependent_slot_bound chainSteps_at_words chainSteps_secOverlay ideal_wots_cell pinnedWotsNode_eq pinnedWotsPk_eq pinnedWotsPublicKey_eq
+  headD_drop_getD tail_drop_succ memoItsrTranscriptCode_play signing_transcript_eq_interactive_itsr
+  hulsing_punctured_fors_leaf_pre_bound hulsing_wots_slot_chain_bound doubleDraw_sum udCoordinateGame_normalize hulsing_punctured_prf_slot_ud_bound
+  prf_entry_exchange_sum samplePair_sum puncturedPrf_draw_sum secretPrfSlot_input_length
+  tape_cons_sum cachedTable_fill cachedTable_puncture evalMemoPrf_sum prf_table_eq_memoized_tape
+  idealSigner_at_prfInput signingTranscriptCode_within signingTranscriptCode_eval
+  signing_transcript_eq_memoized_tape puncturedTablePreAdv_win hulsing_punctured_prf_slot_pre_bound
+
+
+/-- Secret-dependent values used when assembling a production signature. -/
+structure SigningMaterial where
+  wots : UInt32 → UInt64 → Nat → Nat → Nat → Spec.Bytes
+  forsSecret : UInt64 → Nat → Nat → Nat → Spec.Bytes
+  forsLeaf : UInt64 → Nat → Nat → Nat → Spec.Bytes
+
+def SigningMaterial.ideal (suite : TweakableHashSuite) (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes) :
+    SigningMaterial :=
+  let ov := secOverlaySuite suite s f
+  let sk : PqSecretKey := ⟨[], [], s⟩
+  ⟨honestChainNode ov sk, forsIndexedSecretLeaf ov sk, forsIndexedLeafFn ov sk⟩
+
+def forsPrfCell (tree : UInt64) (kp j u : Nat) : HashAdrs :=
+  ⟨0, tree, .forsPrf, UInt32.ofNat kp, UInt32.ofNat j, UInt32.ofNat u⟩
+
+inductive SigningPin where
+  | fors (tree : UInt64) (kp treeIdx leafIdx : Nat)
+  | wots (layer : UInt32) (tree : UInt64) (kp chain step : Nat)
+
+def SigningPin.cell : SigningPin → HashAdrs
+  | .fors t k j u => forsPrfCell t k j u
+  | .wots l t k r _ => wotsPrfCell l t k r
+
+def SigningPin.cut : SigningPin → Nat
+  | .fors .. => 0
+  | .wots _ _ _ _ step => step + 1
+
+def SigningPin.digest (suite : TweakableHashSuite) (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes) :
+    SigningPin → Spec.Bytes
+  | .fors t k j u => (SigningMaterial.ideal suite s f).forsLeaf t k j u
+  | .wots l t k r step => cellWotsNode suite s f (wotsPrfCell l t k r) (step + 1)
+
+/-- Supply the challenged digest at its physical address. Every unchallenged
+    secret comes from the punctured table. -/
+def SigningMaterial.pinned (suite : TweakableHashSuite) (s : Spec.Bytes) (off : Spec.Bytes → Spec.Bytes)
+    (pin : SigningPin) (y : Spec.Bytes) : SigningMaterial :=
+  let view := SigningMaterial.ideal suite s off
+  { wots := fun l t k r => pinnedWotsNode suite s off pin.cell pin.cut y (wotsPrfCell l t k r)
+    forsSecret := view.forsSecret
+    forsLeaf := fun t k j u => if forsPrfCell t k j u = pin.cell then y else view.forsLeaf t k j u }
+
+private theorem off_cell {pin addr : HashAdrs} (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes) (ne : addr ≠ pin) :
+    puncturePrf (s ++ encodeAdrs pin) f (s ++ encodeAdrs addr) = f (s ++ encodeAdrs addr) := by
+  rw [puncturePrf.public_eqs, ite_eq_right (fun e => ne (encodeAdrs_injective (List.append_cancel_left e)))]
+
+theorem pinned_fors_secret (suite : TweakableHashSuite) (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes)
+    (pin : SigningPin) (t : UInt64) (k j u : Nat) (hne : forsPrfCell t k j u ≠ pin.cell) :
+    (SigningMaterial.pinned suite s (puncturePrf (s ++ encodeAdrs pin.cell) f) pin (pin.digest suite s f)).forsSecret t k j u =
+      (SigningMaterial.ideal suite s f).forsSecret t k j u := by
+  simp only [SigningMaterial.pinned, SigningMaterial.ideal, forsIndexedSecretLeaf_eq, secOverlaySuite_tagPrf_empty]
+  exact congrArg padBytes32 (off_cell s f hne)
+
+private theorem forsLeaf_same_cell (suite : TweakableHashSuite) (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes)
+    {t t' : UInt64} {k j u k' j' u' : Nat} (he : forsPrfCell t k j u = forsPrfCell t' k' j' u') :
+    (SigningMaterial.ideal suite s f).forsLeaf t k j u = (SigningMaterial.ideal suite s f).forsLeaf t' k' j' u' := by
+  simp only [forsPrfCell, HashAdrs.mk.injEq, true_and] at he
+  obtain ⟨rfl, hk, hj, hu⟩ := he
+  simp only [SigningMaterial.ideal, forsIndexedLeafFn_eq, forsIndexedSecretLeaf_eq, forsIndexedLeafHash_eq,
+    thChainF_eq, hk, hj, hu]
+
+theorem pinned_fors_leaf (suite : TweakableHashSuite) (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes)
+    (pin : SigningPin) (t : UInt64) (k j u : Nat) :
+    (SigningMaterial.pinned suite s (puncturePrf (s ++ encodeAdrs pin.cell) f) pin (pin.digest suite s f)).forsLeaf t k j u =
+      (SigningMaterial.ideal suite s f).forsLeaf t k j u := by
+  dsimp only [SigningMaterial.pinned]
+  split
+  · rename_i eq
+    cases pin with
+    | fors => exact (forsLeaf_same_cell suite s f eq).symm
+    | wots => simp [SigningPin.cell, forsPrfCell, wotsPrfCell.public_eqs] at eq
+  · rename_i ne
+    have hs := pinned_fors_secret suite s f pin t k j u ne
+    dsimp only [SigningMaterial.ideal, SigningMaterial.pinned] at hs ⊢
+    rw [forsIndexedLeafFn_eq, forsIndexedLeafFn_eq, hs]
+    simp only [forsIndexedLeafHash_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
+
+theorem pinned_wots_node (suite : TweakableHashSuite) (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes)
+    (pin : SigningPin) (l : UInt32) (t : UInt64) (k r n : Nat) (available : wotsPrfCell l t k r = pin.cell → pin.cut ≤ n) :
+    (SigningMaterial.pinned suite s (puncturePrf (s ++ encodeAdrs pin.cell) f) pin (pin.digest suite s f)).wots l t k r n =
+      (SigningMaterial.ideal suite s f).wots l t k r n := by
+  simp only [SigningMaterial.pinned, SigningMaterial.ideal, ideal_wots_cell]
+  cases pin with
+  | fors t' k' j u =>
+    have ne : wotsPrfCell l t k r ≠ forsPrfCell t' k' j u := by
+      simp [wotsPrfCell.public_eqs, forsPrfCell]
+    rw [pinnedWotsNode.public_eqs, SigningPin.cell, ite_eq_right ne]
+    simp only [cellWotsNode.public_eqs, off_cell s f ne]
+  | wots => exact pinnedWotsNode_eq suite s f _ _ _ n available
+
+/-- The endpoint compression and the Merkle paths use public WOTS nodes only. -/
+def SigningMaterial.wotsPk (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s : Spec.Bytes) (l : UInt32) (t : UInt64) (k : Nat) :=
+  thTweakTl suite s ⟨l, t, .wotsPk, UInt32.ofNat k, 0, 0⟩
+    ((List.range p.ell1).map fun r => v.wots l t k r (p.w-1))
+
+def SigningMaterial.xmssRoot (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s : Spec.Bytes) (l : UInt32) (t : UInt64) :=
+  computeMerkleNode suite s l t .tree (v.wotsPk suite p s l t) p.subtreeHeight 0
+
+def SigningMaterial.forsRoot (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s : Spec.Bytes) (t : UInt64) (k : Nat) :=
+  thTweakTl suite s ⟨0, t, .forsRoots, UInt32.ofNat k, 0, 0⟩
+    ((List.range p.forsTrees).map fun j => computeMerkleNodeKp suite s 0 t .forsTree (UInt32.ofNat k)
+      (v.forsLeaf t k j) p.forsHeight j 0)
+
+def SigningMaterial.openings (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s : Spec.Bytes) (t : UInt64) (k : Nat) (idxs : List Nat) :=
+  (List.range p.forsTrees).map fun j =>
+    let u := idxs.getD j 0
+    (⟨v.forsSecret t k j u, buildMerkleAuthPathKp suite s 0 t .forsTree (UInt32.ofNat k)
+      (v.forsLeaf t k j) p.forsHeight j 0 u⟩ : ForsTreeOpening)
+
+theorem ideal_material_wotsPk (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (l : UInt32) (t : UInt64) (k : Nat) :
+    computeWotsPk (secOverlaySuite suite s f) p ⟨[], [], s⟩ l t k =
+      (SigningMaterial.ideal suite s f).wotsPk suite p s l t k := by
+  rw [computeWotsPk_eq, SigningMaterial.wotsPk, thTweakTl_eq, thTweakTl_eq,
+    secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.2]
+  rfl
+
+theorem ideal_material_xmssRoot (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (l : UInt32) (t : UInt64) :
+    computeXmssSubtreeRoot (secOverlaySuite suite s f) p ⟨[], [], s⟩ l t =
+      (SigningMaterial.ideal suite s f).xmssRoot suite p s l t := by
+  rw [computeXmssSubtreeRoot_eq, SigningMaterial.xmssRoot, ← computeMerkleNodeKp_zero_eq, ← computeMerkleNodeKp_zero_eq]
+  exact secOverlaySuite_real_merkleNodeKp suite s f _ _ _ _ _ _ (ideal_material_wotsPk suite p s f l t) _ _ _
+
+theorem ideal_material_forsRoot (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (t : UInt64) (k : Nat) :
+    computeProductionForsPk (secOverlaySuite suite s f) p ⟨[], [], s⟩ t k =
+      (SigningMaterial.ideal suite s f).forsRoot suite p s t k := by
+  rw [computeProductionForsPk_eq, SigningMaterial.forsRoot, thTweakTl_eq, thTweakTl_eq,
+    secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.2]
+  congr 1
+  apply List.map_congr_left
+  intro j _
+  exact secOverlaySuite_real_merkleNodeKp suite s f _ _ _ _ _ _ (fun _ => rfl) _ _ _
+
+theorem ideal_material_openings (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (t : UInt64) (k : Nat) (idxs : List Nat) :
+    buildProductionForsOpenings (secOverlaySuite suite s f) p ⟨[], [], s⟩ t k idxs =
+      (SigningMaterial.ideal suite s f).openings suite p s t k idxs := by
+  rw [buildProductionForsOpenings_def, SigningMaterial.openings]
+  apply List.map_congr_left
+  intro j _
+  dsimp only [SigningMaterial.ideal]
+  congr 1
+  exact secOverlaySuite_real_authPathKp suite s f _ _ _ _ _ _ (fun _ => rfl) _ _ _ _
+
+def SigningMaterial.publicKey (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s : Spec.Bytes) : PqPublicKey := ⟨s, v.xmssRoot suite p s (UInt32.ofNat (p.numLayers-1)) 0⟩
+
+theorem ideal_material_publicKey (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) :
+    derivePublicKeyIdealPrf suite p s f = (SigningMaterial.ideal suite s f).publicKey suite p s := by
+  simp only [derivePublicKeyIdealPrf.public_eqs, derivePublicKey, SigningMaterial.publicKey, ideal_material_xmssRoot]
+
+private theorem pinned_wotsPk (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (pin : SigningPin) (hcut : pin.cut ≤ p.w-1) (l : UInt32) (t : UInt64) :
+    let v := SigningMaterial.pinned suite s (puncturePrf (s ++ encodeAdrs pin.cell) f) pin (pin.digest suite s f)
+    v.wotsPk suite p s l t = (SigningMaterial.ideal suite s f).wotsPk suite p s l t := by
+  intro v
+  funext k
+  unfold SigningMaterial.wotsPk
+  congr 1
+  apply List.map_congr_left
+  exact fun r _ => pinned_wots_node suite s f pin l t k r _ (fun _ => hcut)
+
+private theorem pinned_xmssRoot (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (pin : SigningPin) (hcut : pin.cut ≤ p.w-1) :
+    let v := SigningMaterial.pinned suite s (puncturePrf (s ++ encodeAdrs pin.cell) f) pin (pin.digest suite s f)
+    v.xmssRoot suite p s = (SigningMaterial.ideal suite s f).xmssRoot suite p s := by
+  funext l t
+  unfold SigningMaterial.xmssRoot
+  rw [pinned_wotsPk suite p s f pin hcut]
+
+private theorem pinned_forsRoot (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (pin : SigningPin) :
+    let v := SigningMaterial.pinned suite s (puncturePrf (s ++ encodeAdrs pin.cell) f) pin (pin.digest suite s f)
+    v.forsRoot suite p s = (SigningMaterial.ideal suite s f).forsRoot suite p s := by
+  intro v
+  have leaves : v.forsLeaf = (SigningMaterial.ideal suite s f).forsLeaf :=
+    funext fun t => funext fun k => funext fun j => funext (pinned_fors_leaf suite s f pin t k j)
+  funext t k
+  unfold SigningMaterial.forsRoot
+  rw [leaves]
+
+/-- Address and digest inputs for a layer are determined before any WOTS value is disclosed. -/
+def signingPosition (p : PqHashParams) (leaf i : Nat) := leaf / 2 ^ (i * p.subtreeHeight)
+
+private theorem signingPosition_next (p : PqHashParams) (leaf i : Nat) :
+    signingPosition p leaf (i+1) = signingPosition p leaf i / 2 ^ p.subtreeHeight := by
+  rw [signingPosition, signingPosition, Nat.succ_mul, Nat.pow_add, Nat.div_div_eq_div_mul]
+
+def signingLayerMsg (p : PqHashParams) (root : UInt32 → UInt64 → Spec.Bytes)
+    (initial : Spec.Bytes) (leaf i : Nat) :=
+  if i = 0 then initial else root (UInt32.ofNat (i-1)) (UInt64.ofNat (signingPosition p leaf i))
+
+def signingLayerGrind (suite : TweakableHashSuite) (p : PqHashParams) (pk : PqPublicKey)
+    (rand : Spec.Bytes) (root : UInt32 → UInt64 → Spec.Bytes) (initial : Spec.Bytes) (leaf fuel i : Nat) :=
+  let pos := signingPosition p leaf i
+  prodGrind suite p rand pk.pkSeed pk.pkRoot (signingLayerMsg p root initial leaf i) i
+    (UInt64.ofNat (pos / 2 ^ p.subtreeHeight)) (UInt32.ofNat (pos % 2 ^ p.subtreeHeight)) fuel
+
+private def collectLayers (one : Nat → Option LayerXmssSig) : Nat → Nat → Option (List LayerXmssSig)
+  | _, 0 => some []
+  | i, n+1 => do
+    let layer ← one i
+    let rest ← collectLayers one (i+1) n
+    return layer :: rest
+
+private def renderLayer (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s : Spec.Bytes) (leaf i ctr : Nat) (digits : List Nat) : LayerXmssSig :=
+  let pos := signingPosition p leaf i
+  let l := UInt32.ofNat i
+  let t := UInt64.ofNat (pos / 2 ^ p.subtreeHeight)
+  let k := pos % 2 ^ p.subtreeHeight
+  ⟨ctr, (List.range p.ell1).map (fun r => v.wots l t k r (digits.getD r 0)),
+   buildMerkleAuthPathKp suite s l t .tree 0 (v.wotsPk suite p s l t) p.subtreeHeight 0 0 k⟩
+
+private def renderAt (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s : Spec.Bytes) (leaf : Nat) (counters : Nat → Option (Nat × List Nat × Spec.Bytes)) (i : Nat) :=
+  (counters i).map fun (ctr, digits, _) => renderLayer v suite p s leaf i ctr digits
+
+private theorem prodGrind_overlay (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (rand root msg : Spec.Bytes) (i : Nat) (t : UInt64) (k : UInt32)
+    (fuel : Nat) : prodGrind (secOverlaySuite suite s f) p rand s root msg i t k fuel =
+      prodGrind suite p rand s root msg i t k fuel := by
+  simp only [prodGrind.public_eqs]
+  split
+  · generalize 0 = ctr
+    induction fuel generalizing ctr with
+    | zero => rw [grindTswLeafCounterAux_zero, grindTswLeafCounterAux_zero]
+    | succ n ih => rw [grindTswLeafCounterAux_succ, grindTswLeafCounterAux_succ,
+        thHashLeafMsg_eq, thHashLeafMsg_eq, secOverlaySuite_thCall_cons2, ih]
+  · generalize 0 = ctr
+    induction fuel generalizing ctr with
+    | zero => rw [grindTswInternalCounterAux_zero, grindTswInternalCounterAux_zero]
+    | succ n ih => rw [grindTswInternalCounterAux_succ, grindTswInternalCounterAux_succ,
+        thHashInternalNode_eq, thHashInternalNode_eq, secOverlaySuite_thCall_cons2, ih]
+
+private theorem ideal_layers (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (pkRoot rand initial : Spec.Bytes) (leaf fuel : Nat) :
+    let v := SigningMaterial.ideal suite s f
+    let root := v.xmssRoot suite p s
+    let counters := signingLayerGrind suite p ⟨s, pkRoot⟩ rand root initial leaf fuel
+    ∀ rem i, signProductionHypertreeLayers (secOverlaySuite suite s f) p ⟨[], [], s⟩ pkRoot rand fuel
+      i (signingPosition p leaf i) (signingLayerMsg p root initial leaf i) rem =
+      collectLayers (renderAt v suite p s leaf counters) i rem := by
+  intro v root counters rem
+  induction rem with
+  | zero => intro i; rw [signProductionHypertreeLayers_zero, collectLayers]
+  | succ n ih =>
+    intro i
+    let ov := secOverlaySuite suite s f
+    let pos := signingPosition p leaf i
+    let t := UInt64.ofNat (pos / 2^p.subtreeHeight)
+    let k := pos % 2^p.subtreeHeight
+    let M := signingLayerMsg p root initial leaf i
+    rw [signProductionHypertreeLayers_succ, collectLayers]
+    simp only [renderAt]
+    have gr : prodGrind ov p rand s pkRoot M i t (UInt32.ofNat k) fuel = counters i :=
+      prodGrind_overlay suite p s f rand pkRoot M i t (UInt32.ofNat k) fuel
+    rw [prodGrind.public_eqs] at gr
+    rw [gr]
+    cases g : counters i with
+    | none => rfl
+    | some triple =>
+      obtain ⟨ctr, digits, hm⟩ := triple
+      have msg : computeXmssSubtreeRoot ov p ⟨[], [], s⟩ (UInt32.ofNat i) t =
+          signingLayerMsg p root initial leaf (i+1) := by
+        simp only [signingLayerMsg, Nat.add_one_ne_zero, ↓reduceIte, Nat.add_sub_cancel,
+          signingPosition_next, root, v, ideal_material_xmssRoot, ov, t, pos]
+      rw [msg, ← signingPosition_next, ih]
+      cases rest : collectLayers (renderAt v suite p s leaf counters) (i+1) n with
+      | none => rfl
+      | some tail =>
+        apply congrArg (fun x => some (x :: tail))
+        unfold renderLayer
+        dsimp only
+        simp only [signingPosition_next]
+        congr 1
+        exact secOverlaySuite_real_authPathKp suite s f _ _ _ _ _ _
+          (ideal_material_wotsPk suite p s f _ _) _ _ _ _
+
+private abbrev GrindTable := Nat → Option (Nat × List Nat × Spec.Bytes)
+
+private def treeOf (p : PqHashParams) (pos : Nat) := UInt64.ofNat (pos / 2^p.subtreeHeight)
+private def kpOf (p : PqHashParams) (pos : Nat) := pos % 2^p.subtreeHeight
+
+private abbrev AllowedOpen (p : PqHashParams) (pin : SigningPin) (leaf : Nat) (idxs : List Nat) :=
+  p.statefulJorts = true ∨ ∀ j : Fin p.forsTrees,
+    forsPrfCell (treeOf p leaf) (kpOf p leaf) j (idxs.getD j 0) ≠ pin.cell
+
+private abbrev AllowedWots (p : PqHashParams) (pin : SigningPin) (leaf : Nat) (counters : GrindTable) :=
+  ∀ (i : Fin p.numLayers) (r : Fin p.ell1),
+    let pos := signingPosition p leaf i
+    wotsPrfCell (UInt32.ofNat i) (treeOf p pos) (kpOf p pos) r = pin.cell →
+      pin.cut ≤ (((counters i).map (fun v => v.2.1)).getD []).getD r 0
+
+private def bottomMsg (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s mu : Spec.Bytes) (leaf : Nat) :=
+  if p.statefulJorts then mu else v.forsRoot suite p s (treeOf p leaf) (kpOf p leaf)
+
+private def materialCore (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (pk : PqPublicKey) (q : ProdSigningQuery) (rand mu : Spec.Bytes) (leaf : Nat) (idxs : List Nat)
+    (pin : Option SigningPin) : Option PqHashSig :=
+  let s := pk.pkSeed
+  let counters := signingLayerGrind suite p pk rand (v.xmssRoot suite p s) (bottomMsg v suite p s mu leaf)
+    leaf q.grindLimit
+  let allowed := match pin with
+    | none => true
+    | some target => decide (AllowedOpen p target leaf idxs ∧ AllowedWots p target leaf counters)
+  if allowed then do
+    let layers ← collectLayers (renderAt v suite p s leaf counters) 0 p.numLayers
+    let ops := if p.statefulJorts then [] else v.openings suite p s (treeOf p leaf) (kpOf p leaf) idxs
+    let sig : PqHashSig := ⟨rand, 0, leaf, ops, layers⟩
+    if verifyProductionPqHashSig suite p pk q.message sig then some sig else none
+  else none
+
+private def signLocation (suite : TweakableHashSuite) (p : PqHashParams) (pk : PqPublicKey)
+    (q : ProdSigningQuery) (rand mu : Spec.Bytes) : Option (Nat × List Nat) :=
+  if p.statefulJorts then
+    if p.productionLeafIdxInRange q.epoch then some (q.epoch, []) else none
+  else deriveProductionStatelessInputs suite p rand pk.pkSeed pk.pkRoot mu
+
+def materialSignQuery (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (s : Spec.Bytes) (msg : Spec.Bytes → Spec.Bytes) (q : ProdSigningQuery) (pin : Option SigningPin) :
+    Option PqHashSig :=
+  let pk := v.publicKey suite p s
+  let mu := thPreHash suite s pk.pkRoot q.message
+  let rand := msg (encodePrfMsg65 q.randomness mu)
+  if p.productionWellFormed then do
+    let (leaf, idxs) ← signLocation suite p pk q rand mu
+    materialCore v suite p pk q rand mu leaf idxs pin
+  else none
+
+private theorem overlay_inputs (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (rand seed root mu : Spec.Bytes) :
+    deriveProductionStatelessInputs (secOverlaySuite suite s f) p rand seed root mu =
+      deriveProductionStatelessInputs suite p rand seed root mu := by
+  have blocks : ∀ i n, thXofMsgBlocks (secOverlaySuite suite s f) rand seed root mu i n =
+      thXofMsgBlocks suite rand seed root mu i n := by
+    intro i n; induction n generalizing i with
+    | zero => rw [thXofMsgBlocks_zero, thXofMsgBlocks_zero]
+    | succ n ih => rw [thXofMsgBlocks_succ, thXofMsgBlocks_succ, secOverlaySuite_thCall_cons2, ih]
+  simp only [deriveProductionStatelessInputs_eq, thXofMsg_eq, blocks]
+
+private theorem ideal_material_core (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (root : Spec.Bytes) (q : ProdSigningQuery) (rand mu : Spec.Bytes)
+    (leaf : Nat) (idxs : List Nat) :
+    let ov := secOverlaySuite suite s f
+    let pk : PqPublicKey := ⟨s, root⟩
+    signProductionHypertreeCore ov p ⟨[], [], s⟩ pk q.message mu rand leaf
+      (if p.statefulJorts then none else some idxs) q.grindLimit =
+      materialCore (SigningMaterial.ideal suite s f) suite p pk q rand mu leaf idxs none := by
+  intro ov pk
+  let v := SigningMaterial.ideal suite s f
+  let cur := bottomMsg v suite p s mu leaf
+  let counters := signingLayerGrind suite p pk rand (v.xmssRoot suite p s) cur leaf q.grindLimit
+  have layers : signProductionHypertreeLayers ov p ⟨[], [], s⟩ root rand q.grindLimit 0 leaf cur p.numLayers =
+      collectLayers (renderAt v suite p s leaf counters) 0 p.numLayers := by
+    simpa only [signingPosition, Nat.zero_mul, Nat.pow_zero, Nat.div_one, signingLayerMsg,
+      ↓reduceIte] using ideal_layers suite p s f root rand cur leaf q.grindLimit p.numLayers 0
+  rw [signProductionHypertreeCore_def, materialCore]
+  by_cases mode : p.statefulJorts = true <;>
+    simp only [mode, Bool.false_eq_true, ↓reduceIte, ov, ideal_material_openings, ideal_material_forsRoot, pk]
+  all_goals
+    simp only [cur, bottomMsg, mode, Bool.false_eq_true, ↓reduceIte, treeOf, kpOf, ov, v] at layers
+    rw [layers]
+    change (match collectLayers _ _ _ with | none => none | some ls => _) = _
+    cases hl : collectLayers (renderAt v suite p s leaf counters) 0 p.numLayers with
+    | none => rfl
+    | some ls => simp only [secOverlaySuite_verify_eq]; rfl
+
+theorem ideal_material_signQuery (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f msg : Spec.Bytes → Spec.Bytes) (q : ProdSigningQuery) :
+    signQueryIdealPrf suite p s msg f q = materialSignQuery (SigningMaterial.ideal suite s f) suite p s msg q none := by
+  let ov := secOverlaySuite suite s f
+  let sk : PqSecretKey := ⟨[], [], s⟩
+  let pk := derivePublicKey ov p sk
+  let mu := thPreHash suite s pk.pkRoot q.message
+  let rand := msg (encodePrfMsg65 q.randomness mu)
+  have pkEq : (SigningMaterial.ideal suite s f).publicKey suite p s = pk := by
+    rw [← ideal_material_publicKey, derivePublicKeyIdealPrf.public_eqs]
+  have mh : thPreHash ov pk.pkSeed pk.pkRoot q.message = mu := by
+    simp only [ov, mu, thPreHash_eq, secOverlaySuite_thCall_cons2]; rfl
+  have se : pk.pkSeed = s := rfl
+  simp only [signQueryIdealPrf.public_eqs, signQueryWithRandFn.public_eqs, signCoreWithRand.public_eqs,
+    materialSignQuery, pkEq, signLocation]
+  have mh' : thPreHash (secOverlaySuite suite s f)
+      (derivePublicKey (secOverlaySuite suite s f) p ⟨[], [], s⟩).pkSeed
+      (derivePublicKey (secOverlaySuite suite s f) p ⟨[], [], s⟩).pkRoot q.message = mu := mh
+  simp only [mh', overlay_inputs]
+  cases wf : p.productionWellFormed <;> cases st : p.statefulJorts <;> simp <;> try rfl
+  · change Option.rec _ _ (deriveProductionStatelessInputs suite p rand pk.pkSeed pk.pkRoot mu) =
+      (deriveProductionStatelessInputs suite p rand pk.pkSeed pk.pkRoot mu).bind _
+    cases hi : deriveProductionStatelessInputs suite p rand pk.pkSeed pk.pkRoot mu with
+    | none => rfl
+    | some li =>
+      obtain ⟨l, js⟩ := li
+      simpa only [Option.bind, st, Bool.false_eq_true, ↓reduceIte, pk, sk, ov, derivePublicKey, rand, mu] using ideal_material_core suite p s f pk.pkRoot q rand mu l js
+  · cases ok : p.productionLeafIdxInRange q.epoch <;> simp <;> try rfl
+    simpa only [st, ↓reduceIte, pk, sk, ov, derivePublicKey, rand, mu] using ideal_material_core suite p s f pk.pkRoot q rand mu q.epoch []
+
+private theorem collectLayers_congr {a b : Nat → Option LayerXmssSig} :
+    ∀ n i, (∀ k, i ≤ k → k < i+n → a k = b k) → collectLayers a i n = collectLayers b i n := by
+  intro n; induction n with
+  | zero => intro i _; rfl
+  | succ n ih =>
+    intro i h
+    rw [collectLayers, collectLayers, h i (Nat.le_refl _) (by omega), ih (i+1) (fun k lo hi => h k (by omega) (by omega))]
+
+private abbrev pinnedView (suite : TweakableHashSuite) (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes)
+    (pin : SigningPin) := SigningMaterial.pinned suite s (puncturePrf (s ++ encodeAdrs pin.cell) f) pin
+      (pin.digest suite s f)
+
+private theorem pinned_openings (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (pin : SigningPin) (leaf : Nat) (idxs : List Nat)
+    (allowed : AllowedOpen p pin leaf idxs) (st : p.statefulJorts = false) :
+    let v := pinnedView suite s f pin
+    v.openings suite p s (treeOf p leaf) (kpOf p leaf) idxs =
+      (SigningMaterial.ideal suite s f).openings suite p s (treeOf p leaf) (kpOf p leaf) idxs := by
+  intro v
+  rcases allowed with bad | all
+  · simp [st] at bad
+  · unfold SigningMaterial.openings
+    apply List.map_congr_left
+    intro j hj
+    let u := idxs.getD j 0
+    dsimp only [v, pinnedView]
+    rw [pinned_fors_secret suite s f pin _ _ j u (all ⟨j, List.mem_range.mp hj⟩),
+      funext (pinned_fors_leaf suite s f pin (treeOf p leaf) (kpOf p leaf) j)]
+
+private theorem pinned_layers (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (pin : SigningPin) (cut : pin.cut ≤ p.w-1)
+    (leaf : Nat) (counters : GrindTable) (allowed : AllowedWots p pin leaf counters) :
+    collectLayers (renderAt (pinnedView suite s f pin) suite p s leaf counters) 0 p.numLayers =
+      collectLayers (renderAt (SigningMaterial.ideal suite s f) suite p s leaf counters) 0 p.numLayers := by
+  apply collectLayers_congr
+  intro i _ hi
+  simp only [Nat.zero_add] at hi
+  unfold renderAt
+  cases g : counters i with
+  | none => rfl
+  | some tuple =>
+    obtain ⟨ctr, digits, hm⟩ := tuple
+    simp only [Option.map_some]
+    unfold renderLayer
+    simp only [pinned_wotsPk suite p s f pin cut]
+    congr 2
+    apply List.map_congr_left
+    intro r hr
+    apply pinned_wots_node
+    simpa only [g, Option.map_some, Option.getD_some, treeOf, kpOf] using allowed ⟨i, hi⟩ ⟨r, List.mem_range.mp hr⟩
+
+private def planGrind (v : SigningMaterial) (suite : TweakableHashSuite) (p : PqHashParams)
+    (pk : PqPublicKey) (q : ProdSigningQuery) (rand mu : Spec.Bytes) (leaf : Nat) :=
+  signingLayerGrind suite p pk rand (v.xmssRoot suite p pk.pkSeed) (bottomMsg v suite p pk.pkSeed mu leaf)
+    leaf q.grindLimit
+
+private theorem pinned_core_eq (suite : TweakableHashSuite) (p : PqHashParams) (s root : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (pin : SigningPin) (cut : pin.cut ≤ p.w-1)
+    (q : ProdSigningQuery) (rand mu : Spec.Bytes) (leaf : Nat) (idxs : List Nat) :
+    let pk : PqPublicKey := ⟨s, root⟩
+    let v := SigningMaterial.ideal suite s f
+    let counters := planGrind v suite p pk q rand mu leaf
+    materialCore (pinnedView suite s f pin) suite p pk q rand mu leaf idxs (some pin) =
+      if AllowedOpen p pin leaf idxs ∧ AllowedWots p pin leaf counters then
+        materialCore v suite p pk q rand mu leaf idxs none else none := by
+  intro pk v counters
+  have gr : planGrind (pinnedView suite s f pin) suite p pk q rand mu leaf = counters := by
+    simp only [counters, planGrind, bottomMsg, pk, pinned_forsRoot suite p s f pin, pinned_xmssRoot suite p s f pin cut, v]
+  unfold planGrind at gr
+  simp only [materialCore, gr, decide_eq_true_eq, ↓reduceIte]
+  split
+  · rename_i h
+    rw [pinned_layers suite p s f pin cut leaf counters h.2]
+    have ops : (if p.statefulJorts then [] else (pinnedView suite s f pin).openings suite p s (treeOf p leaf) (kpOf p leaf) idxs) =
+        (if p.statefulJorts then [] else v.openings suite p s (treeOf p leaf) (kpOf p leaf) idxs) := by
+      by_cases st : p.statefulJorts = true
+      · simp [st]
+      · have no := Bool.eq_false_iff.mpr st
+        simpa only [no, Bool.false_eq_true, ↓reduceIte] using pinned_openings suite p s f pin leaf idxs h.1 no
+    rw [ops]
+    rfl
+  · rfl
+
+#verify_constructive collectLayers_congr pinned_openings pinned_layers pinned_core_eq
+
+private theorem collectLayers_get {one : Nat → Option LayerXmssSig} :
+    ∀ n i ls, collectLayers one i n = some ls → ∀ k, k < n →
+      one (i+k) = some (ls.getD k ⟨0, [], []⟩) := by
+  intro n; induction n with
+  | zero => intro i ls h k hk; omega
+  | succ n ih =>
+    intro i ls h k hk
+    rw [collectLayers] at h
+    cases g : one i with
+    | none => simp [g] at h
+    | some l =>
+      cases hTail : collectLayers one (i+1) n with
+      | none => simp [g, hTail] at h
+      | some tail =>
+        simp [g, hTail] at h
+        subst ls
+        cases k with
+        | zero => simpa using g
+        | succ k =>
+          simpa only [List.getD_cons_succ, Nat.add_right_comm, Nat.add_assoc, Nat.add_comm 1 k] using
+            ih (i+1) tail hTail k (by omega)
+
+private theorem material_core_success (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (q : ProdSigningQuery) (rand : Spec.Bytes) (leaf : Nat) (idxs : List Nat)
+    (sig : PqHashSig) :
+    let v := SigningMaterial.ideal suite s f
+    let pk := v.publicKey suite p s
+    let mu := thPreHash suite s pk.pkRoot q.message
+    let counters := planGrind v suite p pk q rand mu leaf
+    materialCore v suite p pk q rand mu leaf idxs none = some sig →
+    sig.leafGlobalIdx = leaf ∧ sig.rRand = rand ∧ ∀ i, i < p.numLayers →
+      ((counters i).map (fun x => x.2.1)).getD [] =
+        prodLogLayerDigits (secOverlaySuite suite s f) p ⟨[], [], s⟩ (q.message, sig) i := by
+  intro v pk mu counters h
+  let one := renderAt v suite p s leaf counters
+  change (do
+    let ls ← collectLayers one 0 p.numLayers
+    let ops := if p.statefulJorts then [] else v.openings suite p s (treeOf p leaf) (kpOf p leaf) idxs
+    let sign : PqHashSig := ⟨rand, 0, leaf, ops, ls⟩
+    if verifyProductionPqHashSig suite p pk q.message sign then some sign else none) = some sig at h
+  cases hs : collectLayers one 0 p.numLayers with
+  | none => simp [hs] at h
+  | some ls =>
+    let ops := if p.statefulJorts then [] else v.openings suite p s (treeOf p leaf) (kpOf p leaf) idxs
+    let built : PqHashSig := ⟨rand, 0, leaf, ops, ls⟩
+    rw [hs] at h
+    change (if verifyProductionPqHashSig suite p pk q.message built then some built else none) = some sig at h
+    split at h
+    · rw [← Option.some.inj h]
+      dsimp only [built]
+      refine ⟨rfl, rfl, fun i hi => ?_⟩
+      have layer := collectLayers_get _ _ _ hs i hi
+      simp only [Nat.zero_add, one, renderAt] at layer
+      cases hg : counters i with
+      | none => simp [hg] at layer
+      | some triple =>
+        obtain ⟨ctr, digits, hm⟩ := triple
+        simp only [hg, Option.map_some, Option.some.injEq] at layer
+        have ctrEq := congrArg LayerXmssSig.tswCtr layer
+        dsimp only [renderLayer] at ctrEq
+        let pos := signingPosition p leaf i
+        let root := v.xmssRoot suite p s
+        let initial := bottomMsg v suite p s mu leaf
+        have honest : prodGrind (secOverlaySuite suite s f) p rand s pk.pkRoot
+            (signingLayerMsg p root initial leaf i) i (treeOf p pos) (UInt32.ofNat (kpOf p pos)) q.grindLimit =
+            some (ctr, digits, hm) := (prodGrind_overlay suite p s f _ _ _ _ _ _ _).trans hg
+        have pkEq : derivePublicKey (secOverlaySuite suite s f) p ⟨[], [], s⟩ = pk :=
+          by simpa only [derivePublicKeyIdealPrf.public_eqs] using ideal_material_publicKey suite p s f
+        simp only [Option.map_some, Option.getD_some, prodLogLayerDigits, prodLogLayerDigest, prodHonestLayerMsg,
+          ← ctrEq, pkEq, ideal_material_xmssRoot, ideal_material_forsRoot, thPreHash_eq, secOverlaySuite_thCall_cons2]
+        simpa only [signingLayerMsg, root, initial, bottomMsg, mu, v, signingPosition, treeOf, kpOf, pos,
+          thPreHash_eq] using (prodGrind_sound honest).2.1
+    · contradiction
+
+#verify_constructive collectLayers_get material_core_success
+
+inductive SigningSlot (p : PqHashParams) where
+  | fors (leaf : Fin (2^(p.numLayers * p.subtreeHeight))) (j : Fin p.forsTrees) (u : Fin (2^p.forsHeight))
+  | wots (i : Fin p.numLayers) (pos : Fin (2^((p.numLayers-i.val)*p.subtreeHeight)))
+      (r : Fin p.ell1) (step : Fin (p.w-1))
+
+def SigningSlot.pin {p : PqHashParams} : SigningSlot p → SigningPin
+  | .fors leaf j u => .fors (treeOf p leaf) (kpOf p leaf) j u
+  | .wots i pos r step => .wots (UInt32.ofNat i) (treeOf p pos) (kpOf p pos) r step
+
+private theorem slot_cut {p : PqHashParams} (slot : SigningSlot p) : slot.pin.cut ≤ p.w-1 := by
+  cases slot with
+  | fors => exact Nat.zero_le _
+  | wots _ _ _ step => exact step.isLt
+
+private def slotUnrevealed (suite : TweakableHashSuite) (p : PqHashParams) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (e : Spec.Bytes × PqHashSig) : SigningSlot p → Prop
+  | .fors leaf j u => (leaf.val, j.val, u.val) ∉ prodSigForsLeaves suite p (derivePublicKeyIdealPrf suite p s f) e.1 e.2
+  | .wots i pos r step => signingPosition p e.2.leafGlobalIdx i = pos.val →
+      step.val < (prodLogLayerDigits (secOverlaySuite suite s f) p ⟨[], [], s⟩ e i).getD r 0
+
+private theorem u32_inj_bounded {a b : Nat} (ha : a < 2^32) (hb : b < 2^32)
+    (e : UInt32.ofNat a = UInt32.ofNat b) : a = b := by
+  simpa only [UInt32.toNat_ofNat', Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb] using congrArg UInt32.toNat e
+
+private theorem physicalPosition_inj (p : PqHashParams) (wf : p.productionWellFormed = true)
+    {a b : Nat} (ha : a < 2^(p.numLayers*p.subtreeHeight)) (hb : b < 2^(p.numLayers*p.subtreeHeight))
+    (t : treeOf p a = treeOf p b) (k : UInt32.ofNat (kpOf p a) = UInt32.ofNat (kpOf p b)) : a = b := by
+  obtain ⟨_, _, _, _, _, _, hh, _, _, hTot, _⟩ := p.productionWellFormed_facts wf
+  let n := 2^p.subtreeHeight
+  have hn : 0 < n := Nat.two_pow_pos _
+  have bound : 2^(p.numLayers*p.subtreeHeight) ≤ 2^64 := Nat.pow_le_pow_right (by decide) (by omega)
+  have small : n ≤ 2^32 := Nat.pow_le_pow_right (by decide) (by omega)
+  have ta := Nat.lt_of_le_of_lt (Nat.div_le_self a n) (Nat.lt_of_lt_of_le ha bound)
+  have tb := Nat.lt_of_le_of_lt (Nat.div_le_self b n) (Nat.lt_of_lt_of_le hb bound)
+  have et : a/n = b/n := by
+    have e := congrArg UInt64.toNat t
+    change (UInt64.ofNat (a/n)).toNat = (UInt64.ofNat (b/n)).toNat at e
+    simpa only [UInt64.toNat_ofNat', Nat.mod_eq_of_lt ta, Nat.mod_eq_of_lt tb] using e
+  have ek := u32_inj_bounded (Nat.lt_of_lt_of_le (Nat.mod_lt a hn) small) (Nat.lt_of_lt_of_le (Nat.mod_lt b hn) small) k
+  calc a = a%n + n*(a/n) := (Nat.mod_add_div ..).symm
+       _ = b%n + n*(b/n) := by rw [et, ek]
+       _ = b := Nat.mod_add_div ..
+
+private theorem location_leaf_lt (suite : TweakableHashSuite) (p : PqHashParams) (pk : PqPublicKey)
+    (q : ProdSigningQuery) (rand mu : Spec.Bytes) {leaf : Nat} {idxs : List Nat}
+    (loc : signLocation suite p pk q rand mu = some (leaf, idxs)) :
+    leaf < 2^(p.numLayers*p.subtreeHeight) := by
+  unfold signLocation at loc
+  split at loc
+  · split at loc
+    · rename_i hr
+      cases loc
+      rw [PqHashParams.productionLeafIdxInRange_eq, decide_eq_true_eq] at hr
+      split at hr
+      · rename_i h
+        exact Nat.lt_of_lt_of_le hr (Nat.pow_le_pow_right (by decide) (Nat.le_of_lt (of_decide_eq_true (Bool.and_eq_true_iff.mp h).2)))
+      · exact hr
+    · contradiction
+  · exact (deriveProductionStatelessInputs_bounds _ _ _ _ _ _ _ _ loc).2.2.1
+
+private theorem slot_permitted (suite : TweakableHashSuite) (p : PqHashParams)
+    (wf : p.productionWellFormed = true) (trees : p.forsTrees ≤ 2^32)
+    (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes) (slot : SigningSlot p) (q : ProdSigningQuery)
+    (rand : Spec.Bytes) (leaf : Nat) (idxs : List Nat) (sig : PqHashSig) :
+    let v := SigningMaterial.ideal suite s f
+    let pk := v.publicKey suite p s
+    let mu := thPreHash suite s pk.pkRoot q.message
+    let counters := planGrind v suite p pk q rand mu leaf
+    signLocation suite p pk q rand mu = some (leaf, idxs) →
+    materialCore v suite p pk q rand mu leaf idxs none = some sig →
+    slotUnrevealed suite p s f (q.message, sig) slot →
+    AllowedOpen p slot.pin leaf idxs ∧ AllowedWots p slot.pin leaf counters := by
+  intro v pk mu counters loc core safe
+  obtain ⟨elt, _, _, _, _, _, _, fh, _, _, _, _, _, layers⟩ := p.productionWellFormed_facts wf
+  obtain ⟨eqLeaf, eqRand, digits⟩ := material_core_success suite p s f q rand leaf idxs sig core
+  have hl := location_leaf_lt suite p pk q rand mu loc
+  cases slot with
+  | fors target j u =>
+    refine ⟨?_, fun _ _ _ => Nat.zero_le _⟩
+    by_cases st : p.statefulJorts = true
+    · exact .inl st
+    right
+    have d : deriveProductionStatelessInputs suite p rand pk.pkSeed pk.pkRoot mu = some (leaf, idxs) := by
+      simpa only [signLocation, st, Bool.false_eq_true, ↓reduceIte] using loc
+    obtain ⟨_, _, _, len, vals⟩ := deriveProductionStatelessInputs_bounds _ _ _ _ _ _ _ _ d
+    have js : prodSigForsIdxs suite p (derivePublicKeyIdealPrf suite p s f) q.message sig = idxs := by
+      rw [prodSigForsIdxs, ideal_material_publicKey, eqRand]
+      change (match deriveProductionStatelessInputs suite p rand pk.pkSeed pk.pkRoot mu with
+        | some (_, l) => l | none => []) = idxs
+      rw [d]
+    intro a he
+    simp only [SigningSlot.pin, SigningPin.cell, forsPrfCell, HashAdrs.mk.injEq, true_and] at he
+    have same := physicalPosition_inj p wf hl target.isLt he.1 he.2.1
+    have eqj := u32_inj_bounded (Nat.lt_of_lt_of_le a.isLt trees) (Nat.lt_of_lt_of_le j.isLt trees) he.2.2.1
+    have small : 2^p.forsHeight ≤ 2^32 := Nat.pow_le_pow_right (by decide) (by omega)
+    have hu : idxs.getD a 0 < 2^p.forsHeight := by
+      have ha : a.val < idxs.length := by rw [len]; exact a.isLt
+      rw [list_getD_eq_getElem _ _ ha]
+      exact vals _ (List.getElem_mem ha)
+    have equ := u32_inj_bounded (Nat.lt_of_lt_of_le hu small) (Nat.lt_of_lt_of_le u.isLt small) he.2.2.2
+    apply safe
+    unfold prodSigForsLeaves
+    exact List.mem_map.mpr ⟨a.val, List.mem_range.mpr a.isLt, by rw [eqLeaf, same, js, equ, eqj]⟩
+  | wots i pos r step =>
+    constructor
+    · exact .inr fun j => by simp [SigningSlot.pin, SigningPin.cell, forsPrfCell, wotsPrfCell.public_eqs]
+    intro l c
+    dsimp only
+    intro eq
+    simp only [SigningSlot.pin, SigningPin.cell, wotsPrfCell.public_eqs, HashAdrs.mk.injEq, and_true, true_and] at eq
+    have ei := u32_inj_bounded (Nat.lt_of_lt_of_le l.isLt (by omega)) (Nat.lt_of_lt_of_le i.isLt (by omega)) eq.1
+    have ell : p.ell1 ≤ 256 := by rcases p.productionWellFormed_w_ell1 wf with h|h|h|h <;> omega
+    have ec := u32_inj_bounded (Nat.lt_of_lt_of_le c.isLt (by omega)) (Nat.lt_of_lt_of_le r.isLt (by omega)) eq.2.2.2
+    have hp := Nat.lt_of_lt_of_le pos.isLt (Nat.pow_le_pow_right (by decide : 0 < 2) (Nat.mul_le_mul_right _ (Nat.sub_le _ _)))
+    have ep := physicalPosition_inj p wf (Nat.lt_of_le_of_lt (Nat.div_le_self leaf _) hl) hp eq.2.1 eq.2.2.1
+    change step.val+1 ≤ _
+    rw [digits l l.isLt, ec, ei]
+    apply safe
+    rw [eqLeaf]
+    exact (congrArg (signingPosition p leaf) ei.symm).trans ep
+
+private theorem pinned_query_eq (suite : TweakableHashSuite) (p : PqHashParams)
+    (wf : p.productionWellFormed = true) (trees : p.forsTrees ≤ 2^32)
+    (s : Spec.Bytes) (f msg : Spec.Bytes → Spec.Bytes) (slot : SigningSlot p) (q : ProdSigningQuery)
+    (safe : ∀ sig, signQueryIdealPrf suite p s msg f q = some sig → slotUnrevealed suite p s f (q.message, sig) slot) :
+    signQueryIdealPrf suite p s msg f q = materialSignQuery (pinnedView suite s f slot.pin) suite p s msg q (some slot.pin) := by
+  rw [ideal_material_signQuery] at safe ⊢
+  let v := SigningMaterial.ideal suite s f
+  let pv := pinnedView suite s f slot.pin
+  let pk := v.publicKey suite p s
+  have key : pv.publicKey suite p s = pk := by
+    simp only [pv, pk, SigningMaterial.publicKey, pinned_xmssRoot suite p s f _ (slot_cut slot), v]
+  let mu := thPreHash suite s pk.pkRoot q.message
+  let rand := msg (encodePrfMsg65 q.randomness mu)
+  dsimp only [pv] at key
+  simp only [materialSignQuery, wf, ↓reduceIte, key] at safe ⊢
+  change (signLocation suite p pk q rand mu).bind _ = (signLocation suite p pk q rand mu).bind _
+  cases loc : signLocation suite p pk q rand mu with
+  | none => rfl
+  | some pair =>
+    obtain ⟨leaf, idxs⟩ := pair
+    change materialCore v suite p pk q rand mu leaf idxs none = materialCore pv suite p pk q rand mu leaf idxs (some slot.pin)
+    have h := pinned_core_eq suite p s pk.pkRoot f slot.pin (slot_cut slot) q rand mu leaf idxs
+    change materialCore pv suite p pk q rand mu leaf idxs (some slot.pin) =
+      (if AllowedOpen p slot.pin leaf idxs ∧ AllowedWots p slot.pin leaf (planGrind v suite p pk q rand mu leaf)
+       then materialCore v suite p pk q rand mu leaf idxs none else none) at h
+    rw [h]
+    split
+    · rfl
+    · rename_i denied
+      cases core : materialCore v suite p pk q rand mu leaf idxs none with
+      | none => rfl
+      | some sig =>
+        apply False.elim
+        apply denied
+        apply slot_permitted suite p wf trees s f slot q rand leaf idxs sig loc core
+        apply safe
+        change (signLocation suite p pk q rand mu).bind _ = some sig
+        rw [loc]; exact core
+
+private theorem mem_signLog_of_reply {o : ProdSigningQuery → Option PqHashSig} {q : ProdSigningQuery}
+    {sig : PqHashSig} (reply : o q = some sig) : ∀ qs, q ∈ qs → (q.message, sig) ∈ signLogFromOracle o qs := by
+  intro qs; induction qs with
+  | nil => simp
+  | cons a rest ih =>
+    intro h; rw [signLogFromOracle_cons]
+    rcases List.mem_cons.mp h with h|h
+    · subst a; simp [reply]
+    · exact List.mem_append_right _ (ih h)
+
+def slotRecover {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (msg : Spec.Bytes → Spec.Bytes) (adv : SeedWithheldEufCmaAdv qHash qSign) (slot : SigningSlot p)
+    (off : Spec.Bytes → Spec.Bytes) (s y : Spec.Bytes) : Spec.Bytes :=
+  let view := SigningMaterial.pinned suite s off slot.pin y
+  let tree := (canonicalizeAdvOptRand adv).run (view.publicKey suite p s)
+  let output := (evalLatchedAdaptiveTree latchOn suite.rawHash
+    (fun q => materialSignQuery view suite p s msg q (some slot.pin)) tree 0).1.2
+  match slot with
+  | .fors _ j _ => (output.forsOpenings.getD j ⟨[], []⟩).secretVal
+  | .wots i _ r _ => (output.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r []
+
+private theorem slotRecover_eq {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (wf : p.productionWellFormed = true) (trees : p.forsTrees ≤ 2^32)
+    (msg f : Spec.Bytes → Spec.Bytes) (adv : SeedWithheldEufCmaAdv qHash qSign) (slot : SigningSlot p) (s : Spec.Bytes) :
+    let pk := derivePublicKeyIdealPrf suite p s f
+    let o := signQueryIdealPrf suite p s msg f
+    let run := evalLatchedAdaptiveTree latchOn suite.rawHash o ((canonicalizeAdvOptRand adv).run pk) 0
+    let log := signLogFromOracle o run.2
+    (∀ e ∈ log, slotUnrevealed suite p s f e slot) →
+    slotRecover latchOn suite p msg adv slot (puncturePrf (s ++ encodeAdrs slot.pin.cell) f) s (slot.pin.digest suite s f) =
+      match slot with
+      | .fors _ j _ => (run.1.2.forsOpenings.getD j ⟨[], []⟩).secretVal
+      | .wots i _ r _ => (run.1.2.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r [] := by
+  intro pk o run log safe
+  let pv := pinnedView suite s f slot.pin
+  have key : pv.publicKey suite p s = pk := by
+    simp only [pk, ideal_material_publicKey, pv, SigningMaterial.publicKey,
+      pinned_xmssRoot suite p s f _ (slot_cut slot)]
+  have eq := evalLatchedAdaptiveTree_congr_on_log latchOn suite.rawHash o
+    (fun q => materialSignQuery pv suite p s msg q (some slot.pin)) ((canonicalizeAdvOptRand adv).run pk) 0
+    (fun q hq => pinned_query_eq suite p wf trees s f msg slot q
+      (fun sig reply => safe (q.message,sig) (mem_signLog_of_reply reply _ hq)))
+  dsimp only [pv, pinnedView] at key eq
+  simp only [slotRecover, key, ← eq, run]
+
+#verify_constructive u32_inj_bounded physicalPosition_inj slot_cut location_leaf_lt slot_permitted pinned_query_eq
+  mem_signLog_of_reply slotRecover_eq
+
+def SigningSlot.tweak {p : PqHashParams} : SigningSlot p → Spec.Bytes
+  | .fors leaf j u => encodeChainFTweak (forsLeafHashAdrs (treeOf p leaf) (kpOf p leaf) j u)
+  | .wots i pos r step => encodeChainFTweak ⟨UInt32.ofNat i, treeOf p pos, .wotsHash,
+      UInt32.ofNat (kpOf p pos), UInt32.ofNat r, UInt32.ofNat step⟩
+
+def slotWin {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (msg : Spec.Bytes → Spec.Bytes) (adv : SeedWithheldEufCmaAdv qHash qSign)
+    (slot : SigningSlot p) (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes) : Bool :=
+  let y := slot.pin.digest suite s f
+  decide (suiteTweakHash suite s slot.tweak (slotRecover latchOn suite p msg adv slot
+    (puncturePrf (s ++ encodeAdrs slot.pin.cell) f) s y) = y)
+
+private theorem position_lt {p : PqHashParams} {leaf i : Nat} (hi : i < p.numLayers)
+    (hl : leaf < 2^(p.numLayers*p.subtreeHeight)) : signingPosition p leaf i < 2^((p.numLayers-i)*p.subtreeHeight) := by
+  apply (Nat.div_lt_iff_lt_mul (Nat.two_pow_pos _)).mpr
+  rwa [← Nat.pow_add, ← Nat.add_mul, Nat.sub_add_cancel (Nat.le_of_lt hi)]
+
+private theorem slotWin_of_eq {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite)
+    (p : PqHashParams) (msg : Spec.Bytes → Spec.Bytes) (adv : SeedWithheldEufCmaAdv qHash qSign)
+    (slot : SigningSlot p) (s : Spec.Bytes) (f : Spec.Bytes → Spec.Bytes)
+    (h : suiteTweakHash suite s slot.tweak (slotRecover latchOn suite p msg adv slot
+      (puncturePrf (s ++ encodeAdrs slot.pin.cell) f) s (slot.pin.digest suite s f)) =
+      slot.pin.digest suite s f) :
+    slotWin latchOn suite p msg adv slot s f = true :=
+  decide_eq_true h
+
+private theorem fors_pre_eq (suite : TweakableHashSuite) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (t : UInt64) (k j u : Nat)
+    (v1 v2 tw y : Spec.Bytes)
+    (hV : v1 = v2) (hTw : tw = encodeChainFTweak (forsLeafHashAdrs t k j u))
+    (hY : forsIndexedLeafFn (secOverlaySuite suite s f) ⟨[], [], s⟩ t k j u = y)
+    (inv : forsIndexedLeafHash suite s t k j u v2 =
+      forsIndexedLeafFn (secOverlaySuite suite s f) ⟨[], [], s⟩ t k j u) :
+    suiteTweakHash suite s tw v1 = y := by
+  cases hV; cases hTw; cases hY
+  rw [suiteTweakHash_chainF, ← forsIndexedLeafHash_eq_chainF_adrs]
+  exact inv
+
+private theorem wots_pre_eq (suite : TweakableHashSuite) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (l : UInt32) (t : UInt64) (k r step : Nat)
+    (v1 v2 tw y : Spec.Bytes)
+    (hV : v1 = v2)
+    (hTw : tw = encodeChainFTweak ⟨l, t, .wotsHash, UInt32.ofNat k, UInt32.ofNat r, UInt32.ofNat step⟩)
+    (hY : cellWotsNode suite s f (wotsPrfCell l t k r) (step + 1) = y)
+    (inv : thChainF suite s ⟨l, t, .wotsHash, UInt32.ofNat k, UInt32.ofNat r, UInt32.ofNat step⟩ v2 =
+      honestChainNode (secOverlaySuite suite s f) ⟨[], [], s⟩ l t k r (step + 1)) :
+    suiteTweakHash suite s tw v1 = y := by
+  cases hV; cases hTw; cases hY
+  rw [suiteTweakHash_chainF, inv, ideal_wots_cell]
+
+private theorem pre_selects_slot {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (wf : p.productionWellFormed = true) (trees : p.forsTrees ≤ 2^32) (s : Spec.Bytes)
+    (msg f : Spec.Bytes → Spec.Bytes) (adv : SeedWithheldEufCmaAdv qHash qSign)
+    (win : (idealPrfBreakEvents latchOn suite p s msg f adv).2 = true) :
+    ∃ slot, (match slot with | .fors .. => p.statefulJorts = false | .wots .. => True) ∧
+      slotWin latchOn suite p msg adv slot s f = true := by
+  dsimp only [idealPrfBreakEvents] at win
+  have pre := of_decide_eq_true win
+  let pk0 := derivePublicKeyIdealPrf suite p s f
+  let signFn := signQueryIdealPrf suite p s msg f
+  let run := evalLatchedAdaptiveTree latchOn suite.rawHash signFn
+    ((canonicalizeAdvOptRand adv).run pk0) 0
+  let log := signLogFromOracle signFn run.2
+  let sig := run.1.2
+  let sk : PqSecretKey := ⟨[], [], s⟩
+  let ov := secOverlaySuite suite s f
+  cases pre with
+  | fors j hj st hl hu no inv =>
+    let u := (prodSigForsIdxs suite p (derivePublicKey ov p sk) run.1.1 sig).getD j 0
+    let slot : SigningSlot p := .fors ⟨_, hl⟩ ⟨j, hj⟩ ⟨u, hu⟩
+    refine ⟨slot, st, ?_⟩
+    have safe : ∀ e ∈ log, slotUnrevealed suite p s f e slot := by
+      intro e he
+      unfold slotUnrevealed
+      dsimp only [slot]
+      rw [congrArg (fun k => prodSigForsLeaves suite p k e.1 e.2)
+        (derivePublicKeyIdealPrf.public_eqs suite p s f)]
+      exact no e he
+    have eq := slotRecover_eq latchOn suite p wf trees msg f adv slot s safe
+    exact slotWin_of_eq latchOn suite p msg adv slot s f
+      (fors_pre_eq suite s f (treeOf p sig.leafGlobalIdx) (kpOf p sig.leafGlobalIdx) j u
+        _ _ slot.tweak (slot.pin.digest suite s f) eq rfl rfl inv)
+  | wots i hi r hr step hstep hl inv no =>
+    let pos := signingPosition p sig.leafGlobalIdx i
+    let slot : SigningSlot p := .wots ⟨i,hi⟩ ⟨pos,position_lt hi hl⟩ ⟨r,hr⟩ ⟨step,hstep⟩
+    refine ⟨slot, trivial, ?_⟩
+    have safe : ∀ e ∈ log, slotUnrevealed suite p s f e slot := no
+    have eq := slotRecover_eq latchOn suite p wf trees msg f adv slot s safe
+    exact slotWin_of_eq latchOn suite p msg adv slot s f
+      (wots_pre_eq suite s f (UInt32.ofNat i) (treeOf p pos) (kpOf p pos) r step
+        _ _ slot.tweak (slot.pin.digest suite s f) eq rfl rfl inv)
+
+/-- Class membership of the single PRE program and each preceding WOTS UD program. -/
