@@ -9,6 +9,7 @@ Address metadata binds the expected address; the Rust signing transcript itself 
 and address version. Applications needing network-exclusive signatures must bind them in msg.
 -/
 public import Qsag.Protocol.Signing.Fips205
+public import Qsag.Oracle.Sponge
 public import Qsag.Tactic.AssuranceKit
 public import Qsag.Math.Algebra
 public section
@@ -708,8 +709,8 @@ theorem two_uses_cover_third : ∃ a b c : Fin 2 → Nat,
 theorem hybrid_inhabited : ∃ (H : Hash) (vc vp : Verifier) (k : Keys) (hrp : Bytes) (v : Nat)
     (e : HybridPinnedEnvelope) (m : Bytes) (qs : List Bytes),
     validateForAddress H e (addressOf H k hrp v) ∧ verifyWith H vc vp e m ∧ m ∉ qs := by
-  refine ⟨fun _ => 0, fun _ _ _ => true, fun _ _ _ => true, ⟨.secpMl44, [1], [2]⟩,
-    [113], 1, ⟨⟨.secpMl44, [1], [2]⟩, [3], [4]⟩, [7], [[8]], ?_⟩
+  refine ⟨fun _ => 0, (fun pk _ sig => decide (sig = pk)), (fun pk _ sig => decide (sig = pk)),
+    ⟨.secpMl44, [1], [2]⟩, [113], 1, ⟨⟨.secpMl44, [1], [2]⟩, [1], [2]⟩, [7], [[8]], ?_⟩
   unfold validateForAddress addressOf verifyWith; decide
 
 def examplePolicy : TransactionPolicy := ⟨9, [7], 100, 100, [⟨100, 2⟩]⟩
@@ -794,11 +795,13 @@ public section
 
 end
 
-/-! ## Executed toy-hash envelope and policy-release instances of `Tests/CompositionInstances`
+/-! ## Executed `cSHAKE256` (`keccakF1600`) envelope and policy-release instances of `Tests/CompositionInstances`
 
-Evaluated here, where `validateForAddress`, `verifyWith`, `PolicyAccepts`, `LedgerStep` and the
-other definitions of this module unfold. The names stay in `Qsag.CompositionInstances`; the test
-module audits them and builds the modelled-primitive (`cSHAKE256`, `Poseidon2`) instances. -/
+Evaluated here over 24-round `keccakF1600` NIST SP 800-185 `cSHAKE256` sponges, where
+`validateForAddress`, `verifyWith`, `PolicyAccepts`, `LedgerStep` and the other definitions of
+this module unfold. Negative-control combiner instances replace constant-`true` strawmen with a
+single-guard-dropped message-blind `cSHAKE256` key-tag verifier (`msgBlindClassicalVerifier`) that
+still authenticates `(pk, suite, pq)` while omitting transcript-message binding. -/
 public section
 namespace Qsag.CompositionInstances
 set_option autoImplicit false
@@ -806,8 +809,82 @@ set_option exponentiation.threshold 2048
 set_option maxRecDepth 1000000
 open Qsag.HybridSecurity
 
-def mix (bs : Bytes) : Nat :=
-  bs.foldl (fun acc b => (acc * 257 + b.toNat + 1) % 256 ^ 32) 0
+private def kZeroState : KState :=
+  ⟨0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩
+
+private def kLoadLe64 (block : List UInt8) (laneIdx : Nat) : UInt64 :=
+  let base := 8 * laneIdx
+  (block.getD base 0).toUInt64 |||
+  ((block.getD (base + 1) 0).toUInt64 <<< 8) |||
+  ((block.getD (base + 2) 0).toUInt64 <<< 16) |||
+  ((block.getD (base + 3) 0).toUInt64 <<< 24) |||
+  ((block.getD (base + 4) 0).toUInt64 <<< 32) |||
+  ((block.getD (base + 5) 0).toUInt64 <<< 40) |||
+  ((block.getD (base + 6) 0).toUInt64 <<< 48) |||
+  ((block.getD (base + 7) 0).toUInt64 <<< 56)
+
+private def kXorRate136 (s : KState) (block : List UInt8) : KState :=
+  { s with
+    a0  := s.a0  ^^^ kLoadLe64 block 0,  a1  := s.a1  ^^^ kLoadLe64 block 1,
+    a2  := s.a2  ^^^ kLoadLe64 block 2,  a3  := s.a3  ^^^ kLoadLe64 block 3,
+    a4  := s.a4  ^^^ kLoadLe64 block 4,  a5  := s.a5  ^^^ kLoadLe64 block 5,
+    a6  := s.a6  ^^^ kLoadLe64 block 6,  a7  := s.a7  ^^^ kLoadLe64 block 7,
+    a8  := s.a8  ^^^ kLoadLe64 block 8,  a9  := s.a9  ^^^ kLoadLe64 block 9,
+    a10 := s.a10 ^^^ kLoadLe64 block 10, a11 := s.a11 ^^^ kLoadLe64 block 11,
+    a12 := s.a12 ^^^ kLoadLe64 block 12, a13 := s.a13 ^^^ kLoadLe64 block 13,
+    a14 := s.a14 ^^^ kLoadLe64 block 14, a15 := s.a15 ^^^ kLoadLe64 block 15,
+    a16 := s.a16 ^^^ kLoadLe64 block 16 }
+
+private def kLaneBytesLE (w : UInt64) : List UInt8 :=
+  [UInt8.ofNat (w.toNat % 256),
+   UInt8.ofNat ((w.toNat / 256) % 256),
+   UInt8.ofNat ((w.toNat / 65536) % 256),
+   UInt8.ofNat ((w.toNat / 16777216) % 256),
+   UInt8.ofNat ((w.toNat / 4294967296) % 256),
+   UInt8.ofNat ((w.toNat / 1099511627776) % 256),
+   UInt8.ofNat ((w.toNat / 281474976710656) % 256),
+   UInt8.ofNat ((w.toNat / 72057594037927936) % 256)]
+
+private def kRateBlockBytes (s : KState) : List UInt8 :=
+  kLaneBytesLE s.a0 ++ kLaneBytesLE s.a1 ++ kLaneBytesLE s.a2 ++ kLaneBytesLE s.a3 ++
+  kLaneBytesLE s.a4 ++ kLaneBytesLE s.a5 ++ kLaneBytesLE s.a6 ++ kLaneBytesLE s.a7 ++
+  kLaneBytesLE s.a8 ++ kLaneBytesLE s.a9 ++ kLaneBytesLE s.a10 ++ kLaneBytesLE s.a11 ++
+  kLaneBytesLE s.a12 ++ kLaneBytesLE s.a13 ++ kLaneBytesLE s.a14 ++ kLaneBytesLE s.a15 ++
+  kLaneBytesLE s.a16
+
+/-- Precomputed 136-byte SP 800-185 `bytepad(encodeString("") || encodeString("QSAG.HYBRID.ENV/v1"), 136)`. -/
+private def hybridEnvPrefix136 : Bytes :=
+  [
+   0x01, 0x88, 0x01, 0x00, 0x01, 0x90, 0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x59, 0x42, 0x52, 0x49, 0x44,
+   0x2E, 0x45, 0x4E, 0x56, 0x2F, 0x76, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+
+/-- Precomputed 136-byte SP 800-185 `bytepad(encodeString("") || encodeString("QSAG.HYBRID.SIG/v1"), 136)`. -/
+private def hybridSigPrefix136 : Bytes :=
+  [
+   0x01, 0x88, 0x01, 0x00, 0x01, 0x90, 0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x59, 0x42, 0x52, 0x49, 0x44,
+   0x2E, 0x53, 0x49, 0x47, 0x2F, 0x76, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+
+/-- 32-byte NIST SP 800-185 `cSHAKE256` (`keccakF1600`, domain `0x04`) digest under `"QSAG.HYBRID.ENV/v1"`. -/
+def cshakeEnvDigest32 (msg : Bytes) : Bytes :=
+  evalSponge 136 0x04 keccakF1600 kZeroState kXorRate136 kRateBlockBytes
+    (hybridEnvPrefix136 ++ msg) 32
+
+/-- 32-byte NIST SP 800-185 `cSHAKE256` (`keccakF1600`, domain `0x04`) tag under `"QSAG.HYBRID.SIG/v1"`. -/
+def cshakeSigTag32 (msg : Bytes) : Bytes :=
+  evalSponge 136 0x04 keccakF1600 kZeroState kXorRate136 kRateBlockBytes
+    (hybridSigPrefix136 ++ msg) 32
 
 def encodePre : Preimage → Bytes
   | .key pq s pk => (if pq then 2 else 1) :: (suiteBytes s ++ pk)
@@ -815,24 +892,27 @@ def encodePre : Preimage → Bytes
   | .address hrp v s id =>
     4 :: (be 8 hrp.length ++ (hrp ++ (be 8 v ++ (suiteBytes s ++ be 32 id.val))))
 
-/-- Input-dependent stand-in for the domain-separated hash. Not collision resistant. -/
-def toyHash : HybridSecurity.Hash := fun x =>
-  ⟨mix (encodePre x) % 256 ^ 32, Nat.mod_lt _ (Nat.pow_pos (by decide))⟩
+/-- Real 256-bit `cSHAKE256` (`keccakF1600`) domain-separated envelope hash (`"QSAG.HYBRID.ENV/v1"`). -/
+def envCshakeHash : HybridSecurity.Hash := fun x =>
+  ⟨ofBE (cshakeEnvDigest32 (encodePre x)) % 256 ^ 32,
+   Nat.mod_lt _ (Nat.pow_pos (by decide))⟩
 
-/-- The V2 transcript field layout without its constant ASCII label (`String.toUTF8` did not
-reduce under `decide` here); the label is the same for every transcript. -/
+/-- V2 transcript byte framing binding `(pq, suite, id, classicalDigest, pqDigest, msg)`. -/
 def transcriptFields (t : Transcript) : Bytes :=
   (if t.pq then 2 else 1) :: (suiteBytes t.suite ++ (be 32 t.id.val ++
     (be 32 t.classicalDigest.val ++ (be 32 t.pqDigest.val ++ (be 8 t.msg.length ++ t.msg)))))
 
-def toySign (pk : Bytes) (t : Transcript) : Bytes := be 32 (mix (pk ++ transcriptFields t))
+/-- Key- and full-transcript-bound 32-byte `cSHAKE256` (`"QSAG.HYBRID.SIG/v1"`) signature tag. -/
+def cshakeTranscriptSign (pk : Bytes) (t : Transcript) : Bytes :=
+  cshakeSigTag32 (0x01 :: (frame64 pk ++ transcriptFields t))
 
-/-- Key- and transcript-bound checksum verifier. Publicly computable, hence forgeable. -/
-def toyVerifier : Verifier := fun pk t sig => decide (sig = toySign pk t)
+/-- Real `cSHAKE256` key- and transcript-binding signature verifier. -/
+def cshakeTranscriptVerifier : Verifier := fun pk t sig =>
+  decide (sig = cshakeTranscriptSign pk t)
 
 def envelopeFor (k : Keys) (m : Bytes) : HybridPinnedEnvelope :=
-  ⟨k, toySign k.classical (transcript toyHash k false m),
-    toySign k.pq (transcript toyHash k true m)⟩
+  ⟨k, cshakeTranscriptSign k.classical (transcript envCshakeHash k false m),
+    cshakeTranscriptSign k.pq (transcript envCshakeHash k true m)⟩
 
 def hk : Keys := ⟨.secpMl44, [2, 0xA1, 0xA2], [0xB1, 0xB2, 0xB3]⟩
 
@@ -843,41 +923,41 @@ def paid : Bytes := [0x70, 0x61, 0x79]
 def unpaid : Bytes := [0x70, 0x61, 0x7A]
 
 theorem hybrid_honest_accepts :
-    validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 1) ∧
-    verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) paid := by
+    validateForAddress envCshakeHash (envelopeFor hk paid) (addressOf envCshakeHash hk hrpQs 1) ∧
+    verifyWith envCshakeHash cshakeTranscriptVerifier cshakeTranscriptVerifier (envelopeFor hk paid) paid := by
   unfold validateForAddress verifyWith; decide +kernel
 
 theorem hybrid_rejects_other_message :
-    ¬ verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) unpaid := by
+    ¬ verifyWith envCshakeHash cshakeTranscriptVerifier cshakeTranscriptVerifier (envelopeFor hk paid) unpaid := by
   unfold verifyWith; decide +kernel
 
 /-- The envelope carries no HRP or version, so it validates for every address derived from the
 same keys. Network exclusivity has to be bound in the message, as the source module states. -/
 theorem hybrid_envelope_valid_for_every_network :
-    validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk [113, 116] 1) ∧
-    validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 2) := by
+    validateForAddress envCshakeHash (envelopeFor hk paid) (addressOf envCshakeHash hk [113, 116] 1) ∧
+    validateForAddress envCshakeHash (envelopeFor hk paid) (addressOf envCshakeHash hk hrpQs 2) := by
   unfold validateForAddress; decide +kernel
 
 /-- Address metadata is bound by the commitment: relabelling the HRP or the version without
 recomputing the commitment is rejected. -/
 theorem hybrid_rejects_relabelled_hrp :
-    ¬ validateForAddress toyHash (envelopeFor hk paid)
-      { addressOf toyHash hk hrpQs 1 with hrp := [113, 116] } := by
+    ¬ validateForAddress envCshakeHash (envelopeFor hk paid)
+      { addressOf envCshakeHash hk hrpQs 1 with hrp := [113, 116] } := by
   unfold validateForAddress; decide +kernel
 
 theorem hybrid_rejects_relabelled_version :
-    ¬ validateForAddress toyHash (envelopeFor hk paid)
-      { addressOf toyHash hk hrpQs 1 with version := 2 } := by
+    ¬ validateForAddress envCshakeHash (envelopeFor hk paid)
+      { addressOf envCshakeHash hk hrpQs 1 with version := 2 } := by
   unfold validateForAddress; decide +kernel
 
 theorem hybrid_address_commitments_differ :
-    (addressOf toyHash hk [113, 116] 1).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment ∧
-    (addressOf toyHash hk hrpQs 2).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment := by
+    (addressOf envCshakeHash hk [113, 116] 1).commitment ≠ (addressOf envCshakeHash hk hrpQs 1).commitment ∧
+    (addressOf envCshakeHash hk hrpQs 2).commitment ≠ (addressOf envCshakeHash hk hrpQs 1).commitment := by
   decide +kernel
 
 theorem hybrid_rejects_other_keys_address :
-    ¬ validateForAddress toyHash (envelopeFor hk paid)
-      (addressOf toyHash { hk with classical := [3, 0xA1, 0xA2] } hrpQs 1) := by
+    ¬ validateForAddress envCshakeHash (envelopeFor hk paid)
+      (addressOf envCshakeHash { hk with classical := [3, 0xA1, 0xA2] } hrpQs 1) := by
   unfold validateForAddress; decide +kernel
 
 /-- Identical component keys and one verification algorithm: the role flag in the transcript
@@ -885,46 +965,63 @@ alone keeps a classical-role signature from being accepted in the PQ role. -/
 def twin : Keys := ⟨.secpMl44, [9], [9]⟩
 
 theorem hybrid_rejects_swapped_roles :
-    verifyWith toyHash toyVerifier toyVerifier (envelopeFor twin paid) paid ∧
-    ¬ verifyWith toyHash toyVerifier toyVerifier
+    verifyWith envCshakeHash cshakeTranscriptVerifier cshakeTranscriptVerifier (envelopeFor twin paid) paid ∧
+    ¬ verifyWith envCshakeHash cshakeTranscriptVerifier cshakeTranscriptVerifier
       ⟨twin, (envelopeFor twin paid).pqSignature, (envelopeFor twin paid).classicalSignature⟩
       paid := by
   unfold verifyWith; decide +kernel
 
 /-- An honest PQ signature is not accepted next to a substituted classical key. -/
 theorem hybrid_rejects_rogue_partner :
-    ¬ (toyVerifier hk.pq (transcript toyHash { hk with classical := [0xEE] } true paid)
+    ¬ (cshakeTranscriptVerifier hk.pq (transcript envCshakeHash { hk with classical := [0xEE] } true paid)
       (envelopeFor hk paid).pqSignature = true) := by decide +kernel
 
 theorem hybrid_keybound_instance : ∃ (H : HybridSecurity.Hash) (vc vp : Verifier) (k : Keys) (hrp : Bytes)
     (v : Nat) (e : HybridPinnedEnvelope) (m : Bytes) (qs : List Bytes),
     validateForAddress H e (addressOf H k hrp v) ∧ verifyWith H vc vp e m ∧ m ∉ qs :=
-  ⟨toyHash, toyVerifier, toyVerifier, hk, hrpQs, 1, envelopeFor hk paid, paid, [unpaid],
+  ⟨envCshakeHash, cshakeTranscriptVerifier, cshakeTranscriptVerifier, hk, hrpQs, 1,
+    envelopeFor hk paid, paid, [unpaid],
     hybrid_honest_accepts.1, hybrid_honest_accepts.2, by decide⟩
 
-def brokenClassical : Verifier := fun _ _ _ => true
+/-- Single-guard-dropped `cSHAKE256` tag binding `(pq, suite, pk)` while omitting `t.msg` / `t.id`
+    binding: rejects malformed/wrong-key signatures (`[0]`), yet transfers across messages! -/
+def msgBlindKeyTag (pk : Bytes) (s : Suite) (pq : Bool) : Bytes :=
+  cshakeSigTag32 (0x02 :: ((if pq then 2 else 1) :: (suiteBytes s ++ frame64 pk)))
 
-/-- Output `0`: junk signatures on a fresh message. Output `1`: replay of a queried message. -/
+/-- Single-guard-dropped mutated verifier: checks the 32-byte `cSHAKE256` `(pq, suite, pk)` tag
+    (rejecting `[0]` and wrong keys/roles) while dropping message-binding. -/
+def msgBlindClassicalVerifier : Verifier := fun pk t sig =>
+  decide (sig = msgBlindKeyTag pk t.suite t.pq)
+
+/-- Output `0`: message-blind `(pq, suite, pk)` key tags reused on fresh `unpaid`.
+    Output `1`: replay of honest envelope on queried `paid`. -/
 def advOut (j : Fin 2) : HybridPinnedEnvelope × Bytes :=
-  if j.val = 0 then (⟨hk, [0], [0]⟩, unpaid) else (envelopeFor hk paid, paid)
+  if j.val = 0 then
+    (⟨hk, msgBlindKeyTag hk.classical hk.suite false, msgBlindKeyTag hk.pq hk.suite true⟩, unpaid)
+  else
+    (envelopeFor hk paid, paid)
 
-/-- Classical component accepting everything, PQ component binding: the hybrid win mass is
-`0` while the classical component game is won with mass `1`. -/
+/-- Classical component dropping message-binding (`msgBlindClassicalVerifier`, still rejecting `[0]`),
+    PQ component binding the full transcript (`cshakeTranscriptVerifier`): hybrid win mass is `0`
+    while the mutated classical component game is won with mass `1`. -/
 theorem robust_combiner_instance :
+    msgBlindClassicalVerifier hk.classical (transcript envCshakeHash hk false unpaid) [0] = false ∧
     mass (fun _ : Fin 2 => 1) (fun j =>
-      hybridWins toyHash brokenClassical toyVerifier hk hrpQs 1 [paid] (advOut j)) = 0 ∧
+      hybridWins envCshakeHash msgBlindClassicalVerifier cshakeTranscriptVerifier hk hrpQs 1 [paid] (advOut j)) = 0 ∧
     mass (fun _ : Fin 2 => 1) (fun j =>
-      brokenClassical hk.classical (transcript toyHash hk false (advOut j).2)
+      msgBlindClassicalVerifier hk.classical (transcript envCshakeHash hk false (advOut j).2)
         (advOut j).1.classicalSignature && decide ((advOut j).2 ∉ [paid])) = 1 ∧
     mass (fun _ : Fin 2 => 1) (fun j =>
-      toyVerifier hk.pq (transcript toyHash hk true (advOut j).2)
+      cshakeTranscriptVerifier hk.pq (transcript envCshakeHash hk true (advOut j).2)
         (advOut j).1.pqSignature && decide ((advOut j).2 ∉ [paid])) = 0 := by
   decide +kernel
 
-/-- Both components accepting everything: the fresh junk output wins. -/
+/-- When both components drop message-binding (`msgBlindClassicalVerifier`), the fresh message
+    reuse wins the hybrid game with mass `1` despite `[0]` still being rejected. -/
 theorem both_components_broken_instance :
+    msgBlindClassicalVerifier hk.pq (transcript envCshakeHash hk true unpaid) [0] = false ∧
     mass (fun _ : Fin 2 => 1) (fun j =>
-      hybridWins toyHash brokenClassical brokenClassical hk hrpQs 1 [paid] (advOut j)) = 1 := by
+      hybridWins envCshakeHash msgBlindClassicalVerifier msgBlindClassicalVerifier hk hrpQs 1 [paid] (advOut j)) = 1 := by
   decide +kernel
 
 def pol : TransactionPolicy := ⟨9, [7, 8], 100, 150, [⟨50, 1⟩, ⟨100, 2⟩]⟩

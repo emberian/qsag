@@ -8,8 +8,8 @@ public import Qsag.Machine.Gf128ClmulLoopAgreement
 # Qsag.Top.Signing — End-to-End Composed Post-Quantum Signing Reductions and Refinements
 
 Top-level composition module (zero `import all`) connecting:
-1. Tweakable-hash `EUF-CMA` collision extraction, target-budget accounting, and full multi-hop
-   game-playing reductions (`ProdCollisionEvents`, `ProdCollisionAccounting`,
+1. Tweakable-hash `EUF-CMA` collision extraction, target-budget accounting, and multi-hop
+   game reductions (`ProdCollisionEvents`, `ProdCollisionAccounting`,
    `ProdCollisionExtraction`, `FullAdaptiveEufCma`, `HulsingMultiHopReduction`,
    `ProductionJortsBaggyBounds`) into `Spec.GameBound` and `Spec.Assumptions` (`PRF_msg`, `PRF`,
    `SM-DT-UD`, `ITSR`, `SM-DT-TCR`, `SM-DT-PRE`),
@@ -29,8 +29,9 @@ Top-level composition module (zero `import all`) connecting:
    `productionLatchedRandomizedSigner_trace_safe`),
 6. `hCand`-free interactive `SM-DT-PRE` adaptive `EUF-CMA` (`poly257MultiLeaf_full_adaptive_forger_bound`),
    load-bearing probability-`1` guard refutations (`BeltLatch`, `checkTargetSum`, `HashAdrs`
-   layer/keyPair separation), and `< 2^{-128}` classical and post-quantum `QROM` security bounds
-   for `Jorts`, `Baggy`, `Corduroy`, and NIST `FIPS 205` `SLH-DSA-SHAKE-128s`/`128f`.
+   layer/keyPair separation), and executable-game bounds for Jorts, Baggy, Corduroy, and the
+   height-60 stateless WOTS+C profile. The FIPS 205 SLH-DSA-SHAKE-128s/128f theorems
+   give numerical budgets for their respective parameter models.
 -/
 
 public import Qsag.Spec.Primitives
@@ -54,6 +55,8 @@ public import Qsag.Protocol.Threshold.BaggyAndRss256Security
 public import Qsag.Protocol.Signing.HybridAddrPolicyAndFullPresetSecurity
 public import Qsag.Protocol.Threshold.ProductionCoinReduction
 public import Qsag.Oracle.Sponge
+public import Qsag.Oracle.SpongeTwoWayIndifferentiability
+public import Qsag.Spec.CorruptibleSignSimulation
 public import Qsag.Oracle.Spn
 public import Qsag.Oracle.Qrom
 public import Qsag.Protocol.Signing.SignatureOutputAndCacheLaws
@@ -75,14 +78,9 @@ set_option autoImplicit false
 
 `production_euf_cma_gameBound` decomposes any winning run of `prodEufCmaWin` into the three
 extractor events (`prodItsrEvent`, `prodTcrEvent`, `prodPreEvent`) via
-`Spec.event_le_three_reductions`. Section 7 below (`hulsing_full_multihop_euf_cma_bound`,
-`poly257MultiLeaf_full_adaptive_forger_bound`, `jortsProd_pq_qrom_euf_cma_lt_2_neg_128`,
-`baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128`,
-`fips205_slhDsa128s_concrete_security_lt_2_neg_128`, and
-`fips205_slhDsa128f_concrete_security_lt_2_neg_128`) closes the complete multi-hop standard-model
-and post-quantum `QROM` reductions into `Spec.Assumptions` (`Spec.PrfHard`, `SmDtUdHard`,
-`Spec.ItsrHard`, `Spec.SmDtTcrHard` / `SmDtOpenSeedTcrHard`, and `Spec.SmDtPreHard`) over
-unrestricted `pk`-dependent adaptive `(qHash, qSign)` adversaries. -/
+`Spec.event_le_three_reductions`. Section 7 composes the conditional multi-hop reduction. `hulsing_closed_multihop_euf_cma_bound` bounds the executable game by the PRF,
+ITSR, open-seed TCR, PRE, and UD losses and the stateless randomizer-guess probability.
+The profile theorems in `ProductionJortsBaggyBounds` specialize this bound. The FIPS 205 theorems bound their separate numerical budgets. -/
 
 /-- **End-to-End Production `EUF-CMA` Concrete `GameBound` (`production_euf_cma_gameBound`)**:
     Composes `ProdCollisionEvents.prodEufCmaWin_classified` and `ProdCollisionAccounting.prodTcrOutput_target_budget`
@@ -470,7 +468,7 @@ theorem inhabited_poly257MultiLeaf_closed_adaptive_forger_bound :
           Qsag.Spec.SmDtPreHard (Qsag.Spec.WithinPreQueries 2 1) Qsag.Spec.poly257Hash 1 1 1 εPre :=
   Qsag.inhabited_poly257MultiLeaf_adaptive_forger_bound
 
-/-! ## 7. Full-Adversary `hCand`-Free EUF-CMA, `RandomizedSigScheme` Refinement, Multi-Hop Standard-Model Reduction, and `< 2^{-128}` Production Bounds -/
+/-! ## 7. Full-Adversary `hCand`-Free EUF-CMA, `RandomizedSigScheme` Refinement, Multi-Hop Reduction and Numerical Production Budgets -/
 
 /-- **`hCand`-Free Interactive `SM-DT-PRE` Adaptive EUF-CMA Bound
     (`poly257MultiLeaf_full_adaptive_forger_bound`)**:
@@ -536,11 +534,8 @@ theorem productionLatchedRandomizedSigner_trace_safe
   Qsag.productionLatchedRandomizedSigner_trace_safe suite params maxGrind sk maxWindow hStateful
     hAdmits
 
-/-- **Master Multi-Hop Standard-Model EUF-CMA Reduction (`hulsing_full_multihop_euf_cma_bound`)**:
-    Composes Hop 1 (`PRF_msg` randomizer idealization via `Spec.PrfHard`), Hop 2 (`PRF` secret-seed
-    idealization via `Spec.PrfHard` leaving `suite.rawHash` untouched), and Hop 3/4 (`ITSR`,
-    `SmDtOpenSeedTcrHard`, `SmDtUdHard`, `Spec.SmDtPreHard`) over all unrestricted `pk`-dependent
-    adaptive `(qHash, qSign)` adversaries. -/
+/-- Compatibility theorem composing the two PRF reductions and open-seed TCR
+    with bounds supplied for the subset-cover and preimage events. -/
 theorem hulsing_full_multihop_euf_cma_bound {n nC1 nR1 nC2 nR2 nSeed nA qHash qSign : Nat}
     (hPos : 0 < n) (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16) (seedLen keyLen qPrfMsg qPrfSec qTcr : Nat)
@@ -613,7 +608,7 @@ theorem jortsProd_pq_qrom_budget_lt_2_neg_128 {qSign qEval : Nat}
   Qsag.jortsProd_pq_qrom_budget_lt_2_neg_128 hqSign hqEval
 
 /-- **NIST FIPS 205 `SLH-DSA-SHAKE-128s` Concrete Classical & Post-Quantum `QROM` `< 2^{-128}`
-    Security (`fips205_slhDsa128s_concrete_security_lt_2_neg_128`).** -/
+    Budget (`fips205_slhDsa128s_concrete_security_lt_2_neg_128`).** -/
 theorem fips205_slhDsa128s_concrete_security_lt_2_neg_128
     {qHMsg qEvalClassical qEvalQrom : Nat}
     (hqHMsg : qHMsg ≤ 16) (hqCl : qEvalClassical ≤ 2 ^ 96) (hqQr : qEvalQrom ≤ 2 ^ 48) :
@@ -637,7 +632,7 @@ theorem fips205_slhDsa128s_concrete_security_lt_2_neg_128
   Qsag.fips205_slhDsa128s_concrete_security_lt_2_neg_128 hqHMsg hqCl hqQr
 
 /-- **NIST FIPS 205 `SLH-DSA-SHAKE-128f` Concrete Classical & Post-Quantum `QROM` `< 2^{-128}`
-    Security (`fips205_slhDsa128f_concrete_security_lt_2_neg_128`).** -/
+    Budget (`fips205_slhDsa128f_concrete_security_lt_2_neg_128`).** -/
 theorem fips205_slhDsa128f_concrete_security_lt_2_neg_128
     {qHMsg qEvalClassical qEvalQrom : Nat}
     (hqHMsg : qHMsg ≤ 4) (hqCl : qEvalClassical ≤ 2 ^ 96) (hqQr : qEvalQrom ≤ 2 ^ 48) :
@@ -663,6 +658,24 @@ theorem fips205_slhDsa128f_concrete_security_lt_2_neg_128
 #verify_kernel
   Qsag.Top.productionRandomizedSigScheme
   Qsag.Top.productionLatchedRandomizedSigner_refines_idealSign
+  Qsag.Spec.latchedCorruptibleSigner_refines_simulator
+
+#verify_constructive
+  Qsag.sponge_distinct_inputs_terminal_disjoint_or_cap_collision
+  Qsag.sponge_output_queries_disjoint_or_cap_collision
+  Qsag.absorbPayload_output_queries_disjoint_or_cap_collision
+  Qsag.cshake256_output_queries_disjoint_or_cap_collision
+  Qsag.keccak_qsag_tags_output_queries_disjoint_or_cap_collision
+  Qsag.evalSponge_congr_on_queries
+  Qsag.spongeReal_eq_ideal_of_no_cap_bad
+  Qsag.sponge_cap_bad_bound
+  Qsag.sponge_multi_domain_ro_indistinguishability_bound
+  Qsag.keccak_cshake_tags_ro_indistinguishability_bound
+  Qsag.keccak_cshake_tags_ro_bound_430_bits_at_q2pow40
+  Qsag.Spec.latchedCorruptibleSigner_adaptive_view_eq_simulator
+  Qsag.Spec.latchedCorruptibleSigner_simulated_by_idealSignCorruptible
+  Qsag.Spec.latchedCorruptibleSigner_run_projects_to_ideal
+  Qsag.Spec.latchedCorruptibleSigner_unexposed_run_safe
 
 #verify_constructive
   Qsag.Top.production_euf_cma_gameBound
@@ -1120,6 +1133,76 @@ theorem production_euf_cma_advantage_bound {Ω : Type} (suite : TweakableHashSui
       hitCount isItsr coins + hitCount isTcr coins + hitCount isPre coins :=
   _root_.Qsag.production_euf_cma_advantage_bound suite params hw coins game isItsr isTcr isPre
     hOneTime hItsr hTcr hPre
+
+theorem smDtOpenSeedTcrHard_implies_smDtTcrHard
+    {𝒜 : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    {th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes} {seedLen q : Nat} {ε : Spec.RatBound}
+    (hard : SmDtOpenSeedTcrHard 𝒜 th seedLen q ε) :
+    Spec.SmDtTcrHard (fun c => 𝒜 (precommitOnOpen false c)) th seedLen q ε :=
+  _root_.Qsag.smDtOpenSeedTcrHard_implies_smDtTcrHard hard
+
+theorem hulsing_closed_multihop_euf_cma_bound {q : Nat} (E : SigningExperiment q) (latchOn : Bool)
+    (suite : TweakableHashSuite) (p : PqHashParams) (wf : p.productionWellFormed = true)
+    (trees : p.forsTrees ≤ 2 ^ 32) (cover prim : Spec.RatBound)
+    (H : SigningPrimitiveBounds E latchOn suite p cover prim) :
+    Spec.GameBound (execEufCmaGameWith latchOn E.pos suite p E.keygen E.adversary).winProb
+      (globalSlotBudget p q cover prim) :=
+  _root_.Qsag.hulsing_closed_multihop_euf_cma_bound E latchOn suite p wf trees cover prim H
+
+theorem baggyProd_stateless_exec_euf_cma_bound {q : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (cover prim : Spec.RatBound)
+    (H : BaggyPrimitiveAssumptions E suite cover prim) :
+    Spec.GameBound (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb
+      (globalSlotBudget baggyProdParams q cover prim) :=
+  _root_.Qsag.baggyProd_stateless_exec_euf_cma_bound E suite cover prim H
+
+theorem jortsProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 96)
+    (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero
+      (classical256PrimEps qEval)) :
+    (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  _root_.Qsag.jortsProd_classical_exec_euf_cma_lt_2_neg_128 E suite hq he H
+
+theorem jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 48)
+    (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero
+      (pqQrom256PrimEps qEval)) :
+    (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  _root_.Qsag.jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128 E suite hq he H
+
+theorem baggyProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 80)
+    (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
+      (classical256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  _root_.Qsag.baggyProd_classical_exec_euf_cma_lt_2_neg_128 E suite hq he H
+
+theorem baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 40)
+    (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
+      (pqQrom256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  _root_.Qsag.baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 E suite hq he H
+
+theorem corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 12) (he : qEval ≤ 2 ^ 40)
+    (H : SigningPrimitiveBounds E false suite corduroyProdParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
+      (pqQrom256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite corduroyProdParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  _root_.Qsag.corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 E suite hq he H
+
+theorem slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 25)
+    (H : SigningPrimitiveBounds E false suite slhDsaW16StatelessParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
+      (pqQrom256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite slhDsaW16StatelessParams E.keygen E.adversary).winProb.lt
+      ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
+  _root_.Qsag.slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128 E suite hq he H
 -- END COMPARATOR ROSTER
 
 end Qsag.Top

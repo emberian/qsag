@@ -1545,12 +1545,15 @@ end
   Qsag.hulsing_hop4c_smDtPre_interactive_bound
   Qsag.hulsing_full_multihop_euf_cma_bound
   Qsag.productionLatchedRandomizedSigner_trace_safe
-  Qsag.jortsProd_classical_euf_cma_lt_2_neg_128
-  Qsag.jortsProd_pq_qrom_euf_cma_lt_2_neg_128
-  Qsag.baggySha3_128f_classical_euf_cma_lt_2_neg_128
-  Qsag.baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128
-  Qsag.corduroyProd_concrete_euf_cma_bound
-  Qsag.baggyProd_concrete_euf_cma_bound
+  Qsag.jortsProd_exec_prf_tcr_reduction
+  Qsag.baggyProd_exec_prf_tcr_reduction
+  Qsag.corduroyProd_exec_prf_tcr_reduction
+  Qsag.globalSlotBudget_mono
+  Qsag.jortsProd_classical_global_slot_budget_lt_2_neg_128
+  Qsag.jortsProd_pq_qrom_global_slot_budget_lt_2_neg_128
+  Qsag.baggyProd_classical_global_slot_budget_lt_2_neg_128
+  Qsag.baggyProd_pq_qrom_global_slot_budget_lt_2_neg_128
+  Qsag.corduroyProd_pq_qrom_global_slot_budget_lt_2_neg_128
   Qsag.fips205_slhDsa128s_concrete_security_lt_2_neg_128
   Qsag.fips205_slhDsa128f_concrete_security_lt_2_neg_128
 
@@ -1572,9 +1575,131 @@ end
   Qsag.smDtOpenSeedTcrHard_constHash_refuted
 #tooth_pair Qsag.productionLatchedRandomizedSigner_trace_safe vs
   Qsag.tooth_unlatched_stateful_signer_reuses_epoch
-#tooth_pair Qsag.jortsProd_pq_qrom_euf_cma_lt_2_neg_128 vs
+public section
+namespace Qsag
+
+/-- Ask twice with decreasing epochs and submit the second response as a forgery. -/
+def baggyReverseEpochReplay : SeedWithheldEufCmaAdv 0 2 where
+  run _ := .signQuery ⟨[1], [], 1, 1⟩ fun _ =>
+    .signQuery ⟨[0], [], 0, 1⟩ fun response =>
+      .pure ([0], response.getD ⟨[], 1, 0, [], []⟩)
+  bounded _ := fun _ _ => True.intro
+
+theorem baggy_reverse_epoch_replay_bound {n : Nat} (hPos : 0 < n) (suite : TweakableHashSuite)
+    (keygen : Fin n → PqSecretKey) :
+    (∀ i, (execEufCmaOutcome false suite baggyProdParams keygen (fun _ => baggyReverseEpochReplay) i).queries =
+      [⟨[1], [], 1, 1⟩, ⟨[0], [], 0, 1⟩]) ∧
+    Spec.GameBound (ExecStatelessEufCmaGame hPos suite baggyProdParams keygen
+      (fun _ => baggyReverseEpochReplay)).winProb Spec.RatBound.zero := by
+  let hi : ProdSigningQuery := ⟨[1], [], 1, 1⟩
+  let lo : ProdSigningQuery := ⟨[0], [], 0, 1⟩
+  have out (i : Fin n) : execEufCmaOutcome false suite baggyProdParams keygen
+      (fun _ => baggyReverseEpochReplay) i =
+      ⟨keygen i, [hi, lo], [0], (prodSignQuery suite baggyProdParams (keygen i) lo).getD ⟨[], 1, 0, [], []⟩⟩ := rfl
+  refine ⟨fun i => congrArg ProdEufCmaOutcome.queries (out i), ?_⟩
+  apply Spec.FinGame.bound_zero_of_forall_lose
+  intro i
+  rw [execEufCmaGameWith_win, out]
+  cases hl : prodSignQuery suite baggyProdParams (keygen i) lo with
+  | none =>
+    rw [prodEufCmaWin_eq]
+    simp only [Option.getD, Bool.and_eq_false_imp]
+    have reject : verifyProductionPqHashSig suite baggyProdParams
+        (derivePublicKey suite baggyProdParams (keygen i)) [0] ⟨[], 1, 0, [], []⟩ = false := by
+      rw [verifyProductionPqHashSig_eq]
+      split <;> simp
+    simp only [reject, Bool.false_eq_true, false_implies]
+  | some sig =>
+    apply prodEufCmaWin_rejects_signed_message suite baggyProdParams _ sig
+    dsimp only
+    rw [productionSigningLog_cons, productionSigningLog_cons, hl]
+    cases prodSignQuery suite baggyProdParams (keygen i) hi <;> simp [lo]
+
+theorem inhabited_baggy_reverse_epoch_replay :
+    ∃ (n : Nat) (hPos : 0 < n) (suite : TweakableHashSuite) (keygen : Fin n → PqSecretKey), 0 < n ∧
+      Spec.GameBound (ExecStatelessEufCmaGame (n := n) hPos suite baggyProdParams
+        keygen (fun _ => baggyReverseEpochReplay)).winProb Spec.RatBound.zero := by
+  exact ⟨1, Nat.one_pos, cshake256Suite, fun _ => ⟨[0], [1], [2]⟩, Nat.one_pos,
+    (baggy_reverse_epoch_replay_bound Nat.one_pos cshake256Suite _).2⟩
+
+/-- Executable Baggy uses one selector output per FORS tree. PORS+FP uses a
+    different number of selected leaves for every input. -/
+theorem tooth_baggy_fors_selector_ne_pors_reveal (suite : TweakableHashSuite)
+    (pk : PqPublicKey) (r msg : Spec.Bytes) :
+    (forsGlobalSubsetSelector suite baggyProdParams pk r msg).length ≠ PorsFpSecurity.sha3_128f.reveal := by
+  rw [forsGlobalSubsetSelector_length _ _ _ _ _ baggyProdParams_accounting.1
+    baggyProdParams_accounting.2.1, baggyProdParams, baggy128fParams_eq, PorsFpSecurity.sha3_128f_eq]
+  decide
+
+/-- Both FIPS Category-1 heights exceed the executable QSAG verifier's height domain. -/
+theorem tooth_fips205_height_rejected_by_qsag (p : PqHashParams)
+    (h : p.numLayers * p.subtreeHeight = slhDsaShake128s.h ∨
+      p.numLayers * p.subtreeHeight = slhDsaShake128f.h) :
+    p.productionWellFormed = false := by
+  have hs : slhDsaShake128s.h = 63 := rfl
+  have hf : slhDsaShake128f.h = 66 := rfl
+  have hHigh : ¬ p.numLayers * p.subtreeHeight ≤ 62 := by rw [hs, hf] at h; omega
+  rw [PqHashParams.productionWellFormed_eq]
+  simp only [decide_eq_false hHigh, Bool.and_false, Bool.false_and]
+
+/-- Assigning either FIPS height to the QSAG game makes every forgery lose. -/
+theorem tooth_fips205_height_qsag_exec_always_loses {n qHash qSign : Nat} (hp : 0 < n)
+    (suite : TweakableHashSuite) (p : PqHashParams)
+    (h : p.numLayers * p.subtreeHeight = slhDsaShake128s.h ∨
+      p.numLayers * p.subtreeHeight = slhDsaShake128f.h)
+    (keygen : Fin n → PqSecretKey) (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign) (i : Fin n) :
+    (ExecStatelessEufCmaGame hp suite p keygen adv).win i = false := by
+  rw [execEufCmaGameWith_win, prodEufCmaWin_eq, verifyProductionPqHashSig_eq,
+    tooth_fips205_height_rejected_by_qsag p h]
+  rfl
+
+/-- A one-query ITSR adversary wins on every tape against the constant suite
+    with executable Baggy parameters. The subset count alone cannot bound it. -/
+theorem tooth_baggy_selector_constant_suite_itsr_win {n : Nat} (hp : 0 < n)
+    (pk : PqPublicKey) (rand : Fin n → Nat → Spec.Bytes) (i : Fin n) :
+    (Spec.itsrGame hp (forsGlobalSubsetSelector zeroRejectToySuite baggyProdParams pk) 1 rand
+      (fun _ => .call [] (fun r => .ret (r, [0])))).win i = true := by
+  let sel := forsGlobalSubsetSelector zeroRejectToySuite baggyProdParams pk
+  have same (r : Spec.Bytes) : sel r [0] = sel r [] := by
+    apply forsGlobalSubsetSelector_congr_preHash
+    simp only [thPreHash_eq, thCall_eq, zeroRejectToySuite]
+  rw [Spec.itsrGame_win, Spec.itsrRun_eq, Spec.Code.play_call, Spec.itsrOracle_eq]
+  simp only [List.length_nil, Nat.zero_lt_one, ↓reduceIte, List.nil_append, Spec.Code.play_ret, Spec.itsrWin_eq]
+  change (!decide ((rand i 0, [0]) ∈ [(rand i 0, [])]) &&
+    (sel (rand i 0) [0]).all (fun x => [(rand i 0, ([] : Spec.Bytes))].any (fun e => decide (x ∈ sel e.1 e.2)))) = true
+  simp [same, List.all_eq_true]
+
+/-- A natural FORS tree index can wrap in the production address even when the
+    parameter guard accepts it. The two logical leaf slots read the same PRF cell. -/
+theorem tooth_wellFormed_fors_tree_alias (suite : TweakableHashSuite) (sk : PqSecretKey) :
+    let p : PqHashParams := { baggyProdParams with forsTrees := 2 ^ 32 + 1 }
+    p.productionWellFormed = true ∧ 0 < p.forsTrees ∧ 2 ^ 32 < p.forsTrees ∧
+      forsIndexedSecretLeaf suite sk 0 0 0 0 = forsIndexedSecretLeaf suite sk 0 0 (2 ^ 32) 0 := by
+  intro p
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · rw [PqHashParams.productionWellFormed_eq]
+    simp only [p, baggyProdParams, baggy128fParams_eq]
+    decide +kernel
+  · decide +kernel
+  · decide +kernel
+  · rw [forsIndexedSecretLeaf_eq, forsIndexedSecretLeaf_eq]
+    rfl
+
+#verify_constructive baggy_reverse_epoch_replay_bound inhabited_baggy_reverse_epoch_replay
+#verify_inhabited baggy_reverse_epoch_replay_bound inhabited_baggy_reverse_epoch_replay
+
+#verify_constructive tooth_baggy_fors_selector_ne_pors_reveal tooth_fips205_height_rejected_by_qsag
+  tooth_wellFormed_fors_tree_alias tooth_fips205_height_qsag_exec_always_loses
+  tooth_baggy_selector_constant_suite_itsr_win
+
+end Qsag
+end
+
+#tooth_pair Qsag.jortsProd_pq_qrom_global_slot_budget_lt_2_neg_128 vs
   Qsag.tooth_pq_grover_2pow64_exceeds_128bit_bound
-#tooth_pair Qsag.baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128 vs
+#tooth_pair Qsag.baggyProd_pq_qrom_global_slot_budget_lt_2_neg_128 vs
   Qsag.tooth_pq_grover_2pow64_exceeds_128bit_bound
+#tooth_pair Qsag.baggyProd_classical_global_slot_budget_lt_2_neg_128 vs
+  Qsag.tooth_classical_2pow128_exceeds_128bit_bound
 #tooth_pair Qsag.fips205_slhDsa128f_concrete_security_lt_2_neg_128 vs
   Qsag.tooth_fips205_128f_bad_hmsg_rejected

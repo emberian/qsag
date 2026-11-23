@@ -4306,8 +4306,11 @@ theorem samplerSum_split (r a b : Nat) : ∀ n,
       simp [Nat.add_mul, Nat.add_assoc]
 
 /-- The defining finite sum for twice TV, scaled by `2^64 * p`. Each term
-uses the exact fiber multiplicity established by `reducedWordPreimages_complete`. -/
-def reducedWordTvSum : Nat :=
+uses the exact fiber multiplicity established by `reducedWordPreimages_complete`.
+Marked `noncomputable` (matching `QuarticExt4.wordPool` and `Preprocessing.oddVaultChallengeSupport`)
+so Lean's C code generator does not eagerly iterate `samplerSum` over `goldilocksPrime` (`2^64 - 2^32 + 1`)
+during module initialization in `spec-oracle`. -/
+noncomputable def reducedWordTvSum : Nat :=
   samplerSum goldilocksPrime (fun x =>
     let count := if x < 2 ^ 32 - 1 then 2 else 1
     (goldilocksPrime * count - 2 ^ 64) + (2 ^ 64 - goldilocksPrime * count))
