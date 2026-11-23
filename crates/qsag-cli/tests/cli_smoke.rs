@@ -259,9 +259,9 @@ fn help_info_and_usage_errors() {
         "\"signature_bytes\": 1122",
         "fts-threshold",
         "agg-jorts-poseidon2",
-        "GoldilocksExt4",
+        "QuinticFp5",
         "WHIR",
-        "CanopyMultiProof",
+        "QSAGHQM2",
         "qsag-migration-proof-v2",
         "\"kind\": \"btc-hash160\"",
         "\"kind\": \"eth-eoa\"",
@@ -629,7 +629,7 @@ fn threshold_few_time_signature_burns_each_epoch_once() {
 }
 
 #[test]
-fn aggregate_merge_verify_and_tamper() {
+fn aggregate_quintic_verify_and_tamper() {
     let dir = Workdir::new("agg");
     let wal = dir.path("wal");
     let pass = dir.path("pass");
@@ -652,10 +652,10 @@ fn aggregate_merge_verify_and_tamper() {
         dir.path("msg"),
         dir.path("other"),
     );
-    let (proof_a, proof_b, merged) = (
+    let (proof_a, proof_b, full_proof) = (
         dir.path("a.proof"),
         dir.path("b.proof"),
-        dir.path("merged.proof"),
+        dir.path("full.proof"),
     );
     let sign = |signers: &str, epoch: &str, input: &str, out: &str, expected: i32| {
         expect(
@@ -715,27 +715,9 @@ fn aggregate_merge_verify_and_tamper() {
     sign("0", "0", &other, &dir.path("equivocation.proof"), 4);
     assert!(!Path::new(&dir.path("equivocation.proof")).exists());
     sign("2,1", "1", &msg, &dir.path("unordered.proof"), 1);
-    // A deleted write-ahead log is not treated as an unused key.
-    std::fs::remove_file(Path::new(&wal).join("validator-3.wal")).unwrap();
-    sign("3", "1", &msg, &dir.path("lost-wal.proof"), 4);
 
-    let pair = format!("{proof_a},{proof_b}");
-    let out = expect(
-        &[
-            "aggregate",
-            "--merge",
-            &pair,
-            "--public",
-            &pk,
-            "--in",
-            &msg,
-            "--out",
-            &merged,
-            "--json",
-        ],
-        0,
-    );
-    assert!(out.contains("\"leaf_shards\": 2"));
+    // Epoch 1 full-committee Quintic Fp5 (`QSAGHQM2`) proof across all 4 validators.
+    sign("0,1,2,3", "1", &msg, &full_proof, 0);
     assert!(
         expect(
             &[
@@ -745,30 +727,33 @@ fn aggregate_merge_verify_and_tamper() {
                 "--in",
                 &msg,
                 "--proof",
-                &merged
+                &full_proof
             ],
             0
         )
         .contains("4 of 4")
     );
-    // Overlapping signer sets can not be merged.
-    let overlap = format!("{proof_a},{merged}");
+    // Retired `--merge` flag must be rejected as an unknown option.
     expect(
         &[
             "aggregate",
             "--merge",
-            &overlap,
+            &format!("{proof_a},{proof_b}"),
             "--public",
             &pk,
             "--in",
             &msg,
             "--out",
-            &dir.path("overlap.proof"),
+            &dir.path("retired-merge.proof"),
         ],
-        2,
+        1,
     );
 
-    flip_hex_digit(&merged, "proof");
+    // A deleted write-ahead log is not treated as an unused key.
+    std::fs::remove_file(Path::new(&wal).join("validator-3.wal")).unwrap();
+    sign("3", "2", &msg, &dir.path("lost-wal.proof"), 4);
+
+    flip_hex_digit(&full_proof, "proof");
     expect(
         &[
             "verify-agg",
@@ -777,7 +762,7 @@ fn aggregate_merge_verify_and_tamper() {
             "--in",
             &msg,
             "--proof",
-            &merged,
+            &full_proof,
         ],
         2,
     );

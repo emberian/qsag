@@ -1,20 +1,15 @@
-//! Succinct K-to-1 signature aggregation and 2-to-1 merging (`qsag-agg`).
+//! Succinct $K$-to-$1$ Quintic `Fp5` signature aggregation (`QSAGHQM2`) and regional hierarchy
+//! composition (`QSAGHEM\x04`, `qsag-agg`).
 //!
 //! ```bash
 //! cargo run --release -p qsag-cli --example succinct_k_to_1_aggregation
 //! ```
-//!
-//! 1. Eight validators enroll a durable epoch write-ahead log and sign one block header in two
-//!    disjoint shards, each epoch being persisted before its signature is computed.
-//! 2. Each shard's signatures are aggregated into one proof (`aggregate_signatures`).
-//! 3. The two proofs are merged (`merge_aggregates`), serialized, decoded strictly, and verified
-//!    without any individual signature; a forged header and overlapping signer sets are refused.
 
 use qsag_agg::sig::digest4_to_bytes;
 use qsag_agg::{
-    AggSigProfile, FsWalEpochSink, HemAggregatedProof, SignerBitmap, SigningMode, ValidatorKeypair,
-    ValidatorPublicKey, ValidatorSignature, aggregate_signatures, merge_aggregates,
-    verify_aggregate, verify_individual_signature,
+    AggSigProfile, FsWalEpochSink, HemQuinticProfile, HemQuinticProof, SignerBitmap, SigningMode,
+    ValidatorKeypair, ValidatorPublicKey, ValidatorSignature, prove_hem_quintic_128,
+    verify_hem_quintic_128, verify_individual_signature,
 };
 
 fn main() {
@@ -32,73 +27,55 @@ fn main() {
         .collect();
     let committee: Vec<ValidatorPublicKey> = keys.iter().map(|k| k.pk).collect();
 
-    let mut sign_shard = |indices: &[usize]| -> (SignerBitmap, Vec<ValidatorSignature>) {
-        let bitmap =
-            SignerBitmap::from_active_indices(validators, indices).expect("ascending indices");
-        let signatures = indices
-            .iter()
-            .map(|&i| {
-                let root = digest4_to_bytes(&keys[i].pk.pk_root);
-                let wal_path = wal_dir.join(format!("validator-{i}.wal"));
-                let (mut wal, _) =
-                    FsWalEpochSink::create_new_for_fresh_key(wal_path, &root, [0x40 + i as u8; 32])
-                        .expect("fresh write-ahead log");
-                let signature = keys[i]
-                    .sign_stateful_with_wal(header, epoch, &mut wal)
-                    .expect("epoch is persisted, then signed");
-                assert!(verify_individual_signature(
-                    &committee[i],
-                    header,
-                    &signature
-                ));
-                signature
-            })
-            .collect();
-        (bitmap, signatures)
-    };
-    let (bitmap_a, signatures_a) = sign_shard(&[0, 1, 2, 5]);
-    let (bitmap_b, signatures_b) = sign_shard(&[3, 4, 6, 7]);
-    let raw_bytes: usize = signatures_a
+    let indices = [0usize, 1, 2, 3, 4, 5, 6, 7];
+    let bitmap = SignerBitmap::from_active_indices(validators, &indices).expect("ascending");
+    let signatures: Vec<ValidatorSignature> = indices
         .iter()
-        .chain(&signatures_b)
-        .map(|s| s.to_bytes().len())
-        .sum();
+        .map(|&i| {
+            let root = digest4_to_bytes(&keys[i].pk.pk_root);
+            let wal_path = wal_dir.join(format!("validator-{i}.wal"));
+            let (mut wal, _) =
+                FsWalEpochSink::create_new_for_fresh_key(wal_path, &root, [0x40 + i as u8; 32])
+                    .expect("fresh write-ahead log");
+            let signature = keys[i]
+                .sign_stateful_with_wal(header, epoch, &mut wal)
+                .expect("epoch is persisted, then signed");
+            assert!(verify_individual_signature(
+                &committee[i],
+                header,
+                &signature
+            ));
+            signature
+        })
+        .collect();
+    let raw_bytes: usize = signatures.iter().map(|s| s.to_bytes().len()).sum();
 
     let started = std::time::Instant::now();
-    let proof_a = aggregate_signatures(&committee, &bitmap_a, &mode, &signatures_a, [0x31; 32])
-        .expect("shard A");
-    let proof_b = aggregate_signatures(&committee, &bitmap_b, &mode, &signatures_b, [0x32; 32])
-        .expect("shard B");
+    let proof = prove_hem_quintic_128(
+        HemQuinticProfile::TurboShake400,
+        &committee,
+        &bitmap,
+        &mode,
+        &signatures,
+    )
+    .expect("quintic 8-signer aggregate");
     let prove_time = started.elapsed();
-    assert!(verify_aggregate(&committee, &mode, &proof_a));
-    assert!(verify_aggregate(&committee, &mode, &proof_b));
-    println!(
-        "  [ok] two 4-signer shards aggregated in {prove_time:.2?}: {} B and {} B",
-        proof_a.to_bytes().len(),
-        proof_b.to_bytes().len()
-    );
 
-    let merged =
-        merge_aggregates(&committee, &mode, &proof_a, &proof_b).expect("disjoint signer sets");
-    let wire = merged.to_bytes();
-    let decoded = HemAggregatedProof::from_bytes_canonical(&wire).expect("canonical proof");
+    let wire = proof.to_bytes();
+    let decoded = HemQuinticProof::from_bytes(&wire).expect("canonical QSAGHQM2 proof");
     assert_eq!(decoded.num_signers(), 8);
     let started = std::time::Instant::now();
-    assert!(verify_aggregate(&committee, &mode, &decoded));
+    assert!(verify_hem_quintic_128(&committee, &mode, &decoded));
     let verify_time = started.elapsed();
-    assert!(!verify_aggregate(
+    assert!(!verify_hem_quintic_128(
         &committee,
         &SigningMode::SharedMessage(b"forged header"),
         &decoded
     ));
-    assert!(
-        merge_aggregates(&committee, &mode, &proof_a, &merged).is_err(),
-        "overlapping signers"
-    );
 
     let _ = std::fs::remove_dir_all(&wal_dir);
     println!(
-        "  [ok] merged proof for 8 signers: {} B on the wire, verified in {verify_time:.2?} ({raw_bytes} B of raw signatures)",
+        "  [ok] 8-signer QSAGHQM2 Quintic Fp5 proof: {} B on the wire (vs {raw_bytes} B raw), proved in {prove_time:.2?}, verified in {verify_time:.2?}",
         wire.len()
     );
 }

@@ -3,24 +3,22 @@
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_agg::sig::digest4_to_bytes;
 use qsag_agg::{
-    AggSigProfile, FsWalEpochSink, HemAggregatedProof, SignerBitmap, SigningMode, ValidatorKeypair,
-    ValidatorPublicKey, ValidatorSignature, aggregate_signatures, compute_committee_root,
-    merge_aggregates, verify_aggregate, verify_individual_signature,
+    AggSigProfile, FsWalEpochSink, HemQuinticProfile, HemQuinticProof, SignerBitmap, SigningMode,
+    ValidatorKeypair, ValidatorPublicKey, ValidatorSignature, compute_committee_root,
+    prove_hem_quintic_128, verify_hem_quintic_128, verify_individual_signature,
 };
-use qsag_agg::{HemQuinticProfile, HemQuinticProof, prove_hem_quintic_128, verify_hem_quintic_128};
 use qsag_core::ceremony_journal::{CeremonyContext, CeremonyReservation, FsCeremonyJournal};
 use std::collections::HashMap;
 
 use crate::cli::{
-    Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, os_random_32,
-    read_bounded_file, read_input, write_new,
+    Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, read_bounded_file,
+    read_input, write_new,
 };
 use crate::codec::{Json, from_hex_exact};
 use crate::keys::{PUBLIC_FORMAT, SECRET_FORMAT, derive, derive_secret, load_json, scheme_of};
 use crate::schemes::Scheme;
 
-const QUINTIC_FORMAT: &str = "qsag-hem-quintic-proof-v2";
-pub const PROOF_FORMAT: &str = "qsag-aggregate-proof-v1";
+pub const QUINTIC_FORMAT: &str = "qsag-hem-quintic-proof-v2";
 
 /// Deterministic validator keypair `index` of a committee seed.
 pub fn validator(seed: &[u8; 32], index: u32) -> ValidatorKeypair {
@@ -393,18 +391,32 @@ fn resolve_signature_authors(
         .unzip())
 }
 
-fn load_proof(path: &str) -> Result<HemAggregatedProof, CliError> {
-    let file = load_json(path, PROOF_FORMAT)?;
-    HemAggregatedProof::from_bytes_canonical(&file.field_hex("proof")?)
-        .map_err(|e| CliError::verify(format!("{path}: malformed aggregate proof: {e:?}")))
+fn load_quintic_proof(path: &str) -> Result<HemQuinticProof, CliError> {
+    let file = load_json(path, QUINTIC_FORMAT)?;
+    HemQuinticProof::from_bytes(&file.field_hex("proof")?)
+        .ok_or_else(|| CliError::verify(format!("{path}: malformed quintic aggregate proof")))
 }
 
-fn proof_file(committee: &[ValidatorPublicKey], proof: &HemAggregatedProof) -> Json {
+fn quintic_profile_name(profile: HemQuinticProfile) -> &'static str {
+    match profile {
+        HemQuinticProfile::TurboShake400 => "quintic-turbo",
+        HemQuinticProfile::Poseidon2Gl24 => "quintic-gl24",
+    }
+}
+
+fn quintic_proof_file(committee: &[ValidatorPublicKey], proof: &HemQuinticProof) -> Json {
     let bytes = proof.to_bytes();
-    let signers = proof.bitmap().active_indices();
+    let signers = proof.bitmap.active_indices();
+    let raw_sig_bytes = signers
+        .first()
+        .and_then(|&idx| committee.get(idx))
+        .map_or(AggSigProfile::JortsPoseidon2, |pk| pk.profile)
+        .raw_signature_bytes()
+        * signers.len();
     Json::object(vec![
-        ("format", Json::str(PROOF_FORMAT)),
+        ("format", Json::str(QUINTIC_FORMAT)),
         ("scheme", Json::str(Scheme::AggCommittee.name())),
+        ("hem_profile", Json::str(quintic_profile_name(proof.profile))),
         (
             "committee_root",
             Json::hex(&compute_committee_root(committee)),
@@ -413,34 +425,27 @@ fn proof_file(committee: &[ValidatorPublicKey], proof: &HemAggregatedProof) -> J
             "signers",
             Json::Array(signers.iter().map(Json::num).collect()),
         ),
-        ("leaf_shards", Json::num(proof.num_leaf_shards())),
         ("proof_bytes", Json::num(bytes.len())),
-        (
-            "raw_signature_bytes",
-            Json::num(signers.len() * AggSigProfile::JortsPoseidon2.raw_signature_bytes()),
-        ),
+        ("raw_signature_bytes", Json::num(raw_sig_bytes)),
         ("proof", Json::hex(&bytes)),
     ])
 }
 
 const AGGREGATE_HELP: &str = "\
 qsag aggregate --pubkeys <pk1,pk2,..|committee> --sigs <sig1,sig2,..> [--signers <i,j,..>] --message <file|-> --out <path>
-qsag aggregate --merge <proofA,proofB> --public <committee|pk1,pk2,..> --in <file|-> --out <path>
 qsag aggregate --secret <committee> --signers <i,j,..> --epoch <n> --wal-dir <dir> --in <file|-> --out <path>
 
 First form (untrusted public aggregator — zero secret keys!): aggregate pre-existing
 JortsPoseidon2 or CorduroyPoseidon2 validator signatures using public keys, signatures,
-and the message. Choose --hem-profile quintic-turbo or quintic-gl24 for a deterministic quintic proof.
+and the message into a deterministic Quintic Fp5 (`QSAGHQM2`) proof.
 Without --signers, each JSON signature must include validator_public_key.
 Raw and legacy signature files require explicit --signers.
 
-Second form: merge two verified proofs over disjoint signer sets into one.
-
-Third form: committee-vault demo signing + aggregation backed by per-validator FsWalEpochSink.
+Second form: committee-vault signing + Quintic Fp5 aggregation backed by per-validator FsWalEpochSink.
 
   --passphrase-env <VAR> / --passphrase-file <PATH>  unlock a sealed committee vault
-  --hem-profile <quintic-turbo|quintic-gl24>  public quintic proof with --sigs
-  --deterministic     derive the proof blinding seed from the inputs instead of OS entropy
+  --hem-profile <quintic-turbo|quintic-gl24>  Quintic Fp5 Canopy profile (default: quintic-turbo)
+  --deterministic     accepted for compatibility (`QSAGHQM2` proofs are always deterministic)
   --anchor-dir <dir>  verify and advance external monotone anchors before releasing proof
   --anchor-tpm-nv <base>  use the committee's reserved range: validator i=base+i,
                          ceremony=base+validators; each a counter of its own
@@ -527,7 +532,6 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             "signers",
             "epoch",
             "wal-dir",
-            "merge",
             "in",
             "message",
             "out",
@@ -557,18 +561,14 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
     args.no_positionals()?;
-    let quintic = parse_quintic_profile(&args)?;
-    if quintic.is_some()
-        && (args.get("sigs").is_none()
-            || args.get("merge").is_some()
-            || args.get("reanchor-tpm-nv").is_some())
-    {
-        return Err(CliError::usage(
-            "--hem-profile requires public signature aggregation with --sigs",
-        ));
-    }
+    let quintic = parse_quintic_profile(&args)?.unwrap_or(HemQuinticProfile::TurboShake400);
     let anchor_cfg = crate::anchor::AnchorConfig::from_args(&args)?;
     if let Some(new_base) = args.get("reanchor-tpm-nv") {
+        if args.get("hem-profile").is_some() {
+            return Err(CliError::usage(
+                "--hem-profile does not apply to --reanchor-tpm-nv",
+            ));
+        }
         return reanchor_committee(&args, anchor_cfg.as_ref(), new_base);
     }
     let base_context = crate::anchor::parse_ceremony_context(&args, 0)?;
@@ -588,32 +588,7 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
     let out_path = args.require("out")?;
     let mode = SigningMode::SharedMessage(&message);
 
-    let (committee, proof) = if let Some(pair) = args.get("merge") {
-        if args.get("secret").is_some() || args.get("sigs").is_some() {
-            return Err(CliError::usage(
-                "--merge cannot be combined with --secret or --sigs",
-            ));
-        }
-        if anchor_cfg.is_some()
-            || args.get("policy-id-hex").is_some()
-            || args.get("spend-amount").is_some()
-        {
-            return Err(CliError::usage(
-                "ceremony anchor and policy options do not apply to --merge",
-            ));
-        }
-        let pub_arg = args
-            .get("pubkeys")
-            .or_else(|| args.get("public"))
-            .ok_or_else(|| CliError::usage("missing required option --pubkeys (or --public)"))?;
-        let committee = load_public_validators(pub_arg)?;
-        let (a, b) = pair
-            .split_once(',')
-            .ok_or_else(|| CliError::usage("--merge takes two comma-separated proof files"))?;
-        let merged = merge_aggregates(&committee, &mode, &load_proof(a)?, &load_proof(b)?)
-            .map_err(|e| CliError::verify(format!("merge refused: {e:?}")))?;
-        (committee, merged)
-    } else if let Some(sigs_spec) = args.get("sigs") {
+    let (committee, proof) = if let Some(sigs_spec) = args.get("sigs") {
         if args.get("secret").is_some()
             || args.get("wal-dir").is_some()
             || args.get("epoch").is_some()
@@ -686,56 +661,8 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
 
         let bitmap = SignerBitmap::from_active_indices(size, &signers)
             .ok_or_else(|| CliError::usage("invalid signer set"))?;
-        if let Some(profile) = quintic {
-            let proof =
-                prove_hem_quintic_128(profile, &committee, &bitmap, &mode, &ordered_sigs)
-                    .map_err(|e| CliError::verify(format!("quintic aggregation failed: {e:?}")))?;
-            if !verify_hem_quintic_128(&committee, &mode, &proof) {
-                return Err(CliError::verify(
-                    "the produced quintic aggregate failed verification",
-                ));
-            }
-            let bytes = proof.to_bytes();
-            let file = Json::object(vec![
-                ("format", Json::str(QUINTIC_FORMAT)),
-                ("proof", Json::hex(&bytes)),
-                ("proof_bytes", Json::num(bytes.len())),
-                (
-                    "signers",
-                    Json::Array(signers.iter().map(Json::num).collect()),
-                ),
-            ]);
-            let json = file.to_pretty();
-            write_new(out_path, json.as_bytes(), false)?;
-            if args.flag("json") {
-                print!("{json}");
-            } else {
-                println!(
-                    "wrote {out_path}: {} signers, {} proof bytes",
-                    signers.len(),
-                    bytes.len()
-                );
-            }
-            return Ok(());
-        }
-        let committee_root = compute_committee_root(&committee);
-        let blinding = if args.flag("deterministic") {
-            let mut sig_digest_acc = [0u8; 32];
-            for s in &ordered_sigs {
-                sig_digest_acc = cshake256_framed_32(
-                    b"QSAG.CLI.PUBLIC_AGG.SIG_ACC.V1",
-                    &[&sig_digest_acc, &s.to_bytes()],
-                );
-            }
-            cshake256_framed_32(
-                b"QSAG.CLI.PUBLIC_AGG.BLINDING.V1",
-                &[&committee_root, &sig_digest_acc, &message],
-            )
-        } else {
-            os_random_32()?
-        };
-        let proof = aggregate_signatures(&committee, &bitmap, &mode, &ordered_sigs, blinding)
-            .map_err(|e| CliError::verify(format!("aggregation failed: {e:?}")))?;
+        let proof = prove_hem_quintic_128(quintic, &committee, &bitmap, &mode, &ordered_sigs)
+            .map_err(|e| CliError::verify(format!("quintic aggregation failed: {e:?}")))?;
         (committee, proof)
     } else {
         crate::keys::require_stateful_anchor(
@@ -961,22 +888,16 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             }
             signatures.push(signature);
         }
-        let blinding = if args.flag("deterministic") {
-            derive(
-                &seed,
-                &[b"blinding", &epoch.to_be_bytes()[..], &message].concat(),
-            )
-        } else {
-            os_random_32()?
-        };
-        let proof = aggregate_signatures(&committee, &bitmap, &mode, &signatures, blinding)
-            .map_err(|e| CliError::verify(format!("aggregation failed: {e:?}")))?;
+        let proof = prove_hem_quintic_128(quintic, &committee, &bitmap, &mode, &signatures)
+            .map_err(|e| CliError::verify(format!("quintic aggregation failed: {e:?}")))?;
         (committee, proof)
     };
-    if !verify_aggregate(&committee, &mode, &proof) {
-        return Err(CliError::verify("the produced aggregate does not verify"));
+    if !verify_hem_quintic_128(&committee, &mode, &proof) {
+        return Err(CliError::verify(
+            "the produced quintic aggregate does not verify",
+        ));
     }
-    let file = proof_file(&committee, &proof);
+    let file = quintic_proof_file(&committee, &proof);
     write_new(out_path, file.to_pretty().as_bytes(), false)?;
     if args.flag("json") {
         print!("{}", file.to_pretty());
@@ -995,8 +916,9 @@ const VERIFY_AGG_HELP: &str = "\
 qsag verify-aggregate --pubkeys <pk1,pk2,..|committee> --message <file|-> --proof <path> [--json]
 qsag verify-agg       --public  <committee|pk1,pk2,..> --in      <file|-> --proof <path> [--json]
 
-Verify an aggregate proof against public keys and a message. Exit code 0 means valid; exit code 2
-means invalid. Use --hem-profile quintic-turbo or quintic-gl24 to require a quintic proof. The signer set is read from the proof and reported.
+Verify a Quintic Fp5 (`QSAGHQM2`) aggregate proof against public keys and a message. Exit code 0
+means valid; exit code 2 means invalid. Use --hem-profile quintic-turbo or quintic-gl24 to pin an
+exact Canopy profile. The signer set is read from the proof and reported.
 ";
 
 pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
@@ -1029,21 +951,11 @@ pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
     let committee = load_public_validators(pub_arg)?;
     let message = read_input(msg_arg)?;
     let mode = SigningMode::SharedMessage(&message);
-    let (valid, signers) = if let Some(profile) = parse_quintic_profile(&args)? {
-        let json = load_json(args.require("proof")?, QUINTIC_FORMAT)?;
-        let proof = HemQuinticProof::from_bytes(&json.field_hex("proof")?)
-            .ok_or_else(|| CliError::verify("malformed quintic proof"))?;
-        (
-            proof.profile == profile && verify_hem_quintic_128(&committee, &mode, &proof),
-            proof.bitmap.active_indices(),
-        )
-    } else {
-        let proof = load_proof(args.require("proof")?)?;
-        (
-            verify_aggregate(&committee, &mode, &proof),
-            proof.bitmap().active_indices(),
-        )
-    };
+    let expected_profile = parse_quintic_profile(&args)?;
+    let proof = load_quintic_proof(args.require("proof")?)?;
+    let signers = proof.bitmap.active_indices();
+    let valid = expected_profile.is_none_or(|p| proof.profile == p)
+        && verify_hem_quintic_128(&committee, &mode, &proof);
     if args.flag("json") {
         let verdict = Json::object(vec![
             ("valid", Json::Bool(valid)),
@@ -1073,6 +985,7 @@ pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::cli::os_random_32;
     use crate::codec::to_hex;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1305,6 +1218,7 @@ mod tests {
 mod tpm_anchor_tests {
     use super::*;
     use crate::anchor::{AnchorConfig, FsExternalMountAnchor, tpm_model};
+    use crate::cli::os_random_32;
 
     const BASE: u32 = 0x0180_0101;
     const VALIDATORS: u32 = 3;

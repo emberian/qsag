@@ -179,11 +179,11 @@ pub fn info_json() -> Json {
                 (
                     "proof_system",
                     Json::str(
-                        "multilinear sumcheck over GoldilocksExt4 with multi-stage WHIR and Steiner CanopyMultiProof",
+                        "multilinear sumcheck over QuinticFp5 (QSAGHQM2 HemQuintic128) with multi-stage DKT26 < 2^-128 QROM WHIR and 400-bit TurboSHAKE / 448-bit Poseidon2-GL24 Canopy multiproofs",
                     ),
                 ),
-                ("rs_blowup", Json::num(qsag_agg::RS_BLOWUP)),
-                ("pow_bits", Json::num(qsag_agg::PCS_POW_BITS)),
+                ("max_pcs_num_vars", Json::num(qsag_agg::MAX_PCS_NUM_VARS)),
+                ("pow_bits", Json::num(0)),
             ]),
         ),
         ("migration", crate::migrate::info()),
@@ -232,9 +232,8 @@ pub fn info_text() -> String {
         ));
     }
     out.push_str(&format!(
-        "\naggregation: GoldilocksExt4 multi-stage WHIR with Steiner CanopyMultiProof, blowup {}, {} proof-of-work bits\n",
-        qsag_agg::RS_BLOWUP,
-        qsag_agg::PCS_POW_BITS
+        "\naggregation: QuinticFp5 (`QSAGHQM2` HemQuintic128) DKT26 < 2^-128 QROM multi-stage WHIR, max_pcs_num_vars {}, 0 proof-of-work bits\n",
+        qsag_agg::MAX_PCS_NUM_VARS,
     ));
     out.push_str(&crate::migrate::info_text());
     out

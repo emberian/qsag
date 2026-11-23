@@ -227,7 +227,8 @@ fn accel_checks(report: &mut Report, kat: &Json) -> Result<(), CliError> {
 fn agg_checks(report: &mut Report, kat: &Json) -> Result<(), CliError> {
     use qsag_agg::sponge::poseidon2_hash32;
     use qsag_agg::{
-        SignerBitmap, SigningMode, ValidatorKeypair, aggregate_signatures, verify_aggregate,
+        HemQuinticProfile, SignerBitmap, SigningMode, ValidatorKeypair, prove_hem_quintic_128,
+        verify_hem_quintic_128,
     };
 
     let poseidon = kat
@@ -305,17 +306,21 @@ fn agg_checks(report: &mut Report, kat: &Json) -> Result<(), CliError> {
     std::fs::remove_dir_all(&kat_dir).map_err(|e| CliError::io("removing own KAT directory", e))?;
     let roundtrip = signatures.ok().and_then(|sigs| {
         let bitmap = SignerBitmap::from_active_indices(2, &[0, 1])?;
-        let proof = aggregate_signatures(
+        let proof = prove_hem_quintic_128(
+            HemQuinticProfile::TurboShake400,
             &committee,
             &bitmap,
             &SigningMode::SharedMessage(message),
             &sigs,
-            [7; 32],
         )
         .ok()?;
         Some(
-            verify_aggregate(&committee, &SigningMode::SharedMessage(message), &proof)
-                && !verify_aggregate(&committee, &SigningMode::SharedMessage(b"other"), &proof),
+            verify_hem_quintic_128(&committee, &SigningMode::SharedMessage(message), &proof)
+                && !verify_hem_quintic_128(
+                    &committee,
+                    &SigningMode::SharedMessage(b"other"),
+                    &proof,
+                ),
         )
     });
     report.check(
