@@ -8,7 +8,11 @@ const STAGING: u64 = 0x80000;
 const STREAM: u64 = 0xc0000;
 const PAGE: usize = 4096;
 const SRAM_WORDS: usize = 65536;
-const POLLS: usize = 2_000_000;
+const POLLS: usize = 5_000_000;
+/// Autonomous on-chip `QSAG-NI v2` proof verification (`QSAGZKH2` / `QSAGHQM2`).
+pub const OP_VERIFY_PROOF_AUTO: u8 = 0x50;
+/// Resume autonomous verification after refilling a paged SRAM proof window.
+pub const OP_PAGE_CONTINUE: u8 = 0x51;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NiCmd {
@@ -28,7 +32,7 @@ const STATUS: NiCmd = NiCmd {
 /// Four little-endian lanes, in issue order. The wire index is five bits.
 pub fn pack_pcis_cmd_beat(commands: [NiCmd; 4]) -> [u8; 64] {
     let mut beat = [0; 64];
-    for (lane, cmd) in beat.chunks_exact_mut(16).zip(commands) {
+    for (lane, cmd) in beat.as_chunks_mut::<16>().0.iter_mut().zip(commands) {
         lane[..8].copy_from_slice(&cmd.data.to_le_bytes());
         let control =
             u32::from(cmd.addr) | (u32::from(cmd.idx & 31) << 16) | (u32::from(cmd.op) << 21);
@@ -60,6 +64,18 @@ pub trait Bar0Pcis {
     }
 }
 
+/// BAR0 anchor status. Health covers the hardware startup window and sticky
+/// continuous-test results. The seeded flag acknowledges a host mailbox commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnchorStatus {
+    pub ok: bool,
+    pub rct_fail: bool,
+    pub apt_fail: bool,
+    pub sysmon_ready: bool,
+    pub nitro_seeded: bool,
+    pub epoch_cnt: u16,
+}
+
 pub struct AwsF2Backend<T> {
     io: T,
     engines: u8,
@@ -87,6 +103,32 @@ impl<T: Bar0Pcis> AwsF2Backend<T> {
     /// True when the image exposes only the public ASS2 pad diagnostics.
     pub fn diagnostics_only(&mut self) -> ResultF<bool, T::Error> {
         Ok(self.read(12)? & (1 << 31) != 0)
+    }
+    pub fn anchor_status(&mut self) -> ResultF<AnchorStatus, T::Error> {
+        let flags = self.read(0x54)?;
+        Ok(AnchorStatus {
+            ok: flags & 1 != 0,
+            rct_fail: flags & 2 != 0,
+            apt_fail: flags & 4 != 0,
+            sysmon_ready: flags & 8 != 0,
+            nitro_seeded: flags & 16 != 0,
+            epoch_cnt: (flags >> 16) as u16,
+        })
+    }
+
+    /// Provision a globally scrubbed device before selecting any vat. The
+    /// caller authenticates the recipient and obtains the seed from KMS.
+    pub fn inject_nitro_seed(&mut self, seed: &[u8; 32]) -> ResultF<(), T::Error> {
+        let before = self.anchor_status()?.epoch_cnt;
+        for (i, word) in seed.as_chunks::<4>().0.iter().enumerate() {
+            self.write(0x30 + 4 * i as u32, u32::from_le_bytes(*word))?;
+        }
+        self.write(0x50, 1)?;
+        self.poll(0x54, 0x1f, 0x19)?;
+        if self.anchor_status()?.epoch_cnt != before.wrapping_add(1) {
+            return Err(F2Error::Response);
+        }
+        Ok(())
     }
     pub fn into_inner(self) -> T {
         self.io
@@ -120,8 +162,19 @@ impl<T: Bar0Pcis> AwsF2Backend<T> {
         Err(F2Error::Timeout)
     }
     pub fn zeroize(&mut self) -> ResultF<(), T::Error> {
-        self.write(0x28, 1)?;
-        self.poll(0x28, 1, 0)
+        for e in 0..self.engines {
+            let csr = 4096 * (u32::from(e) + 1);
+            self.poll(csr + 16, 1, 1)?;
+        }
+        let before = self.read(0x2c)?;
+        for _ in 0..POLLS {
+            self.write(0x28, 1)?;
+            if self.read(0x2c)? != before {
+                return self.poll(0x28, 1, 0);
+            }
+            core::hint::spin_loop();
+        }
+        Err(F2Error::Timeout)
     }
 }
 
@@ -146,6 +199,7 @@ impl<T: Bar0Pcis> F2NiSession<'_, T> {
             return Err(F2Error::Range);
         }
         self.idle()?;
+        let before = self.backend.read(self.csr + 32)?;
         self.backend.write(self.csr, cmd.data as u32)?;
         self.backend.write(self.csr + 4, (cmd.data >> 32) as u32)?;
         self.backend.write(
@@ -154,6 +208,9 @@ impl<T: Bar0Pcis> F2NiSession<'_, T> {
         )?;
         self.backend.write(self.csr + 12, 1)?;
         self.idle()?;
+        if self.backend.read(self.csr + 32)? != before.wrapping_add(1) {
+            return Err(F2Error::Response);
+        }
         let lo = self.backend.read(self.csr + 24)?;
         let hi = self.backend.read(self.csr + 28)?;
         Ok(u64::from(lo) | (u64::from(hi) << 32))
@@ -186,14 +243,19 @@ impl<T: Bar0Pcis> F2NiSession<'_, T> {
                     .read_pcis(addr, &mut page[..64])
                     .map_err(F2Error::Transport)?;
             }
-            if (offset + 8 * n) % 64 != 0 && (len != 64 || offset == 0) {
+            if !(offset + 8 * n).is_multiple_of(64) && (len != 64 || offset == 0) {
                 self.backend
                     .io
                     .read_pcis(addr + (len - 64) as u64, &mut page[len - 64..len])
                     .map_err(F2Error::Transport)?;
             }
-            for (dst, word) in page[offset..offset + n * 8].chunks_exact_mut(8).zip(rest) {
-                dst.copy_from_slice(&word.to_le_bytes());
+            for (dst, word) in page[offset..offset + n * 8]
+                .as_chunks_mut::<8>()
+                .0
+                .iter_mut()
+                .zip(rest)
+            {
+                *dst = word.to_le_bytes();
             }
             self.backend
                 .io
@@ -225,9 +287,9 @@ impl<T: Bar0Pcis> F2NiSession<'_, T> {
                 .map_err(F2Error::Transport)?;
             for (dst, src) in rest[..n]
                 .iter_mut()
-                .zip(page[offset..offset + n * 8].chunks_exact(8))
+                .zip(page[offset..offset + n * 8].as_chunks::<8>().0)
             {
-                *dst = u64::from_le_bytes(src.try_into().unwrap());
+                *dst = u64::from_le_bytes(*src);
             }
             rest = &mut rest[n..];
             pos += n;
@@ -245,10 +307,10 @@ impl<T: Bar0Pcis> F2NiSession<'_, T> {
             self.idle()?;
             let before = self.backend.read(self.csr + 32)?;
             let beats = batch.len().div_ceil(4);
-            for (dst, src) in page.chunks_exact_mut(64).zip(batch.chunks(4)) {
+            for (dst, src) in page.as_chunks_mut::<64>().0.iter_mut().zip(batch.chunks(4)) {
                 let mut lanes = [STATUS; 4];
                 lanes[..src.len()].copy_from_slice(src);
-                dst.copy_from_slice(&pack_pcis_cmd_beat(lanes));
+                *dst = pack_pcis_cmd_beat(lanes);
             }
             let staged = self.backend.io.stage_commands();
             let addr = self.dma + if staged { STAGING } else { STREAM };
@@ -262,6 +324,7 @@ impl<T: Bar0Pcis> F2NiSession<'_, T> {
                 self.backend.write(0x14, beats as u32)?;
                 self.backend.write(0x18, 1)?;
             }
+            self.idle()?;
             self.backend.poll(
                 self.csr + 32,
                 u32::MAX,
@@ -269,6 +332,118 @@ impl<T: Bar0Pcis> F2NiSession<'_, T> {
             )?;
         }
         Ok(())
+    }
+    /// Upload an arbitrary byte slice into NI SRAM starting at `first_word`,
+    /// zero-padding any trailing partial 64-bit word.
+    pub fn upload_bytes(&mut self, first_word: u16, bytes: &[u8]) -> ResultF<(), T::Error> {
+        let words_len = bytes.len().div_ceil(8);
+        if words_len > SRAM_WORDS - usize::from(first_word) {
+            return Err(F2Error::Range);
+        }
+        let mut words = Vec::with_capacity(words_len);
+        for chunk in bytes.chunks(8) {
+            let mut b = [0u8; 8];
+            b[..chunk.len()].copy_from_slice(chunk);
+            words.push(u64::from_le_bytes(b));
+        }
+        self.upload_words(first_word, &words)
+    }
+    /// Verify a serialized `QSAGZKH2` or `QSAGHQM2` proof autonomously on-chip
+    /// via PCIS DMA + `OP_VERIFY_PROOF_AUTO` (`0x50`).
+    ///
+    /// Pass `window_words = 0` when `proof` + `descriptor` + verifier scratch fit
+    /// in the 512 KiB NI SRAM (single `0x50` command); pass `window_words >= 8`
+    /// (64-byte PCIS beat aligned, `window_words % 8 == 0`) to stream arbitrarily
+    /// large proofs through a hardware-bounded SRAM window via `0x51`.
+    pub fn verify_proof_auto(
+        &mut self,
+        descriptor: &[u8],
+        proof: &[u8],
+        window_words: u16,
+    ) -> ResultF<VerifyStatus, T::Error> {
+        if (window_words != 0 && (window_words < 8 || !window_words.is_multiple_of(8)))
+            || proof.len() > 0xe000_0000
+        {
+            return Err(F2Error::Range);
+        }
+        let proof_words = proof.len().div_ceil(8);
+        let desc_words = descriptor.len().div_ceil(8);
+        let desc_addr_usize = if window_words == 0 {
+            proof_words + 1
+        } else {
+            usize::from(window_words)
+        };
+        if desc_addr_usize
+            .checked_add(desc_words)
+            .is_none_or(|end| end > SRAM_WORDS)
+        {
+            return Err(F2Error::Range);
+        }
+        let desc_word = u16::try_from(desc_addr_usize).map_err(|_| F2Error::Range)?;
+        let initial_bytes = if window_words == 0 {
+            proof.len()
+        } else {
+            proof.len().min(usize::from(window_words) * 8)
+        };
+        self.upload_bytes(0, &proof[..initial_bytes])?;
+        self.upload_bytes(desc_word, descriptor)?;
+        let clear = NiCmd {
+            op: 0x08,
+            idx: 1,
+            addr: 0,
+            data: 0,
+        };
+        let kickoff = ((proof.len() as u64) << 32) | (u64::from(window_words) << 16);
+        let launch = NiCmd {
+            op: OP_VERIFY_PROOF_AUTO,
+            idx: 0,
+            addr: desc_word,
+            data: kickoff,
+        };
+        if window_words == 0 {
+            // Issue [SET_PTR(clear), OP_VERIFY_PROOF_AUTO, RD_STATUS, RD_STATUS] in one
+            // 64-byte PCIS beat (triggered by a single BAR0 ring doorbell when staged).
+            self.stream(&[clear, launch])?;
+            let lo = self.backend.read(self.csr + 24)?;
+            let hi = self.backend.read(self.csr + 28)?;
+            let word = u64::from(lo) | (u64::from(hi) << 32);
+            let checks = word as u32;
+            return Ok(VerifyStatus {
+                pass: (word >> 32 == 1) && checks > 0,
+                checks,
+            });
+        }
+        self.command(clear)?;
+        let mut reply = self.command(launch)?;
+        let mut prior_offset = 0usize;
+        while (reply >> 56) as u8 == OP_PAGE_CONTINUE {
+            let offset = (reply as u32) as usize;
+            if window_words < 8
+                || offset <= prior_offset
+                || offset >= proof.len()
+                || !offset.is_multiple_of(8)
+            {
+                return Err(F2Error::Response);
+            }
+            prior_offset = offset;
+            let end = proof.len().min(offset + usize::from(window_words) * 8);
+            self.upload_bytes(0, &proof[offset..end])?;
+            reply = self.command(NiCmd {
+                op: OP_PAGE_CONTINUE,
+                idx: 0,
+                addr: 0,
+                data: offset as u64,
+            })?;
+        }
+        if reply > 1 {
+            return Err(F2Error::Response);
+        }
+        let mut status = self.status()?;
+        status.pass = status.pass && status.checks > 0;
+        if status.pass != (reply == 1) {
+            return Err(F2Error::Response);
+        }
+        Ok(status)
     }
 }
 
@@ -328,7 +503,8 @@ impl<T: Bar0Pcis> F2Ass2Cluster<'_, T> {
         self.backend.poll(base + 8, 2, 2)
     }
     /// Payload length is the unpadded ASS2 byte count, including LOAD_CODE's
-    /// count, image and tag. The wire transfer ends on a 64-bit boundary.
+    /// count, image and tag (up to 812 B for 128-word inline `WOTS+C` `CMD_LOAD_CODE`).
+    /// The wire transfer ends on a 64-bit boundary.
     pub fn command(
         &mut self,
         vat: u8,
@@ -339,7 +515,7 @@ impl<T: Bar0Pcis> F2Ass2Cluster<'_, T> {
         payload: &[u8],
     ) -> ResultF<Vec<u8>, T::Error> {
         let base = Self::base(vat)?;
-        if payload.len() > 532 {
+        if (op & 0x80) != 0 || payload.len() > 812 {
             return Err(F2Error::Range);
         }
         self.backend.poll(base + 8, 2, 2)?;
@@ -372,10 +548,19 @@ impl<T: Bar0Pcis> F2Ass2Cluster<'_, T> {
             if header[0] != 0x51 || header[1] != (op | 0x80) {
                 return Err(F2Error::Response);
             }
-            if header[2] & 0x80 != 0 {
+            if header[2] == 0x80 {
+                if header[3] != 0
+                    || header[4] != 0
+                    || header[5] != 0
+                    || header[6] == 0
+                    || header[6] > 31
+                    || header[7] != 0
+                {
+                    return Err(F2Error::Response);
+                }
                 return Err(F2Error::Resident(header[6]));
             }
-            if header[2] != 1 || header[3] > 160 {
+            if header[2] != 1 || header[3] > 160 || header[4..8] != [0; 4] {
                 return Err(F2Error::Response);
             }
             let mut out = Vec::with_capacity(usize::from(header[3]));
@@ -421,7 +606,11 @@ pub mod linux {
         }
     }
     fn dma_range(address: u64, n: usize) -> io::Result<()> {
-        if address % 64 != 0 || n % 64 != 0 || n > PAGE || (address as usize % PAGE) + n > PAGE {
+        if !address.is_multiple_of(64)
+            || !n.is_multiple_of(64)
+            || n > PAGE
+            || (address as usize % PAGE) + n > PAGE
+        {
             return Err(invalid());
         }
         Ok(())
@@ -451,7 +640,7 @@ pub mod linux {
     impl Bar0Pcis for Xdma {
         type Error = io::Error;
         fn read32(&mut self, a: u32) -> io::Result<u32> {
-            if a % 4 != 0 {
+            if !a.is_multiple_of(4) {
                 return Err(invalid());
             }
             let mut b = [0; 4];
@@ -459,7 +648,7 @@ pub mod linux {
             Ok(u32::from_le_bytes(b))
         }
         fn write32(&mut self, a: u32, v: u32) -> io::Result<()> {
-            if a % 4 != 0 {
+            if !a.is_multiple_of(4) {
                 return Err(invalid());
             }
             transfer_ok(self.bar.write_at(&v.to_le_bytes(), u64::from(a))?, 4)
@@ -518,7 +707,7 @@ pub mod linux {
                 })
             }
             fn word(&self, a: usize) -> io::Result<*mut u32> {
-                if a % 4 != 0 || a > self.len - 4 {
+                if !a.is_multiple_of(4) || a > self.len - 4 {
                     return Err(invalid());
                 }
                 // mmap is page aligned. Range and alignment were checked above.
@@ -568,8 +757,8 @@ pub mod linux {
                 if a > self.bar4.len.saturating_sub(b.len()) as u64 {
                     return Err(invalid());
                 }
-                for (i, d) in b.chunks_exact_mut(4).enumerate() {
-                    d.copy_from_slice(&self.bar4.read(a as usize + 4 * i)?.to_le_bytes());
+                for (i, d) in b.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    *d = self.bar4.read(a as usize + 4 * i)?.to_le_bytes();
                 }
                 Ok(())
             }
@@ -578,11 +767,9 @@ pub mod linux {
                 if a > self.bar4.len.saturating_sub(b.len()) as u64 {
                     return Err(invalid());
                 }
-                for (i, d) in b.chunks_exact(4).enumerate() {
-                    self.bar4.write(
-                        a as usize + 4 * i,
-                        u32::from_le_bytes(d.try_into().unwrap()),
-                    )?;
+                for (i, d) in b.as_chunks::<4>().0.iter().enumerate() {
+                    self.bar4
+                        .write(a as usize + 4 * i, u32::from_le_bytes(*d))?;
                 }
                 Ok(())
             }
@@ -616,16 +803,40 @@ mod tests {
         fn exec(&mut self, e: usize, c: NiCmd) {
             self.cmds.push((e, c));
             self.done[e] += 1;
+            if c.op == 8 && c.idx == 1 {
+                self.checks[e] = 0;
+                self.fail[e] = false;
+            }
             if c.op == 10 {
                 self.checks[e] += 1;
                 self.fail[e] |= c.data != 0;
+            }
+            if c.op == OP_VERIFY_PROOF_AUTO {
+                let win = ((c.data >> 16) & 0xffff) as usize;
+                let total = (c.data >> 32) as usize;
+                if win > 0 && total > win * 8 {
+                    self.reply[e] = (u64::from(OP_PAGE_CONTINUE) << 56) | ((win * 8) as u64);
+                } else {
+                    let row0 = self.rows.get(&((e as u64) << 20)).copied().unwrap_or([0; 64]);
+                    let ok = row0[0] == b'Q';
+                    self.checks[e] += 107;
+                    self.fail[e] |= !ok;
+                    self.reply[e] = u64::from(ok);
+                }
+            }
+            if c.op == OP_PAGE_CONTINUE {
+                let row0 = self.rows.get(&((e as u64) << 20)).copied().unwrap_or([0; 64]);
+                let ok = row0[0] != 0xff;
+                self.checks[e] += 107;
+                self.fail[e] |= !ok;
+                self.reply[e] = u64::from(ok);
             }
             if c.op == 11 {
                 self.reply[e] = (u64::from(!self.fail[e]) << 32) | u64::from(self.checks[e]);
             }
         }
         fn unpack(&mut self, e: usize, b: &[u8]) {
-            for l in b.chunks_exact(16) {
+            for l in b.as_chunks::<16>().0 {
                 let data = u64::from_le_bytes(l[..8].try_into().unwrap());
                 let ctl = u32::from_le_bytes(l[8..12].try_into().unwrap());
                 self.exec(
@@ -672,7 +883,14 @@ mod tests {
         }
         fn write32(&mut self, a: u32, v: u32) -> Result<(), ()> {
             self.regs.insert(a, v);
-            if a == 0x18 {
+            if a == 0x28 && v == 1 {
+                let next = self.regs.get(&0x2c).copied().unwrap_or(0).wrapping_add(1);
+                self.regs.insert(0x2c, next);
+            } else if a == 0x50 && v == 1 {
+                let prev = (self.regs.get(&0x54).copied().unwrap_or(0) >> 16) as u16;
+                self.regs
+                    .insert(0x54, (u32::from(prev.wrapping_add(1)) << 16) | 0x19);
+            } else if a == 0x18 {
                 let base = u64::from(self.regs[&0x10]);
                 for i in 0..self.regs[&0x14] {
                     let beat = self.rows[&(base + 64 * u64::from(i))];
@@ -694,7 +912,7 @@ mod tests {
             } else if a >= 0x10000 {
                 let e = (a as usize >> 16) - 1;
                 self.serial.push((a, v));
-                if a % 65536 == 0 {
+                if a.is_multiple_of(65536) {
                     self.step[e] = 0;
                 } else {
                     let step = self.step[e];
@@ -727,24 +945,43 @@ mod tests {
             Ok(())
         }
         fn read_pcis(&mut self, a: u64, b: &mut [u8]) -> Result<(), ()> {
-            for (i, row) in b.chunks_exact_mut(64).enumerate() {
-                row.copy_from_slice(self.rows.get(&(a + i as u64 * 64)).unwrap_or(&[0xaa; 64]));
+            for (i, row) in b.as_chunks_mut::<64>().0.iter_mut().enumerate() {
+                *row = *self.rows.get(&(a + i as u64 * 64)).unwrap_or(&[0xaa; 64]);
             }
             Ok(())
         }
         fn write_pcis(&mut self, a: u64, b: &[u8]) -> Result<(), ()> {
-            assert_eq!(a % 64, 0);
+            assert!(a.is_multiple_of(64));
             assert!((a as usize % 4096) + b.len() <= 4096);
-            for (i, row) in b.chunks_exact(64).enumerate() {
+            for (i, row) in b.as_chunks::<64>().0.iter().enumerate() {
                 if a & 0xf0000 == STREAM {
                     self.unpack((a >> 20) as usize, row);
                 } else {
-                    self.rows.insert(a + 64 * i as u64, row.try_into().unwrap());
+                    self.rows.insert(a + 64 * i as u64, *row);
                 }
             }
             Ok(())
         }
     }
+    #[test]
+    fn seed_words_and_anchor_flags() {
+        let mut hw = AwsF2Backend::attach(MockF2Bar0Pcis::default()).unwrap();
+        hw.io.regs.insert(0x54, 0x1234_0006);
+        let failed = hw.anchor_status().unwrap();
+        assert_eq!(failed.epoch_cnt, 0x1234);
+        assert!(failed.rct_fail && failed.apt_fail && !failed.ok);
+        let seed = core::array::from_fn(|i| i as u8);
+        hw.inject_nitro_seed(&seed).unwrap();
+        for i in 0..8 {
+            assert_eq!(hw.io.regs[&(0x30 + 4 * i)], 0x03020100 + i * 0x04040404);
+        }
+        let ready = hw.anchor_status().unwrap();
+        assert!(ready.ok && ready.sysmon_ready && ready.nitro_seeded);
+        assert_eq!(ready.epoch_cnt, 0x1235);
+        hw.zeroize().unwrap();
+        assert_eq!(hw.io.regs[&0x2c], 1);
+    }
+
     #[test]
     fn independent_lane_encoding() {
         let c = NiCmd {
@@ -845,5 +1082,143 @@ mod tests {
         }
         assert_eq!(b.enclaves().diag(3), Err(F2Error::Range));
         assert_eq!(b.into_inner().serial.len(), 36);
+    }
+    #[test]
+    fn autonomous_verify_resident_and_paged() {
+        for staged in [false, true] {
+            let mut b = AwsF2Backend::attach(MockF2Bar0Pcis {
+                staged,
+                ..Default::default()
+            })
+            .unwrap();
+            let desc = b"\x10\x00\x00\x00ZKD1abcdefgh";
+            let mut proof = vec![0x5a; 96];
+            proof[..8].copy_from_slice(b"QSAGZKH2");
+            assert_eq!(
+                b.ni(0).unwrap().verify_proof_auto(desc, &proof, 4),
+                Err(F2Error::Range)
+            );
+            let ok = b.ni(0).unwrap().verify_proof_auto(desc, &proof, 0).unwrap();
+            assert_eq!(
+                ok,
+                VerifyStatus {
+                    pass: true,
+                    checks: 107
+                }
+            );
+            let paged = b.ni(1).unwrap().verify_proof_auto(desc, &proof, 8).unwrap();
+            assert_eq!(
+                paged,
+                VerifyStatus {
+                    pass: true,
+                    checks: 107
+                }
+            );
+            proof[0] ^= 1;
+            let bad = b.ni(0).unwrap().verify_proof_auto(desc, &proof, 0).unwrap();
+            assert!(!bad.pass);
+            proof[0] ^= 1;
+            proof[64] = 0xff;
+            let bad_paged = b.ni(1).unwrap().verify_proof_auto(desc, &proof, 8).unwrap();
+            assert!(!bad_paged.pass);
+        }
+    }
+
+    #[test]
+    fn tooth_f2_command_allows_812b_wotsc_load_and_rejects_response_bit_opcode() {
+        // `#tooth`: Rev. 2.0 RTL (`qsag_ass2_enclave_top.sv:436`) accepts inline `WOTS+C`
+        // `CMD_LOAD_CODE` (`0x30`, `flags = 2`) up to 128 words = `300 + 4 * 128 = 812` bytes,
+        // whereas `aws_f2.rs` previously capped `payload.len() <= 532` and allowed `op & 0x80 != 0`.
+        let mut b = AwsF2Backend::attach(MockF2Bar0Pcis::default()).unwrap();
+        let max_wotsc_load = [0x5Au8; 812];
+        assert_eq!(
+            b.enclaves()
+                .command(0, SerialWidth::Octal, 0x30, 2, 0, &max_wotsc_load),
+            Ok(vec![0; 8])
+        );
+        assert_eq!(
+            b.enclaves()
+                .command(0, SerialWidth::Octal, 0x30, 2, 0, &[0u8; 813]),
+            Err(F2Error::Range)
+        );
+        assert_eq!(
+            b.enclaves()
+                .command(0, SerialWidth::Octal, 0xB0, 0, 0, &[0u8; 8]),
+            Err(F2Error::Range)
+        );
+    }
+
+    #[test]
+    fn tooth_f2_command_rejects_noncanonical_response_header_upper_bytes() {
+        // `#tooth`: RTL `resp_w0` (`qsag_ass2_enclave_top.sv:91-92`) sets `header[4..8]` to
+        // zero on success and `{0, 0, err_code[4:0], 0}` with `header[2] == 0x80, header[3] == 0`
+        // on error. Previously `F2Ass2Cluster::command` ignored `header[4..8]` on success (turning
+        // a 24-bit length `256` `[0x51, op|0x80, 1, 0, 1, 0, 0, 0]` into `Ok(vec![])`) and accepted
+        // non-canonical error headers such as `header[2] = 0x81` or `header[6] = 0xFF`.
+        struct CustomRespHeaderIo {
+            resp_header: [u8; 8],
+            rx: u8,
+            step: usize,
+            prefix: u8,
+        }
+        impl Bar0Pcis for CustomRespHeaderIo {
+            type Error = ();
+            fn read32(&mut self, a: u32) -> Result<u32, ()> {
+                Ok(match a {
+                    0 => MAGIC,
+                    4 => ABI,
+                    8 => 1,
+                    0x28 => 0,
+                    0x10008 => 6,
+                    0x1000c => u32::from(self.rx),
+                    _ => 0,
+                })
+            }
+            fn write32(&mut self, a: u32, v: u32) -> Result<(), ()> {
+                if a == 0x10000 {
+                    self.step = 0;
+                } else if a == 0x10004 {
+                    if self.step == 0 {
+                        self.prefix = v as u8;
+                    }
+                    self.rx = if self.prefix == 0x82 && (2..10).contains(&self.step) {
+                        self.resp_header[self.step - 2]
+                    } else {
+                        0xAA
+                    };
+                    self.step += 1;
+                }
+                Ok(())
+            }
+            fn read_pcis(&mut self, _: u64, _: &mut [u8]) -> Result<(), ()> {
+                Ok(())
+            }
+            fn write_pcis(&mut self, _: u64, _: &[u8]) -> Result<(), ()> {
+                Ok(())
+            }
+        }
+
+        for bad_header in [
+            [0x51, 0xA0, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00], // 24-bit len = 256 masquerading as 0
+            [0x51, 0xA0, 0x01, 0x08, 0x00, 0x00, 0x01, 0x00], // nonzero err_code on success
+            [0x51, 0xA0, 0x81, 0x00, 0x00, 0x00, 0x05, 0x00], // both ok & err bits set
+            [0x51, 0xA0, 0x80, 0x08, 0x00, 0x00, 0x05, 0x00], // nonzero length on error
+            [0x51, 0xA0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00], // zero resident error code
+            [0x51, 0xA0, 0x80, 0x00, 0x00, 0x00, 0x20, 0x00], // out-of-range 5-bit error code (32)
+            [0x51, 0xA0, 0x80, 0x00, 0x00, 0x00, 0x05, 0x01], // nonzero reserved byte 7
+        ] {
+            let mut b = AwsF2Backend::attach(CustomRespHeaderIo {
+                resp_header: bad_header,
+                rx: 0,
+                step: 0,
+                prefix: 0,
+            })
+            .unwrap();
+            assert_eq!(
+                b.enclaves().cth_sign(0, &[0u8; 120]),
+                Err(F2Error::Response),
+                "must reject malformed response header {bad_header:02x?}"
+            );
+        }
     }
 }
