@@ -2,7 +2,9 @@
 //! All coordinates (columns first, then steps, then signer slots) are little-endian.
 use super::*;
 use crate::sponge::{poseidon2_apply_me, poseidon2_apply_mi};
-use crate::trace::{RowPublicEval, RowWeights, TraceField, eval_row_with_weights};
+use crate::trace::{
+    COL_PREV_STATE, COL_ST_IN, RowPublicEval, RowWeights, TraceField, eval_row_with_weights,
+};
 use crate::zk_hem::v2::protocol::{eq_table, evals_to_coeffs};
 
 impl TraceField for E {
@@ -49,10 +51,39 @@ const LAST: usize = FIRST + 1;
 const EQ: usize = LAST + 1;
 const NOT_LAST: usize = EQ + 1;
 const SHIFT: usize = NOT_LAST + 1;
-const SELECTORS: usize = SHIFT + 1;
+const INACTIVE: usize = SHIFT + 1;
+const SELECTORS: usize = INACTIVE + 1;
+const INACTIVE_PINNED_COLS: usize = 12 + (NUM_TRACE_COLS - COL_PREV_STATE);
 
-fn eval(c: &ShardCircuit, r: &[E], gamma: E, weights: &RowWeights<E>) -> E {
-    eval_row_with_weights(
+fn pow_u64(mut base: E, mut exp: u64) -> E {
+    let mut acc = E::ONE;
+    while exp != 0 {
+        if exp & 1 != 0 {
+            acc *= base;
+        }
+        base = base.square();
+        exp >>= 1;
+    }
+    acc
+}
+
+fn build_inactive_weights(gamma: E, start_exp: usize) -> [E; INACTIVE_PINNED_COLS] {
+    let mut cur = pow_u64(gamma, start_exp as u64);
+    core::array::from_fn(|_| {
+        let w = cur;
+        cur *= gamma;
+        w
+    })
+}
+
+fn eval(
+    c: &ShardCircuit,
+    r: &[E],
+    gamma: E,
+    weights: &RowWeights<E>,
+    inactive_weights: &[E; INACTIVE_PINNED_COLS],
+) -> E {
+    let active_eval = eval_row_with_weights(
         &c.unique_ops,
         r.first_chunk().unwrap(),
         &RowPublicEval {
@@ -71,7 +102,19 @@ fn eval(c: &ShardCircuit, r: &[E], gamma: E, weights: &RowWeights<E>) -> E {
         },
         gamma,
         Some(weights),
-    )
+    );
+    // Pin all 138 non-S-box columns (`COL_ST_IN[0..12]` + `COL_PREV_STATE..NUM_TRACE_COLS`)
+    // to zero on inactive padding slots; Group A Poseidon2 S-box equations then uniquely pin
+    // `COL_SBOX_OUT[0..118]`. Degree in X is 1 (EQ) + 1 (INACTIVE) + 1 (col) = 3 <= 8.
+    let mut inactive_acc = E::ZERO;
+    for (&col, &w) in r[COL_ST_IN..COL_ST_IN + 12]
+        .iter()
+        .chain(&r[COL_PREV_STATE..NUM_TRACE_COLS])
+        .zip(inactive_weights)
+    {
+        inactive_acc += w * col;
+    }
+    active_eval + r[EQ] * r[INACTIVE] * inactive_acc
 }
 
 fn challenges(st: &mut Statement) -> (Vec<E>, E) {
@@ -113,9 +156,10 @@ pub(super) fn prove(
     let eq = eq_table(&tau);
     let c = &st.circuit;
     let weights = RowWeights::new(&c.unique_ops, gamma);
-    if weights.count() > 1 << 20 {
+    if weights.count() + INACTIVE_PINNED_COLS > 1 << 20 {
         return None;
     }
+    let inactive_weights = build_inactive_weights(gamma, weights.count());
     let width = SELECTORS + c.unique_ops.len();
     let mut table = vec![E::ZERO; rows.len() * width];
     for (i, (r, cols)) in table.chunks_exact_mut(width).zip(rows).enumerate() {
@@ -126,6 +170,8 @@ pub(super) fn prove(
             r[ROOT..MU].copy_from_slice(&s.pk.pk_root.map(E::from_base));
             r[MU..STEP].copy_from_slice(&s.mu.map(E::from_base));
             r[SELECTORS + c.step_to_uid[step]] = E::ONE;
+        } else {
+            r[INACTIVE] = E::ONE;
         }
         r[STEP] = E::from_base(c.step_c0_base[step]);
         r[FIRST] = E::from_u64((step == 0) as u64);
@@ -151,7 +197,7 @@ pub(super) fn prove(
                 *d = hi - lo;
             }
             for v in &mut values {
-                *v += eval(c, &work, gamma, &weights);
+                *v += eval(c, &work, gamma, &weights, &inactive_weights);
                 for (x, &d) in work.iter_mut().zip(&delta) {
                     *x += d;
                 }
@@ -169,7 +215,7 @@ pub(super) fn prove(
         }
         table.truncate(table.len() / 2);
     }
-    if eval(c, &table, gamma, &weights) != claim {
+    if eval(c, &table, gamma, &weights, &inactive_weights) != claim {
         return None;
     }
     let cols = table.first_chunk()?;
@@ -181,9 +227,10 @@ pub(super) fn verify(st: &mut Statement, input: &mut &[u8]) -> Option<(Vec<E>, E
     let (tau, gamma) = challenges(st);
     let c = &st.circuit;
     let weights = RowWeights::new(&c.unique_ops, gamma);
-    if weights.count() > 1 << 20 {
+    if weights.count() + INACTIVE_PINNED_COLS > 1 << 20 {
         return None;
     }
+    let inactive_weights = build_inactive_weights(gamma, weights.count());
     let mut claim = E::ZERO;
     let mut rx = Vec::with_capacity(tau.len());
     for _ in &tau {
@@ -213,6 +260,7 @@ pub(super) fn verify(st: &mut Statement, input: &mut &[u8]) -> Option<(Vec<E>, E
             row[SEED + j] += w.mul_base(v);
         }
     }
+    row[INACTIVE] = E::ONE - active;
     for (i, w) in steps.into_iter().enumerate() {
         row[STEP] += w.mul_base(c.step_c0_base[i]);
         row[SELECTORS + c.step_to_uid[i]] += active * w;
@@ -230,7 +278,10 @@ pub(super) fn verify(st: &mut Statement, input: &mut &[u8]) -> Option<(Vec<E>, E
     row[EQ] = eq;
     row[NOT_LAST] = eq - last;
     row[SHIFT] = shift;
-    if eval(c, &row, gamma, &weights) != claim {
+    if !qsag_whir_verified::verify_ood_pin_eq_fp5(
+        eval(c, &row, gamma, &weights, &inactive_weights).to_verified(),
+        claim.to_verified(),
+    ) {
         return None;
     }
     Some(col_claim(&mut st.transcript, &cols, rx))

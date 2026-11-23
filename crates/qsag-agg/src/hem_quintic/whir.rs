@@ -284,7 +284,10 @@ pub(super) fn verify<const N: usize, H: Hash<N>>(
     let poly = (0..final_len)
         .map(|_| read_e(&mut input))
         .collect::<Option<Vec<_>>>()?;
-    if kernel.apply(&poly) != claim {
+    if !qsag_whir_verified::verify_ood_pin_eq_fp5(
+        kernel.apply(&poly).to_verified(),
+        claim.to_verified(),
+    ) {
         return None;
     }
     ch.absorb_fp5_slice(b"FINAL_POLY", &poly);
@@ -293,6 +296,6 @@ pub(super) fn verify<const N: usize, H: Hash<N>>(
         && input.is_empty()
         && shifts
             .iter()
-            .all(|&(y, v)| pcs::eval_at_base(&poly, y) == v))
+            .all(|&(y, v)| pcs::verify_at_base_pin(&poly, y, v)))
     .then_some(())
 }

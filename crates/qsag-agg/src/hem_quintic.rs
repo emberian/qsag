@@ -34,6 +34,86 @@ pub enum HemQuinticProfile {
     Poseidon2Gl24 = 2,
 }
 
+impl HemQuinticProfile {
+    /// Initialize the bounded `QSAG.HEM.QUINTIC.FS/v2` Fiat-Shamir [`Transcript`] bound to
+    /// `(MAGIC, bitmap, committee)` and `mode`, identical to [`prove_hem_quintic_128`] and
+    /// [`verify_hem_quintic_128`].
+    pub fn open_transcript(
+        self,
+        pks: &[ValidatorPublicKey],
+        bitmap: &SignerBitmap,
+        mode: &SigningMode<'_>,
+    ) -> Option<Transcript> {
+        let committee: Vec<u8> = pks.iter().flat_map(ValidatorPublicKey::to_bytes).collect();
+        let mut tr = Transcript::turbo_domain(
+            &FS_DOMAIN,
+            self as u8,
+            &[MAGIC, &bitmap.to_bytes(), &committee],
+            FS_CALL_LIMIT,
+        );
+        match mode {
+            SigningMode::SharedMessage(m) => tr.absorb(b"SHARED", m),
+            SigningMode::PerSignerMessages(ms) => {
+                if ms.len() != bitmap.count_ones() {
+                    return None;
+                }
+                tr.absorb(b"PER_SIGNER", &crate::sponge::encode_multi_frame(ms));
+            }
+        }
+        Some(tr)
+    }
+
+    /// Canonical 50-byte (`TurboShake400`) Canopy leaf digest on `QSAG.HEM.QUINTIC.TREE/v2`.
+    pub fn turbo_canopy_leaf(stage: u8, index: u32, symbols: &[u8]) -> [u8; 50] {
+        <tree::Turbo as tree::Hash<50>>::leaf(tree::Turbo, stage as usize, index as usize, symbols)
+    }
+
+    /// Canonical 50-byte (`TurboShake400`) Canopy internal node digest on `QSAG.HEM.QUINTIC.TREE/v2`.
+    pub fn turbo_canopy_node(index: u32, left: &[u8; 50], right: &[u8; 50]) -> [u8; 50] {
+        <tree::Turbo as crate::zk_hem::v2::hash::CanopyHash<50>>::node(
+            tree::Turbo,
+            index,
+            left,
+            right,
+        )
+    }
+
+    /// Canonical 50-byte (`TurboShake400`) Canopy root digest on `QSAG.HEM.QUINTIC.TREE/v2`.
+    pub fn turbo_canopy_root(stage: u8, depth: u8, top: &[u8; 50]) -> [u8; 50] {
+        <tree::Turbo as crate::zk_hem::v2::hash::CanopyHash<50>>::root(
+            tree::Turbo,
+            stage,
+            depth,
+            top,
+        )
+    }
+
+    /// Canonical 56-byte (`Poseidon2Gl24`) Canopy leaf digest on `QSAG.HEM.QUINTIC.TREE/v2`.
+    pub fn gl24_canopy_leaf(stage: u8, index: u32, symbols: &[u8]) -> [u8; 56] {
+        <tree::Gl24 as tree::Hash<56>>::leaf(tree::Gl24, stage as usize, index as usize, symbols)
+    }
+
+    /// Canonical 56-byte (`Poseidon2Gl24`) Canopy Jive internal node digest on `QSAG.HEM.QUINTIC.TREE/v2`.
+    pub fn gl24_canopy_node(index: u32, left: &[u8; 56], right: &[u8; 56]) -> [u8; 56] {
+        <tree::Gl24 as crate::zk_hem::v2::hash::CanopyHash<56>>::node(
+            tree::Gl24,
+            index,
+            left,
+            right,
+        )
+    }
+
+    /// Canonical 56-byte (`Poseidon2Gl24`) Canopy root digest on `QSAG.HEM.QUINTIC.TREE/v2`.
+    pub fn gl24_canopy_root(stage: u8, depth: u8, top: &[u8; 56]) -> [u8; 56] {
+        <tree::Gl24 as crate::zk_hem::v2::hash::CanopyHash<56>>::root(
+            tree::Gl24,
+            stage,
+            depth,
+            top,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Statement,
@@ -53,28 +133,46 @@ pub struct HemQuinticProof {
 }
 
 impl HemQuinticProof {
+    #[inline]
+    pub fn num_signers(&self) -> usize {
+        self.bitmap.count_ones()
+    }
+
+    pub(crate) fn push_wire_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(MAGIC);
+        out.push(self.profile as u8);
+        out.extend_from_slice(&self.bitmap.to_bytes());
+        out.extend_from_slice(&(self.payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(&self.payload);
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
-        [
-            MAGIC.as_slice(),
-            &[self.profile as u8],
-            &self.bitmap.to_bytes(),
-            &(self.payload.len() as u64).to_le_bytes(),
-            &self.payload,
-        ]
-        .concat()
+        let mut out = Vec::with_capacity(24 + self.payload.len());
+        self.push_wire_bytes(&mut out);
+        out
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let mut input = bytes.strip_prefix(MAGIC)?;
-        let profile = match *input.split_off_first()? {
-            1 => HemQuinticProfile::TurboShake400,
-            2 => HemQuinticProfile::Poseidon2Gl24,
-            _ => return None,
-        };
+        let mut input = bytes;
+        let magic = take::<8>(&mut input)?;
+        let profile_tag = *input.split_off_first()?;
         let (bitmap, used) = SignerBitmap::from_bytes_canonical(input)?;
         input = &input[used..];
-        let len = u64::from_le_bytes(take(&mut input)?);
-        (len == input.len() as u64 && len > 0 && bitmap.count_ones() != 0).then(|| Self {
+        let declared_len = u64::from_le_bytes(take(&mut input)?);
+        let header = qsag_whir_verified::verify_qsaghqm2_header(
+            magic,
+            profile_tag,
+            bitmap.count_ones() as u64,
+            bitmap.num_validators() as u64,
+            declared_len,
+            input.len() as u64,
+        )?;
+        let profile = match header.profile_tag {
+            qsag_whir_verified::QSAGHQM2_PROFILE_TURBO400 => HemQuinticProfile::TurboShake400,
+            qsag_whir_verified::QSAGHQM2_PROFILE_GL24 => HemQuinticProfile::Poseidon2Gl24,
+            _ => return None,
+        };
+        Some(Self {
             profile,
             bitmap,
             payload: input.to_vec(),
@@ -132,6 +230,15 @@ fn statement(
         .ok_or(Error::Geometry)?;
     let log = cells.ilog2() as usize;
     let schedule = params::schedule(log).ok_or(Error::Geometry)?;
+    let folded_sum: u32 = schedule.stages.iter().map(|s| s.step_vars as u32).sum();
+    if !qsag_whir_verified::verify_quintic_schedule_envelope(
+        log as u32,
+        schedule.early_stop_vars as u32,
+        folded_sum,
+        schedule.stages.len() as u32,
+    ) {
+        return Err(Error::Geometry);
+    }
     let dims = pcs::stage_dims(log, &schedule).ok_or(Error::Geometry)?;
     let circuit = ShardCircuit::new(scheme, slots);
     let committee: Vec<u8> = pks.iter().flat_map(ValidatorPublicKey::to_bytes).collect();

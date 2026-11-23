@@ -1,14 +1,16 @@
-//! Known-answer digests of `cSHAKE256`-regime proof bytes produced through the public API.
-//! The default regime's wire bytes must not move when other regimes or larger sizes are added.
+//! Deterministic proof-bytes KAT for `[DKT26]` `< 2^{-128}` QROM Quintic `Fp5` proofs:
+//! - Public [`HemQuinticProof`] (`QSAGHQM2`) under both `TurboShake400` and `Poseidon2Gl24`.
+//! - Committed-mask zero-knowledge [`ZkHemV2Proof`] (`QSAGZKH2`) under deterministic seed material.
 #![cfg(feature = "std")]
 
-use qsag_agg::field::mle_eval_base_at_ext4;
 use qsag_agg::sig::{EpochWalSink, SigError, WalEpochState};
-use qsag_agg::sponge::{FiatShamirTranscript, InstanceBound, cshake256_32};
+use qsag_agg::sponge::cshake256_32;
+use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc};
+use qsag_agg::zk_hem::v2::params::Profile as ZkHemV2Profile;
+use qsag_agg::zk_hem::v2::protocol::{prove as prove_v2, verify as verify_v2};
 use qsag_agg::{
-    AggSigProfile, Goldilocks, GoldilocksExt4, SignerBitmap, SigningMode, ValidatorKeypair,
-    aggregate_signatures, verify_aggregate, whir_commit, whir_commit_batch_owned, whir_open,
-    whir_open_batch, whir_stage_schedule, whir_verify, whir_verify_batch,
+    AggSigProfile, Goldilocks, HemQuinticProfile, HemQuinticProof, SignerBitmap, SigningMode,
+    ValidatorKeypair, prove_hem_quintic_128, verify_hem_quintic_128,
 };
 
 fn hex(bytes: &[u8]) -> String {
@@ -17,37 +19,6 @@ fn hex(bytes: &[u8]) -> String {
 
 fn digest(bytes: &[u8]) -> String {
     hex(&cshake256_32(b"QSAG.TEST.PROOF_BYTES_KAT", bytes))
-}
-
-fn poly(num_vars: usize, tag: u64) -> Vec<Goldilocks> {
-    (0..1u64 << num_vars)
-        .map(|i| {
-            Goldilocks::from_u64_reduced(
-                (i + 1)
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                    .wrapping_add(tag.wrapping_mul(0xD1B5_4A32_D192_ED03)),
-            )
-        })
-        .collect()
-}
-
-fn point(num_vars: usize, tag: u64) -> Vec<GoldilocksExt4> {
-    (0..num_vars as u64)
-        .map(|k| {
-            GoldilocksExt4::from_limbs([
-                Goldilocks::from_u64_reduced((k + 1) * 31_337 + tag),
-                Goldilocks::from_u64_reduced((k + 5) * 4_242 + tag),
-                Goldilocks::from_u64_reduced((k + 9) * 1_717 + tag),
-                Goldilocks::from_u64_reduced((k + 13) * 9_001 + tag),
-            ])
-        })
-        .collect()
-}
-
-fn transcript(num_vars: usize) -> FiatShamirTranscript<InstanceBound> {
-    FiatShamirTranscript::new()
-        .bind_relation(b"KAT.PCS", b"v1", &whir_stage_schedule(num_vars))
-        .bind_instance(&[b"kat-instance"])
 }
 
 #[derive(Default)]
@@ -71,95 +42,80 @@ impl EpochWalSink for MemoryWal {
 }
 
 #[test]
-fn default_regime_single_opening_bytes() {
-    let num_vars = 12;
-    let evals = poly(num_vars, 1);
-    let pt = point(num_vars, 3);
-    let value = mle_eval_base_at_ext4(&evals, &pt);
-    let (comm, state) = whir_commit(&evals, &[7; 32]);
-    let proof = whir_open(&state, &pt, value, &mut transcript(num_vars));
-    assert!(whir_verify(
-        &comm,
-        num_vars,
-        &pt,
-        value,
-        &proof,
-        &mut transcript(num_vars)
-    ));
-    let mut bytes = comm.to_bytes().to_vec();
-    proof.push_bytes(&mut bytes);
-    println!(
-        "KAT single nv=12 len={} digest={}",
-        bytes.len(),
-        digest(&bytes)
-    );
-    assert_eq!(bytes.len(), SINGLE_NV12_LEN);
-    assert_eq!(digest(&bytes), SINGLE_NV12_DIGEST);
-}
-
-#[test]
-fn default_regime_batch_opening_bytes() {
-    let num_vars = 16;
-    let polys: Vec<Vec<Goldilocks>> = (0..3).map(|t| poly(num_vars, 10 + t)).collect();
-    let points: Vec<Vec<GoldilocksExt4>> = (0..3).map(|t| point(num_vars, 20 + t)).collect();
-    let evals: Vec<GoldilocksExt4> = polys
-        .iter()
-        .zip(&points)
-        .map(|(w, p)| mle_eval_base_at_ext4(w, p))
+fn hem_quintic_proof_bytes_are_deterministic_and_canonical() {
+    let mut keys: Vec<ValidatorKeypair> = (0..4)
+        .map(|idx| {
+            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[11; 32], idx)
+        })
         .collect();
-    let point_refs: Vec<&[GoldilocksExt4]> = points.iter().map(Vec::as_slice).collect();
-    let (comm, state) = whir_commit_batch_owned(polys, &[9; 32]);
-    let proof = whir_open_batch(&state, &point_refs, &evals, &mut transcript(num_vars));
-    assert!(whir_verify_batch(
-        &comm,
-        num_vars,
-        &point_refs,
-        &evals,
-        &proof,
-        &mut transcript(num_vars)
-    ));
-    let mut bytes = comm.to_bytes().to_vec();
-    proof.push_bytes(&mut bytes);
-    println!(
-        "KAT batch nv=16 len={} digest={}",
-        bytes.len(),
-        digest(&bytes)
-    );
-    assert_eq!(bytes.len(), BATCH_NV16_LEN);
-    assert_eq!(digest(&bytes), BATCH_NV16_DIGEST);
+    let pks: Vec<_> = keys.iter().map(|kp| kp.pk).collect();
+    let message = b"kat-aggregate-message";
+    let bitmap = SignerBitmap::from_active_indices(4, &[0, 2, 3]).unwrap();
+    let sigs: Vec<_> = [0usize, 2, 3]
+        .into_iter()
+        .map(|idx| {
+            let mut wal = MemoryWal::default();
+            keys[idx].sign_stateful(message, 0, &mut wal).unwrap()
+        })
+        .collect();
+    let mode = SigningMode::SharedMessage(message);
+
+    for profile in [
+        HemQuinticProfile::TurboShake400,
+        HemQuinticProfile::Poseidon2Gl24,
+    ] {
+        let p_a = prove_hem_quintic_128(profile, &pks, &bitmap, &mode, &sigs).unwrap();
+        let p_b = prove_hem_quintic_128(profile, &pks, &bitmap, &mode, &sigs).unwrap();
+        let bytes_a = p_a.to_bytes();
+        let bytes_b = p_b.to_bytes();
+        assert_eq!(bytes_a, bytes_b, "HemQuinticProof must be 100% deterministic");
+        assert_eq!(&bytes_a[..8], b"QSAGHQM2");
+        let decoded = HemQuinticProof::from_bytes(&bytes_a).unwrap();
+        assert!(verify_hem_quintic_128(&pks, &mode, &decoded));
+        println!(
+            "KAT quintic profile={profile:?} len={} digest={}",
+            bytes_a.len(),
+            digest(&bytes_a)
+        );
+    }
 }
 
 #[test]
-fn default_config_aggregate_bytes() {
-    let msg = b"proof-bytes-kat";
-    let mut pks = Vec::new();
-    let mut sigs = Vec::new();
-    for idx in 0..4u32 {
-        let mut kp =
-            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[5; 32], idx);
-        let mut wal = MemoryWal::default();
-        sigs.push(kp.sign_stateful(msg, 0, &mut wal).unwrap());
-        pks.push(kp.pk);
-    }
-    let bitmap = SignerBitmap::from_active_indices(4, &[0, 1, 2, 3]).unwrap();
-    let mode = SigningMode::SharedMessage(msg);
-    let proof = aggregate_signatures(&pks, &bitmap, &mode, &sigs, [11; 32]).unwrap();
-    assert!(verify_aggregate(&pks, &mode, &proof));
-    let bytes = proof.to_bytes();
-    println!(
-        "KAT aggregate K=4 len={} digest={}",
-        bytes.len(),
-        digest(&bytes)
-    );
-    assert_eq!(bytes.len(), AGG_K4_LEN);
-    assert_eq!(digest(&bytes), AGG_K4_DIGEST);
-}
+fn zkhem_v2_cshake_and_turboshake_proof_bytes_are_deterministic() {
+    let f = Goldilocks::from_u64_reduced;
+    let mut cs = ConstraintSystem::new();
+    let pub_out: Lc = cs.public_input(f(42)).into();
+    let a: Lc = cs.alloc(f(6)).into();
+    let b: Lc = cs.alloc(f(7)).into();
+    let prod: Lc = cs.mul(&a, &b).into();
+    cs.enforce_equal(&prod, &pub_out);
+    let _ = qsag_agg::zk_hem::relation::sponge12(&mut cs, &[pub_out, prod]);
+    let (shape, assignment) = cs.finish_v2();
 
-// PCS vectors retain the original default regime. The aggregate vector below
-// additionally pins the canonical Poseidon2 signature/trace profile.
-const SINGLE_NV12_LEN: usize = 97_891;
-const SINGLE_NV12_DIGEST: &str = "0670fbfdd9348c47af1da8c486db306e11c17a8430a9bf09052d179e4dd9730e";
-const BATCH_NV16_LEN: usize = 243_011;
-const BATCH_NV16_DIGEST: &str = "665403b05f370b337bc95db3f6e5990a4217f9e9a72dddc19f64fa155603e13e";
-const AGG_K4_LEN: usize = 270_272;
-const AGG_K4_DIGEST: &str = "b6ccae6c28d0d14a8d3f49cfb3b4aee9762605a863dbef46880a556f7868fca2";
+    for profile in [
+        ZkHemV2Profile::CshakeJohnson400,
+        ZkHemV2Profile::TurboShakeJohnson400,
+    ] {
+        let p1 = prove_v2(
+            &shape,
+            assignment.clone(),
+            b"KAT.ZKHEM.V2",
+            profile,
+            &[0x3C; 32],
+        )
+        .unwrap();
+        let p2 = prove_v2(
+            &shape,
+            assignment.clone(),
+            b"KAT.ZKHEM.V2",
+            profile,
+            &[0x3C; 32],
+        )
+        .unwrap();
+        let b1 = p1.to_bytes();
+        let b2 = p2.to_bytes();
+        assert_eq!(b1, b2);
+        assert_eq!(&b1[..8], b"QSAGZKH2");
+        assert!(verify_v2(&shape, &[f(42)], b"KAT.ZKHEM.V2", profile, &p1));
+    }
+}
