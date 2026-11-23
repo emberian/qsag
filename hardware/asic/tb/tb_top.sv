@@ -14,7 +14,7 @@ module tb_top;
   logic [63:0] cmd_data = 0;
   wire         rsp_valid;
   wire  [63:0] rsp_data;
-  qsag_ni_asic_top dut (.*);
+  qsag_ni_asic_top #(.AUTO_VERIFY(0)) dut (.*);
 
   bit [63:0] cyc;
   longint mark_cyc = 0, cmds = 0, mark_cmds = 0, checks = 0, errors = 0;
@@ -50,6 +50,25 @@ module tb_top;
     end
   endtask
 
+  // Start each rejection with a clean status. Sample the sticky bit on the
+  // accepting edge and independently read it back through the command port.
+  task automatic reject_op(input logic [7:0] retired);
+    cmd_valid = 1; cmd_op = 8'h08; cmd_idx = 1;
+    @(negedge clk);
+    if (!cmd_ready || !rsp_valid || dut.verify_fail) $fatal(1,"failed to clear status");
+    cmd_op = retired; cmd_idx = 0; cmd_data = 1;
+    @(negedge clk);
+    if (!dut.verify_fail || cmd_ready) $fatal(1,"op %h failed to reject immediately", retired);
+    cmd_valid = 0;
+    @(negedge clk);
+    if (!rsp_valid || rsp_data !== 0 || !cmd_ready) $fatal(1,"op %h reject response", retired);
+    cmd_valid = 1; cmd_op = 8'h0b;
+    @(negedge clk);
+    if (!rsp_valid || rsp_data !== 0) $fatal(1,"op %h reject status", retired);
+    cmd_valid = 0;
+    $display("FAIL-CLOSED op=%h", retired);
+  endtask
+
   int fd;
   logic [7:0]  op;
   logic [4:0]  idx;
@@ -61,7 +80,7 @@ module tb_top;
   initial begin
     if (!$value$plusargs("trace=%s", trace)) trace = "vec/trace_kat.hex";
     fd = $fopen(trace, "r");
-    if (fd == 0) begin $display("cannot open %s", trace); $finish; end
+    if (fd == 0) $fatal(1,"cannot open %s", trace);
     repeat (4) @(negedge clk);
     rst = 0;
     @(negedge clk);
@@ -94,7 +113,10 @@ module tb_top;
       check_rsp();
     end
     $display("tb_top %s: %0d commands, %0d checked words, %0d errors, %0d cycles", trace, cmds, checks, errors, cyc);
-    if (errors == 0 && checks > 0) $display("TB_TOP PASS"); else $display("TB_TOP FAIL");
+    if (errors != 0 || checks == 0) $fatal(1,"invalid KAT result");
+    for (int i='h20; i<='h27; i++) if (i!='h23) reject_op(8'(i));
+    reject_op(8'h50);
+    $display("TB_TOP PASS");
     $finish;
   end
 endmodule
