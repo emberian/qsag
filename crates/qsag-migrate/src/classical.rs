@@ -1,4 +1,4 @@
-//! Legacy key & BIP-32 / SLIP-0010 derivation commitments (`HASH160` P2PKH/P2WPKH, BIP-341
+//! Classical key & BIP-32 / SLIP-0010 derivation commitments (`HASH160` P2PKH/P2WPKH, BIP-341
 //! Taproot tweaked x-only key, `Keccak256` 20-byte EVM address, and `SLIP-0010` Ed25519 chain).
 //!
 //! Redacted secret formatting,
@@ -18,7 +18,7 @@ use crate::secp256k1_ct::{
 
 /// Supported classical-to-PQ migration target commitment kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum LegacyCommitmentKind {
+pub enum ClassicalCommitmentKind {
     /// Bitcoin `HASH160 = RIPEMD160(SHA256(compressed_pk_33))` (`20 B` P2PKH / P2WPKH).
     BitcoinHash160([u8; 20]),
     /// Bitcoin BIP-341 Taproot tweaked x-only output key `x(P_even + H_TapTweak(x(P_even)) * G)` (`32 B`).
@@ -29,8 +29,8 @@ pub enum LegacyCommitmentKind {
     Slip0010Ed25519([u8; 32]),
 }
 
-impl LegacyCommitmentKind {
-    /// Canonical injective 5-limb 56-bit Goldilocks encoding of the public legacy commitment (`< 2^56 < p`).
+impl ClassicalCommitmentKind {
+    /// Canonical injective 5-limb 56-bit Goldilocks encoding of the public classical commitment (`< 2^56 < p`).
     pub fn to_canonical_limbs56(&self) -> [u64; 6] {
         let (tag, bytes32) = match *self {
             Self::BitcoinHash160(h20) => {
@@ -140,21 +140,21 @@ impl HardenedChainStep {
 }
 
 /// Secret classical ownership witness (`Redacted` `Debug`, `write_volatile` `Drop`).
-pub struct LegacyOwnershipWitness {
+pub struct ClassicalOwnershipWitness {
     secret_scalar_or_seed: RedactedSecret<32>,
     chain_step: Option<HardenedChainStep>,
 }
 
-impl fmt::Debug for LegacyOwnershipWitness {
+impl fmt::Debug for ClassicalOwnershipWitness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LegacyOwnershipWitness")
+        f.debug_struct("ClassicalOwnershipWitness")
             .field("secret_scalar_or_seed", &"<REDACTED>")
             .field("has_chain_step", &self.chain_step.is_some())
             .finish()
     }
 }
 
-impl LegacyOwnershipWitness {
+impl ClassicalOwnershipWitness {
     /// Construct from a standalone raw 32-byte `secp256k1` or `Ed25519` secret key (works for
     /// non-HD custodial keys before pubkey exposure!).
     pub const fn from_raw_secret(secret_32: [u8; 32]) -> Self {
@@ -189,7 +189,7 @@ impl LegacyOwnershipWitness {
     }
 
     /// Compute the Bitcoin `HASH160` (`P2PKH` / `P2WPKH`) commitment in constant time (`0` logs!).
-    pub fn compute_bitcoin_hash160(&self) -> Option<LegacyCommitmentKind> {
+    pub fn compute_bitcoin_hash160(&self) -> Option<ClassicalCommitmentKind> {
         let sk = self.secret_scalar_or_seed.expose();
         if !secp_scalar_is_valid_nonzero(sk) {
             return None;
@@ -199,13 +199,13 @@ impl LegacyOwnershipWitness {
         pt.wipe();
         let h20 = hash160(&comp);
         ct_zeroize_bytes(&mut comp);
-        Some(LegacyCommitmentKind::BitcoinHash160(h20))
+        Some(ClassicalCommitmentKind::BitcoinHash160(h20))
     }
 
     /// Compute the BIP-341 Taproot tweaked x-only public key commitment:
     /// `d_even = y(d*G) is even ? d : n - d`, `t = SHA256_tagged("TapTweak", x(d_even * G))`,
     /// `Q = (d_even + t mod n) * G` -> `x(Q)`!
-    pub fn compute_taproot_tweaked_xonly(&self) -> Option<LegacyCommitmentKind> {
+    pub fn compute_taproot_tweaked_xonly(&self) -> Option<ClassicalCommitmentKind> {
         let sk = self.secret_scalar_or_seed.expose();
         if !secp_scalar_is_valid_nonzero(sk) {
             return None;
@@ -238,11 +238,11 @@ impl LegacyOwnershipWitness {
         ct_zeroize_bytes(&mut tweaked_sk);
         let (qx, _) = out_pt.to_affine()?;
         out_pt.wipe();
-        Some(LegacyCommitmentKind::BitcoinTaprootXOnly(qx.to_be_bytes()))
+        Some(ClassicalCommitmentKind::BitcoinTaprootXOnly(qx.to_be_bytes()))
     }
 
     /// Compute the Ethereum 20-byte `Keccak256(uncompressed_pk_64)[12..32]` address commitment!
-    pub fn compute_ethereum_keccak20(&self) -> Option<LegacyCommitmentKind> {
+    pub fn compute_ethereum_keccak20(&self) -> Option<ClassicalCommitmentKind> {
         let sk = self.secret_scalar_or_seed.expose();
         if !secp_scalar_is_valid_nonzero(sk) {
             return None;
@@ -255,11 +255,11 @@ impl LegacyOwnershipWitness {
         let mut addr20 = [0u8; 20];
         addr20.copy_from_slice(&k[12..32]);
         ct_zeroize_bytes(&mut k);
-        Some(LegacyCommitmentKind::EthereumKeccak20(addr20))
+        Some(ClassicalCommitmentKind::EthereumKeccak20(addr20))
     }
 
     /// Derive the RFC 8032 public key from the SLIP-0010 child seed.
-    pub fn compute_slip0010_commitment(&self) -> LegacyCommitmentKind {
+    pub fn compute_slip0010_commitment(&self) -> ClassicalCommitmentKind {
         let mut h = sha512(self.secret_scalar_or_seed.expose());
         // RFC 8032 Ed25519 scalar clamping on `h[0..32]`
         h[0] &= 248;
@@ -271,19 +271,19 @@ impl LegacyOwnershipWitness {
 
         let out = crate::ed25519_ct::public_key_from_clamped_scalar(&clamped);
         ct_zeroize_bytes(&mut clamped);
-        LegacyCommitmentKind::Slip0010Ed25519(out)
+        ClassicalCommitmentKind::Slip0010Ed25519(out)
     }
 
     /// Normalize the key to the nonzero subgroup scalar proved by migration.
     /// Taproot includes the key-path tweak and output parity normalization.
     pub fn spending_scalar(
         &self,
-        kind: &LegacyCommitmentKind,
+        kind: &ClassicalCommitmentKind,
     ) -> Option<crate::scalar::SpendingScalar> {
         use crate::scalar::{self, ScalarGroup, SpendingScalar};
         let mut bytes = *self.secret_scalar_or_seed.expose();
         let group = match kind {
-            LegacyCommitmentKind::Slip0010Ed25519(_) => {
+            ClassicalCommitmentKind::Slip0010Ed25519(_) => {
                 let mut digest = sha512(&bytes);
                 digest[0] &= 248;
                 digest[31] = (digest[31] & 127) | 64;
@@ -292,7 +292,7 @@ impl LegacyOwnershipWitness {
                 bytes = scalar::encode(scalar::reduce(&bytes, scalar::ED_ORDER));
                 ScalarGroup::Ed25519
             }
-            LegacyCommitmentKind::BitcoinTaprootXOnly(_) => {
+            ClassicalCommitmentKind::BitcoinTaprootXOnly(_) => {
                 if !secp_scalar_is_valid_nonzero(&bytes) {
                     ct_zeroize_bytes(&mut bytes);
                     return None;
@@ -338,11 +338,11 @@ impl LegacyOwnershipWitness {
         result
     }
 
-    /// Normalize the spending key for the selected legacy address format.
+    /// Normalize the spending key for the selected classical address format.
     /// This does not check the address bytes; use `matches_commitment` separately.
     pub fn normalize_spending_scalar(
         &self,
-        kind: &LegacyCommitmentKind,
+        kind: &ClassicalCommitmentKind,
     ) -> Option<crate::scalar::SpendingScalar> {
         self.spending_scalar(kind)
     }
@@ -352,7 +352,7 @@ impl LegacyOwnershipWitness {
     /// This does not prove ownership or check the supplied commitment bytes.
     pub fn compute_nullifier(
         &self,
-        kind: &LegacyCommitmentKind,
+        kind: &ClassicalCommitmentKind,
         migration_domain: &[u8; 32],
     ) -> Option<[u64; 4]> {
         Some(
@@ -362,10 +362,10 @@ impl LegacyOwnershipWitness {
     }
 
     /// Verify locally that `self` matches `target` before running the PQ-ZK prover.
-    pub fn matches_commitment(&self, target: &LegacyCommitmentKind) -> bool {
+    pub fn matches_commitment(&self, target: &ClassicalCommitmentKind) -> bool {
         match *target {
-            LegacyCommitmentKind::BitcoinHash160(ref expected) => {
-                if let Some(LegacyCommitmentKind::BitcoinHash160(a)) =
+            ClassicalCommitmentKind::BitcoinHash160(ref expected) => {
+                if let Some(ClassicalCommitmentKind::BitcoinHash160(a)) =
                     self.compute_bitcoin_hash160()
                 {
                     qsag_accel::ct::ct_eq_bytes(&a, expected)
@@ -373,8 +373,8 @@ impl LegacyOwnershipWitness {
                     false
                 }
             }
-            LegacyCommitmentKind::BitcoinTaprootXOnly(ref expected) => {
-                if let Some(LegacyCommitmentKind::BitcoinTaprootXOnly(a)) =
+            ClassicalCommitmentKind::BitcoinTaprootXOnly(ref expected) => {
+                if let Some(ClassicalCommitmentKind::BitcoinTaprootXOnly(a)) =
                     self.compute_taproot_tweaked_xonly()
                 {
                     qsag_accel::ct::ct_eq_bytes(&a, expected)
@@ -382,8 +382,8 @@ impl LegacyOwnershipWitness {
                     false
                 }
             }
-            LegacyCommitmentKind::EthereumKeccak20(ref expected) => {
-                if let Some(LegacyCommitmentKind::EthereumKeccak20(a)) =
+            ClassicalCommitmentKind::EthereumKeccak20(ref expected) => {
+                if let Some(ClassicalCommitmentKind::EthereumKeccak20(a)) =
                     self.compute_ethereum_keccak20()
                 {
                     qsag_accel::ct::ct_eq_bytes(&a, expected)
@@ -391,8 +391,8 @@ impl LegacyOwnershipWitness {
                     false
                 }
             }
-            LegacyCommitmentKind::Slip0010Ed25519(ref expected) => {
-                if let LegacyCommitmentKind::Slip0010Ed25519(a) = self.compute_slip0010_commitment()
+            ClassicalCommitmentKind::Slip0010Ed25519(ref expected) => {
+                if let ClassicalCommitmentKind::Slip0010Ed25519(a) = self.compute_slip0010_commitment()
                 {
                     qsag_accel::ct::ct_eq_bytes(&a, expected)
                 } else {

@@ -19,7 +19,7 @@ use qsag_accel::goldilocks::pack_bytes32_to_limbs56;
 use qsag_accel::poseidon2::poseidon2_hash_limbs;
 use qsag_core::sponge::poseidon2::pack_bytes32_to_limbs56_canonical;
 use qsag_migrate::scalar::NULLIFIER_DOMAIN;
-use qsag_migrate::{LegacyCommitmentKind, ScalarGroup, SpendingScalar};
+use qsag_migrate::{ClassicalCommitmentKind, ScalarGroup, SpendingScalar};
 use serde::Deserialize;
 
 const EMBEDDED_JSONL: &str = include_str!("fixtures/lean_pack256_limbs56.jsonl");
@@ -113,7 +113,7 @@ fn assert_all_packers(bytes: &[u8; 32], expected: [u64; 5], context: &str) {
         expected,
         "qsag-core: {context}"
     );
-    let commitment = LegacyCommitmentKind::BitcoinTaprootXOnly(*bytes).to_canonical_limbs56();
+    let commitment = ClassicalCommitmentKind::BitcoinTaprootXOnly(*bytes).to_canonical_limbs56();
     assert_eq!(commitment[0], 2, "taproot tag: {context}");
     assert_eq!(commitment[1..], expected, "qsag-migrate legacy commitment: {context}");
 }

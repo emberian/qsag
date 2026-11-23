@@ -30,7 +30,7 @@ use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
 use qsag_agg::zk_hem::v2::params::Profile;
 use qsag_migrate::{
     BlsG1Point, BlsOwnershipWitness, BlsValidatorCommitment, FpBls381, FpPallas, FqPallas,
-    FrBls381, HardenedChainStep, LegacyCommitmentKind, LegacyOwnershipWitness,
+    ClassicalCommitmentKind, ClassicalOwnershipWitness, FrBls381, HardenedChainStep,
     PallasCommitmentKind, PallasOwnershipWitness, PallasPoint,
     compute_bls_0x00_withdrawal_credentials, ed25519_ct::public_key_from_clamped_scalar,
     hem::{
@@ -181,18 +181,18 @@ fn check_secp256k1_scalar_against_k256(
     qsag_pt.wipe();
 
     // 2. All three secp256k1 commitment kinds match independent `k256` + `sha2`/`ripemd`/`sha3`
-    let wit = LegacyOwnershipWitness::from_raw_secret(sk_be);
+    let wit = ClassicalOwnershipWitness::from_raw_secret(sk_be);
     prop_assert_eq!(
         wit.compute_bitcoin_hash160(),
-        Some(LegacyCommitmentKind::BitcoinHash160(ref_bitcoin_hash160(&ref_comp33)))
+        Some(ClassicalCommitmentKind::BitcoinHash160(ref_bitcoin_hash160(&ref_comp33)))
     );
     prop_assert_eq!(
         wit.compute_taproot_tweaked_xonly(),
-        Some(LegacyCommitmentKind::BitcoinTaprootXOnly(ref_taproot_tweaked_xonly(&ref_sk)))
+        Some(ClassicalCommitmentKind::BitcoinTaprootXOnly(ref_taproot_tweaked_xonly(&ref_sk)))
     );
     prop_assert_eq!(
         wit.compute_ethereum_keccak20(),
-        Some(LegacyCommitmentKind::EthereumKeccak20(ref_ethereum_keccak20(&ref_sk)))
+        Some(ClassicalCommitmentKind::EthereumKeccak20(ref_ethereum_keccak20(&ref_sk)))
     );
 
     // 3. Hardened BIP-32 child derivation matches independent `Hmac<Sha512>` + `k256::Scalar`
@@ -248,7 +248,7 @@ fn secp256k1_edge_scalars_and_out_of_range_refusal() {
 
     for bad in [[0u8; 32], n, be256_offset(&n, 1), [0xFF; 32]] {
         assert!(K256SecretKey::from_slice(&bad).is_err());
-        let wit = LegacyOwnershipWitness::from_raw_secret(bad);
+        let wit = ClassicalOwnershipWitness::from_raw_secret(bad);
         assert_eq!(wit.compute_bitcoin_hash160(), None, "{bad:02x?}");
         assert_eq!(wit.compute_taproot_tweaked_xonly(), None, "{bad:02x?}");
         assert_eq!(wit.compute_ethereum_keccak20(), None, "{bad:02x?}");
@@ -291,10 +291,10 @@ proptest! {
         // 1. RFC 8032 seed -> SHA-512 -> clamp -> compressed Edwards pubkey vs `ed25519-dalek`
         let dalek_sk = DalekEdSigningKey::from_bytes(&seed);
         let dalek_pk_bytes = dalek_sk.verifying_key().to_bytes();
-        let wit = LegacyOwnershipWitness::from_raw_secret(seed);
+        let wit = ClassicalOwnershipWitness::from_raw_secret(seed);
         prop_assert_eq!(
             wit.compute_slip0010_commitment(),
-            LegacyCommitmentKind::Slip0010Ed25519(dalek_pk_bytes)
+            ClassicalCommitmentKind::Slip0010Ed25519(dalek_pk_bytes)
         );
 
         // 2. Direct clamped scalar basepoint mul vs `curve25519-dalek`
@@ -307,7 +307,7 @@ proptest! {
         // 3. Hardened SLIP-0010 derivation vs `Hmac<Sha512>` + `ed25519-dalek`
         let hardened_idx = child_low | 0x8000_0000;
         let step = HardenedChainStep::new(seed, chain_code, hardened_idx).unwrap();
-        let child_wit = LegacyOwnershipWitness::from_slip0010_hardened_step(step);
+        let child_wit = ClassicalOwnershipWitness::from_slip0010_hardened_step(step);
 
         let mut mac = HmacSha512::new_from_slice(&chain_code).unwrap();
         mac.update(&[0x00]);
@@ -318,7 +318,7 @@ proptest! {
         let expected_pk = DalekEdSigningKey::from_bytes(&child_seed).verifying_key().to_bytes();
         prop_assert_eq!(
             child_wit.compute_slip0010_commitment(),
-            LegacyCommitmentKind::Slip0010Ed25519(expected_pk)
+            ClassicalCommitmentKind::Slip0010Ed25519(expected_pk)
         );
     }
 }
