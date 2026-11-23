@@ -179,7 +179,7 @@ theorem chiWordBit_eq_keccakChiBit (w0 w1 w2 : UInt64) (i : Nat) (hi : i < 64) :
   let m := chiS (rhoPiS (thetaS s))
   { m with a0 := m.a0 ^^^ rc }
 
-def keccakRoundConstants : List UInt64 := [
+@[expose] def keccakRoundConstants : List UInt64 := [
   0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
   0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
   0x000000000000008a, 0x0000000000000088, 0x0000000080008009, 0x000000008000000a,

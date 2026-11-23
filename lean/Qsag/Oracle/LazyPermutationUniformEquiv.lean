@@ -390,7 +390,7 @@ private theorem eval_record (p : Perm n) (A : Program n O) (hist : Transcript n)
   | done => simp [record, eval, requests]
   | query d x k ih => simp [record, eval, requests, ih, List.append_assoc]
 
-/-- Give the FB5 evaluator one coin for each newly revealed edge, in query order. -/
+/-- Give the bounded-tape evaluator one coin for each newly revealed edge, in query order. -/
 def freshTape (τ : PermTable r c) : Transcript (r*c) → List (SpSt r c)
   | [] => []
   | (d,x,b)::rest =>
@@ -451,7 +451,7 @@ private theorem replay_requests (p : Perm (r*c)) (A : Program (r*c) O) (τ : Per
         rw [ite_eq_right hm, realInv_fresh hi ho]
         simpa only [Option.bind_some, a, b, pack_unpack, eval, publicPermutationQuery] using ih (p.inverse x) _ (agrees_cons h e)
 
-/-- Exact pushforward through FB5's own evaluator, with without-replacement coins.
+/-- Exact pushforward through the bounded-tape evaluator, with without-replacement coins.
 The node, forward and inverse ports share one permutation and one evolving table. -/
 theorem sponge_realRun_fisher_yates (ops : AbsorbOps β r) (s0 : SpSt r c)
     (A : SpAdv β r c O) (weight : Option O → Nat) :
@@ -480,7 +480,7 @@ theorem finite_tape_exhaustion :
 #print axioms sponge_realRun_fisher_yates
 #print axioms finite_tape_exhaustion
 
-/-! ## Transferring FB5's bounded-tape advantage to the full permutation
+/-! ## Transferring bounded-tape advantage to the full permutation
 
 Count successful bounded runs from below, once for each verdict. Cached queries move
 deterministically. At a miss, all unused answers have equally many permutation completions;

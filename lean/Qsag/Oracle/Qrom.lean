@@ -504,6 +504,16 @@ def queryWeight {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) (x : Fin car
 def queryMassOn {cardX w cardAnc : Nat} (S : Fin cardX → Bool) (ψ : QVec cardX w cardAnc) : Nat :=
   qsum cardX (fun x => if S x = true then queryWeight ψ x else 0)
 
+theorem queryMassOn_mono {cardX w cardAnc : Nat} {S T : Fin cardX → Bool}
+    (h : ∀ x, S x = true → T x = true) (ψ : QVec cardX w cardAnc) :
+    queryMassOn S ψ ≤ queryMassOn T ψ := by
+  unfold queryMassOn
+  apply qsum_le_qsum
+  intro x
+  cases hs : S x with
+  | false => exact Nat.zero_le _
+  | true => rw [h x hs]; exact Nat.le_refl _
+
 /-- Total squared Hilbert-space norm `‖ψ‖² = ∑_{x, y, a} |ψ(x, y, a)|²`. -/
 @[expose] def stateNormSq {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) : Nat :=
   qsum cardX (fun x => queryWeight ψ x)
@@ -8206,3 +8216,5 @@ theorem twiceQuery_execution (H : Fin 3 → BitVec 1) (x : Fin 3) :
   Qsag.PreprocessingGame.twiceQuery_execution
 end Qsag.PreprocessingGame
 end
+
+#verify_constructive Qsag.QVec.queryMassOn_mono
