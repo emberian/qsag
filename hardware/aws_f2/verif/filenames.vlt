@@ -1,3 +1,8 @@
 `verilator_config
 // Imported ASIC generators emit several design units in each compilation unit.
 lint_off -rule DECLFILENAME -file "*/qsag_asic_*"
+lint_off -rule DECLFILENAME -file "*/qsag_auto_steps.sv"
+// Each marked two-flop reset synchronizer intentionally fans its synchronized
+// output to both asynchronous clear pins and synchronous admission logic.
+lint_off -rule SYNCASYNCNET -file "*/cl_qsag_f2_top.sv" -match "*reset_pipe*"
+lint_off -rule SYNCASYNCNET -file "*/qsag_f2_ass2_bridge.sv" -match "*reset_pipe*"
