@@ -31,7 +31,9 @@ impl<W: Base> Kernel<W> {
         let mut terms = poly[..1 << suffix.len()].to_vec();
         for x in suffix {
             terms = terms
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|p| p[0].add(&p[1].mul(b, x)))
                 .collect();
         }
@@ -109,6 +111,7 @@ fn fiber_fold<B: Wide>(
     }
     (x, vals.pop().unwrap())
 }
+#[allow(clippy::too_many_arguments)]
 fn queries<B: Wide>(
     b: &mut B,
     tr: &mut Duplex<B::W>,
@@ -156,6 +159,7 @@ fn queries<B: Wide>(
     octopus::verify(b, stage, d.fibers, &idx, hashes, &s.siblings, root);
     shifts
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check<B: Wide>(
     b: &mut B,
     cfg: &IvcStepConfig,
@@ -197,7 +201,7 @@ pub(super) fn check<B: Wide>(
     let mask = Quint::alloc(b, proof.mask_claim);
     tr.exts(b, b"MASK_CLAIM", core::slice::from_ref(&mask));
     let beta = tr.challenge(b, b"MASK_BETA");
-    let inv = E(core::array::from_fn(|i| b.value(&beta.0[i]))).inv();
+    let inv = E(core::array::from_fn(|i| b.value(&beta.0[i]))).inv_or_zero();
     let inverse = Quint::alloc(b, inv);
     beta.mul(b, &inverse).equal(b, &Quint::constant(E::ONE));
     claim = claim.add(&beta.mul(b, &mask));
@@ -339,7 +343,7 @@ fn terminal_evals<B: Wide>(
     for (x, y) in points.iter().zip(&ys).rev() {
         let denom = t.sub(x);
         let dx = E(core::array::from_fn(|i| b.value(&denom.0[i])));
-        let inverse = Quint::alloc(b, dx.inv());
+        let inverse = Quint::alloc(b, dx.inv_or_zero());
         denom.mul(b, &inverse).equal(b, &Quint::constant(E::ONE));
         sum = sum.mul(b, &gamma).add(&pt.sub(y).mul(b, &inverse));
     }
@@ -350,6 +354,7 @@ fn terminal_evals<B: Wide>(
 impl FixedPathWhirW24 {
     /// Constrain a complete opening on caller-supplied wires. The caller binds
     /// those wires to its own statement and checks the enclosing relation.
+    #[allow(clippy::too_many_arguments)]
     pub fn constrain(
         &self,
         cs: &mut ConstraintSystem,

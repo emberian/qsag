@@ -141,32 +141,39 @@ impl IvcStepConfig {
         }
     }
 }
-pub struct IvcTreeStepRelation<const DIAGNOSTIC: bool = false> {
+
+/// Recursive binary tree step relation over `[DKT26]` `< 2^{-128}` QROM `Fp5` WHIR (`2^23` cells).
+pub struct IvcTreeStepRelation {
     cfg: IvcStepConfig,
     leaf: Arc<Shape>,
     step: Arc<Shape>,
 }
-impl<const D: bool> IvcTreeStepRelation<D> {
+
+impl IvcTreeStepRelation {
     pub fn new() -> Option<Self> {
-        let cfg = profile::<D>();
+        let cfg = profile();
         #[cfg(feature = "std")]
         let (leaf, step) = {
             type Keys = std::sync::OnceLock<Option<(Arc<Shape>, Arc<Shape>)>>;
-            static DIAGNOSTIC: Keys = Keys::new();
             static PRODUCTION: Keys = Keys::new();
-            (if D { &DIAGNOSTIC } else { &PRODUCTION })
-                .get_or_init(|| Self::compile(&cfg))
-                .clone()?
+            PRODUCTION.get_or_init(|| Self::compile(&cfg)).clone()?
         };
         #[cfg(not(feature = "std"))]
         let (leaf, step) = Self::compile(&cfg)?;
         Some(Self { cfg, leaf, step })
     }
+
+    #[cfg(test)]
+    pub(super) fn new_with_config(cfg: IvcStepConfig) -> Option<Self> {
+        let (leaf, step) = Self::compile(&cfg)?;
+        Some(Self { cfg, leaf, step })
+    }
+
     fn compile(cfg: &IvcStepConfig) -> Option<(Arc<Shape>, Arc<Shape>)> {
         let mut cs = ConstraintSystem::new();
         leaf::populate(
             &mut cs,
-            &cfg,
+            cfg,
             &IvcSubtreeStatement::blank(),
             &Witness::blank(),
         );
@@ -178,13 +185,13 @@ impl<const D: bool> IvcTreeStepRelation<D> {
         }
         let mut cs = ConstraintSystem::new();
         let pub_wires: Vec<_> = (0..29).map(|_| cs.public_input(F::ZERO).into()).collect();
-        let arg = Argument::blank(&cfg);
+        let arg = Argument::blank(cfg);
         circuit(
             &mut cs,
-            &cfg,
+            cfg,
             [leaf.num_sbox, census.sbox_rows],
             &pub_wires,
-            &skeleton(&cfg, &arg),
+            &skeleton(cfg, &arg),
         );
         if cs.num_rows() != census.total_rows() {
             return None;
@@ -199,6 +206,7 @@ impl<const D: bool> IvcTreeStepRelation<D> {
         }
         Some((Arc::new(leaf), Arc::new(step)))
     }
+
     pub fn shape(&self) -> &Shape {
         &self.step
     }
@@ -261,7 +269,7 @@ impl<const D: bool> IvcTreeStepRelation<D> {
         message_digest: [u8; 32],
         leaves: &[IvcShard<'_>],
         seed: &[u8; 32],
-    ) -> Option<(IvcSubtreeStatement, SuccinctIvcProof<D>)> {
+    ) -> Option<(IvcSubtreeStatement, SuccinctIvcProof)> {
         if leaves.len() < 2 || !leaves.len().is_power_of_two() {
             return None;
         }
@@ -293,7 +301,7 @@ impl<const D: bool> IvcTreeStepRelation<D> {
         let mut mode = false;
         while nodes.len() > 1 {
             let mut parents = Vec::with_capacity(nodes.len() / 2);
-            for pair in nodes.chunks_exact(2) {
+            for pair in nodes.as_chunks::<2>().0 {
                 let (s, l) = &pair[0];
                 let (t, r) = &pair[1];
                 parents.push(self.fold(mode, s, l, t, r, &rng.next_bytes32())?);
@@ -304,7 +312,7 @@ impl<const D: bool> IvcTreeStepRelation<D> {
         let (s, p) = nodes.pop()?;
         Some((s, SuccinctIvcProof(p)))
     }
-    pub fn verify(&self, stmt: &IvcSubtreeStatement, p: &SuccinctIvcProof<D>) -> bool {
+    pub fn verify(&self, stmt: &IvcSubtreeStatement, p: &SuccinctIvcProof) -> bool {
         self.child_claims(true, stmt, &p.0).is_some_and(|claims| {
             claims
                 .iter()
@@ -312,48 +320,45 @@ impl<const D: bool> IvcTreeStepRelation<D> {
         })
     }
 }
-pub(super) fn profile<const D: bool>() -> IvcStepConfig {
-    if D {
-        IvcStepConfig::diagnostic(19).unwrap()
-    } else {
-        IvcStepConfig::dkt26(23).unwrap()
-    }
+
+pub(super) fn profile() -> IvcStepConfig {
+    IvcStepConfig::dkt26(23).unwrap()
 }
-/// Profile selection is a verifier-chosen Rust type parameter. A production
-/// decoder accepts only the production wire tag.
+
+/// Canonical `[DKT26]` `< 2^{-128}` QROM recursive IVC root proof (`QSAGIVC1\x00`, `639,673` bytes).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SuccinctIvcProof<const DIAGNOSTIC: bool = false>(pub(super) Argument);
+pub struct SuccinctIvcProof(pub(super) Argument);
+
 /// A binary step over previously serialized internal proofs. The child
 /// statements and proofs are prover inputs; the result is independently verifiable.
-pub struct SuccinctIvcStep<'a, const D: bool = false> {
-    pub children: [(&'a IvcSubtreeStatement, &'a SuccinctIvcProof<D>); 2],
+pub struct SuccinctIvcStep<'a> {
+    pub children: [(&'a IvcSubtreeStatement, &'a SuccinctIvcProof); 2],
 }
-impl<const D: bool> SuccinctIvcStep<'_, D> {
+
+impl SuccinctIvcStep<'_> {
     pub fn prove(
         &self,
-        relation: &IvcTreeStepRelation<D>,
+        relation: &IvcTreeStepRelation,
         seed: &[u8; 32],
-    ) -> Option<(IvcSubtreeStatement, SuccinctIvcProof<D>)> {
+    ) -> Option<(IvcSubtreeStatement, SuccinctIvcProof)> {
         let [(s, l), (t, r)] = self.children;
         let (stmt, p) = relation.fold(true, s, &l.0, t, &r.0, seed)?;
         Some((stmt, SuccinctIvcProof(p)))
     }
 }
+
 /// Prove the ordered shards under one registry and application-message digest.
 /// Supply fresh private seed material for each independently generated tree.
-pub fn prove_ivc_tree<const D: bool>(
+pub fn prove_ivc_tree(
     registry: &IvcPolicyRegistry,
     message_digest: [u8; 32],
     shards: &[IvcShard<'_>],
     seed: &[u8; 32],
-) -> Option<(IvcSubtreeStatement, SuccinctIvcProof<D>)> {
-    IvcTreeStepRelation::<D>::new()?.prove(registry, message_digest, shards, seed)
+) -> Option<(IvcSubtreeStatement, SuccinctIvcProof)> {
+    IvcTreeStepRelation::new()?.prove(registry, message_digest, shards, seed)
 }
-/// Verify a root with locally selected parameters. Callers accepting the DKT26
-/// profile decode as `SuccinctIvcProof<false>` (the default).
-pub fn verify_ivc_tree<const D: bool>(
-    stmt: &IvcSubtreeStatement,
-    proof: &SuccinctIvcProof<D>,
-) -> bool {
-    IvcTreeStepRelation::<D>::new().is_some_and(|rel| rel.verify(stmt, proof))
+
+/// Verify a canonical `[DKT26]` `< 2^{-128}` QROM recursive IVC root proof.
+pub fn verify_ivc_tree(stmt: &IvcSubtreeStatement, proof: &SuccinctIvcProof) -> bool {
+    IvcTreeStepRelation::new().is_some_and(|rel| rel.verify(stmt, proof))
 }

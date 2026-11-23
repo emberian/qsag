@@ -63,10 +63,14 @@ impl FixedPathWhirW24 {
         if bytes.len() != cfg.opening_bytes() || !bytes.starts_with(MAGIC) {
             return None;
         }
-        let mut words = bytes[8..].chunks_exact(8);
+        let (chunks, rem) = bytes[8..].as_chunks::<8>();
+        if !rem.is_empty() {
+            return None;
+        }
+        let mut words = chunks.iter();
         let mut out = Self::blank(cfg);
         out.visit_mut(|x| {
-            let raw = u64::from_le_bytes(words.next()?.try_into().ok()?);
+            let raw = u64::from_le_bytes(*words.next()?);
             if raw >= crate::field::GOLDILOCKS_PRIME {
                 return None;
             }
@@ -91,6 +95,7 @@ impl IvcStepConfig {
 }
 
 const TREE_MAGIC: &[u8; 8] = b"QSAGIVC1";
+const PRODUCTION_TAG: u8 = 0;
 
 fn argument_header_bytes(log_cells: usize) -> usize {
     let accumulator_words = 5 * (2 * log_cells + 4);
@@ -98,16 +103,26 @@ fn argument_header_bytes(log_cells: usize) -> usize {
     let sumcheck_words = 5 * (13 * log_cells + 5);
     9 + 8 * (accumulator_words + nonce_and_root_words + sumcheck_words)
 }
-impl<const D: bool> SuccinctIvcProof<D> {
-    /// Exact byte length for this verifier-selected profile.
+
+impl SuccinctIvcProof {
+    /// Exact byte length of the canonical `[DKT26]` `< 2^{-128}` QROM proof (`639,673` bytes).
     pub fn encoded_len() -> usize {
-        let cfg = tree::profile::<D>();
+        let cfg = tree::profile();
         argument_header_bytes(cfg.log_cells) + cfg.opening_bytes()
     }
+
     pub fn to_bytes(&self) -> Vec<u8> {
+        self.encode_with_tag(PRODUCTION_TAG)
+    }
+
+    pub fn from_bytes_canonical(bytes: &[u8]) -> Option<Self> {
+        Self::decode_with_cfg(&tree::profile(), PRODUCTION_TAG, bytes)
+    }
+
+    fn encode_with_tag(&self, tag: u8) -> Vec<u8> {
         let p = &self.0;
         let mut out = TREE_MAGIC.to_vec();
-        out.push(u8::from(D));
+        out.push(tag);
         for x in p
             .acc
             .point
@@ -131,17 +146,21 @@ impl<const D: bool> SuccinctIvcProof<D> {
         out.extend_from_slice(&p.opening.to_bytes());
         out
     }
-    pub fn from_bytes_canonical(bytes: &[u8]) -> Option<Self> {
-        let cfg = tree::profile::<D>();
+
+    fn decode_with_cfg(cfg: &IvcStepConfig, expected_tag: u8, bytes: &[u8]) -> Option<Self> {
         let split = argument_header_bytes(cfg.log_cells);
         if bytes.len() != split + cfg.opening_bytes()
             || bytes.get(..8)? != TREE_MAGIC
-            || bytes[8] != u8::from(D)
+            || bytes[8] != expected_tag
         {
             return None;
         }
-        let mut p = r1cs::Argument::blank(&cfg);
-        let mut raw = bytes[9..split].chunks_exact(8);
+        let mut p = r1cs::Argument::blank(cfg);
+        let (chunks, rem) = bytes[9..split].as_chunks::<8>();
+        if !rem.is_empty() {
+            return None;
+        }
+        let mut raw = chunks.iter();
         for x in p
             .acc
             .point
@@ -160,7 +179,7 @@ impl<const D: bool> SuccinctIvcProof<D> {
                     .flat_map(|e| &mut e.0),
             )
         {
-            let v = u64::from_le_bytes(raw.next()?.try_into().ok()?);
+            let v = u64::from_le_bytes(*raw.next()?);
             if v >= crate::field::GOLDILOCKS_PRIME {
                 return None;
             }
@@ -169,7 +188,18 @@ impl<const D: bool> SuccinctIvcProof<D> {
         if raw.next().is_some() {
             return None;
         }
-        p.opening = FixedPathWhirW24::from_bytes_canonical(&cfg, &bytes[split..])?;
+        p.opening = FixedPathWhirW24::from_bytes_canonical(cfg, &bytes[split..])?;
         Some(Self(p))
+    }
+
+    #[cfg(test)]
+    pub(super) fn to_bytes_test_only(&self) -> Vec<u8> {
+        // Test-only tag 0xFF is never accepted by production `from_bytes_canonical`.
+        self.encode_with_tag(0xFF)
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_bytes_test_only(cfg: &IvcStepConfig, bytes: &[u8]) -> Option<Self> {
+        Self::decode_with_cfg(cfg, 0xFF, bytes)
     }
 }

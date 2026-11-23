@@ -1,8 +1,8 @@
-//! Binary proof-carrying data over Goldilocks with quintic WHIR challenges.
+//! Binary proof-carrying data over Goldilocks with quintic `[DKT26]` WHIR challenges.
 //!
 //! [`prove_ivc_tree`] proves a power-of-two run of contiguous Jorts shards.
-//! [`verify_ivc_tree`] accepts the subtree statement and its canonical root
-//! proof. It selects the two compiled relations from the local profile.
+//! [`verify_ivc_tree`] accepts the subtree statement and its canonical `[DKT26]` `< 2^{-128}`
+//! QROM root proof (`QSAGIVC1\x00`, `639,673` bytes).
 //! [`SuccinctIvcStep`] also accepts two previously encoded internal proofs.
 //!
 //! Leaves execute the Jorts multisignature predicate and a directory path.
@@ -12,20 +12,23 @@
 //! scans the two compiled matrices, so verification cost is independent of
 //! the number of shards and linear in the fixed relation description.
 //!
-//! The default proof type uses the v2 DKT26 query schedule. The distinct
-//! `SuccinctIvcProof<true>` type selects the low-query diagnostic schedule.
+//! [`SuccinctIvcProof`] exclusively uses the `[DKT26]` `< 2^{-128}` QROM query schedule
+//! (`IvcStepConfig::dkt26(23)`), with zero wire-level profile polymorphism.
 //! The public row sumchecks expose witness evaluations. A composed QROM
 //! knowledge-extraction analysis for this recursive transcript is open.
-use super::recursive_whir::{Backend, Base, Native, bits, equal_bit, f, remainder, select};
+mod gadgets;
 use super::v2::{
     field5::Fp5 as E,
     hash::Channel,
-    params::{self, Schedule, StageSpec},
+    params::{self, Schedule},
     pcs::{self, StageDims},
 };
+#[cfg(test)]
+use super::v2::params::StageSpec;
 use crate::field::{Goldilocks as F, GoldilocksOps as _};
 use alloc::{vec, vec::Vec};
 use arithmetic::{Duplex, Quint, Wide, compress};
+use gadgets::{Backend, Base, Native, bits, bits_canonical_u64, equal_bit, f, remainder, select};
 mod arithmetic;
 mod leaf;
 mod matrix;
@@ -79,8 +82,9 @@ impl IvcStepConfig {
             schedule: params::schedule(log_cells)?,
         })
     }
-    /// Low-query geometry for execution and differential tests.
-    pub fn diagnostic(log_cells: usize) -> Option<Self> {
+    /// Low-query geometry restricted strictly to crate-internal unit tests (`#[cfg(test)]`).
+    #[cfg(test)]
+    pub(crate) fn diagnostic(log_cells: usize) -> Option<Self> {
         if !(4..=24).contains(&log_cells) {
             return None;
         }
@@ -230,6 +234,11 @@ fn sample_log<B: Wide>(b: &mut B, tr: &mut Duplex<B::W>, d: StageDims) -> Vec<(B
     let mut out = Vec::new();
     let stride = (2 * d.queries).next_power_of_two();
     let key_bits = d.log_leaves() + stride.trailing_zeros() as usize;
+    // Ensure `cur_key - prev_key - 1 in [0, 2^key_bits)` cannot wrap modulo Goldilocks (`2^(key_bits+1) < p`).
+    assert!(
+        key_bits <= 62,
+        "offline Fisher-Yates key width exceeds Goldilocks no-wrap bound"
+    );
     let one = B::W::constant(F::ONE);
     for q in 0..d.queries {
         if q % 16 == 0 {
@@ -288,6 +297,9 @@ impl Channel for Duplex<F> {
     fn squeeze_fp5(&mut self, label: &[u8]) -> E {
         E(self.challenge(&mut Native::default(), label).0)
     }
+    /// Fixed-topology R1CS circuits cannot loop a data-dependent number of times: draw once,
+    /// abort proving if zero (`red.beta_r.is_zero()`), and enforce `x * inv_or_zero(x) == 1`
+    /// in the circuit (`verifier::check`).
     fn squeeze_fp5_nonzero(&mut self, label: &[u8]) -> E {
         self.squeeze_fp5(label)
     }
@@ -295,7 +307,11 @@ impl Channel for Duplex<F> {
         let limbs: Vec<_> = xs.iter().flat_map(|x| x.0).collect();
         self.frame(&mut Native::default(), label, &limbs);
     }
-    fn squeeze_distinct_indices(&mut self, _: &[u8], n: usize, count: usize) -> Vec<usize> {
+    fn squeeze_distinct_indices(&mut self, label: &[u8], n: usize, count: usize) -> Vec<usize> {
+        assert_eq!(
+            label, b"QUERY",
+            "Duplex fixed-topology query sampler only supports the QUERY phase label"
+        );
         let d = StageDims {
             vars: 0,
             step_vars: 0,
