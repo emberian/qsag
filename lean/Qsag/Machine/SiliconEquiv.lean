@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.Machine.SiliconEquiv — Mechanized RTL-to-Lean Equivalence (`Arch 4`: FPGA & Dregg-180 Silicon)
+# Qsag.Machine.SiliconEquiv — Mechanized RTL-to-Lean Equivalence (`Arch 4`: FPGA & GF180MCU Silicon)
 
 Constructive bit-level and cycle-level hardware equivalence proofs (`0 sorry`, `0 bv_decide`,
 `0 native_decide`, `0 Classical.choice`, `axioms ⊆ {propext, Quot.sound}`) bridging `qsag`'s
@@ -12,7 +12,7 @@ SystemVerilog RTL datapaths directly to canonical `Qsag.Math.Goldilocks`:
      (`rtlCsaReduce2`) compressors proved over arbitrary bitwidth `w` via inductive bit-weight
      identities (`natOfBits_csa_identity`, `0 bv_decide`).
    - Exact arbitrary-width Han-Carlson parallel-prefix adder (`rtlPrefixAdd`, modeling
-     `hardware/gf180mcu/rtl/qsag_gl64_karatsuba_csa.sv:15-77`) and Kogge-Stone chunked split adder
+     `hardware/ass2/rtl/qsag_gl64_karatsuba_csa.sv`) and Kogge-Stone chunked split adder
      (`rtlAddSplit3Chunk`, modeling `hardware/fpga/rtl/qsag_add_split.sv`).
 2. **FPGA 136-Bit Solinas Goldilocks Reducer (`hardware/fpga/rtl/qsag_gl64_reduce.sv`)**:
    - Models the exact 6-term inverted Solinas CSA stage (`t0..t5` with `C_BIAS = GL_P + 3`, 66-bit
@@ -20,8 +20,8 @@ SystemVerilog RTL datapaths directly to canonical `Qsag.Math.Goldilocks`:
      canonicalizer (`rtlFpgaGl64Reduce` and 2-stage registered `rtlFpgaGl64Step`).
    - Proves exact bit-for-bit equivalence `(rtlFpgaGl64Reduce x).toNat = (Goldilocks.ofNat x.toNat).val`
      across **all** `2^136` inputs (`0 ≤ x < 2^136`), plus latency-2 pipeline equivalence for `REG_OUT = 1`.
-3. **GF180MCU ASIC `Dregg-180` Booth-Karatsuba-CSA Goldilocks Engine
-   (`hardware/gf180mcu/rtl/qsag_gl64_karatsuba_csa.sv`)**:
+3. **GF180MCU ASIC (`ASS2-0P5`) Booth-Karatsuba-CSA Goldilocks Engine
+   (`hardware/ass2/rtl/qsag_gl64_karatsuba_csa.sv`)**:
    - Models `qsag_gl64_canon` (76-bit guard-bit fold + `ε = 2^32 - 1` conditional correction),
      `qsag_mul33` (17-row radix-4 Booth encoder + `neg_row` + 66-bit CSA tree + Han-Carlson CPA),
      `qsag_gl64_sqrows` / `qsag_gl64_sq_pipe` (5-row 64-bit Goldilocks squarer), and the 4-cycle
@@ -1178,7 +1178,7 @@ theorem rtlFpgaGl64Step_two_clocks (st₀ : FpgaGl64PipeState) (x x_next : BitVe
       (Goldilocks.ofNat x.toNat).val :=
   rtlFpgaGl64Reduce_sound x
 
-/-! ## 5. ASIC `Dregg-180` Canonicalizer, Radix-4 Booth Multiplier, Squarer & Karatsuba FSM -/
+/-! ## 5. GF180MCU (`ASS2-0P5`) Canonicalizer, Radix-4 Booth Multiplier, Squarer & Karatsuba FSM -/
 
 private def rtlGl64CanonMux (u : BitVec 66) (v : BitVec 65) : BitVec 64 :=
   if u.getLsbD 64 || v.getLsbD 64 then v.extractLsb' 0 64 else u.extractLsb' 0 64
@@ -2171,7 +2171,7 @@ private theorem rtlKaratsuba_four_cycle_aux (st₀ st₁ st₂ st₃ : Karatsuba
   rw [Nat.add_mul_mod_self_left, Nat.add_mul_mod_self_left] at hModSides
   exact hModSides
 
-/-- **End-to-End 4-Cycle ASIC `Dregg-180` Booth-Karatsuba-CSA Theorem (`rtlKaratsuba_four_cycle_mul_sound`)**:
+/-- **End-to-End 4-Cycle GF180MCU (`ASS2-0P5`) Booth-Karatsuba-CSA Theorem (`rtlKaratsuba_four_cycle_mul_sound`)**:
     Starting in idle `mph = 0` with arbitrary `opa, opb : BitVec 64` (and arbitrary prior accumulator
     contents!), pulsing `mul_start = true` and clocking 3 pipeline cycles (`mph = 1 → 2 → 3`)
     reaches `mul_last = true` with `cv.toNat = (Goldilocks.mul (Goldilocks.ofNat opa.toNat) (Goldilocks.ofNat opb.toNat)).val`! -/

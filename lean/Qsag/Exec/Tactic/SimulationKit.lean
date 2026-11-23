@@ -837,8 +837,8 @@ theorem frame_prefix_inj_tagged_list_exemplar
 
 /-! ### Scar-Free Coalgebraic Machine State-Packing Repair Exemplar -/
 
-/-- Retired unpacked `(epoch, spent)` state carrier. -/
-structure RetiredUnpackedCounter where
+/-- Unpacked `(epoch, spent)` reference state carrier. -/
+structure UnpackedCounterSpec where
   epoch : UInt64
   spent : UInt64
 
@@ -846,7 +846,7 @@ structure RetiredUnpackedCounter where
 structure Packed128Counter where
   word : BitVec 128
 
-def unpackedCounterMachine (cap : Nat) : Spec.Machine RetiredUnpackedCounter UInt64 UInt64 where
+def unpackedCounterMachine (cap : Nat) : Spec.Machine UnpackedCounterSpec UInt64 UInt64 where
   Init s := s.epoch = 0 ∧ s.spent = 0
   step s req :=
     if s.epoch.toNat + 1 < 2 ^ 64 ∧ s.spent.toNat + req.toNat ≤ cap ∧ cap < 2 ^ 64 then
@@ -938,8 +938,8 @@ def unpackedToPackedCounterEquiv (cap : Nat) :
     · simp only [hCond, ↓reduceIte]; rfl
   errStep_comm _ _ := rfl
 
--- `packedCounterMachine` is 100% scar-free with respect to `RetiredUnpackedCounter`!
-#assert_no_scar RetiredUnpackedCounter in packedCounterMachine
+-- `packedCounterMachine` is 100% scar-free with respect to `UnpackedCounterSpec`!
+#assert_no_scar UnpackedCounterSpec in packedCounterMachine
 
 #verify_constructive
   mir_option_test

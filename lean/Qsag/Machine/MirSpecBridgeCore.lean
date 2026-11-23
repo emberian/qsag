@@ -3055,7 +3055,7 @@ theorem round1Commit_no_algebraic_inverse
   rw [List.length_map, List.length_range, List.length_range] at hLenLe
   omega
 
-/-- Retired 1-round `sbox7` + `applyME` encoding (retained strictly for `#tooth` regression). -/
+/-- Unblinded 1-round `sbox7` + `applyME` encoding refuted by `tooth_one_round_applyME_commitment_exposes_opening`. -/
 def retiredOneRoundApplyMECommitB0 (nonceLimb maskLimb sessionTag partyId : Goldilocks) : Lane4 :=
   let dom := Goldilocks.ofNat 0x515341475231434D
   let st : Poseidon2State12 :=
@@ -3079,7 +3079,7 @@ private def oneRoundSolve8 (e : Lane4) : Lane4 :=
    Goldilocks.sub (Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 3) e.x2) e.x1) e.x0,
    Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 8) e.x3) (Goldilocks.mul (Goldilocks.ofNat 4) e.x0)⟩
 
-/-- Explicit algebraic inverse of the retired 1-round formula under the deployed `M_4 ⊗ P_3`
+/-- Explicit algebraic inverse of `retiredOneRoundApplyMECommitB0` under the deployed `M_4 ⊗ P_3`
     external layer. With `u = x^{∘7}` and `e = c - (applyME ⟨0, d, 0⟩).b0`,
     `e₀ = 4u₀+2u₁+2u₂+6u₃`, `e₁ = 2u₀+4u₁+2u₂+3u₃`, `e₂ = 2u₀+2u₁+4u₂+3u₃`, `e₃ = 2u₀+u₁+u₂+4u₃`,
     a linear system of determinant `32` solved by
@@ -3129,7 +3129,7 @@ private theorem oneRound_linear_extract (u d : Lane4) :
      congr 1; omega)
 
 /-- **`#tooth` Regression (`tooth_one_round_applyME_commitment_exposes_opening`)**:
-    Proves that the retired unblinded 1-round encoding `(applyME ⟨x^{∘7}, d, 0⟩).b0` is
+    Proves that the unblinded 1-round encoding `(applyME ⟨x^{∘7}, d, 0⟩).b0` is
     algebraically inverted by `invertOneRoundApplyMECommitB0` on EVERY 4-limb opening, and concretely recovers `[17, 23, 31, 47]` from its commitment. -/
 theorem tooth_one_round_applyME_commitment_exposes_opening :
     (∀ nonceLimb maskLimb sessionTag partyId : Goldilocks,
@@ -3200,7 +3200,7 @@ def poseidon2FullTagPreimage_injective (sh₁ msg₁ sh₂ msg₂ : List UInt8)
       exact hNe rfl
     eq := packWire_injective hEqTag }
 
-/-- Retired 2-share-byte / 1-message-byte / 4-byte-output tag (retained strictly for `#tooth` regression). -/
+/-- Truncated 2-share-byte / 1-message-byte / 4-byte-output tag refuted by `tooth_truncated_prefix_tag_collides_ab_ac`. -/
 def retiredTruncatedPrefixTagBytes (sh msg : List UInt8) : ByteArray :=
   let k0 := Goldilocks.ofNat (sh.getD 0 0).toNat
   let k1 := Goldilocks.ofNat (sh.getD 1 0).toNat
@@ -3213,7 +3213,7 @@ def retiredTruncatedPrefixTagBytes (sh msg : List UInt8) : ByteArray :=
             UInt8.ofNat (out.x2.val % 256), UInt8.ofNat (out.x3.val % 256)]
 
 /-- **`#tooth` Regression (`tooth_truncated_prefix_tag_collides_ab_ac`)**:
-    1. The retired 2-byte/first-byte 4-byte construction collides unconditionally on `"AB"`
+    1. The truncated 2-byte/first-byte 4-byte construction collides unconditionally on `"AB"`
        (`[0x41, 0x42]`) vs `"AC"` (`[0x41, 0x43]`) for EVERY key `sh`, and ignores bytes `2..31`
        of a 32-byte key for EVERY message `msg`,
     2. The upgraded 32-byte (`256`-bit) `poseidon2TagBytes` absorbs every byte of `sh` and `msg`
