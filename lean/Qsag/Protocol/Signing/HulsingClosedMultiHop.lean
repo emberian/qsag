@@ -2743,3 +2743,889 @@ private theorem pre_selects_slot {qHash qSign : Nat} (latchOn : Bool) (suite : T
         _ _ slot.tweak (slot.pin.digest suite s f) eq rfl rfl inv)
 
 /-- Class membership of the single PRE program and each preceding WOTS UD program. -/
+@[expose] def SlotReductionClass {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (msg f : Spec.Bytes → Spec.Bytes) (adv : SeedWithheldEufCmaAdv qHash qSign) (slot : SigningSlot p)
+    (𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop) (𝒜Ud : Spec.Code Spec.targetIface Bool → Prop) : Prop :=
+  let recover := slotRecover latchOn suite p msg adv slot
+  𝒜Pre (puncturedTablePreAdv slot.pin.cell slot.tweak recover f) ∧
+    match slot with
+    | .fors .. => True
+    | .wots i pos r step =>
+      let l := UInt32.ofNat i
+      let t := UInt64.ofNat (pos.val / 2^p.subtreeHeight)
+      let k := pos.val % 2^p.subtreeHeight
+      ∀ a b, a+1+b = step.val → 𝒜Ud (udDigestTest
+        (encodeChainFTweak ⟨l,t,.wotsHash, UInt32.ofNat k, UInt32.ofNat r, UInt32.ofNat a⟩)
+        (fun s => wotsSlotTest suite l t k r (a+1) b slot.tweak recover (puncturePrf (s ++ encodeAdrs slot.pin.cell) f) s))
+
+theorem slotReductionClass_unrestricted {qHash qSign : Nat} (latch : Bool) (suite : TweakableHashSuite)
+    (p : PqHashParams) (msg f : Spec.Bytes → Spec.Bytes) (adv : SeedWithheldEufCmaAdv qHash qSign)
+    (slot : SigningSlot p) : SlotReductionClass latch suite p msg f adv slot (fun _ => True) (fun _ => True) := by
+  cases slot <;> simp [SlotReductionClass]
+
+#verify_constructive slotReductionClass_unrestricted
+
+def SigningSlot.cost {p : PqHashParams} : SigningSlot p → Nat
+  | .fors .. => 1
+  | .wots _ _ _ step => step.val+1
+
+private theorem add_scale_same (a b : Nat) (ε : Spec.RatBound) :
+    ((Spec.RatBound.scale a ε).add (Spec.RatBound.scale b ε)).le (Spec.RatBound.scale (a+b) ε) := by
+  unfold Spec.RatBound.scale Spec.RatBound.add Spec.RatBound.le
+  dsimp only
+  simp only [Nat.add_mul, Nat.mul_assoc, Nat.le_refl]
+
+private theorem wotsSlotLoss_scale (ε : Spec.RatBound) (n : Nat) : (wotsSlotLoss ε ε n).le (Spec.RatBound.scale (n+1) ε) := by
+  have one : ε.le (Spec.RatBound.scale 1 ε) := by unfold Spec.RatBound.le Spec.RatBound.scale; simp
+  induction n with
+  | zero => exact one
+  | succ n ih => exact Spec.RatBound.le_trans (Spec.RatBound.add_le_add ih one) (add_scale_same _ _ ε)
+
+private theorem wots_slot_pin_digest (suite : TweakableHashSuite) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (l : UInt32) (t : UInt64) (k r step : Nat)
+    (len : (f (s ++ encodeAdrs (wotsPrfCell l t k r))).length = 32) :
+    suiteTweakHash suite s
+      (encodeChainFTweak ⟨l, t, .wotsHash, UInt32.ofNat k, UInt32.ofNat r, UInt32.ofNat step⟩)
+      (wotsChainSteps suite s l t k r 0 step (f (s ++ encodeAdrs (wotsPrfCell l t k r)))) =
+    SigningPin.digest suite s f (.wots l t k r step) := by
+  change _ = cellWotsNode suite s f (wotsPrfCell l t k r) (step + 1)
+  rw [← ideal_wots_cell, ← honestChainNode_succ, honestChainNode_eq, wotsSecretBase_eq, secOverlaySuite_tagPrf_empty]
+  change _ = thChainF (secOverlaySuite suite s f) s
+    ⟨l, t, .wotsHash, UInt32.ofNat k, UInt32.ofNat r, UInt32.ofNat step⟩
+    (wotsChainSteps (secOverlaySuite suite s f) s l t k r 0 step
+      (padBytes32 (f (s ++ encodeAdrs (wotsPrfCell l t k r)))))
+  rw [padBytes32_of_len32 len, chainSteps_secOverlay, suiteTweakHash_chainF]
+  rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
+
+private theorem puncturedDigestGame_win_at {nSeed nSec : Nat}
+    (hs : 0 < nSeed) (hc : 0 < nSec) (seed : Fin nSeed → Spec.Bytes)
+    (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (addr : HashAdrs) (test : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Bool)
+    (z : Fin (nSeed * nSec)) :
+    let sp := Spec.CoinSplit.prod nSeed nSec
+    let s := seed (sp.chal z)
+    let f := (table (sp.advc z)).2
+    let x := s ++ encodeAdrs addr
+    (puncturedDigestGame hs hc seed table addr test).win z =
+      test (puncturePrf x f) s (f x) := rfl
+
+private theorem fors_digest_eq (suite : TweakableHashSuite) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (t : UInt64) (k j u : Nat) :
+    forsIndexedLeafFn (secOverlaySuite suite s f) ⟨[], [], s⟩ t k j u =
+      SigningPin.digest suite s f (.fors t k j u) := rfl
+
+private theorem fors_win_imp (suite : TweakableHashSuite) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (t : UInt64) (k j u : Nat)
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (y : Spec.Bytes) (addr : HashAdrs) (tweak : Spec.Bytes)
+    (hTw : tweak = encodeChainFTweak (forsLeafHashAdrs t k j u))
+    (hz : decide (suiteTweakHash suite s tweak (recov (puncturePrf (s ++ encodeAdrs addr) f) s y) = y) = true) :
+    decide (forsIndexedLeafHash suite s t k j u (recov (puncturePrf (s ++ encodeAdrs addr) f) s y) = y) = true := by
+  rw [forsIndexedLeafHash_eq_chainF_adrs, ← suiteTweakHash_chainF, ← hTw]
+  exact hz
+
+private theorem fors_step_hb {nSeed nSec seedLen keyLen : Nat}
+    (hs : 0 < nSeed) (hc : 0 < nSec) (suite : TweakableHashSuite) (p : PqHashParams)
+    (seed : Fin nSeed → Spec.Bytes) (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) table)
+    (leaf : Fin (2^(p.numLayers * p.subtreeHeight))) (j : Fin p.forsTrees) (u : Fin (2^p.forsHeight))
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    {𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    {prim : Spec.RatBound}
+    (hpre : Spec.SmDtPreHard 𝒜Pre (suiteTweakHash suite) seedLen 32 1 prim)
+    (cPre : ∀ c, 𝒜Pre (puncturedTablePreAdv (SigningSlot.fors (p := p) leaf j u).pin.cell
+      (SigningSlot.fors (p := p) leaf j u).tweak recov (table c).2)) :
+    Spec.GameBound (Spec.FinGame.mk (Nat.mul_pos hs hc) fun z =>
+      let pair := samplePair seed table z
+      let s := pair.1
+      let f := pair.2.2
+      let y := forsIndexedLeafFn (secOverlaySuite suite s f) ⟨[], [], s⟩ (treeOf p leaf) (kpOf p leaf) j u
+      decide (forsIndexedLeafHash suite s (treeOf p leaf) (kpOf p leaf) j u
+        (recov (puncturePrf (s ++ encodeAdrs ⟨0, treeOf p leaf, .forsPrf, UInt32.ofNat (kpOf p leaf), UInt32.ofNat j, UInt32.ofNat u⟩) f) s y) = y)).winProb prim :=
+  hulsing_punctured_fors_leaf_pre_bound hs hc suite seed hSeed table hSec (treeOf p leaf) (kpOf p leaf) j u recov hpre cPre
+
+private theorem gameBound_of_imp_scale1 {n : Nat} (hPos : 0 < n)
+    (f1 f2 : Fin n → Bool) (prim : Spec.RatBound)
+    (hb : Spec.GameBound (Spec.FinGame.mk hPos f2).winProb prim)
+    (hImp : ∀ z, f1 z = true → f2 z = true) :
+    Spec.GameBound (Spec.FinGame.mk hPos f1).winProb (Spec.RatBound.scale 1 prim) := by
+  have one : prim.le (Spec.RatBound.scale 1 prim) := by unfold Spec.RatBound.le Spec.RatBound.scale; simp
+  exact Spec.GameBound.trans
+    (Spec.event_le_reduction_win (Spec.FinGame.mk hPos f1) (Spec.FinGame.mk hPos f2) hImp)
+    (Spec.RatBound.le_trans hb one)
+
+private theorem fors_step_ev {nSeed nSec : Nat}
+    (suite : TweakableHashSuite) (p : PqHashParams)
+    (seed : Fin nSeed → Spec.Bytes) (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (leaf : Fin (2^(p.numLayers * p.subtreeHeight))) (j : Fin p.forsTrees) (u : Fin (2^p.forsHeight))
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes) :
+    let sp := Spec.CoinSplit.prod nSeed nSec
+    let slot : SigningSlot p := .fors leaf j u
+    ∀ z : Fin (nSeed * nSec),
+      (let s := seed (sp.chal z)
+       let f := (table (sp.advc z)).2
+       let y := slot.pin.digest suite s f
+       decide (suiteTweakHash suite s slot.tweak
+         (recov (puncturePrf (s ++ encodeAdrs slot.pin.cell) f) s y) = y)) = true →
+      (let pair := samplePair seed table z
+       let s0 := pair.1
+       let f0 := pair.2.2
+       let y0 := forsIndexedLeafFn (secOverlaySuite suite s0 f0) ⟨[], [], s0⟩ (treeOf p leaf) (kpOf p leaf) j u
+       decide (forsIndexedLeafHash suite s0 (treeOf p leaf) (kpOf p leaf) j u
+         (recov (puncturePrf (s0 ++ encodeAdrs ⟨0, treeOf p leaf, .forsPrf, UInt32.ofNat (kpOf p leaf), UInt32.ofNat j, UInt32.ofNat u⟩) f0) s0 y0) = y0)) = true :=
+  fun z hz => fors_win_imp suite (seed ((Spec.CoinSplit.prod nSeed nSec).chal z)) (table ((Spec.CoinSplit.prod nSeed nSec).advc z)).2
+    (treeOf p leaf) (kpOf p leaf) j u recov
+    ((SigningSlot.fors (p := p) leaf j u).pin.digest suite (seed ((Spec.CoinSplit.prod nSeed nSec).chal z)) (table ((Spec.CoinSplit.prod nSeed nSec).advc z)).2)
+    (SigningSlot.fors (p := p) leaf j u).pin.cell (SigningSlot.fors (p := p) leaf j u).tweak rfl hz
+
+private theorem slot_fors_part {nSeed nSec seedLen keyLen : Nat}
+    (hs : 0 < nSeed) (hc : 0 < nSec) (suite : TweakableHashSuite) (p : PqHashParams)
+    (seed : Fin nSeed → Spec.Bytes) (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) table)
+    (leaf : Fin (2^(p.numLayers * p.subtreeHeight))) (j : Fin p.forsTrees) (u : Fin (2^p.forsHeight))
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    {𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    {prim : Spec.RatBound}
+    (hpre : Spec.SmDtPreHard 𝒜Pre (suiteTweakHash suite) seedLen 32 1 prim)
+    (cPre : ∀ c, 𝒜Pre (puncturedTablePreAdv (SigningSlot.fors (p := p) leaf j u).pin.cell
+      (SigningSlot.fors (p := p) leaf j u).tweak recov (table c).2)) :
+    let sp := Spec.CoinSplit.prod nSeed nSec
+    let slot : SigningSlot p := .fors leaf j u
+    Spec.GameBound (Spec.FinGame.mk (Nat.mul_pos hs hc) fun z =>
+      let s := seed (sp.chal z)
+      let f := (table (sp.advc z)).2
+      let y := slot.pin.digest suite s f
+      decide (suiteTweakHash suite s slot.tweak
+        (recov (puncturePrf (s ++ encodeAdrs slot.pin.cell) f) s y) = y)).winProb
+      (Spec.RatBound.scale slot.cost prim) :=
+  gameBound_of_imp_scale1 (Nat.mul_pos hs hc) _ _ prim
+    (fors_step_hb hs hc suite p seed hSeed table hSec leaf j u recov hpre cPre)
+    (fors_step_ev suite p seed table leaf j u recov)
+
+private theorem gameBound_of_imp_wots {n : Nat} (hPos : 0 < n)
+    (f1 f2 : Fin n → Bool) (prim : Spec.RatBound) (step : Nat)
+    (hb : Spec.GameBound (Spec.FinGame.mk hPos f2).winProb (wotsSlotLoss prim prim step))
+    (hImp : ∀ z, f1 z = true → f2 z = true) :
+    Spec.GameBound (Spec.FinGame.mk hPos f1).winProb (Spec.RatBound.scale (step + 1) prim) :=
+  Spec.GameBound.trans
+    (Spec.event_le_reduction_win (Spec.FinGame.mk hPos f1) (Spec.FinGame.mk hPos f2) hImp)
+    (Spec.RatBound.le_trans hb (wotsSlotLoss_scale prim step))
+
+private theorem wots_win_imp (suite : TweakableHashSuite) (s : Spec.Bytes)
+    (f : Spec.Bytes → Spec.Bytes) (l : UInt32) (t : UInt64) (k r step : Nat)
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (x0 tw0 y x1 tw1 : Spec.Bytes)
+    (hX : x0 = x1) (hTw : tw1 = tw0)
+    (hPt : suiteTweakHash suite s tw0 (wotsChainSteps suite s l t k r 0 step (f x0)) = y)
+    (win : decide (suiteTweakHash suite s tw1 (recov (puncturePrf x1 f) s y) = y) = true) :
+    wotsSlotTest suite l t k r 0 step tw0 recov (puncturePrf x0 f) s (f x0) = true := by
+  cases hX; cases hTw; cases hPt; exact win
+
+private theorem slot_wots_cUd_part {nSec : Nat} (suite : TweakableHashSuite) (p : PqHashParams)
+    (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (i : Fin p.numLayers) (pos : Fin (2^((p.numLayers-i.val)*p.subtreeHeight)))
+    (r : Fin p.ell1) (step : Fin (p.w-1))
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    {𝒜Ud : Spec.Code Spec.targetIface Bool → Prop}
+    (cUd : let l := UInt32.ofNat i; let t := UInt64.ofNat (pos.val / 2^p.subtreeHeight); let k := pos.val % 2^p.subtreeHeight
+      ∀ a b, a+1+b = step.val → ∀ c, 𝒜Ud (udDigestTest
+        (encodeChainFTweak ⟨l,t,.wotsHash, UInt32.ofNat k, UInt32.ofNat r, UInt32.ofNat a⟩)
+        (fun s => wotsSlotTest suite l t k r (a+1) b (SigningSlot.wots i pos r step).tweak recov
+          (puncturePrf (s ++ encodeAdrs (SigningSlot.wots i pos r step).pin.cell) (table c).2) s))) :
+    let l := UInt32.ofNat i; let t := treeOf p pos; let k := kpOf p pos
+    let addr : HashAdrs := ⟨l, t, .wotsPrf, UInt32.ofNat k, UInt32.ofNat r, 0⟩
+    let ha := fun a => HashAdrs.mk l t .wotsHash (UInt32.ofNat k) (UInt32.ofNat r) (UInt32.ofNat a)
+    ∀ a b, a+1+b = step.val → ∀ c, 𝒜Ud (udDigestTest (encodeChainFTweak (ha a))
+      (fun s => wotsSlotTest suite l t k r (a+1) b (encodeChainFTweak (ha step)) recov
+        (puncturePrf (s ++ encodeAdrs addr) (table c).2) s)) := by
+  intro l t k addr ha a b hab c
+  have hT : UInt64.ofNat (pos.val / 2^p.subtreeHeight) = t := rfl
+  have hK : pos.val % 2^p.subtreeHeight = k := rfl
+  have hCellW : (SigningSlot.wots i pos r step).pin.cell = addr := rfl
+  have hTw : (SigningSlot.wots i pos r step).tweak = encodeChainFTweak (ha step) := rfl
+  have h := cUd a b hab c
+  rwa [hT, hK, hCellW, hTw] at h
+
+private theorem wots_step_hb {nSeed nSec seedLen keyLen : Nat}
+    (hs : 0 < nSeed) (hc : 0 < nSec) (suite : TweakableHashSuite) (p : PqHashParams)
+    (seed : Fin nSeed → Spec.Bytes) (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) table)
+    (i : Fin p.numLayers) (pos : Fin (2^((p.numLayers-i.val)*p.subtreeHeight)))
+    (r : Fin p.ell1) (step : Fin (p.w-1))
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    {𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    {𝒜Ud : Spec.Code Spec.targetIface Bool → Prop}
+    {prim : Spec.RatBound}
+    (hpre : Spec.SmDtPreHard 𝒜Pre (suiteTweakHash suite) seedLen 32 1 prim)
+    (hud : SmDtUdHard 𝒜Ud (suiteTweakHash suite) seedLen 32 32 1 prim)
+    (cPre : ∀ c, 𝒜Pre (puncturedTablePreAdv (SigningSlot.wots i pos r step).pin.cell
+      (SigningSlot.wots i pos r step).tweak recov (table c).2))
+    (cUd : let l := UInt32.ofNat i; let t := UInt64.ofNat (pos.val / 2^p.subtreeHeight); let k := pos.val % 2^p.subtreeHeight
+      ∀ a b, a+1+b = step.val → ∀ c, 𝒜Ud (udDigestTest
+        (encodeChainFTweak ⟨l,t,.wotsHash, UInt32.ofNat k, UInt32.ofNat r, UInt32.ofNat a⟩)
+        (fun s => wotsSlotTest suite l t k r (a+1) b (SigningSlot.wots i pos r step).tweak recov
+          (puncturePrf (s ++ encodeAdrs (SigningSlot.wots i pos r step).pin.cell) (table c).2) s))) :
+    let l := UInt32.ofNat i; let t := treeOf p pos; let k := kpOf p pos
+    let addr : HashAdrs := ⟨l, t, .wotsPrf, UInt32.ofNat k, UInt32.ofNat r, 0⟩
+    let ha := fun a => HashAdrs.mk l t .wotsHash (UInt32.ofNat k) (UInt32.ofNat r) (UInt32.ofNat a)
+    Spec.GameBound
+      (puncturedDigestGame hs hc seed table addr
+        (wotsSlotTest suite l t k r 0 step (encodeChainFTweak (ha step)) recov)).winProb
+      (wotsSlotLoss prim prim step) := by
+  intro l t k addr ha
+  have hCellW : (SigningSlot.wots i pos r step).pin.cell = addr := rfl
+  have hTw : (SigningSlot.wots i pos r step).tweak = encodeChainFTweak (ha step) := rfl
+  have cPre1 : ∀ c, 𝒜Pre (puncturedTablePreAdv addr (encodeChainFTweak (ha step)) recov (table c).2) := by
+    intro c; have h := cPre c; rwa [hCellW, hTw] at h
+  exact hulsing_wots_slot_chain_bound hs hc suite seed hSeed table hSec l t k r step recov hpre hud cPre1
+    (slot_wots_cUd_part suite p table i pos r step recov cUd)
+
+private theorem wots_step_ev {nSeed nSec seedLen keyLen : Nat}
+    (hs : 0 < nSeed) (hc : 0 < nSec) (suite : TweakableHashSuite) (p : PqHashParams)
+    (seed : Fin nSeed → Spec.Bytes) (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) table)
+    (i : Fin p.numLayers) (pos : Fin (2^((p.numLayers-i.val)*p.subtreeHeight)))
+    (r : Fin p.ell1) (step : Fin (p.w-1))
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes) :
+    let sp := Spec.CoinSplit.prod nSeed nSec
+    let slot : SigningSlot p := .wots i pos r step
+    let l := UInt32.ofNat i; let t := treeOf p pos; let k := kpOf p pos
+    let addr : HashAdrs := ⟨l, t, .wotsPrf, UInt32.ofNat k, UInt32.ofNat r, 0⟩
+    let ha := fun a => HashAdrs.mk l t .wotsHash (UInt32.ofNat k) (UInt32.ofNat r) (UInt32.ofNat a)
+    ∀ z : Fin (nSeed * nSec),
+      (let s := seed (sp.chal z)
+       let f := (table (sp.advc z)).2
+       let y := slot.pin.digest suite s f
+       decide (suiteTweakHash suite s slot.tweak
+         (recov (puncturePrf (s ++ encodeAdrs slot.pin.cell) f) s y) = y)) = true →
+      (puncturedDigestGame hs hc seed table addr
+        (wotsSlotTest suite l t k r 0 step (encodeChainFTweak (ha step)) recov)).win z = true := by
+  intro sp slot l t k addr ha z win
+  rw [puncturedDigestGame_win_at]
+  let s := seed (sp.chal z)
+  let f := (table (sp.advc z)).2
+  have len : (f (s ++ encodeAdrs (wotsPrfCell l t k r))).length = 32 :=
+    (((Spec.PrfSampleOk_eq ..).mp (hSec.mem (sp.advc z))).2 _).1
+      (secretPrfSlot_input_length hSeed (sp.chal z) (wotsPrfCell l t k r))
+  exact wots_win_imp suite s f l t k r step recov
+    (s ++ encodeAdrs addr) (encodeChainFTweak (ha step)) (slot.pin.digest suite s f)
+    (s ++ encodeAdrs slot.pin.cell) slot.tweak
+    (congrArg (fun a => s ++ encodeAdrs a) (rfl : addr = slot.pin.cell))
+    rfl (wots_slot_pin_digest suite s f l t k r step len) win
+
+private theorem slot_wots_part {nSeed nSec seedLen keyLen : Nat}
+    (hs : 0 < nSeed) (hc : 0 < nSec) (suite : TweakableHashSuite) (p : PqHashParams)
+    (seed : Fin nSeed → Spec.Bytes) (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) table)
+    (i : Fin p.numLayers) (pos : Fin (2^((p.numLayers-i.val)*p.subtreeHeight)))
+    (r : Fin p.ell1) (step : Fin (p.w-1))
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    {𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    {𝒜Ud : Spec.Code Spec.targetIface Bool → Prop}
+    {prim : Spec.RatBound}
+    (hpre : Spec.SmDtPreHard 𝒜Pre (suiteTweakHash suite) seedLen 32 1 prim)
+    (hud : SmDtUdHard 𝒜Ud (suiteTweakHash suite) seedLen 32 32 1 prim)
+    (cPre : ∀ c, 𝒜Pre (puncturedTablePreAdv (SigningSlot.wots i pos r step).pin.cell
+      (SigningSlot.wots i pos r step).tweak recov (table c).2))
+    (cUd : let l := UInt32.ofNat i; let t := UInt64.ofNat (pos.val / 2^p.subtreeHeight); let k := pos.val % 2^p.subtreeHeight
+      ∀ a b, a+1+b = step.val → ∀ c, 𝒜Ud (udDigestTest
+        (encodeChainFTweak ⟨l,t,.wotsHash, UInt32.ofNat k, UInt32.ofNat r, UInt32.ofNat a⟩)
+        (fun s => wotsSlotTest suite l t k r (a+1) b (SigningSlot.wots i pos r step).tweak recov
+          (puncturePrf (s ++ encodeAdrs (SigningSlot.wots i pos r step).pin.cell) (table c).2) s))) :
+    let sp := Spec.CoinSplit.prod nSeed nSec
+    let slot : SigningSlot p := .wots i pos r step
+    Spec.GameBound (Spec.FinGame.mk (Nat.mul_pos hs hc) fun z =>
+      let s := seed (sp.chal z)
+      let f := (table (sp.advc z)).2
+      let y := slot.pin.digest suite s f
+      decide (suiteTweakHash suite s slot.tweak
+        (recov (puncturePrf (s ++ encodeAdrs slot.pin.cell) f) s y) = y)).winProb
+      (Spec.RatBound.scale slot.cost prim) :=
+  gameBound_of_imp_wots (Nat.mul_pos hs hc) _ _ prim step
+    (wots_step_hb hs hc suite p seed hSeed table hSec i pos r step recov hpre hud cPre cUd)
+    (wots_step_ev hs hc suite p seed hSeed table hSec i pos r step recov)
+
+private theorem slot_bound_of_recov {nSeed nSec seedLen keyLen : Nat}
+    (hs : 0 < nSeed) (hc : 0 < nSec) (suite : TweakableHashSuite) (p : PqHashParams)
+    (seed : Fin nSeed → Spec.Bytes) (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) table)
+    (slot : SigningSlot p)
+    (recov : (Spec.Bytes → Spec.Bytes) → Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    {𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    {𝒜Ud : Spec.Code Spec.targetIface Bool → Prop}
+    {prim : Spec.RatBound}
+    (hpre : Spec.SmDtPreHard 𝒜Pre (suiteTweakHash suite) seedLen 32 1 prim)
+    (hud : SmDtUdHard 𝒜Ud (suiteTweakHash suite) seedLen 32 32 1 prim)
+    (cPre : ∀ c, 𝒜Pre (puncturedTablePreAdv slot.pin.cell slot.tweak recov (table c).2))
+    (cUd : match slot with
+      | .fors .. => True
+      | .wots i pos r step =>
+        let l := UInt32.ofNat i
+        let t := UInt64.ofNat (pos.val / 2^p.subtreeHeight)
+        let k := pos.val % 2^p.subtreeHeight
+        ∀ a b, a+1+b = step.val → ∀ c, 𝒜Ud (udDigestTest
+          (encodeChainFTweak ⟨l,t,.wotsHash, UInt32.ofNat k, UInt32.ofNat r, UInt32.ofNat a⟩)
+          (fun s => wotsSlotTest suite l t k r (a+1) b slot.tweak recov
+            (puncturePrf (s ++ encodeAdrs slot.pin.cell) (table c).2) s))) :
+    let sp := Spec.CoinSplit.prod nSeed nSec
+    Spec.GameBound (Spec.FinGame.mk (Nat.mul_pos hs hc) fun z =>
+      let s := seed (sp.chal z)
+      let f := (table (sp.advc z)).2
+      let y := slot.pin.digest suite s f
+      decide (suiteTweakHash suite s slot.tweak
+        (recov (puncturePrf (s ++ encodeAdrs slot.pin.cell) f) s y) = y)).winProb
+      (Spec.RatBound.scale slot.cost prim) := by
+  intro sp
+  cases slot with
+  | fors leaf j u => exact slot_fors_part hs hc suite p seed hSeed table hSec leaf j u recov hpre cPre
+  | wots i pos r step => exact slot_wots_part hs hc suite p seed hSeed table hSec i pos r step recov hpre hud cPre cUd
+
+private theorem slot_bound {nSeed nSec seedLen keyLen qHash qSign : Nat}
+    (hs : 0 < nSeed) (hc : 0 < nSec) (latchOn : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (seed : Fin nSeed → Spec.Bytes) (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (table : Fin nSec → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) table)
+    (msg : Spec.Bytes → Spec.Bytes) (adv : SeedWithheldEufCmaAdv qHash qSign) (slot : SigningSlot p)
+    {𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop} {𝒜Ud : Spec.Code Spec.targetIface Bool → Prop}
+    {prim : Spec.RatBound}
+    (hpre : Spec.SmDtPreHard 𝒜Pre (suiteTweakHash suite) seedLen 32 1 prim)
+    (hud : SmDtUdHard 𝒜Ud (suiteTweakHash suite) seedLen 32 32 1 prim)
+    (classes : ∀ c, SlotReductionClass latchOn suite p msg (table c).2 adv slot 𝒜Pre 𝒜Ud) :
+    let sp := Spec.CoinSplit.prod nSeed nSec
+    Spec.GameBound (Spec.FinGame.mk (Nat.mul_pos hs hc) fun z => slotWin latchOn suite p msg adv slot
+      (seed (sp.chal z)) (table (sp.advc z)).2).winProb (Spec.RatBound.scale slot.cost prim) := by
+  intro sp
+  refine slot_bound_of_recov hs hc suite p seed hSeed table hSec slot
+    (slotRecover latchOn suite p msg adv slot) hpre hud (fun c => (classes c).1) ?_
+  cases slot with
+  | fors => exact trivial
+  | wots => exact fun a b ab c => (classes c).2 a b ab
+
+#verify_constructive position_lt pre_selects_slot add_scale_same wotsSlotLoss_scale slot_bound
+
+/-- Number of XMSS key pairs over all layers, including every tree and every leaf. -/
+@[expose] def hypertreeKeyPairs (subtreeHeight : Nat) : Nat → Nat
+  | 0 => 0
+  | d + 1 => 2 ^ ((d + 1) * subtreeHeight) + hypertreeKeyPairs subtreeHeight d
+
+/-- Count one PRE per FORS secret and per WOTS step. A step with index s also costs s
+    UD hops, giving w(w-1)/2 primitive calls per chain. -/
+@[expose] def globalPreUdCalls (p : PqHashParams) : Nat :=
+  let fors := if p.statefulJorts then 0 else 2 ^ (p.numLayers * p.subtreeHeight) * p.forsTrees * 2 ^ p.forsHeight
+  fors + hypertreeKeyPairs p.subtreeHeight p.numLayers * p.ell1 * (p.w * (p.w - 1) / 2)
+
+/-- Arithmetic envelope with a common primitive cap. Reserve two PRFs, one open-seed
+    collision extraction, and a second collision extraction for message prehashing.
+    Stateless signing also reserves one randomizer guess per signing query. -/
+@[expose] def globalSlotBudget (p : PqHashParams) (qSign : Nat) (cover prim : Spec.RatBound) : Spec.RatBound :=
+  let failed : Spec.RatBound := ⟨if p.statefulJorts then 0 else qSign, 2 ^ 256, by decide⟩
+  (cover.add failed).add (Spec.RatBound.scale (4 + globalPreUdCalls p) prim)
+
+private def enumFin {α : Type} (n : Nat) (f : Fin n → List α) := (List.ofFn f).flatten
+
+private theorem enumFin_mem {α : Type} {n : Nat} {f : Fin n → List α} (i : Fin n) {x : α} (h : x ∈ f i) :
+    x ∈ enumFin n f := List.mem_flatten.mpr ⟨_, List.mem_ofFn.mpr ⟨i,rfl⟩, h⟩
+
+private theorem enumFin_weight {α : Type} (cost : α → Nat) :
+    ∀ n (f : Fin n → List α), ((enumFin n f).map cost).sum =
+      Spec.sampleSum n (fun i => ((f i).map cost).sum) := by
+  intro n; induction n with
+  | zero => intro f; simp [enumFin, Spec.sampleSum_zero]
+  | succ n ih =>
+    intro f
+    rw [enumFin, List.ofFn_succ, List.flatten_cons, List.map_append, List.sum_append, Spec.sampleSum_succ]
+    rw [← ih]; rfl
+
+private def allSigningSlots (p : PqHashParams) : List (SigningSlot p) :=
+  (if p.statefulJorts then [] else enumFin _ fun l => enumFin _ fun j => enumFin _ fun u => [.fors l j u]) ++
+  enumFin _ fun i => enumFin _ fun pos => enumFin _ fun r => enumFin _ fun step => [.wots i pos r step]
+
+private theorem mem_allSigningSlots (p : PqHashParams) (slot : SigningSlot p)
+    (active : match slot with | .fors .. => p.statefulJorts = false | .wots .. => True) :
+    slot ∈ allSigningSlots p := by
+  unfold allSigningSlots
+  cases slot with
+  | fors l j u =>
+    apply List.mem_append_left
+    simp only [active, Bool.false_eq_true, ↓reduceIte]
+    exact enumFin_mem l (enumFin_mem j (enumFin_mem u (.head _)))
+  | wots i pos r step =>
+    exact List.mem_append_right _ (enumFin_mem i (enumFin_mem pos (enumFin_mem r (enumFin_mem step (.head _)))))
+
+private theorem layer_sum (h : Nat) : ∀ d, Spec.sampleSum d (fun i => 2^((d-i.val)*h)) = hypertreeKeyPairs h d := by
+  intro d; induction d with
+  | zero => rfl
+  | succ d ih =>
+    rw [Spec.sampleSum_succ, hypertreeKeyPairs]
+    simpa only [Nat.sub_zero, Nat.add_sub_add_right] using congrArg (2^((d+1)*h) + ·) ih
+
+private theorem step_sum : ∀ n, 2 * Spec.sampleSum n (fun i => i.val+1) = n*(n+1) := by
+  intro n; induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [Spec.sampleSum_succ]
+    change 2*(1+Spec.sampleSum n (fun i => (i.val+1)+1)) = _
+    rw [Spec.sampleSum_add_fn, Spec.sampleSum_const, Nat.mul_one, Nat.mul_add, Nat.mul_add, ih]
+    simp only [Nat.add_mul, Nat.mul_add, Nat.one_mul, Nat.mul_one]
+    omega
+
+private theorem allSlots_cost (p : PqHashParams) :
+    ((allSigningSlots p).map SigningSlot.cost).sum = globalPreUdCalls p := by
+  have steps : Spec.sampleSum (p.w-1) (fun i => i.val+1) = p.w*(p.w-1)/2 := by
+    have h := step_sum (p.w-1)
+    cases hw : p.w with
+    | zero => rfl
+    | succ n => rw [hw] at h; simp only [Nat.add_sub_cancel] at h ⊢; rw [Nat.mul_comm _ n]; omega
+  unfold allSigningSlots globalPreUdCalls
+  rw [List.map_append, List.sum_append]
+  by_cases st : p.statefulJorts = true <;>
+    simp only [st, Bool.false_eq_true, ↓reduceIte, List.map_nil, List.sum_nil, enumFin_weight, List.map_cons,
+      List.sum_cons, SigningSlot.cost, Nat.add_zero, Spec.sampleSum_const, Nat.mul_one, steps,
+      Spec.sampleSum_mul_right, layer_sum, Nat.mul_assoc]
+
+private theorem weighted_union {α : Type} {n : Nat} (pos : 0 < n) (w : α → Fin n → Bool)
+    (cost : α → Nat) (prim : Spec.RatBound) (slots : List α)
+    (bounds : ∀ a, Spec.GameBound (Spec.FinGame.mk pos (w a)).winProb (Spec.RatBound.scale (cost a) prim)) :
+    Spec.GameBound (Spec.FinGame.mk pos fun z => slots.any (fun a => w a z)).winProb
+      (Spec.RatBound.scale (slots.map cost).sum prim) := by
+  induction slots with
+  | nil =>
+    change Spec.sampleSum n (fun _ => 0) * _ ≤ 0 * _ * _
+    rw [Spec.sampleSum_const]; simp
+  | cons a rest ih =>
+    apply Spec.GameBound.trans (Spec.event_le_two_reductions _ _ _ (fun _ win => Bool.or_eq_true_iff.mp win))
+      (Spec.RatBound.le_trans (Spec.RatBound.add_le_add (bounds a) ih) (add_scale_same _ _ prim))
+
+private theorem fixed_pre_bound {ns nc seedLen keyLen qHash qSign : Nat} (hs : 0 < ns) (hc : 0 < nc)
+    (latchOn : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (wf : p.productionWellFormed = true) (trees : p.forsTrees ≤ 2^32)
+    (seed : Fin ns → Spec.Bytes) (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (table : Fin nc → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) table)
+    (msg : Spec.Bytes → Spec.Bytes) (adv : SeedWithheldEufCmaAdv qHash qSign)
+    {𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop} {𝒜Ud : Spec.Code Spec.targetIface Bool → Prop}
+    {prim : Spec.RatBound}
+    (hpre : Spec.SmDtPreHard 𝒜Pre (suiteTweakHash suite) seedLen 32 1 prim)
+    (hud : SmDtUdHard 𝒜Ud (suiteTweakHash suite) seedLen 32 32 1 prim)
+    (classes : ∀ slot c, SlotReductionClass latchOn suite p msg (table c).2 adv slot 𝒜Pre 𝒜Ud) :
+    let sp := Spec.CoinSplit.prod ns nc
+    Spec.GameBound (Spec.FinGame.mk (Nat.mul_pos hs hc) fun z =>
+      (idealPrfBreakEvents latchOn suite p (seed (sp.chal z)) msg (table (sp.advc z)).2 adv).2).winProb
+      (Spec.RatBound.scale (globalPreUdCalls p) prim) := by
+  intro sp
+  let w := fun slot (z : Fin (ns*nc)) => slotWin latchOn suite p msg adv slot (seed (sp.chal z)) (table (sp.advc z)).2
+  have bound := weighted_union (Nat.mul_pos hs hc) w SigningSlot.cost prim (allSigningSlots p)
+    (fun slot => slot_bound hs hc latchOn suite p seed hSeed table hSec msg adv slot hpre hud (classes slot))
+  rw [allSlots_cost] at bound
+  exact Spec.GameBound.trans
+    (Spec.event_le_reduction_win
+      (Spec.FinGame.mk (Nat.mul_pos hs hc) fun z =>
+        (idealPrfBreakEvents latchOn suite p (seed (sp.chal z)) msg (table (sp.advc z)).2 adv).2)
+      (Spec.FinGame.mk (Nat.mul_pos hs hc) fun z => (allSigningSlots p).any (fun a => w a z))
+      (fun z win => by
+        obtain ⟨slot, act, won⟩ := pre_selects_slot latchOn suite p wf trees _ msg _ adv win
+        exact List.any_eq_true.mpr ⟨slot, mem_allSigningSlots p slot act, won⟩))
+    bound
+
+#verify_constructive enumFin_mem enumFin_weight mem_allSigningSlots layer_sum step_sum allSlots_cost weighted_union fixed_pre_bound
+
+private theorem average_secret_seed {n nm nr nc nz ns na : Nat} (pos : 0 < n)
+    (a : Spec.CoinSplit n nm nr) (b : Spec.CoinSplit nr nc nz) (c : Spec.CoinSplit nz ns na)
+    (w : Fin nm → Fin nc → Fin ns → Fin na → Bool) (eps : Spec.RatBound)
+    (h : ∀ m j,
+      let sp := Spec.CoinSplit.prod ns nc
+      Spec.sampleSum (ns*nc) (fun z => if w m (sp.advc z) (sp.chal z) j then 1 else 0) * eps.den ≤ eps.num*(ns*nc)) :
+    Spec.GameBound (Spec.FinGame.mk pos fun z => w (a.chal z) (b.chal (a.advc z)) (c.chal (b.advc (a.advc z)))
+      (c.advc (b.advc (a.advc z)))).winProb eps := by
+  let sp := Spec.CoinSplit.prod ns nc
+  let t := fun m i s j => (if w m i s j then 1 else 0) * eps.den
+  have fixed (m j) : Spec.sampleSum nc (fun i => Spec.sampleSum ns (fun s => t m i s j)) ≤ eps.num*(ns*nc) := by
+    have h' := h m j
+    dsimp only at h'
+    rw [← Spec.sampleSum_mul_right, sp.sampleSum_eq] at h'
+    rw [Spec.sampleSum_comm]
+    simpa only [t, sp, Spec.CoinSplit.chal_pair, Spec.CoinSplit.advc_pair] using h'
+  have per (m : Fin nm) : Spec.sampleSum nr (fun r => t m (b.chal r) (c.chal (b.advc r)) (c.advc (b.advc r))) ≤
+      na*(eps.num*(ns*nc)) := by
+    rw [b.sampleSum_eq]
+    simp only [b.chal_pair,b.advc_pair,c.sampleSum_eq,c.chal_pair,c.advc_pair]
+    conv => lhs; arg 2; intro i; rw [Spec.sampleSum_comm ns na]
+    rw [Spec.sampleSum_comm nc na]
+    have h' := Spec.sampleSum_le na _ _ (fixed m)
+    rwa [Spec.sampleSum_const] at h'
+  change Spec.sampleSum n _ * eps.den ≤ eps.num*n
+  rw [← Spec.sampleSum_mul_right, a.sampleSum_eq]
+  simp only [a.chal_pair, a.advc_pair]
+  have bound := Spec.sampleSum_le nm _ _ per
+  rw [Spec.sampleSum_const] at bound
+  conv => rhs; rw [a.card_eq,b.card_eq,c.card_eq]
+  simpa only [t,Nat.mul_left_comm,Nat.mul_comm,Nat.mul_assoc] using bound
+
+theorem hulsing_idealPrf_pre_bound {n nm nr nc nz ns na qHash qSign keyLen seedLen : Nat}
+    (pos : 0 < n) (latchOn : Bool) (suite : TweakableHashSuite) (p : PqHashParams)
+    (wf : p.productionWellFormed = true) (trees : p.forsTrees ≤ 2^32)
+    (π₁ : Spec.CoinSplit n nm nr) (π₂ : Spec.CoinSplit nr nc nz) (π₃ : Spec.CoinSplit nz ns na)
+    (msg : Fin nm → Spec.Bytes → Spec.Bytes)
+    (sec : Fin nc → Spec.Bytes × (Spec.Bytes → Spec.Bytes)) (hc : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) sec)
+    (seed : Fin ns → Spec.Bytes) (hs : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (adv : Fin na → SeedWithheldEufCmaAdv qHash qSign)
+    {𝒜P : Spec.Code Spec.targetIface Spec.TargetBreak → Prop} {𝒜U : Spec.Code Spec.targetIface Bool → Prop}
+    {prim : Spec.RatBound} (classes : ∀ m c a slot, SlotReductionClass latchOn suite p (msg m) (sec c).2 (adv a) slot 𝒜P 𝒜U)
+    (hpre : Spec.SmDtPreHard 𝒜P (suiteTweakHash suite) seedLen 32 1 prim)
+    (hud : SmDtUdHard 𝒜U (suiteTweakHash suite) seedLen 32 32 1 prim) :
+    Spec.GameBound (Spec.FinGame.mk pos fun z => (idealPrfBreakEvents latchOn suite p
+      (seed (π₃.chal (π₂.advc (π₁.advc z)))) (msg (π₁.chal z))
+      (sec (π₂.chal (π₁.advc z))).2 (adv (π₃.advc (π₂.advc (π₁.advc z))))).2).winProb
+      (Spec.RatBound.scale (globalPreUdCalls p) prim) := by
+  let r := π₁.advc ⟨0,pos⟩
+  have sc := Nat.lt_of_le_of_lt (Nat.zero_le _) (π₂.chal r).isLt
+  have ss := Nat.lt_of_le_of_lt (Nat.zero_le _) (π₃.chal (π₂.advc r)).isLt
+  exact average_secret_seed pos π₁ π₂ π₃ (fun m c s a => (idealPrfBreakEvents latchOn suite p (seed s)
+    (msg m) (sec c).2 (adv a)).2) _ (fun m a => fixed_pre_bound ss sc latchOn suite p wf trees seed hs sec hc
+      (msg m) (adv a) hpre hud (fun slot c => classes m c a slot))
+
+#verify_constructive average_secret_seed hulsing_idealPrf_pre_bound
+
+/-- Independent finite coins for message PRF, secret PRF, public seed, and adaptive EUF adversary. -/
+structure SigningExperiment (qSign : Nat) where
+  n : Nat
+  nm : Nat
+  nr : Nat
+  nc : Nat
+  nz : Nat
+  ns : Nat
+  na : Nat
+  keyLen : Nat
+  seedLen : Nat
+  qHash : Nat
+  pos : 0 < n
+  a : Spec.CoinSplit n nm nr
+  b : Spec.CoinSplit nr nc nz
+  c : Spec.CoinSplit nz ns na
+  msg : Fin nm → Spec.Bytes × (Spec.Bytes → Spec.Bytes)
+  sec : Fin nc → Spec.Bytes × (Spec.Bytes → Spec.Bytes)
+  seed : Fin ns → Spec.Bytes
+  adv : Fin na → SeedWithheldEufCmaAdv qHash qSign
+  uniformMsg : Spec.UniformOn (Spec.PrfSampleOk keyLen 65 32) msg
+  uniformSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen+32) 32) sec
+  uniformSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed
+
+abbrev SigningExperiment.keygen {q : Nat} (E : SigningExperiment q) :=
+  multiHopFullKeygen E.a E.b E.c E.msg E.sec E.seed
+abbrev SigningExperiment.adversary {q : Nat} (E : SigningExperiment q) :=
+  multiHopFullAdv E.a E.b E.c E.adv
+
+/-- Membership is required only for the reductions executed by the proof. The ITSR
+    assumption is used only when a stateless signature can open FORS leaves. -/
+structure SigningPrimitiveBounds {q : Nat} (E : SigningExperiment q) (latch : Bool) (suite : TweakableHashSuite)
+    (p : PqHashParams) (cover prim : Spec.RatBound) where
+  word : p.w = 4 ∨ p.w = 16
+  oneTime : p.statefulJorts = true → latch = true
+  msgClass : Spec.Code Spec.byteOracleIface Bool → Prop
+  secClass : Spec.Code Spec.byteOracleIface Bool → Prop
+  tcrClass : Spec.Code Spec.targetIface Spec.TargetBreak → Prop
+  itsrClass : Spec.Code Spec.byteOracleIface (Spec.Bytes × Spec.Bytes) → Prop
+  preClass : Spec.Code Spec.targetIface Spec.TargetBreak → Prop
+  udClass : Spec.Code Spec.targetIface Bool → Prop
+  msgMember : ∀ r, msgClass (prfMsgHopDistinguisher latch suite p (E.seed (E.c.chal (E.b.advc r)))
+    (E.sec (E.b.chal r)).1 (E.adv (E.c.advc (E.b.advc r))))
+  secMember : ∀ m z, secClass (prfSecHopDistinguisher latch suite p (E.seed (E.c.chal z)) (E.msg m).2 (E.adv (E.c.advc z)))
+  tcrMember : ∀ m c a, tcrClass (openSeedTcrHopAdv latch suite p word (E.msg m).2 (E.sec c).2
+    (fun x hx => (((Spec.PrfSampleOk_eq ..).mp (E.uniformMsg.mem m)).2 x).1 hx) oneTime (E.adv a))
+  prehashMember : ∀ m c a, tcrClass (openSeedWitnessAdv suite (signingPrehashTcr latch suite p (E.msg m).2 (E.sec c).2 (E.adv a)))
+  itsrMember : ∀ s c a, itsrClass (memoItsrAdv latch suite p (E.seed s) (E.sec c).2 (E.adv a))
+  slotMember : ∀ m c a slot, SlotReductionClass latch suite p (E.msg m).2 (E.sec c).2 (E.adv a) slot preClass udClass
+  prfMsg : Spec.PrfHard msgClass (suitePrfMsg65 suite) E.keyLen 65 32 q prim
+  prfSec : Spec.PrfHard secClass (suitePrfSec E.seedLen suite) E.keyLen (E.seedLen+32) 32 (prfSecQueryBudget p q) prim
+  itsr : ¬ (p.statefulJorts = true ∨ p.forsTrees = 0) → ∀ s c, Spec.ItsrHard itsrClass
+    (forsGlobalSubsetSelector suite p (derivePublicKeyIdealPrf suite p (E.seed s) (E.sec c).2)) 32 q cover
+  tcr : SmDtOpenSeedTcrHard tcrClass (suiteTweakHash suite) E.seedLen 1 prim
+  pre : Spec.SmDtPreHard preClass (suiteTweakHash suite) E.seedLen 32 1 prim
+  ud : SmDtUdHard udClass (suiteTweakHash suite) E.seedLen 32 32 1 prim
+
+private theorem budget_collect (base prim : Spec.RatBound) (k : Nat) :
+    (((((base.add prim).add prim).add (Spec.RatBound.scale k prim)).add prim).add prim).le
+      (base.add (Spec.RatBound.scale (4+k) prim)) := by
+  unfold Spec.RatBound.add Spec.RatBound.scale Spec.RatBound.le
+  dsimp only
+  apply Nat.le_of_eq
+  have four (n : Nat) : 4*n = n+n+n+n := by omega
+  simp only [Nat.add_mul, four]
+  ac_rfl
+
+/-- Executable EUF-CMA reduction to five primitive notions, on the actual keygen and adaptive adversary. -/
+theorem hulsing_closed_multihop_euf_cma_bound {q : Nat} (E : SigningExperiment q) (latchOn : Bool)
+    (suite : TweakableHashSuite) (p : PqHashParams) (wf : p.productionWellFormed = true)
+    (trees : p.forsTrees ≤ 2^32) (cover prim : Spec.RatBound)
+    (H : SigningPrimitiveBounds E latchOn suite p cover prim) :
+    Spec.GameBound (execEufCmaGameWith latchOn E.pos suite p E.keygen E.adversary).winProb
+      (globalSlotBudget p q cover prim) := by
+  let events := fun z => idealPrfBreakEvents latchOn suite p (E.seed (E.c.chal (E.b.advc (E.a.advc z))))
+    (E.msg (E.a.chal z)).2 (E.sec (E.b.chal (E.a.advc z))).2 (E.adv (E.c.advc (E.b.advc (E.a.advc z))))
+  let base := cover.add (⟨if p.statefulJorts then 0 else q, 2^256, by decide⟩ : Spec.RatBound)
+  have hc := hulsing_idealPrf_cover_bound E.pos latchOn suite p E.a E.b E.c E.msg E.uniformMsg
+    (fun c => (E.sec c).2) E.seed E.uniformSeed E.adv H.itsrMember H.prehashMember H.itsr H.tcr (by decide)
+  have coverB : Spec.GameBound (Spec.FinGame.mk E.pos fun z => (events z).1).winProb (base.add prim) := by
+    apply Spec.GameBound.trans hc
+    split
+    · change 0 * _ ≤ _ * 1
+      simp
+    · rename_i h
+      have st : p.statefulJorts = false := Bool.eq_false_iff.mpr (fun yes => h (.inl yes))
+      simp only [base, st, Bool.false_eq_true, ↓reduceIte, Spec.RatBound.le_refl]
+  have preB := hulsing_idealPrf_pre_bound E.pos latchOn suite p wf trees E.a E.b E.c (fun m => (E.msg m).2)
+    E.sec E.uniformSec E.seed E.uniformSeed E.adv H.slotMember H.pre H.ud
+  exact Spec.GameBound.trans (hulsing_full_multihop_euf_cma_bound_with latchOn E.pos suite p H.oneTime H.word
+    E.seedLen E.keyLen q (prfSecQueryBudget p q) 1 (Nat.le_refl _) (Nat.le_refl _) (by decide)
+    E.a E.b E.c E.msg E.uniformMsg E.sec E.uniformSec E.seed E.uniformSeed E.adv H.msgMember
+    (fun _ => H.secMember _ _) (fun _ => H.tcrMember _ _ _) (fun z => (events z).1) (fun z => (events z).2)
+    (fun _ => idealPrfBreakEvents_fst_of _ _ _ _ _ _ _) (fun _ => idealPrfBreakEvents_snd_of _ _ _ _ _ _ _)
+    H.prfMsg H.prfSec coverB H.tcr preB) (budget_collect base prim _)
+
+#verify_constructive budget_collect hulsing_closed_multihop_euf_cma_bound
+
+/-- A zero-query adversary used to test joint reachability of the primitive hypotheses. -/
+def emptySigningForgery {qh : Nat} : SeedWithheldEufCmaAdv qh 0 :=
+  ⟨fun _ => .pure ([], ⟨[], 0, 0, [], []⟩), fun _ => trivial⟩
+
+private theorem empty_run {qh : Nat} (pk : PqPublicKey) :
+    (canonicalizeAdvOptRand (@emptySigningForgery qh)).run pk = .pure ([], ⟨[], 0, 0, [], []⟩) := by
+  rw [canonicalizeAdvOptRand_run, emptySigningForgery, canonicalizeTreeOptRand.public_eq_1]
+
+private theorem empty_verify (suite : TweakableHashSuite) (pk : PqPublicKey) :
+    verifyProductionPqHashSig suite baggyProdParams pk [] ⟨[],0,0,[],[]⟩ = false := by
+  rw [verifyProductionPqHashSig_eq]
+  split
+  · rfl
+  · have h : 0 ≠ baggyProdParams.numLayers := by
+      rw [baggyProdParams,baggy128fParams_eq]; decide
+    simp [h]
+
+private theorem empty_recover {qh : Nat} (suite : TweakableHashSuite) (p : PqHashParams) (msg : Spec.Bytes → Spec.Bytes)
+    (slot : SigningSlot p) (f : Spec.Bytes → Spec.Bytes) (s y : Spec.Bytes) :
+    slotRecover false suite p msg (@emptySigningForgery qh) slot f s y = [] := by
+  cases slot <;> simp only [slotRecover, empty_run, evalLatchedAdaptiveTree.public_eq_1, List.getD_nil]
+
+private theorem empty_prehash {qh : Nat} (suite : TweakableHashSuite) (p : PqHashParams) (msg f : Spec.Bytes → Spec.Bytes)
+    (s : Spec.Bytes) : signingPrehashTcr false suite p msg f (@emptySigningForgery qh) s = none := by
+  have transport : ∀ {a b : Spec.Bytes} (e : a = b), (e ▸ (none : Option (ExplicitTcrWitness suite a)) :
+      Option (ExplicitTcrWitness suite b)) = none := by intro a b e; cases e; rfl
+  simp only [signingPrehashTcr, idealSigningObservation, empty_run, evalLatchedAdaptiveTree.public_eq_1,
+    signLogFromOracle.public_eq_1, logPrehashCollision, transport]
+
+/-- Test suite distinguishing an empty chain input from a full-width input. The strict witness
+    uses only the reduction programs induced by the empty forgery. -/
+def signingWitnessSuite : TweakableHashSuite where
+  suiteId := []
+  rawHash raw := List.replicate 32 (if ((decodeMultiFrameBytes raw).getD []).getD 3 [] = [] then 0 else 1)
+  rawHash_len _ := List.length_replicate
+
+private theorem witness_chain_separates (s : Spec.Bytes) (a : HashAdrs) {v : Spec.Bytes} (len : v.length = 32) :
+    thChainF signingWitnessSuite s a [] ≠ thChainF signingWitnessSuite s a v := by
+  have ne : v ≠ [] := by intro e; simp [e] at len
+  simp only [thChainF_eq, thCall_eq, signingWitnessSuite, thPreimage_eq, List.cons_append, List.nil_append,
+    decodeMultiFrameBytes_encodeMultiFrame, Option.getD_some, List.getD_cons_succ, List.getD_cons_zero,
+    ↓reduceIte, ne]
+  decide
+
+private theorem chain_steps_length (suite : TweakableHashSuite) (s : Spec.Bytes) (l : UInt32) (t : UInt64) (kp r : Nat) :
+    ∀ n i v, v.length = 32 → (wotsChainSteps suite s l t kp r i n v).length = 32 := by
+  intro n; induction n with
+  | zero => intro i v h; rwa [wotsChainSteps_zero]
+  | succ n ih =>
+    intro i v _
+    rw [wotsChainSteps_succ]
+    apply ih
+    rw [thChainF_eq]; exact thCall_length ..
+
+private theorem zero_le_loss (eps : Spec.RatBound) : Spec.RatBound.zero.le eps := by
+  unfold Spec.RatBound.le Spec.RatBound.zero; simp
+
+private theorem dist_zero_of_equal {n : Nat} (A B : Spec.FinGame n) (eps : Spec.RatBound) (h : ∀ z, A.win z = B.win z) :
+    Spec.GameBound (Spec.AdvDist A B) eps := by
+  rw [Spec.FinGame.ext_win h]
+  exact Spec.GameBound.trans (Spec.adv_refl _) (zero_le_loss eps)
+
+private def rejectingPrf (D : Spec.Code Spec.byteOracleIface Bool) : Prop :=
+  ∀ f q, (Spec.Code.play (Spec.budgetedFunOracle f q) D 0).1 = false
+
+private theorem rejectingPrf_hard (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes) (k l width q : Nat) (eps : Spec.RatBound) :
+    Spec.PrfHard rejectingPrf prf k l width q eps := by
+  intro n nc na pos sp sample _ adv h
+  apply dist_zero_of_equal
+  intro z
+  rw [Spec.prfRealGame.public_eqs, Spec.prfIdealGame.public_eqs]
+  exact (h (sp.advc z) _ _).trans (h (sp.advc z) _ _).symm
+
+private theorem empty_msg_rejects {qh : Nat} (suite : TweakableHashSuite) (s key : Spec.Bytes) :
+    rejectingPrf (prfMsgHopDistinguisher false suite baggyProdParams s key (@emptySigningForgery qh)) := by
+  intro f q
+  simp only [prfMsgHopDistinguisher.public_eqs, empty_run, prfMsgHopTree_pure, empty_verify, Bool.false_and, Spec.Code.play_ret]
+
+private theorem empty_sec_rejects {qh : Nat} (suite : TweakableHashSuite) (s : Spec.Bytes) (msg : Spec.Bytes → Spec.Bytes) :
+    rejectingPrf (prfSecHopDistinguisher false suite baggyProdParams s msg (@emptySigningForgery qh)) := by
+  intro f q
+  simp only [prfSecHopDistinguisher.public_eqs, code_play_bind, empty_run, prfSecHopTree_pure, empty_verify,
+    Bool.false_and, Spec.Code.play_ret]
+
+private def emptyTcrProgram : Spec.Code Spec.targetIface Spec.TargetBreak := .call .reveal fun _ => .ret ⟨[],[],[]⟩
+
+private theorem empty_tcr {qh : Nat} (suite : TweakableHashSuite) (msg f : Spec.Bytes → Spec.Bytes)
+    (hw : baggyProdParams.w = 4 ∨ baggyProdParams.w = 16) (hr : ∀ x, x.length = 65 → (msg x).length = 32)
+    (st : baggyProdParams.statefulJorts = true → false = true) :
+    openSeedTcrHopAdv false suite baggyProdParams hw msg f hr st (@emptySigningForgery qh) = emptyTcrProgram := by
+  unfold openSeedTcrHopAdv emptyTcrProgram
+  congr 1
+  funext seed
+  dsimp only
+  rw [extractIdealPrfTcrWitnessOpt_lost]
+  simp only [ExecEufCmaIdealPrfGame_win, empty_run, evalLatchedAdaptiveTree.public_eq_1, empty_verify, Bool.false_and]
+
+private theorem empty_tcr_hard (th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes) (seedLen : Nat) (eps : Spec.RatBound) :
+    SmDtOpenSeedTcrHard (· = emptyTcrProgram) th seedLen 1 eps := by
+  intro n nc na pos sp seed _ adv h
+  apply Spec.GameBound.trans (Spec.FinGame.bound_zero_of_forall_lose _ _) (zero_le_loss eps)
+  intro z
+  simp only [smDtOpenSeedTcrGame.public_eqs, h, emptyTcrProgram, Spec.Code.play_call,
+    smDtOpenSeedTcrOracle_reveal, Spec.Code.play_ret, Spec.smDtTcrWin_eq]
+  rfl
+
+private theorem empty_itsr_hard (suite : TweakableHashSuite) (pk : PqPublicKey) (eps : Spec.RatBound) :
+    Spec.ItsrHard (fun _ => True) (forsGlobalSubsetSelector suite baggyProdParams pk) 32 0 eps := by
+  intro n nc na pos sp rand _ adv _
+  apply Spec.GameBound.trans (Spec.FinGame.bound_zero_of_forall_lose _ _) (zero_le_loss eps)
+  intro z
+  apply Bool.eq_false_iff.mpr
+  intro win
+  let tape := fun (w : Fin n) i => (rand (sp.chal w)).getD i []
+  let A := fun w => adv (sp.advc w)
+  let run := Spec.itsrRun 0 tape A z
+  let leaves := forsGlobalSubsetSelector suite baggyProdParams pk run.1.1 run.1.2
+  have len : leaves.length = baggyProdParams.forsTrees := forsGlobalSubsetSelector_length _ _ _ _ _
+    baggy128f_productionWellFormed (by rw [baggyProdParams, baggy128fParams_eq])
+  have nonzero : 0 < leaves.length := by rw [len, baggyProdParams, baggy128fParams_eq]; decide
+  obtain ⟨_,inLog,_⟩ := (Spec.itsrGame_win_sound pos _ 0 tape A z win).2 _ (List.getElem_mem (l := leaves) nonzero)
+  have zero : run.2.length ≤ 0 := Spec.itsrRun_log_length_le 0 tape A z
+  have nil : run.2 = [] := List.length_eq_zero_iff.mp (Nat.eq_zero_of_le_zero zero)
+  change _ ∈ run.2 at inLog
+  rw [nil] at inLog; contradiction
+
+#verify_constructive empty_run empty_verify empty_recover empty_prehash witness_chain_separates chain_steps_length
+  zero_le_loss dist_zero_of_equal rejectingPrf_hard empty_msg_rejects empty_sec_rejects empty_tcr empty_tcr_hard empty_itsr_hard
+
+private def rejectingPre (D : Spec.Code Spec.targetIface Spec.TargetBreak) : Prop :=
+  let th := suiteTweakHash signingWitnessSuite
+  ∀ s hidden, (hidden 0 : Spec.Bytes).length = 32 →
+    let run := Spec.Code.play (Spec.smDtPreOracle th 1 hidden) D ⟨s, [], false⟩
+    Spec.smDtPreWin th run.2 run.1 = false
+
+private theorem singleton_head_length {xs : List Spec.Bytes} (hl : xs.length = 1)
+    (hv : ∀ v ∈ xs, v.length = 32) : (xs.getD 0 []).length = 32 := by
+  cases xs with
+  | nil => contradiction
+  | cons x tail => exact hv x (.head _)
+
+private theorem rejectingPre_hard (seedLen : Nat) (eps : Spec.RatBound) :
+    Spec.SmDtPreHard rejectingPre (suiteTweakHash signingWitnessSuite) seedLen 32 1 eps := by
+  intro n nc na pos sp sample hu adv adm
+  apply Spec.GameBound.trans (Spec.FinGame.bound_zero_of_forall_lose _ _) (zero_le_loss eps)
+  intro z
+  have ok := (Spec.SmDtPreSampleOk_eq ..).mp (hu.mem (sp.chal z))
+  simp only [Spec.smDtPreGame.public_eqs, Spec.smDtPreRun.public_eqs]
+  exact adm (sp.advc z) _ _ (singleton_head_length ok.2.1 ok.2.2)
+
+private def rejectingUd (D : Spec.Code Spec.targetIface Bool) : Prop :=
+  ∃ addr test, D = udDigestTest (encodeChainFTweak addr) test ∧
+    ∀ (s y : Spec.Bytes), y.length = 32 → test s y = false
+
+private theorem rejectingUd_hard (seedLen : Nat) (eps : Spec.RatBound) :
+    SmDtUdHard rejectingUd (suiteTweakHash signingWitnessSuite) seedLen 32 32 1 eps := by
+  intro n nc na pos sp sample hu adv adm
+  apply dist_zero_of_equal
+  intro z
+  obtain ⟨addr,test,eq,no⟩ := adm (sp.advc z)
+  have ok := (SmDtUdSampleOk.public_eqs ..).mp (hu.mem (sp.chal z))
+  let s := (sample (sp.chal z)).1
+  let hidden := fun i => (sample (sp.chal z)).2.1.getD i []
+  let digest := fun i => (sample (sp.chal z)).2.2.getD i []
+  simp only [smDtUdRealGame.public_eqs, smDtUdIdealGame.public_eqs, eq]
+  have R := udDigestTest_real_win Nat.one_pos (suiteTweakHash signingWitnessSuite) (fun _ => s)
+    (fun _ => hidden) (encodeChainFTweak addr) (fun _ => test) ⟨0,Nat.one_pos⟩
+  have I := udDigestTest_ideal_win Nat.one_pos (fun _ => s) (fun _ => digest)
+    (encodeChainFTweak addr) (fun _ => test) ⟨0,Nat.one_pos⟩
+  simp only [smDtUdRealGame.public_eqs] at R
+  simp only [smDtUdIdealGame.public_eqs] at I
+  change (Spec.Code.play (Spec.smDtPreOracle _ 1 hidden) _ ⟨s,[],false⟩).1 =
+    (Spec.Code.play (smDtUdIdealOracle 1 digest) _ ⟨s,[],false⟩).1
+  rw [R, I, suiteTweakHash_chainF, no, no]
+  · exact singleton_head_length ok.2.2.1 ok.2.2.2
+  · rw [thChainF_eq]; exact thCall_length ..
+
+private theorem slot_tweak_address {p : PqHashParams} (slot : SigningSlot p) :
+    ∃ addr, slot.tweak = encodeChainFTweak addr := by cases slot <;> exact ⟨_,rfl⟩
+
+private theorem empty_slot_member {qh : Nat} (p : PqHashParams) (msg f : Spec.Bytes → Spec.Bytes) (slot : SigningSlot p) :
+    SlotReductionClass false signingWitnessSuite p msg f (@emptySigningForgery qh) slot rejectingPre rejectingUd := by
+  let suite := signingWitnessSuite
+  constructor
+  · intro s hidden len
+    dsimp only
+    rw [puncturedTablePreAdv_win, empty_recover]
+    obtain ⟨a,ha⟩ := slot_tweak_address slot
+    rw [ha, suiteTweakHash_chainF, suiteTweakHash_chainF]
+    exact decide_eq_false (witness_chain_separates s a len)
+  · cases slot with
+    | fors => trivial
+    | wots i pos r step =>
+      intro a b _
+      refine ⟨_, _, rfl, ?_⟩
+      intro s y len
+      simp only [wotsSlotTest, empty_recover, SigningSlot.tweak, suiteTweakHash_chainF]
+      apply decide_eq_false
+      exact witness_chain_separates s _ (chain_steps_length suite s _ _ _ _ b _ y len)
+
+/-- Joint fixture for strict game bounds. The adversary submits a malformed signature and the
+    primitive classes contain its actual induced reductions. No cryptographic hardness of the
+    fixture hash against unrestricted adversaries is required. -/
+def emptyForgeryBaggyPrimitiveBounds (E : SigningExperiment 0) (advEq : ∀ a, E.adv a = emptySigningForgery)
+    (cover prim : Spec.RatBound) : SigningPrimitiveBounds E false signingWitnessSuite baggyProdParams cover prim where
+  word := .inl (by rw [baggyProdParams, baggy128fParams_eq])
+  oneTime := by rw [baggyProdParams, baggy128fParams_eq]; decide
+  msgClass := rejectingPrf
+  secClass := rejectingPrf
+  itsrClass := fun _ => True
+  tcrClass := (· = emptyTcrProgram)
+  preClass := rejectingPre
+  udClass := rejectingUd
+  msgMember := fun r => by rw [advEq]; apply empty_msg_rejects
+  secMember := fun m z => by rw [advEq]; apply empty_sec_rejects
+  itsrMember := fun _ _ _ => trivial
+  tcrMember := fun m c a => by rw [advEq]; apply empty_tcr
+  prehashMember := fun m c a => by simp only [advEq, openSeedWitnessAdv.public_eqs, empty_prehash, emptyTcrProgram]
+  slotMember := fun m c a slot => by rw [advEq]; apply empty_slot_member
+  prfMsg := rejectingPrf_hard _ _ _ _ _ prim
+  prfSec := rejectingPrf_hard _ _ _ _ _ prim
+  tcr := empty_tcr_hard _ _ prim
+  itsr := fun _ _ _ => empty_itsr_hard _ _ _
+  pre := rejectingPre_hard _ prim
+  ud := rejectingUd_hard _ prim
+
+#verify_constructive singleton_head_length rejectingPre_hard rejectingUd_hard slot_tweak_address empty_slot_member
+
+#verify_constructive overlay_inputs ideal_material_core ideal_material_signQuery
+
+#verify_constructive ideal_material_publicKey pinned_wotsPk pinned_xmssRoot pinned_forsRoot
+  signingPosition_next prodGrind_overlay ideal_layers
+
+#verify_constructive off_cell pinned_fors_secret forsLeaf_same_cell pinned_fors_leaf pinned_wots_node
+  ideal_material_wotsPk ideal_material_xmssRoot ideal_material_forsRoot ideal_material_openings
+
+
+end Qsag
+end

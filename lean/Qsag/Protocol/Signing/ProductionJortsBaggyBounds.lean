@@ -1,25 +1,15 @@
 module
 /-
-# Qsag.Protocol.Signing.ProductionJortsBaggyBounds — Concrete `< 2^{-128}` Classical & Post-Quantum `QROM` Multi-Hop EUF-CMA Bounds for `Jorts`, `Baggy`, `Corduroy` & `SLH-DSA`
+# Production signing reductions and numerical budgets
 
-Instantiates `ProductionParamRefinement` across all canonical QSAG and NIST FIPS 205 Category-1
-profiles with machine-checked `< 2^{-128}` (`⟨1, 2 ^ 128, by decide⟩`) classical (`qEval ≤ 2^96`)
-and post-quantum `QROM` / Grover (`qEval ≤ 2^48`) security bounds:
-
-1. **Stateful `Jorts` (`jortsProdParams`):**
-   * `jortsProd_classical_euf_cma_lt_2_neg_128`, `jortsProd_pq_qrom_euf_cma_lt_2_neg_128`,
-     and `jortsProd_pq_qrom_budget_lt_2_neg_128`.
-2. **Stateless `Baggy` (`PorsFpSecurity.BaggySha3_128f` & `baggyProdParams`) and `Corduroy` (`corduroyProdParams`):**
-   * `baggySha3_128f_pors_itsr_lt_2_neg_131`, `baggySha3_128f_classical_euf_cma_lt_2_neg_128`,
-     `baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128`, `corduroyProd_concrete_euf_cma_bound`,
-     and `baggyProd_concrete_euf_cma_bound`.
-3. **NIST FIPS 205 `SLH-DSA-SHAKE-128s` & `128f`:**
-   * `one_sub_pow_mul_truncBinom_le`, `fips205_interleaved_itsr_128s_128f_bounds`,
-     `fips205_slhDsa128s_concrete_security_lt_2_neg_128`, and
-     `fips205_slhDsa128f_concrete_security_lt_2_neg_128`.
+The QSAG reductions evaluate the real signing game. Their right-hand sides include
+the primitive costs of the PRF, ITSR, open-seed TCR, PRE, and UD reductions.
+The global slot count charges one PRE per slot and one UD per preceding WOTS step. The PORS+FP subset count and FIPS 205 arithmetic use their
+respective parameter models.
 -/
 
-public import Qsag.Protocol.Signing.ProductionParamRefinement
+public import Qsag.Protocol.Signing.HulsingClosedMultiHop
+public import Qsag.Protocol.Threshold.MultiSessionMacBlindHybrid
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -31,7 +21,7 @@ set_option autoImplicit false
 set_option exponentiation.threshold 512
 set_option maxRecDepth 4096
 
-/-! ## §1. Concrete `< 2^{-128}` EUF-CMA Theorems for `Jorts`, `Baggy`, and `Corduroy` -/
+/-! ## QSAG profile reductions and budget arithmetic -/
 
 /-- Exact multi-hop rational security budget for `PqHashParams` profiles. -/
 @[expose] def pqMultiHopBudget (params : PqHashParams) (qSign : Nat)
@@ -58,122 +48,6 @@ theorem pqMultiHopBudget_mono (params : PqHashParams) {q₁ q₂ : Nat} (hq : q�
     (Spec.RatBound.add_le_add
       (Spec.RatBound.add_le_add (Spec.RatBound.add_le_add hi hTcrScale)
         (Spec.RatBound.scale_le_scale _ hp)) hs) hm
-
-/-- **`jortsProdParams` Classical (`256`-Bit, `qSign ≤ 2^16`, `qEval ≤ 2^96`) Multi-Hop EUF-CMA
-    `< 2^{-128}` Bound (`jortsProd_classical_euf_cma_lt_2_neg_128`).** -/
-theorem jortsProd_classical_euf_cma_lt_2_neg_128 {n nC1 nRest nC2 nA qHash qSign qEval : Nat}
-    (hPos : 0 < n) (suite : TweakableHashSuite) (hqSign : qSign ≤ 2 ^ 16) (hqEval : qEval ≤ 2 ^ 96)
-    (seedLen keyLen qPrfMsg qPrfSec : Nat) (hSeedPos : 0 < seedLen) (hqPrfMsg : qSign ≤ qPrfMsg)
-    (hqPrfSec : prfSecQueryBudget jortsProdParams qSign ≤ qPrfSec)
-    (π1 : Spec.CoinSplit n nC1 nRest) (π2 : Spec.CoinSplit nRest nC2 nA)
-    (sampleMsg : Fin nC1 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
-    (hSampleMsg : Spec.UniformOn (Spec.PrfSampleOk keyLen 65 32) sampleMsg)
-    (sampleSec : Fin nC2 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
-    (hSampleSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen + 32) 32) sampleSec)
-    (pkSeedA : Fin nA → List UInt8) (hSeedLen : ∀ a, (pkSeedA a).length = seedLen)
-    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
-    {𝒜Msg 𝒜Sec : Spec.Code Spec.byteOracleIface Bool → Prop}
-    (hClassMsg : ∀ r : Fin nRest, 𝒜Msg (prfMsgHopDistinguisher true suite jortsProdParams
-      (pkSeedA (π2.advc r)) (sampleSec (π2.chal r)).1 (adv (π2.advc r))))
-    (hClassSec : ∀ b : Fin (nC1 * nA),
-      let sp := Spec.CoinSplit.prod nC1 nA
-      𝒜Sec (prfSecHopDistinguisher true suite jortsProdParams (pkSeedA (sp.advc b))
-        (sampleMsg (sp.chal b)).2 (adv (sp.advc b))))
-    {εPrfMsg εPrfSec εTcr εPre : Spec.RatBound}
-    (hPrfMsg : Spec.PrfHard 𝒜Msg (suitePrfMsg65 suite) keyLen 65 32 qPrfMsg εPrfMsg)
-    (hPrfSec : Spec.PrfHard 𝒜Sec (suitePrfSec seedLen suite) keyLen (seedLen + 32) 32 qPrfSec εPrfSec)
-    (hTcrB : ∀ slot : Fin (prodPathTargetCount jortsProdParams qSign), Spec.GameBound
-      (idealSlotTcrGame hPos suite jortsProdParams
-        (.inl (by rw [jortsProdParams, jortsPoseidon2Params_eq]))
-        π1 π2 sampleMsg sampleSec pkSeedA adv slot.val).winProb εTcr)
-    (hPreB : ∀ slot : Fin (prodPreCandidateBudget jortsProdParams), Spec.GameBound
-      (idealSlotPreGame hPos suite jortsProdParams π1 π2 sampleMsg sampleSec pkSeedA adv slot.val).winProb εPre)
-    (hEpsMsg : εPrfMsg.le (classical256PrimEps qEval)) (hEpsSec : εPrfSec.le (classical256PrimEps qEval))
-    (hEpsTcr : εTcr.le (classical256PrimEps qEval)) (hEpsPre : εPre.le (classical256PrimEps qEval)) :
-    (jortsMultiHopBudget qSign εPrfMsg εPrfSec εTcr εPre).lt ⟨1, 2 ^ 128, by decide⟩ ∧
-    Spec.GameBound (ExecEufCmaGame hPos suite jortsProdParams
-      (multiHopKeygen π1 π2 sampleMsg sampleSec pkSeedA) (multiHopAdv π1 π2 adv)).winProb
-      ⟨1, 2 ^ 128, by decide⟩ := by
-  have hwJ : jortsProdParams.w = 4 ∨ jortsProdParams.w = 16 :=
-    .inl (by rw [jortsProdParams, jortsPoseidon2Params_eq])
-  have hItsrZero : Spec.GameBound
-      (idealSlotItsrGame hPos suite jortsProdParams hwJ π1 π2 sampleMsg sampleSec pkSeedA adv).winProb
-      Spec.RatBound.zero :=
-    Spec.FinGame.bound_zero_of_forall_lose _ (fun _ => idealPrfItsrWin_of_forsTrees_zero suite
-      jortsProdParams hwJ (by rw [jortsProdParams, jortsPoseidon2Params_eq]) _ _ _ _)
-  have hGame := hulsing_multiHop_idealSlot_euf_cma_bound hPos suite jortsProdParams hwJ
-    seedLen keyLen qPrfMsg qPrfSec hSeedPos hqPrfMsg hqPrfSec π1 π2 sampleMsg hSampleMsg
-    sampleSec hSampleSec pkSeedA hSeedLen adv hClassMsg hClassSec hPrfMsg hPrfSec hItsrZero hTcrB hPreB
-  have hPrim := classical256PrimEps_mono hqEval
-  have hMono := pqMultiHopBudget_mono jortsProdParams hqSign
-    (Spec.RatBound.le_refl Spec.RatBound.zero)
-    (Spec.RatBound.le_trans hEpsTcr hPrim) (Spec.RatBound.le_trans hEpsPre hPrim)
-    (Spec.RatBound.le_trans hEpsSec hPrim) (Spec.RatBound.le_trans hEpsMsg hPrim)
-  have hTopLt : (jortsMultiHopBudget (2 ^ 16) (classical256PrimEps (2 ^ 96))
-      (classical256PrimEps (2 ^ 96)) (classical256PrimEps (2 ^ 96))
-      (classical256PrimEps (2 ^ 96))).lt ⟨1, 2 ^ 128, by decide⟩ := by
-    unfold jortsMultiHopBudget pqMultiHopBudget
-    rw [jortsProdParams_accounting.2.2.2.1, jortsProdParams_accounting.2.2.2.2.1]; decide +kernel
-  have hLt := Spec.RatBound.lt_of_le_of_lt hMono hTopLt
-  exact ⟨hLt, Spec.RatBound.le_trans hGame (Spec.RatBound.le_of_lt hLt)⟩
-
-/-- **`jortsProdParams` Post-Quantum `QROM` (`qSign ≤ 2^16`, Grover `qEval ≤ 2^48`) Multi-Hop
-    EUF-CMA `< 2^{-128}` Bound (`jortsProd_pq_qrom_euf_cma_lt_2_neg_128`).** -/
-theorem jortsProd_pq_qrom_euf_cma_lt_2_neg_128 {n nC1 nRest nC2 nA qHash qSign qEval : Nat}
-    (hPos : 0 < n) (suite : TweakableHashSuite) (hqSign : qSign ≤ 2 ^ 16) (hqEval : qEval ≤ 2 ^ 48)
-    (seedLen keyLen qPrfMsg qPrfSec : Nat) (hSeedPos : 0 < seedLen) (hqPrfMsg : qSign ≤ qPrfMsg)
-    (hqPrfSec : prfSecQueryBudget jortsProdParams qSign ≤ qPrfSec)
-    (π1 : Spec.CoinSplit n nC1 nRest) (π2 : Spec.CoinSplit nRest nC2 nA)
-    (sampleMsg : Fin nC1 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
-    (hSampleMsg : Spec.UniformOn (Spec.PrfSampleOk keyLen 65 32) sampleMsg)
-    (sampleSec : Fin nC2 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
-    (hSampleSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen + 32) 32) sampleSec)
-    (pkSeedA : Fin nA → List UInt8) (hSeedLen : ∀ a, (pkSeedA a).length = seedLen)
-    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
-    {𝒜Msg 𝒜Sec : Spec.Code Spec.byteOracleIface Bool → Prop}
-    (hClassMsg : ∀ r : Fin nRest, 𝒜Msg (prfMsgHopDistinguisher true suite jortsProdParams
-      (pkSeedA (π2.advc r)) (sampleSec (π2.chal r)).1 (adv (π2.advc r))))
-    (hClassSec : ∀ b : Fin (nC1 * nA),
-      let sp := Spec.CoinSplit.prod nC1 nA
-      𝒜Sec (prfSecHopDistinguisher true suite jortsProdParams (pkSeedA (sp.advc b))
-        (sampleMsg (sp.chal b)).2 (adv (sp.advc b))))
-    {εPrfMsg εPrfSec εTcr εPre : Spec.RatBound}
-    (hPrfMsg : Spec.PrfHard 𝒜Msg (suitePrfMsg65 suite) keyLen 65 32 qPrfMsg εPrfMsg)
-    (hPrfSec : Spec.PrfHard 𝒜Sec (suitePrfSec seedLen suite) keyLen (seedLen + 32) 32 qPrfSec εPrfSec)
-    (hTcrB : ∀ slot : Fin (prodPathTargetCount jortsProdParams qSign), Spec.GameBound
-      (idealSlotTcrGame hPos suite jortsProdParams
-        (.inl (by rw [jortsProdParams, jortsPoseidon2Params_eq]))
-        π1 π2 sampleMsg sampleSec pkSeedA adv slot.val).winProb εTcr)
-    (hPreB : ∀ slot : Fin (prodPreCandidateBudget jortsProdParams), Spec.GameBound
-      (idealSlotPreGame hPos suite jortsProdParams π1 π2 sampleMsg sampleSec pkSeedA adv slot.val).winProb εPre)
-    (hEpsMsg : εPrfMsg.le (pqQrom256PrimEps qEval)) (hEpsSec : εPrfSec.le (pqQrom256PrimEps qEval))
-    (hEpsTcr : εTcr.le (pqQrom256PrimEps qEval)) (hEpsPre : εPre.le (pqQrom256PrimEps qEval)) :
-    (jortsMultiHopBudget qSign εPrfMsg εPrfSec εTcr εPre).lt ⟨1, 2 ^ 128, by decide⟩ ∧
-    Spec.GameBound (ExecEufCmaGame hPos suite jortsProdParams
-      (multiHopKeygen π1 π2 sampleMsg sampleSec pkSeedA) (multiHopAdv π1 π2 adv)).winProb
-      ⟨1, 2 ^ 128, by decide⟩ := by
-  have hwJ : jortsProdParams.w = 4 ∨ jortsProdParams.w = 16 :=
-    .inl (by rw [jortsProdParams, jortsPoseidon2Params_eq])
-  have hItsrZero : Spec.GameBound
-      (idealSlotItsrGame hPos suite jortsProdParams hwJ π1 π2 sampleMsg sampleSec pkSeedA adv).winProb
-      Spec.RatBound.zero :=
-    Spec.FinGame.bound_zero_of_forall_lose _ (fun _ => idealPrfItsrWin_of_forsTrees_zero suite
-      jortsProdParams hwJ (by rw [jortsProdParams, jortsPoseidon2Params_eq]) _ _ _ _)
-  have hGame := hulsing_multiHop_idealSlot_euf_cma_bound hPos suite jortsProdParams hwJ
-    seedLen keyLen qPrfMsg qPrfSec hSeedPos hqPrfMsg hqPrfSec π1 π2 sampleMsg hSampleMsg
-    sampleSec hSampleSec pkSeedA hSeedLen adv hClassMsg hClassSec hPrfMsg hPrfSec hItsrZero hTcrB hPreB
-  have hPrim := pqQrom256PrimEps_mono hqEval
-  have hMono := pqMultiHopBudget_mono jortsProdParams hqSign
-    (Spec.RatBound.le_refl Spec.RatBound.zero)
-    (Spec.RatBound.le_trans hEpsTcr hPrim) (Spec.RatBound.le_trans hEpsPre hPrim)
-    (Spec.RatBound.le_trans hEpsSec hPrim) (Spec.RatBound.le_trans hEpsMsg hPrim)
-  have hTopLt : (jortsMultiHopBudget (2 ^ 16) (pqQrom256PrimEps (2 ^ 48))
-      (pqQrom256PrimEps (2 ^ 48)) (pqQrom256PrimEps (2 ^ 48))
-      (pqQrom256PrimEps (2 ^ 48))).lt ⟨1, 2 ^ 128, by decide⟩ := by
-    unfold jortsMultiHopBudget pqMultiHopBudget
-    rw [jortsProdParams_accounting.2.2.2.1, jortsProdParams_accounting.2.2.2.2.1]; decide +kernel
-  have hLt := Spec.RatBound.lt_of_le_of_lt hMono hTopLt
-  exact ⟨hLt, Spec.RatBound.le_trans hGame (Spec.RatBound.le_of_lt hLt)⟩
 
 /-- Standalone rational PQ QROM `< 2^{-128}` budget theorem for `jortsProdParams` (`qSign ≤ 2^16, qEval ≤ 2^48`). -/
 theorem jortsProd_pq_qrom_budget_lt_2_neg_128 {qSign qEval : Nat}
@@ -234,303 +108,169 @@ theorem baggySha3_128f_pors_itsr_lt_2_neg_131
     Nat.mul_pos (Nat.two_pow_pos 135) hPos84
   exact Decidable.byContradiction (fun _ => by omega)
 
-/-- Multi-hop EUF-CMA rational budget for `BaggySha3_128f`. -/
-@[expose] def baggySha3MultiHopBudget
-    (εItsr εCol εPre εPrfSec εPrfMsg : Spec.RatBound) : Spec.RatBound :=
-  ((((εItsr.add εCol).add εPre).add εPrfSec).add εPrfMsg)
+/-- Jorts runs the epoch latch during all three reductions. -/
+theorem jortsProd_exec_prf_tcr_reduction :
+    PrfTcrReductionFor true jortsProdParams (fun _ => rfl)
+      (.inl (by rw [jortsProdParams, jortsPoseidon2Params_eq])) :=
+  hulsing_prf_tcr_residual_bound _ _ _ _
 
-private theorem baggySha3_128f_multiHop_core {n : Nat} (hPos : 0 < n)
-    (forgerRealGame forgerHop1Game : Spec.FinGame n)
-    (suite : TweakableHashSuite) (hmsgXof : PorsFpSecurity.BaggyHmsgStream)
-    (skIdeal : Fin n → PqSecretKey)
-    (logOf : (ω : Fin n) →
-      List (PorsFpSecurity.HonestBaggySignedEntry suite hmsgXof PorsFpSecurity.BaggySha3_128f (skIdeal ω)))
-    (forgerOut : Fin n → List UInt8 × PorsFpSecurity.BaggySig)
-    (itsrEvent colEvent preEvent : Fin n → Bool)
-    {εItsr εCol εPre εPrfSec εPrfMsg : Spec.RatBound}
-    (hHop1 : Spec.GameBound (Spec.AdvDist forgerRealGame forgerHop1Game) εPrfMsg)
-    (hHop2 : Spec.GameBound (Spec.AdvDist forgerHop1Game
-      ⟨hPos, fun ω =>
-        PorsFpSecurity.baggyVerify suite hmsgXof PorsFpSecurity.BaggySha3_128f
-          (PorsFpSecurity.baggyDerivePublicKey suite PorsFpSecurity.BaggySha3_128f (skIdeal ω))
-          (forgerOut ω).1 (forgerOut ω).2 &&
-        decide ((forgerOut ω).1 ∉ (logOf ω).map PorsFpSecurity.HonestBaggySignedEntry.msg)⟩) εPrfSec)
-    (hItsr : ∀ ω (rStar muStar : List UInt8) (ctrStar leafIdx : Nat) (idxsStar : List Nat),
-      PorsFpSecurity.baggySelectAt hmsgXof PorsFpSecurity.BaggySha3_128f
-        (PorsFpSecurity.baggyDerivePublicKey suite PorsFpSecurity.BaggySha3_128f (skIdeal ω))
-        rStar muStar ctrStar = some (idxsStar, leafIdx) →
-      (∀ u ∈ idxsStar, ∃ e ∈ logOf ω,
-        PorsFpSecurity.BaggySha3_128f.pathAt e.leafIdx 0 =
-          PorsFpSecurity.BaggySha3_128f.pathAt leafIdx 0 ∧ u ∈ e.idxs) →
-      itsrEvent ω = true)
-    (hCol : ∀ ω, Nonempty (HashCollisionWitness suite.rawHash) → colEvent ω = true)
-    (hPre : ∀ ω,
-      (∃ tree0 kp0 u cand,
-        (∀ e ∈ logOf ω, PorsFpSecurity.BaggySha3_128f.pathAt e.leafIdx 0 = (kp0, tree0) → u ∉ e.idxs) ∧
-        thChainF suite (skIdeal ω).pkSeed
-          (PorsFpSecurity.porsLeafAdrs tree0 kp0 (UInt32.ofNat u)) cand =
-          (PorsFpSecurity.porsTweakableSuite suite (skIdeal ω).pkSeed tree0 kp0).leaf u
-            (PorsFpSecurity.porsSecretLeaf suite (skIdeal ω) tree0 kp0 u)) ∨
-      Nonempty (WotsBackwardInversionWitness suite (skIdeal ω).pkSeed) →
-      preEvent ω = true)
-    (hBItsr : Spec.GameBound (Spec.FinGame.mk hPos itsrEvent).winProb εItsr)
-    (hBCol : Spec.GameBound (Spec.FinGame.mk hPos colEvent).winProb εCol)
-    (hBPre : Spec.GameBound (Spec.FinGame.mk hPos preEvent).winProb εPre) :
-    Spec.GameBound forgerRealGame.winProb (baggySha3MultiHopBudget εItsr εCol εPre εPrfSec εPrfMsg) := by
-  have hIdeal := PorsFpSecurity.baggy_sha3_128f_euf_cma_gameBound hPos suite hmsgXof skIdeal
-    logOf forgerOut itsrEvent colEvent preEvent hItsr hCol hPre hBItsr hBCol hBPre
-  have hStep2 := Spec.RatBound.le_trans (winProb_le_add_advDist forgerHop1Game _)
-    (Spec.RatBound.add_le_add hIdeal hHop2)
-  exact Spec.RatBound.le_trans (winProb_le_add_advDist forgerRealGame forgerHop1Game)
-    (Spec.RatBound.add_le_add hStep2 hHop1)
+/-- Baggy admits all adaptive signing requests, including repeated epochs. -/
+theorem baggyProd_exec_prf_tcr_reduction :
+    PrfTcrReductionFor false baggyProdParams (by rw [baggyProdParams, baggy128fParams_eq]; decide)
+      (.inl (by rw [baggyProdParams, baggy128fParams_eq])) :=
+  hulsing_prf_tcr_residual_bound _ _ _ _
 
-/-- **`BaggySha3_128f` Classical (`qEval ≤ 2^96`) Multi-Hop EUF-CMA `< 2^{-128}` Bound.** -/
-theorem baggySha3_128f_classical_euf_cma_lt_2_neg_128 {n qEval : Nat} (hPos : 0 < n)
-    (hqEval : qEval ≤ 2 ^ 96) (forgerRealGame forgerHop1Game : Spec.FinGame n)
-    (suite : TweakableHashSuite) (hmsgXof : PorsFpSecurity.BaggyHmsgStream)
-    (skIdeal : Fin n → PqSecretKey)
-    (logOf : (ω : Fin n) →
-      List (PorsFpSecurity.HonestBaggySignedEntry suite hmsgXof PorsFpSecurity.BaggySha3_128f (skIdeal ω)))
-    (forgerOut : Fin n → List UInt8 × PorsFpSecurity.BaggySig)
-    (itsrEvent colEvent preEvent : Fin n → Bool)
-    {εItsr εCol εPre εPrfSec εPrfMsg : Spec.RatBound}
-    (hHop1 : Spec.GameBound (Spec.AdvDist forgerRealGame forgerHop1Game) εPrfMsg)
-    (hHop2 : Spec.GameBound (Spec.AdvDist forgerHop1Game
-      ⟨hPos, fun ω =>
-        PorsFpSecurity.baggyVerify suite hmsgXof PorsFpSecurity.BaggySha3_128f
-          (PorsFpSecurity.baggyDerivePublicKey suite PorsFpSecurity.BaggySha3_128f (skIdeal ω))
-          (forgerOut ω).1 (forgerOut ω).2 &&
-        decide ((forgerOut ω).1 ∉ (logOf ω).map PorsFpSecurity.HonestBaggySignedEntry.msg)⟩) εPrfSec)
-    (hItsr : ∀ ω (rStar muStar : List UInt8) (ctrStar leafIdx : Nat) (idxsStar : List Nat),
-      PorsFpSecurity.baggySelectAt hmsgXof PorsFpSecurity.BaggySha3_128f
-        (PorsFpSecurity.baggyDerivePublicKey suite PorsFpSecurity.BaggySha3_128f (skIdeal ω))
-        rStar muStar ctrStar = some (idxsStar, leafIdx) →
-      (∀ u ∈ idxsStar, ∃ e ∈ logOf ω,
-        PorsFpSecurity.BaggySha3_128f.pathAt e.leafIdx 0 =
-          PorsFpSecurity.BaggySha3_128f.pathAt leafIdx 0 ∧ u ∈ e.idxs) →
-      itsrEvent ω = true)
-    (hCol : ∀ ω, Nonempty (HashCollisionWitness suite.rawHash) → colEvent ω = true)
-    (hPre : ∀ ω,
-      (∃ tree0 kp0 u cand,
-        (∀ e ∈ logOf ω, PorsFpSecurity.BaggySha3_128f.pathAt e.leafIdx 0 = (kp0, tree0) → u ∉ e.idxs) ∧
-        thChainF suite (skIdeal ω).pkSeed
-          (PorsFpSecurity.porsLeafAdrs tree0 kp0 (UInt32.ofNat u)) cand =
-          (PorsFpSecurity.porsTweakableSuite suite (skIdeal ω).pkSeed tree0 kp0).leaf u
-            (PorsFpSecurity.porsSecretLeaf suite (skIdeal ω) tree0 kp0 u)) ∨
-      Nonempty (WotsBackwardInversionWitness suite (skIdeal ω).pkSeed) →
-      preEvent ω = true)
-    (hBItsr : Spec.GameBound (Spec.FinGame.mk hPos itsrEvent).winProb εItsr)
-    (hBCol : Spec.GameBound (Spec.FinGame.mk hPos colEvent).winProb εCol)
-    (hBPre : Spec.GameBound (Spec.FinGame.mk hPos preEvent).winProb εPre)
-    (hEpsItsr : εItsr.le ⟨1, 2 ^ 131, by decide⟩)
-    (hEpsCol : εCol.le (Spec.RatBound.scale (2 ^ 21) (classical256PrimEps qEval)))
-    (hEpsPre : εPre.le (Spec.RatBound.scale 8192 (classical256PrimEps qEval)))
-    (hEpsSec : εPrfSec.le (classical256PrimEps qEval))
-    (hEpsMsg : εPrfMsg.le (classical256PrimEps qEval)) :
-    (baggySha3MultiHopBudget εItsr εCol εPre εPrfSec εPrfMsg).lt ⟨1, 2 ^ 128, by decide⟩ ∧
-    Spec.GameBound forgerRealGame.winProb ⟨1, 2 ^ 128, by decide⟩ := by
-  have hTotal := baggySha3_128f_multiHop_core hPos forgerRealGame forgerHop1Game suite hmsgXof
-    skIdeal logOf forgerOut itsrEvent colEvent preEvent hHop1 hHop2 hItsr hCol hPre hBItsr hBCol hBPre
-  have hPrim := classical256PrimEps_mono hqEval
-  have hMono : (baggySha3MultiHopBudget εItsr εCol εPre εPrfSec εPrfMsg).le
-      (baggySha3MultiHopBudget ⟨1, 2 ^ 131, by decide⟩
-        (Spec.RatBound.scale (2 ^ 21) (classical256PrimEps (2 ^ 96)))
-        (Spec.RatBound.scale 8192 (classical256PrimEps (2 ^ 96)))
-        (classical256PrimEps (2 ^ 96)) (classical256PrimEps (2 ^ 96))) :=
-    Spec.RatBound.add_le_add
-      (Spec.RatBound.add_le_add
-        (Spec.RatBound.add_le_add
-          (Spec.RatBound.add_le_add hEpsItsr
-            (Spec.RatBound.le_trans hEpsCol (Spec.RatBound.scale_le_scale _ hPrim)))
-          (Spec.RatBound.le_trans hEpsPre (Spec.RatBound.scale_le_scale _ hPrim)))
-        (Spec.RatBound.le_trans hEpsSec hPrim))
-      (Spec.RatBound.le_trans hEpsMsg hPrim)
-  have hLt : (baggySha3MultiHopBudget εItsr εCol εPre εPrfSec εPrfMsg).lt ⟨1, 2 ^ 128, by decide⟩ :=
-    Spec.RatBound.lt_of_le_of_lt hMono (by decide +kernel)
-  exact ⟨hLt, Spec.RatBound.le_trans hTotal (Spec.RatBound.le_of_lt hLt)⟩
+/-- Corduroy uses the same stateless signing experiment as Baggy. -/
+theorem corduroyProd_exec_prf_tcr_reduction :
+    PrfTcrReductionFor false corduroyProdParams (by rw [corduroyProdParams, corduroyCustody128Params_eq]; decide)
+      (.inl (by rw [corduroyProdParams, corduroyCustody128Params_eq])) :=
+  hulsing_prf_tcr_residual_bound _ _ _ _
 
-/-- **`BaggySha3_128f` Post-Quantum `QROM` (Grover `qEval ≤ 2^48`) Multi-Hop EUF-CMA `< 2^{-128}` Bound.** -/
-theorem baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128 {n qEval : Nat} (hPos : 0 < n)
-    (hqEval : qEval ≤ 2 ^ 48) (forgerRealGame forgerHop1Game : Spec.FinGame n)
-    (suite : TweakableHashSuite) (hmsgXof : PorsFpSecurity.BaggyHmsgStream)
-    (skIdeal : Fin n → PqSecretKey)
-    (logOf : (ω : Fin n) →
-      List (PorsFpSecurity.HonestBaggySignedEntry suite hmsgXof PorsFpSecurity.BaggySha3_128f (skIdeal ω)))
-    (forgerOut : Fin n → List UInt8 × PorsFpSecurity.BaggySig)
-    (itsrEvent colEvent preEvent : Fin n → Bool)
-    {εItsr εCol εPre εPrfSec εPrfMsg : Spec.RatBound}
-    (hHop1 : Spec.GameBound (Spec.AdvDist forgerRealGame forgerHop1Game) εPrfMsg)
-    (hHop2 : Spec.GameBound (Spec.AdvDist forgerHop1Game
-      ⟨hPos, fun ω =>
-        PorsFpSecurity.baggyVerify suite hmsgXof PorsFpSecurity.BaggySha3_128f
-          (PorsFpSecurity.baggyDerivePublicKey suite PorsFpSecurity.BaggySha3_128f (skIdeal ω))
-          (forgerOut ω).1 (forgerOut ω).2 &&
-        decide ((forgerOut ω).1 ∉ (logOf ω).map PorsFpSecurity.HonestBaggySignedEntry.msg)⟩) εPrfSec)
-    (hItsr : ∀ ω (rStar muStar : List UInt8) (ctrStar leafIdx : Nat) (idxsStar : List Nat),
-      PorsFpSecurity.baggySelectAt hmsgXof PorsFpSecurity.BaggySha3_128f
-        (PorsFpSecurity.baggyDerivePublicKey suite PorsFpSecurity.BaggySha3_128f (skIdeal ω))
-        rStar muStar ctrStar = some (idxsStar, leafIdx) →
-      (∀ u ∈ idxsStar, ∃ e ∈ logOf ω,
-        PorsFpSecurity.BaggySha3_128f.pathAt e.leafIdx 0 =
-          PorsFpSecurity.BaggySha3_128f.pathAt leafIdx 0 ∧ u ∈ e.idxs) →
-      itsrEvent ω = true)
-    (hCol : ∀ ω, Nonempty (HashCollisionWitness suite.rawHash) → colEvent ω = true)
-    (hPre : ∀ ω,
-      (∃ tree0 kp0 u cand,
-        (∀ e ∈ logOf ω, PorsFpSecurity.BaggySha3_128f.pathAt e.leafIdx 0 = (kp0, tree0) → u ∉ e.idxs) ∧
-        thChainF suite (skIdeal ω).pkSeed
-          (PorsFpSecurity.porsLeafAdrs tree0 kp0 (UInt32.ofNat u)) cand =
-          (PorsFpSecurity.porsTweakableSuite suite (skIdeal ω).pkSeed tree0 kp0).leaf u
-            (PorsFpSecurity.porsSecretLeaf suite (skIdeal ω) tree0 kp0 u)) ∨
-      Nonempty (WotsBackwardInversionWitness suite (skIdeal ω).pkSeed) →
-      preEvent ω = true)
-    (hBItsr : Spec.GameBound (Spec.FinGame.mk hPos itsrEvent).winProb εItsr)
-    (hBCol : Spec.GameBound (Spec.FinGame.mk hPos colEvent).winProb εCol)
-    (hBPre : Spec.GameBound (Spec.FinGame.mk hPos preEvent).winProb εPre)
-    (hEpsItsr : εItsr.le ⟨1, 2 ^ 131, by decide⟩)
-    (hEpsCol : εCol.le (Spec.RatBound.scale (2 ^ 21) (pqQrom256PrimEps qEval)))
-    (hEpsPre : εPre.le (Spec.RatBound.scale 8192 (pqQrom256PrimEps qEval)))
-    (hEpsSec : εPrfSec.le (pqQrom256PrimEps qEval))
-    (hEpsMsg : εPrfMsg.le (pqQrom256PrimEps qEval)) :
-    (baggySha3MultiHopBudget εItsr εCol εPre εPrfSec εPrfMsg).lt ⟨1, 2 ^ 128, by decide⟩ ∧
-    Spec.GameBound forgerRealGame.winProb ⟨1, 2 ^ 128, by decide⟩ := by
-  have hTotal := baggySha3_128f_multiHop_core hPos forgerRealGame forgerHop1Game suite hmsgXof
-    skIdeal logOf forgerOut itsrEvent colEvent preEvent hHop1 hHop2 hItsr hCol hPre hBItsr hBCol hBPre
-  have hPrim := pqQrom256PrimEps_mono hqEval
-  have hMono : (baggySha3MultiHopBudget εItsr εCol εPre εPrfSec εPrfMsg).le
-      (baggySha3MultiHopBudget ⟨1, 2 ^ 131, by decide⟩
-        (Spec.RatBound.scale (2 ^ 21) (pqQrom256PrimEps (2 ^ 48)))
-        (Spec.RatBound.scale 8192 (pqQrom256PrimEps (2 ^ 48)))
-        (pqQrom256PrimEps (2 ^ 48)) (pqQrom256PrimEps (2 ^ 48))) :=
-    Spec.RatBound.add_le_add
-      (Spec.RatBound.add_le_add
-        (Spec.RatBound.add_le_add
-          (Spec.RatBound.add_le_add hEpsItsr
-            (Spec.RatBound.le_trans hEpsCol (Spec.RatBound.scale_le_scale _ hPrim)))
-          (Spec.RatBound.le_trans hEpsPre (Spec.RatBound.scale_le_scale _ hPrim)))
-        (Spec.RatBound.le_trans hEpsSec hPrim))
-      (Spec.RatBound.le_trans hEpsMsg hPrim)
-  have hLt : (baggySha3MultiHopBudget εItsr εCol εPre εPrfSec εPrfMsg).lt ⟨1, 2 ^ 128, by decide⟩ :=
-    Spec.RatBound.lt_of_le_of_lt hMono (by decide +kernel)
-  exact ⟨hLt, Spec.RatBound.le_trans hTotal (Spec.RatBound.le_of_lt hLt)⟩
+theorem globalSlotBudget_mono (p : PqHashParams) {q qMax : Nat} (hq : q ≤ qMax)
+    {cover coverMax prim primMax : Spec.RatBound} (hc : cover.le coverMax) (hp : prim.le primMax) :
+    (globalSlotBudget p q cover prim).le (globalSlotBudget p qMax coverMax primMax) := by
+  apply Spec.RatBound.add_le_add _ (Spec.RatBound.scale_le_scale _ hp)
+  apply Spec.RatBound.add_le_add hc
+  show (if p.statefulJorts then 0 else q) * 2 ^ 256 ≤ (if p.statefulJorts then 0 else qMax) * 2 ^ 256
+  exact Nat.mul_le_mul_right _ (by cases p.statefulJorts <;> simp [hq])
 
-/-- **`corduroyProdParams` Concrete Multi-Hop EUF-CMA Bound & PQ QROM `< 2^{-128}` Regime.** -/
-theorem corduroyProd_concrete_euf_cma_bound {n nC1 nRest nC2 nA qHash qSign qEval : Nat}
-    (hPos : 0 < n) (suite : TweakableHashSuite) (hqSign : qSign ≤ 2 ^ 12) (hqEval : qEval ≤ 2 ^ 48)
-    (seedLen keyLen qPrfMsg qPrfSec : Nat) (hSeedPos : 0 < seedLen) (hqPrfMsg : qSign ≤ qPrfMsg)
-    (hqPrfSec : prfSecQueryBudget corduroyProdParams qSign ≤ qPrfSec)
-    (π1 : Spec.CoinSplit n nC1 nRest) (π2 : Spec.CoinSplit nRest nC2 nA)
-    (sampleMsg : Fin nC1 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
-    (hSampleMsg : Spec.UniformOn (Spec.PrfSampleOk keyLen 65 32) sampleMsg)
-    (sampleSec : Fin nC2 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
-    (hSampleSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen + 32) 32) sampleSec)
-    (pkSeedA : Fin nA → List UInt8) (hSeedLen : ∀ a, (pkSeedA a).length = seedLen)
-    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
-    {𝒜Msg 𝒜Sec : Spec.Code Spec.byteOracleIface Bool → Prop}
-    (hClassMsg : ∀ r : Fin nRest, 𝒜Msg (prfMsgHopDistinguisher true suite corduroyProdParams
-      (pkSeedA (π2.advc r)) (sampleSec (π2.chal r)).1 (adv (π2.advc r))))
-    (hClassSec : ∀ b : Fin (nC1 * nA),
-      let sp := Spec.CoinSplit.prod nC1 nA
-      𝒜Sec (prfSecHopDistinguisher true suite corduroyProdParams (pkSeedA (sp.advc b))
-        (sampleMsg (sp.chal b)).2 (adv (sp.advc b))))
-    {εPrfMsg εPrfSec εItsr εTcr εPre : Spec.RatBound}
-    (hPrfMsg : Spec.PrfHard 𝒜Msg (suitePrfMsg65 suite) keyLen 65 32 qPrfMsg εPrfMsg)
-    (hPrfSec : Spec.PrfHard 𝒜Sec (suitePrfSec seedLen suite) keyLen (seedLen + 32) 32 qPrfSec εPrfSec)
-    (hItsrB : Spec.GameBound
-      (idealSlotItsrGame hPos suite corduroyProdParams
-        (.inl (by rw [corduroyProdParams, corduroyCustody128Params_eq]))
-        π1 π2 sampleMsg sampleSec pkSeedA adv).winProb εItsr)
-    (hTcrB : ∀ slot : Fin (prodPathTargetCount corduroyProdParams qSign), Spec.GameBound
-      (idealSlotTcrGame hPos suite corduroyProdParams
-        (.inl (by rw [corduroyProdParams, corduroyCustody128Params_eq]))
-        π1 π2 sampleMsg sampleSec pkSeedA adv slot.val).winProb εTcr)
-    (hPreB : ∀ slot : Fin (prodPreCandidateBudget corduroyProdParams), Spec.GameBound
-      (idealSlotPreGame hPos suite corduroyProdParams π1 π2 sampleMsg sampleSec pkSeedA adv slot.val).winProb εPre)
-    (hEpsItsr : εItsr.le ⟨1, 2 ^ 131, by decide⟩) (hEpsTcr : εTcr.le (pqQrom256PrimEps qEval))
-    (hEpsPre : εPre.le (pqQrom256PrimEps qEval)) (hEpsSec : εPrfSec.le (pqQrom256PrimEps qEval))
-    (hEpsMsg : εPrfMsg.le (pqQrom256PrimEps qEval)) :
-    prodPathTargetCount corduroyProdParams qSign ≤ 35690 ∧
-    (pqMultiHopBudget corduroyProdParams qSign εItsr εTcr εPre εPrfSec εPrfMsg).lt ⟨1, 2 ^ 128, by decide⟩ ∧
-    Spec.GameBound (ExecEufCmaGame hPos suite corduroyProdParams
-      (multiHopKeygen π1 π2 sampleMsg sampleSec pkSeedA) (multiHopAdv π1 π2 adv)).winProb
+theorem jortsProd_classical_global_slot_budget_lt_2_neg_128 {qSign qEval : Nat}
+    (hSign : qSign ≤ 2 ^ 16) (hEval : qEval ≤ 2 ^ 96) :
+    (globalSlotBudget jortsProdParams qSign Spec.RatBound.zero (classical256PrimEps qEval)).lt
       ⟨1, 2 ^ 128, by decide⟩ := by
-  have hwC : corduroyProdParams.w = 4 ∨ corduroyProdParams.w = 16 :=
-    .inl (by rw [corduroyProdParams, corduroyCustody128Params_eq])
-  have hGame := hulsing_multiHop_idealSlot_euf_cma_bound hPos suite corduroyProdParams hwC
-    seedLen keyLen qPrfMsg qPrfSec hSeedPos hqPrfMsg hqPrfSec π1 π2 sampleMsg hSampleMsg
-    sampleSec hSampleSec pkSeedA hSeedLen adv hClassMsg hClassSec hPrfMsg hPrfSec hItsrB hTcrB hPreB
-  have hPrim := pqQrom256PrimEps_mono hqEval
-  have hMono := pqMultiHopBudget_mono corduroyProdParams hqSign hEpsItsr
-    (Spec.RatBound.le_trans hEpsTcr hPrim) (Spec.RatBound.le_trans hEpsPre hPrim)
-    (Spec.RatBound.le_trans hEpsSec hPrim) (Spec.RatBound.le_trans hEpsMsg hPrim)
-  have hTopLt : (pqMultiHopBudget corduroyProdParams (2 ^ 12) ⟨1, 2 ^ 131, by decide⟩
-      (pqQrom256PrimEps (2 ^ 48)) (pqQrom256PrimEps (2 ^ 48))
-      (pqQrom256PrimEps (2 ^ 48)) (pqQrom256PrimEps (2 ^ 48))).lt ⟨1, 2 ^ 128, by decide⟩ := by
-    unfold pqMultiHopBudget
-    rw [corduroyProdParams_accounting.2.2.2.1, corduroyProdParams_accounting.2.2.2.2.1]; decide +kernel
-  have hLt := Spec.RatBound.lt_of_le_of_lt hMono hTopLt
-  have hCntLe : prodPathTargetCount corduroyProdParams qSign ≤ 35690 := by
-    rw [← corduroyProdParams_accounting.2.2.2.1]; exact prodPathTargetCount_mono corduroyProdParams hqSign
-  exact ⟨hCntLe, hLt, Spec.RatBound.le_trans hGame (Spec.RatBound.le_of_lt hLt)⟩
+  apply Spec.RatBound.lt_of_le_of_lt (globalSlotBudget_mono jortsProdParams hSign
+    (Spec.RatBound.le_refl _) (classical256PrimEps_mono hEval))
+  unfold globalSlotBudget globalPreUdCalls
+  rw [jortsProdParams, jortsPoseidon2Params_eq]
+  decide +kernel
 
-/-- **`baggyProdParams` Concrete Multi-Hop EUF-CMA Bound & PQ QROM `< 2^{-128}` Regime.** -/
-theorem baggyProd_concrete_euf_cma_bound {n nC1 nRest nC2 nA qHash qSign qEval : Nat}
-    (hPos : 0 < n) (suite : TweakableHashSuite) (hqSign : qSign ≤ 2 ^ 16) (hqEval : qEval ≤ 2 ^ 48)
-    (seedLen keyLen qPrfMsg qPrfSec : Nat) (hSeedPos : 0 < seedLen) (hqPrfMsg : qSign ≤ qPrfMsg)
-    (hqPrfSec : prfSecQueryBudget baggyProdParams qSign ≤ qPrfSec)
-    (π1 : Spec.CoinSplit n nC1 nRest) (π2 : Spec.CoinSplit nRest nC2 nA)
-    (sampleMsg : Fin nC1 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
-    (hSampleMsg : Spec.UniformOn (Spec.PrfSampleOk keyLen 65 32) sampleMsg)
-    (sampleSec : Fin nC2 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
-    (hSampleSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen + 32) 32) sampleSec)
-    (pkSeedA : Fin nA → List UInt8) (hSeedLen : ∀ a, (pkSeedA a).length = seedLen)
-    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
-    {𝒜Msg 𝒜Sec : Spec.Code Spec.byteOracleIface Bool → Prop}
-    (hClassMsg : ∀ r : Fin nRest, 𝒜Msg (prfMsgHopDistinguisher true suite baggyProdParams
-      (pkSeedA (π2.advc r)) (sampleSec (π2.chal r)).1 (adv (π2.advc r))))
-    (hClassSec : ∀ b : Fin (nC1 * nA),
-      let sp := Spec.CoinSplit.prod nC1 nA
-      𝒜Sec (prfSecHopDistinguisher true suite baggyProdParams (pkSeedA (sp.advc b))
-        (sampleMsg (sp.chal b)).2 (adv (sp.advc b))))
-    {εPrfMsg εPrfSec εItsr εTcr εPre : Spec.RatBound}
-    (hPrfMsg : Spec.PrfHard 𝒜Msg (suitePrfMsg65 suite) keyLen 65 32 qPrfMsg εPrfMsg)
-    (hPrfSec : Spec.PrfHard 𝒜Sec (suitePrfSec seedLen suite) keyLen (seedLen + 32) 32 qPrfSec εPrfSec)
-    (hItsrB : Spec.GameBound
-      (idealSlotItsrGame hPos suite baggyProdParams
-        (.inl (by rw [baggyProdParams, baggy128fParams_eq]))
-        π1 π2 sampleMsg sampleSec pkSeedA adv).winProb εItsr)
-    (hTcrB : ∀ slot : Fin (prodPathTargetCount baggyProdParams qSign), Spec.GameBound
-      (idealSlotTcrGame hPos suite baggyProdParams
-        (.inl (by rw [baggyProdParams, baggy128fParams_eq]))
-        π1 π2 sampleMsg sampleSec pkSeedA adv slot.val).winProb εTcr)
-    (hPreB : ∀ slot : Fin (prodPreCandidateBudget baggyProdParams), Spec.GameBound
-      (idealSlotPreGame hPos suite baggyProdParams π1 π2 sampleMsg sampleSec pkSeedA adv slot.val).winProb εPre)
-    (hEpsItsr : εItsr.le ⟨1, 2 ^ 131, by decide⟩) (hEpsTcr : εTcr.le (pqQrom256PrimEps qEval))
-    (hEpsPre : εPre.le (pqQrom256PrimEps qEval)) (hEpsSec : εPrfSec.le (pqQrom256PrimEps qEval))
-    (hEpsMsg : εPrfMsg.le (pqQrom256PrimEps qEval)) :
-    prodPathTargetCount baggyProdParams qSign ≤ 1120503 ∧
-    (pqMultiHopBudget baggyProdParams qSign εItsr εTcr εPre εPrfSec εPrfMsg).lt ⟨1, 2 ^ 128, by decide⟩ ∧
-    Spec.GameBound (ExecEufCmaGame hPos suite baggyProdParams
-      (multiHopKeygen π1 π2 sampleMsg sampleSec pkSeedA) (multiHopAdv π1 π2 adv)).winProb
+theorem jortsProd_pq_qrom_global_slot_budget_lt_2_neg_128 {qSign qEval : Nat}
+    (hSign : qSign ≤ 2 ^ 16) (hEval : qEval ≤ 2 ^ 48) :
+    (globalSlotBudget jortsProdParams qSign Spec.RatBound.zero (pqQrom256PrimEps qEval)).lt
       ⟨1, 2 ^ 128, by decide⟩ := by
-  have hwB : baggyProdParams.w = 4 ∨ baggyProdParams.w = 16 :=
-    .inl (by rw [baggyProdParams, baggy128fParams_eq])
-  have hGame := hulsing_multiHop_idealSlot_euf_cma_bound hPos suite baggyProdParams hwB
-    seedLen keyLen qPrfMsg qPrfSec hSeedPos hqPrfMsg hqPrfSec π1 π2 sampleMsg hSampleMsg
-    sampleSec hSampleSec pkSeedA hSeedLen adv hClassMsg hClassSec hPrfMsg hPrfSec hItsrB hTcrB hPreB
-  have hPrim := pqQrom256PrimEps_mono hqEval
-  have hMono := pqMultiHopBudget_mono baggyProdParams hqSign hEpsItsr
-    (Spec.RatBound.le_trans hEpsTcr hPrim) (Spec.RatBound.le_trans hEpsPre hPrim)
-    (Spec.RatBound.le_trans hEpsSec hPrim) (Spec.RatBound.le_trans hEpsMsg hPrim)
-  have hTopLt : (pqMultiHopBudget baggyProdParams (2 ^ 16) ⟨1, 2 ^ 131, by decide⟩
-      (pqQrom256PrimEps (2 ^ 48)) (pqQrom256PrimEps (2 ^ 48))
-      (pqQrom256PrimEps (2 ^ 48)) (pqQrom256PrimEps (2 ^ 48))).lt ⟨1, 2 ^ 128, by decide⟩ := by
-    unfold pqMultiHopBudget
-    rw [baggyProdParams_accounting.2.2.2.1, baggyProdParams_accounting.2.2.2.2.1]; decide +kernel
-  have hLt := Spec.RatBound.lt_of_le_of_lt hMono hTopLt
-  have hCntLe : prodPathTargetCount baggyProdParams qSign ≤ 1120503 := by
-    rw [← baggyProdParams_accounting.2.2.2.1]; exact prodPathTargetCount_mono baggyProdParams hqSign
-  exact ⟨hCntLe, hLt, Spec.RatBound.le_trans hGame (Spec.RatBound.le_of_lt hLt)⟩
+  apply Spec.RatBound.lt_of_le_of_lt (globalSlotBudget_mono jortsProdParams hSign
+    (Spec.RatBound.le_refl _) (pqQrom256PrimEps_mono hEval))
+  unfold globalSlotBudget globalPreUdCalls
+  rw [jortsProdParams, jortsPoseidon2Params_eq]
+  decide +kernel
+
+theorem baggyProd_classical_global_slot_budget_lt_2_neg_128 {qSign qEval : Nat}
+    (hSign : qSign ≤ 2 ^ 16) (hEval : qEval ≤ 2 ^ 80) :
+    (globalSlotBudget baggyProdParams qSign ⟨1, 2 ^ 131, by decide⟩ (classical256PrimEps qEval)).lt
+      ⟨1, 2 ^ 128, by decide⟩ := by
+  apply Spec.RatBound.lt_of_le_of_lt (globalSlotBudget_mono baggyProdParams hSign
+    (Spec.RatBound.le_refl _) (classical256PrimEps_mono hEval))
+  unfold globalSlotBudget globalPreUdCalls
+  rw [baggyProdParams, baggy128fParams_eq]
+  decide +kernel
+
+theorem baggyProd_pq_qrom_global_slot_budget_lt_2_neg_128 {qSign qEval : Nat}
+    (hSign : qSign ≤ 2 ^ 16) (hEval : qEval ≤ 2 ^ 40) :
+    (globalSlotBudget baggyProdParams qSign ⟨1, 2 ^ 131, by decide⟩ (pqQrom256PrimEps qEval)).lt
+      ⟨1, 2 ^ 128, by decide⟩ := by
+  apply Spec.RatBound.lt_of_le_of_lt (globalSlotBudget_mono baggyProdParams hSign
+    (Spec.RatBound.le_refl _) (pqQrom256PrimEps_mono hEval))
+  unfold globalSlotBudget globalPreUdCalls
+  rw [baggyProdParams, baggy128fParams_eq]
+  decide +kernel
+
+theorem corduroyProd_pq_qrom_global_slot_budget_lt_2_neg_128 {qSign qEval : Nat}
+    (hSign : qSign ≤ 2 ^ 12) (hEval : qEval ≤ 2 ^ 40) :
+    (globalSlotBudget corduroyProdParams qSign ⟨1, 2 ^ 131, by decide⟩ (pqQrom256PrimEps qEval)).lt
+      ⟨1, 2 ^ 128, by decide⟩ := by
+  apply Spec.RatBound.lt_of_le_of_lt (globalSlotBudget_mono corduroyProdParams hSign
+    (Spec.RatBound.le_refl _) (pqQrom256PrimEps_mono hEval))
+  unfold globalSlotBudget globalPreUdCalls
+  rw [corduroyProdParams, corduroyCustody128Params_eq]
+  decide +kernel
+
+/-- Height-60 stateless WOTS+C execution profile for the QSAG production verifier. -/
+def slhDsaW16StatelessParams : PqHashParams := ⟨16, 64, 5, 12, 33, 6, 16, false⟩
+
+theorem slhDsaW16StatelessParams_geometry :
+    slhDsaW16StatelessParams.productionWellFormed = true ∧
+    slhDsaW16StatelessParams.statefulJorts = false ∧ slhDsaW16StatelessParams.w = 16 ∧
+    slhDsaW16StatelessParams.numLayers * slhDsaW16StatelessParams.subtreeHeight = 60 ∧
+    slhDsaW16StatelessParams.forsTrees ≤ 2 ^ 32 := by
+  rw [PqHashParams.productionWellFormed_eq]
+  decide +kernel
+
+theorem slhDsaW16_pq_qrom_global_slot_budget_lt_2_neg_128 {qSign qEval : Nat}
+    (hSign : qSign ≤ 2 ^ 16) (hEval : qEval ≤ 2 ^ 25) :
+    (globalSlotBudget slhDsaW16StatelessParams qSign ⟨1, 2 ^ 131, by decide⟩
+      (pqQrom256PrimEps qEval)).lt ⟨1, 2 ^ 128, by decide⟩ := by
+  apply Spec.RatBound.lt_of_le_of_lt (globalSlotBudget_mono slhDsaW16StatelessParams hSign
+    (Spec.RatBound.le_refl _) (pqQrom256PrimEps_mono hEval))
+  decide +kernel
+
+/-- Existence of a single consistent choice of all primitive classes and their hardness proofs. -/
+def BaggyPrimitiveAssumptions {q : Nat} (E : SigningExperiment q) (suite : TweakableHashSuite)
+    (cover prim : Spec.RatBound) : Prop := Nonempty (SigningPrimitiveBounds E false suite baggyProdParams cover prim)
+
+theorem baggyProd_stateless_exec_euf_cma_bound {q : Nat} (E : SigningExperiment q) (suite : TweakableHashSuite)
+    (cover prim : Spec.RatBound) (H : BaggyPrimitiveAssumptions E suite cover prim) :
+    Spec.GameBound (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb
+      (globalSlotBudget baggyProdParams q cover prim) := by
+  obtain ⟨h⟩ := H
+  exact hulsing_closed_multihop_euf_cma_bound E false suite baggyProdParams baggy128f_productionWellFormed
+    (by rw [baggyProdParams, baggy128fParams_eq]; decide) cover prim h
+
+#verify_constructive baggyProd_stateless_exec_euf_cma_bound
+
+theorem jortsProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^96)
+    (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero (classical256PrimEps qEval)) :
+    (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E true suite jortsProdParams
+    jortsPoseidon2_productionWellFormed (by rw [jortsProdParams, jortsPoseidon2Params_eq]; decide) _ _ H)
+    (jortsProd_classical_global_slot_budget_lt_2_neg_128 hq he)
+
+theorem jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^48)
+    (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero (pqQrom256PrimEps qEval)) :
+    (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E true suite jortsProdParams
+    jortsPoseidon2_productionWellFormed (by rw [jortsProdParams, jortsPoseidon2Params_eq]; decide) _ _ H)
+    (jortsProd_pq_qrom_global_slot_budget_lt_2_neg_128 hq he)
+
+theorem baggyProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^80)
+    (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2^131, Nat.two_pow_pos 131⟩ (classical256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E false suite baggyProdParams
+    baggy128f_productionWellFormed (by rw [baggyProdParams, baggy128fParams_eq]; decide) _ _ H)
+    (baggyProd_classical_global_slot_budget_lt_2_neg_128 hq he)
+
+theorem baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^40)
+    (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2^131, Nat.two_pow_pos 131⟩ (pqQrom256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E false suite baggyProdParams
+    baggy128f_productionWellFormed (by rw [baggyProdParams, baggy128fParams_eq]; decide) _ _ H)
+    (baggyProd_pq_qrom_global_slot_budget_lt_2_neg_128 hq he)
+
+theorem corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2^12) (he : qEval ≤ 2^40)
+    (H : SigningPrimitiveBounds E false suite corduroyProdParams ⟨1, 2^131, Nat.two_pow_pos 131⟩ (pqQrom256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite corduroyProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E false suite corduroyProdParams
+    corduroyCustody128_productionWellFormed (by rw [corduroyProdParams, corduroyCustody128Params_eq]; decide) _ _ H)
+    (corduroyProd_pq_qrom_global_slot_budget_lt_2_neg_128 hq he)
+
+theorem slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+    (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^25)
+    (H : SigningPrimitiveBounds E false suite slhDsaW16StatelessParams ⟨1, 2^131, Nat.two_pow_pos 131⟩ (pqQrom256PrimEps qEval)) :
+    (ExecStatelessEufCmaGame E.pos suite slhDsaW16StatelessParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E false suite slhDsaW16StatelessParams
+    slhDsaW16StatelessParams_geometry.1 (by exact slhDsaW16StatelessParams_geometry.2.2.2.2) _ _ H)
+    (slhDsaW16_pq_qrom_global_slot_budget_lt_2_neg_128 hq he)
+
+#verify_constructive jortsProd_classical_exec_euf_cma_lt_2_neg_128
+  jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128
+  baggyProd_classical_exec_euf_cma_lt_2_neg_128
+  baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128
+  corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128
+  slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128
 
 /-! ## §2. NIST FIPS 205 `SLH-DSA-SHAKE-128s` & `128f` Exact Interleaved `ITSR` & `< 2^{-128}` Bounds -/
 
@@ -856,6 +596,109 @@ theorem fips205_slhDsa128f_concrete_security_lt_2_neg_128
 
 /-! ## §3. Inhabitedness Witnesses & Six-Kernel Assurance Audits -/
 
+private structure WitnessPrfTable (keyLen inputLen : Nat) where
+  size : Nat
+  pos : 0 < size
+  sample : Fin size → Spec.Bytes × (Spec.Bytes → Spec.Bytes)
+  uniform : Spec.UniformOn (Spec.PrfSampleOk keyLen inputLen 32) sample
+
+private def witnessTable (keyLen inputLen : Nat) : WitnessPrfTable keyLen inputLen where
+  size := pow256 keyLen * MacBlind.seqTapeCard (pow256 32) (256^inputLen)
+  pos := Nat.mul_pos (pow256_pos keyLen) (MacBlind.seqTapeCard_pos (pow256_pos 32) _)
+  sample := MacBlind.funTapePrfSampler (byteVecSampler keyLen) (byteVecSampler 32) inputLen
+  uniform := MacBlind.uniformOn_funTapePrfSampler (uniformOn_byteVecSampler keyLen) (uniformOn_byteVecSampler 32)
+
+private def mkWitnessExperiment (keyLen seedLen : Nat) (msg : WitnessPrfTable keyLen 65)
+    (sec : WitnessPrfTable keyLen (seedLen+32)) : SigningExperiment 0 where
+  n := msg.size * (sec.size * (pow256 seedLen * 1))
+  nm := msg.size
+  nr := sec.size * (pow256 seedLen * 1)
+  nc := sec.size
+  nz := pow256 seedLen * 1
+  ns := pow256 seedLen
+  na := 1
+  keyLen := keyLen
+  seedLen := seedLen
+  qHash := 0
+  pos := Nat.mul_pos msg.pos (Nat.mul_pos sec.pos (Nat.mul_pos (pow256_pos seedLen) Nat.one_pos))
+  a := Spec.CoinSplit.prod _ _
+  b := Spec.CoinSplit.prod _ _
+  c := Spec.CoinSplit.prod _ _
+  msg := msg.sample
+  sec := sec.sample
+  seed := byteVecSampler seedLen
+  adv := fun _ => emptySigningForgery
+  uniformMsg := msg.uniform
+  uniformSec := sec.uniform
+  uniformSeed := uniformOn_byteVecSampler seedLen
+
+private def witnessExperiment := mkWitnessExperiment 32 32 (witnessTable 32 65) (witnessTable 32 64)
+
+private theorem advDist_one {n : Nat} (a b : Spec.FinGame n) : Spec.GameBound (Spec.AdvDist a b) Spec.RatBound.one := by
+  have ha : a.winCount*1 ≤ 1*n := Spec.FinGame.winProb_le_one a
+  have hb : b.winCount*1 ≤ 1*n := Spec.FinGame.winProb_le_one b
+  change Spec.natAbsDiff _ _ * 1 ≤ 1*n
+  unfold Spec.natAbsDiff; split <;> omega
+
+private def baggyUnitBounds (E : SigningExperiment 0) (suite : TweakableHashSuite) :
+    SigningPrimitiveBounds E false suite baggyProdParams Spec.RatBound.one Spec.RatBound.one where
+  word := .inl (by rw [baggyProdParams, baggy128fParams_eq])
+  oneTime := by rw [baggyProdParams, baggy128fParams_eq]; decide
+  msgClass := fun _ => True
+  secClass := fun _ => True
+  itsrClass := fun _ => True
+  tcrClass := fun _ => True
+  preClass := fun _ => True
+  udClass := fun _ => True
+  msgMember := fun _ => trivial
+  secMember := fun _ _ => trivial
+  itsrMember := fun _ _ _ => trivial
+  tcrMember := fun _ _ _ => trivial
+  prehashMember := fun _ _ _ => trivial
+  slotMember := fun _ _ _ slot => slotReductionClass_unrestricted _ _ _ _ _ _ slot
+  prfMsg := MacBlind.prfHard_one _ _ _ _ _ _
+  prfSec := MacBlind.prfHard_one _ _ _ _ _ _
+  itsr := fun _ _ _ _ _ _ _ _ _ _ _ _ => Spec.FinGame.winProb_le_one _
+  tcr := fun _ _ _ _ _ _ _ _ _ => Spec.FinGame.winProb_le_one _
+  pre := fun _ _ _ _ _ _ _ _ _ => Spec.FinGame.winProb_le_one _
+  ud := fun _ _ _ _ _ _ _ _ _ => advDist_one _ _
+
+/-- Joint unit-loss witness on full 32-byte uniform samplers and unrestricted primitive classes. -/
+theorem inhabited_baggyProd_stateless_exec_euf_cma :
+    ∃ (E : SigningExperiment 0) (suite : TweakableHashSuite),
+      BaggyPrimitiveAssumptions E suite Spec.RatBound.one Spec.RatBound.one ∧
+      Spec.GameBound (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb
+        (globalSlotBudget baggyProdParams 0 Spec.RatBound.one Spec.RatBound.one) := by
+  let h := baggyUnitBounds witnessExperiment cshake256Suite
+  exact ⟨witnessExperiment, cshake256Suite, ⟨h⟩, baggyProd_stateless_exec_euf_cma_bound _ _ _ _ ⟨h⟩⟩
+
+#verify_constructive advDist_one inhabited_baggyProd_stateless_exec_euf_cma
+#verify_inhabited baggyProd_stateless_exec_euf_cma_bound inhabited_baggyProd_stateless_exec_euf_cma
+
+theorem inhabited_baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 :
+    ∃ (q qEval : Nat) (E : SigningExperiment q) (suite : TweakableHashSuite),
+      q ≤ 2^16 ∧ qEval ≤ 2^40 ∧
+      Nonempty (SigningPrimitiveBounds E false suite baggyProdParams ⟨1,2^131,Nat.two_pow_pos 131⟩ (pqQrom256PrimEps qEval)) ∧
+      (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt ⟨1,2^128,Nat.two_pow_pos 128⟩ := by
+  let H := emptyForgeryBaggyPrimitiveBounds witnessExperiment (fun _ => rfl) ⟨1,2^131,Nat.two_pow_pos 131⟩ (pqQrom256PrimEps 1)
+  exact ⟨0, 1, witnessExperiment, signingWitnessSuite, by decide, by decide, ⟨H⟩,
+    baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 _ _ (by decide) (by decide) H⟩
+
+#verify_constructive inhabited_baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128
+#verify_inhabited baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 inhabited_baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128
+
+theorem inhabited_baggyProd_classical_exec_euf_cma_lt_2_neg_128 :
+    ∃ (q qEval : Nat) (E : SigningExperiment q) (suite : TweakableHashSuite),
+      q ≤ 2^16 ∧ qEval ≤ 2^80 ∧
+      Nonempty (SigningPrimitiveBounds E false suite baggyProdParams ⟨1,2^131,Nat.two_pow_pos 131⟩ (classical256PrimEps qEval)) ∧
+      (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt ⟨1,2^128,Nat.two_pow_pos 128⟩ := by
+  let H := emptyForgeryBaggyPrimitiveBounds witnessExperiment (fun _ => rfl) ⟨1,2^131,Nat.two_pow_pos 131⟩ (classical256PrimEps 1)
+  exact ⟨0, 1, witnessExperiment, signingWitnessSuite, by decide, by decide, ⟨H⟩,
+    baggyProd_classical_exec_euf_cma_lt_2_neg_128 _ _ (by decide) (by decide) H⟩
+
+#verify_constructive inhabited_baggyProd_classical_exec_euf_cma_lt_2_neg_128
+#verify_inhabited baggyProd_classical_exec_euf_cma_lt_2_neg_128 inhabited_baggyProd_classical_exec_euf_cma_lt_2_neg_128
+
 /-- Joint inhabitedness witness for `jortsProd_pq_qrom_budget_lt_2_neg_128`. -/
 theorem inhabited_jortsProd_pq_qrom_budget :
     ∃ qSign qEval : Nat, qSign ≤ 2 ^ 16 ∧ qEval ≤ 2 ^ 48 ∧
@@ -882,19 +725,26 @@ theorem inhabited_fips205_slhDsa128f_concrete_security :
     (fips205_slhDsa128f_concrete_security_lt_2_neg_128
       (Nat.le_refl _) (Nat.le_refl _) (Nat.le_refl _)).2.2.2⟩
 
+#verify_constructive slhDsaW16StatelessParams_geometry slhDsaW16_pq_qrom_global_slot_budget_lt_2_neg_128
+
 #verify_constructive
+  factFast_pos fallingFactFast_zero_left fallingFactFast_succ_left truncBinomFast_pos
+  truncBinomFast_eq_spec truncBinom_step fips205Budget_le_cap
   Qsag.pqMultiHopBudget_mono
-  Qsag.jortsProd_classical_euf_cma_lt_2_neg_128
-  Qsag.jortsProd_pq_qrom_euf_cma_lt_2_neg_128
   Qsag.jortsProd_pq_qrom_budget_lt_2_neg_128
   Qsag.baggySha3_128f_pors_itsr_lt_2_neg_131
-  Qsag.baggySha3_128f_classical_euf_cma_lt_2_neg_128
-  Qsag.baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128
-  Qsag.corduroyProd_concrete_euf_cma_bound
-  Qsag.baggyProd_concrete_euf_cma_bound
   Qsag.binomChoose_mul_factFast
   Qsag.one_sub_pow_mul_truncBinom_le
   Qsag.fips205_interleaved_itsr_128s_128f_bounds
+  Qsag.jortsProd_exec_prf_tcr_reduction
+  Qsag.baggyProd_exec_prf_tcr_reduction
+  Qsag.corduroyProd_exec_prf_tcr_reduction
+  Qsag.globalSlotBudget_mono
+  Qsag.jortsProd_classical_global_slot_budget_lt_2_neg_128
+  Qsag.jortsProd_pq_qrom_global_slot_budget_lt_2_neg_128
+  Qsag.baggyProd_classical_global_slot_budget_lt_2_neg_128
+  Qsag.baggyProd_pq_qrom_global_slot_budget_lt_2_neg_128
+  Qsag.corduroyProd_pq_qrom_global_slot_budget_lt_2_neg_128
   Qsag.fips205_slhDsa128s_concrete_security_lt_2_neg_128
   Qsag.fips205_slhDsa128f_concrete_security_lt_2_neg_128
   Qsag.inhabited_jortsProd_pq_qrom_budget
@@ -911,11 +761,13 @@ theorem inhabited_fips205_slhDsa128f_concrete_security :
   Qsag.fips205_slhDsa128f_concrete_security_lt_2_neg_128
   Qsag.inhabited_fips205_slhDsa128f_concrete_security
 
-#tooth_pair Qsag.jortsProd_pq_qrom_euf_cma_lt_2_neg_128 vs
+#tooth_pair Qsag.jortsProd_pq_qrom_global_slot_budget_lt_2_neg_128 vs
   Qsag.tooth_pq_grover_2pow64_exceeds_128bit_bound
-#tooth_pair Qsag.baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128 vs
+#tooth_pair Qsag.baggyProd_pq_qrom_global_slot_budget_lt_2_neg_128 vs
   Qsag.tooth_pq_grover_2pow64_exceeds_128bit_bound
-#tooth_pair Qsag.jortsProd_classical_euf_cma_lt_2_neg_128 vs
+#tooth_pair Qsag.jortsProd_classical_global_slot_budget_lt_2_neg_128 vs
+  Qsag.tooth_classical_2pow128_exceeds_128bit_bound
+#tooth_pair Qsag.baggyProd_classical_global_slot_budget_lt_2_neg_128 vs
   Qsag.tooth_classical_2pow128_exceeds_128bit_bound
 #tooth_pair Qsag.fips205_slhDsa128f_concrete_security_lt_2_neg_128 vs
   Qsag.tooth_fips205_128f_bad_hmsg_rejected
