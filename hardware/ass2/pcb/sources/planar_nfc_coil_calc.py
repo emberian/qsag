@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Dregg-180 Reference PCB — 13.56 MHz Planar Rectangular Spiral NFC Antenna Calculator
+ASS2-0P5 Reference PCB — 13.56 MHz Planar Rectangular Spiral NFC Antenna Calculator
 ====================================================================================
 First-principles electromagnetic & RF tank calculator for the 40x40 mm Top-Copper (L1)
-planar spiral NFC air-gap coil on the Dregg-180 4-layer JLCPCB JLC04161H-7628 carrier.
+planar spiral NFC air-gap coil on the ASS2-0P5 4-layer JLCPCB JLC04161H-7628 carrier.
 
 Models implemented:
   1. Inductance L2:
@@ -322,7 +322,7 @@ def run_self_test(res: CoilDesignResult, spec: PlanarSpiralSpec) -> None:
 def format_report(res: CoilDesignResult, spec: PlanarSpiralSpec) -> str:
     lines = [
         "==============================================================================",
-        " Dregg-180 13.56 MHz Planar Spiral NFC Antenna & Tank Summary (JLC04161H-7628)",
+        " ASS2-0P5 13.56 MHz Planar Spiral NFC Antenna & Tank Summary (JLC04161H-7628)",
         "==============================================================================",
         f" Geometry (L1 1 oz / {spec.cu_thickness_um:.0f} um Cu, 46x46 mm L2/L3/L4 GND/PWR Keepout):",
         f"   Outer side d_out          : {res.d_out_mm:.2f} mm x {res.d_out_mm:.2f} mm",
@@ -353,7 +353,7 @@ def format_report(res: CoilDesignResult, spec: PlanarSpiralSpec) -> str:
         f"   Loaded Tank Q_loaded      : {res.q_loaded:.2f}  [Target: 15..22]",
         f"   Loaded -3 dB Bandwidth    : {res.bw_3db_khz:.1f} kHz [Target: > 650 kHz]",
         "------------------------------------------------------------------------------",
-        " Reader-to-Dregg180 Axial Coupling Profile (Primary L1 = 1.00 uH, r1 = 22.5 mm):",
+        " Reader-to-ASS2-0P5 Axial Coupling Profile (Primary L1 = 1.00 uH, r1 = 22.5 mm):",
     ]
     for row in res.coupling_table:
         lines.append(
@@ -365,7 +365,7 @@ def format_report(res: CoilDesignResult, spec: PlanarSpiralSpec) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Dregg-180 13.56 MHz Planar NFC Coil Calculator")
+    ap = argparse.ArgumentParser(description="ASS2-0P5 13.56 MHz Planar NFC Coil Calculator")
     ap.add_argument("--self-test", action="store_true", help="Run physics & SPICE consistency assertions")
     ap.add_argument("--json", action="store_true", help="Emit JSON output")
     args = ap.parse_args()

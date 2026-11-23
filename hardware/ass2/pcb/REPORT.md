@@ -1,6 +1,6 @@
 # ASS2-0P5 verification report
 
-On 2026-11-21, KiCad 8.0.3 reported **zero schematic ERC violations**. Its XML netlist agreed pin-for-pin with the independent Python reconstruction. Both custom footprints passed native DRC in a four-layer fixture. The local macOS application supplied the CLI. Neither bb2 nor hbox exposed a kicad-cli command on its login PATH.
+On 2026-11-21, KiCad 8.0.3 reported **zero schematic ERC violations**. Its XML netlist agreed pin-for-pin with the independent Python reconstruction. Both custom footprints passed native DRC in a four-layer fixture. The local macOS KiCad 8.0.3 installation supplied `kicad-cli`.
 
 | Check | Observed result |
 |---|---|
@@ -50,9 +50,9 @@ The source directory contains the calculator and slot YAML, plus verbatim extrac
 
 ```sh
 python3 -B verify_carrier_erc.py --self-test \
-  --datasheet ../../../../fable-fb7-datasheet/hardware/ass2/datasheet/dregg64-ass2-datasheet.typ \
-  --slot /Users/ember/dev/qsag/hardware/gf180mcu/librelane/slots/slot_0p5x0p5.yaml \
-  --def-file ../../../../ass2-slot0p5-pnr/artifacts/placed.def.gz \
+  --datasheet ../datasheet/dregg64-ass2-datasheet.typ \
+  --slot ../pnr/librelane/slot_0p5x0p5.yaml \
+  --def-file "${ASS2_PNR_ARTIFACTS:-../pnr/artifacts}/placed.def.gz" \
   --calculator /Users/ember/dev/qsag/hardware/gf180mcu/pcb/planar_nfc_coil_calc.py
 ```
 
