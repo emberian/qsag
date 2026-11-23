@@ -11,7 +11,7 @@
 //! here from the specifications: an SP 800-185 `cSHAKE256` over the raw Keccak permutation
 //! (`tiny-keccak` 2.0.2 double-permutes when the `bytepad` header is a multiple of the rate),
 //! a schoolbook product in `Z_q[X]/(X^256 + 1)`, and `u128` arithmetic for Goldilocks and its
-//! quadratic and quartic extensions, written as `F_p[u]/(u^2 - 7)` and `F_p[v]/(v^4 - 7)`.
+//! quadratic and quintic extensions (`F_p[u]/(u^2 - 7)` and `F_p[X]/(X^5 - 3)`).
 
 use arbitrary::Arbitrary;
 use ghash::universal_hash::{KeyInit, UniversalHash};
@@ -21,7 +21,7 @@ use p3_goldilocks::Goldilocks as P3Goldilocks;
 use qsag_accel::goldilocks as accel_gl;
 use qsag_accel::keccak::{cshake256_framed_xof, keccak256, sha3_256, shake256_xof};
 use qsag_accel::sha2::sha256;
-use qsag_agg::field::GoldilocksExt4;
+use qsag_agg::QuinticFp5;
 use qsag_asm::{
     SimdBackend, detect_backend, gf2_128_dot_with_backend, gf256_shamir_mac_with_backend,
     goldilocks_add_ct, goldilocks_dot2_ct, goldilocks_mul_ct, goldilocks_mul_ct_with_backend,
@@ -185,9 +185,8 @@ fn r_pow7(a: u64) -> u64 {
     (0..6).fold(a % P, |acc, _| r_mul(acc, a))
 }
 
-/// Product in `F_p[x]/(x^N - 7)`: `N = 2` is the quadratic extension in basis `(1, u)`,
-/// `N = 4` the quartic extension in basis `(1, v, v^2, v^3)`.
-fn r_binomial_mul<const N: usize>(a: [u64; N], b: [u64; N]) -> [u64; N] {
+/// Product in `F_p[x]/(x^N - W)`.
+fn r_binomial_mul<const N: usize>(a: [u64; N], b: [u64; N], w_nonres: u64) -> [u64; N] {
     let mut out = [0u64; N];
     for i in 0..N {
         for j in 0..N {
@@ -195,25 +194,19 @@ fn r_binomial_mul<const N: usize>(a: [u64; N], b: [u64; N]) -> [u64; N] {
             if i + j < N {
                 out[i + j] = r_add(out[i + j], term);
             } else {
-                out[i + j - N] = r_add(out[i + j - N], r_mul(7, term));
+                out[i + j - N] = r_add(out[i + j - N], r_mul(w_nonres, term));
             }
         }
     }
     out
 }
 
-/// Tower limbs `(c0.c0, c0.c1, c1.c0, c1.c1)` hold `l0 + l1 u + l2 v + l3 u v` with
-/// `u = v^2`: the coefficients of `1, v, v^2, v^3` are `l0, l2, l1, l3`.
-fn tower_to_powers(l: [u64; 4]) -> [u64; 4] {
-    [l[0], l[2], l[1], l[3]]
+fn fp5_of(l: [u64; 5]) -> QuinticFp5 {
+    QuinticFp5::from_limbs(l.map(CoreGl::from_u64_reduced))
 }
 
-fn ext4_of(l: [u64; 4]) -> GoldilocksExt4 {
-    GoldilocksExt4::from_limbs(l.map(CoreGl::from_u64_reduced))
-}
-
-fn ext4_powers(x: GoldilocksExt4) -> [u64; 4] {
-    tower_to_powers(x.to_limbs().map(CoreGl::to_canonical_u64))
+fn fp5_limbs(x: QuinticFp5) -> [u64; 5] {
+    x.to_limbs().map(CoreGl::to_canonical_u64)
 }
 
 fn ext2_of(l: [u64; 2]) -> GoldilocksExt2 {
@@ -296,13 +289,13 @@ fn check_goldilocks_extensions(w: [u64; 4], x: [u64; 4]) {
     let (a2, b2) = ([w[0], w[1]], [x[0], x[1]]);
     let (ra2, rb2) = (a2.map(|v| v % P), b2.map(|v| v % P));
     let (ea, eb) = (ext2_of(a2), ext2_of(b2));
-    let prod2 = r_binomial_mul(ra2, rb2);
+    let prod2 = r_binomial_mul(ra2, rb2, 7);
     let sum2 = [r_add(a2[0], b2[0]), r_add(a2[1], b2[1])];
     let diff2 = [r_sub(a2[0], b2[0]), r_sub(a2[1], b2[1])];
     assert_eq!(ext2_limbs(ea + eb), sum2);
     assert_eq!(ext2_limbs(ea - eb), diff2);
     assert_eq!(ext2_limbs(ea * eb), prod2);
-    assert_eq!(ext2_limbs(ea.square()), r_binomial_mul(ra2, ra2));
+    assert_eq!(ext2_limbs(ea.square()), r_binomial_mul(ra2, ra2, 7));
     assert_eq!(ext2_limbs(ea.mul_base(CoreGl::from_u64_reduced(x[2]))), {
         [r_mul(a2[0], x[2]), r_mul(a2[1], x[2])]
     });
@@ -310,7 +303,7 @@ fn check_goldilocks_extensions(w: [u64; 4], x: [u64; 4]) {
     match ea.inv() {
         Some(inv) => {
             assert!(!is_zero2);
-            assert_eq!(r_binomial_mul(ra2, ext2_limbs(inv)), [1, 0]);
+            assert_eq!(r_binomial_mul(ra2, ext2_limbs(inv), 7), [1, 0]);
         }
         None => assert!(is_zero2),
     }
@@ -320,40 +313,34 @@ fn check_goldilocks_extensions(w: [u64; 4], x: [u64; 4]) {
     assert_eq!(accel_gl::ext2_neg(a2), [r_sub(0, a2[0]), r_sub(0, a2[1])]);
     let accel_inv2 = accel_gl::ext2_inv_or_zero(a2);
     assert_eq!(
-        r_binomial_mul(ra2, accel_inv2),
+        r_binomial_mul(ra2, accel_inv2, 7),
         [u64::from(!is_zero2), 0]
     );
 
-    // Quartic extension against the schoolbook product in `F_p[v]/(v^4 - 7)`.
-    let (a4, b4) = (ext4_of(w), ext4_of(x));
-    let (pa4, pb4) = (
-        tower_to_powers(w.map(|v| v % P)),
-        tower_to_powers(x.map(|v| v % P)),
-    );
-    let prod4 = r_binomial_mul(pa4, pb4);
-    assert_eq!(ext4_powers(a4 + b4), core::array::from_fn(|i| r_add(pa4[i], pb4[i])));
-    assert_eq!(ext4_powers(a4 - b4), core::array::from_fn(|i| r_sub(pa4[i], pb4[i])));
-    assert_eq!(ext4_powers(-a4), pa4.map(|v| r_sub(0, v)));
-    assert_eq!(ext4_powers(a4 * b4), prod4);
-    assert_eq!(ext4_powers(a4.square()), r_binomial_mul(pa4, pa4));
+    // Quintic extension `Fp5` against schoolbook product in `F_p[X]/(X^5 - 3)`.
+    let w5 = [w[0], w[1], w[2], w[3], w[0].wrapping_add(x[3])];
+    let x5 = [x[0], x[1], x[2], x[3], x[0] ^ w[2]];
+    let (a5, b5) = (fp5_of(w5), fp5_of(x5));
+    let (pa5, pb5) = (w5.map(|v| v % P), x5.map(|v| v % P));
+    let prod5 = r_binomial_mul(pa5, pb5, 3);
+    assert_eq!(fp5_limbs(a5 + b5), core::array::from_fn(|i| r_add(pa5[i], pb5[i])));
+    assert_eq!(fp5_limbs(a5 - b5), core::array::from_fn(|i| r_sub(pa5[i], pb5[i])));
+    assert_eq!(fp5_limbs(-a5), pa5.map(|v| r_sub(0, v)));
+    assert_eq!(fp5_limbs(a5 * b5), prod5);
+    assert_eq!(fp5_limbs(a5.square()), r_binomial_mul(pa5, pa5, 3));
     assert_eq!(
-        ext4_powers(a4.mul_add(b4, a4)),
-        core::array::from_fn(|i| r_add(prod4[i], pa4[i]))
+        fp5_limbs(a5.mul_base(CoreGl::from_u64_reduced(x[0]))),
+        pa5.map(|v| r_mul(v, x[0]))
     );
+    let seventh5 = (0..6).fold(pa5, |acc, _| r_binomial_mul(acc, pa5, 3));
+    assert_eq!(fp5_limbs(a5.pow(7)), seventh5);
+    let is_zero5 = pa5 == [0; 5];
+    assert_eq!(a5.is_zero(), is_zero5);
     assert_eq!(
-        ext4_powers(a4.mul_base(CoreGl::from_u64_reduced(x[0]))),
-        pa4.map(|v| r_mul(v, x[0]))
+        r_binomial_mul(pa5, fp5_limbs(a5.inv_or_zero()), 3),
+        [u64::from(!is_zero5), 0, 0, 0, 0]
     );
-    let seventh4 = (0..6).fold(pa4, |acc, _| r_binomial_mul(acc, pa4));
-    assert_eq!(ext4_powers(a4.pow(7)), seventh4);
-    let is_zero4 = pa4 == [0; 4];
-    assert_eq!(a4.is_zero(), is_zero4);
-    assert_eq!(
-        r_binomial_mul(pa4, ext4_powers(a4.inv())),
-        [u64::from(!is_zero4), 0, 0, 0]
-    );
-    // Canonical 32-byte codec of the element.
-    assert_eq!(GoldilocksExt4::from_le_bytes_canonical(a4.to_le_bytes()), Some(a4));
+    assert_eq!(QuinticFp5::from_le_bytes_canonical(a5.to_le_bytes()), Some(a5));
 }
 
 /// `a * b` in `Z_q[X]/(X^256 + 1)`.

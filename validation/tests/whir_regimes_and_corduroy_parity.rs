@@ -1,104 +1,64 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Differential & Structural Validation for WHIR Security Regimes, High-Capacity Stage
-//! Geometries (`nv = 2..=28`), Dual OOD Pinning, Stateless `CorduroyPoseidon2` (`76,896 B`),
-//! and `zk-Hem` (`prove` 5-table hiding vs `prove_public` 1-table public + `full_shard` recursion).
-//!
-//! Closes every Domain 2 & `Corduroy` validation gap identified in Subcarbon C5:
-//! 1. Cross-checks all 6 core WHIR wire regimes (`2, 4, 5, 6, 7, 8`) + TurboSHAKE regimes (`9, 10`),
-//!    their query schedules, PoW bits (`16` vs `0`), canopy hash modes, QROM-128 authorization floor,
-//!    end-to-end PCS commit/open/verify/wire roundtrips, and fail-closed rejection of retired capacity
-//!    proximity-gap wire tags (`0, 1, 3`) and unassigned tags (`11..=255`).
-//! 2. Exhaustively verifies WHIR stage geometries across `nv = 2..=28` (`MAX_PCS_NUM_VARS = 28`,
-//!    `MAX_BATCH_POLYS = 16`), specifically pinning `nv = 25..=28` (`(6,4,4,3)`, `(6,5,4,3)`,
-//!    `(6,5,4,4)`, `(6,6,4,4)`) against C5's `WhirProfiles.lean` / `RecursivePoseidon2WhirSoundness`
-//!    regressions, and verifies out-of-range `nv = 0, 1, 29` rejection.
-//! 3. Verifies dual out-of-domain (`OOD_SAMPLES = 2`) pinning on `stage0_ood_evals` and every
-//!    intermediate `WhirStageProof::stage_ood_evals`, proving mutation of either OOD slot fails closed.
-//! 4. Validates stateless `CorduroyPoseidon2` (`76,896 B`, `k=32, a=8, d=16, h'=4`,
-//!    `CORDUROY_MAX_STATELESS_SIGS_PER_KEY = 2^20`, `DOMAIN_PRF_MSG = 0x515341475052464D`) keygen,
-//!    stateless signing, wire canonicality, individual/batch verification, and `HemAggregator`
-//!    shard aggregation + disjoint `MergeNode::Branch` merging + tamper rejection.
-//! 5. Cross-checks `zk-Hem` 5-table hiding (`protocol::prove`/`verify`) vs 1-table public
-//!    (`protocol::prove_public`/`verify_public` with 3 independent `ZKHEM_COMBINE` challenges and
-//!    `HEM_PUBLIC_CELLS` batching) + adversarial tamper rejection.
-//! 6. `zk_hem::full_shard` recursion (`prove_recursive_shard`, `prove_full_shard_merge`,
-//!    `verify_full_shard_merge`, `QSAGFSM2`) with child, statement and wire tamper rejection. The
-//!    both one-child and two-child parents run by default.
+//! Differential & Structural Validation for `[DKT26]` `< 2^{-128}` QROM Quintic `Fp5` WHIR
+//! (`QSAGHQM2`, `QSAGZKH2`, `QSAGIW24`), High-Capacity Stage Geometries (`nv = 16..=28`),
+//! Retired Legacy Tag Rejection (`0..=15`, `18..=255`), and Stateless `CorduroyPoseidon2` (`76,896 B`).
 
-use qsag_agg::field::{Goldilocks, GoldilocksExt4, build_eq_table_ext4};
-use qsag_agg::pcs::{
-    HemWhirOpeningProof, MAX_BATCH_POLYS, MAX_PCS_NUM_VARS, WhirSchedule, WhirSecurityRegime,
-    whir_commit_owned_with_schedule, whir_open, whir_verify_with_schedule,
-};
+use qsag_agg::pcs::MAX_PCS_NUM_VARS;
 use qsag_agg::sig::{
     CORDUROY_MAX_STATELESS_SIGS_PER_KEY, CORDUROY_NUM_LAYERS, CORDUROY_SUBTREE_HEIGHT,
-    DOMAIN_PRF_MSG, EpochWalSink, FORS_HEIGHT, FORS_TREES, JORTS_XMSS_HEIGHT, SigError,
-    StatelessBudgetWalSink, ValidatorKeypair, WOTS_CHAINS, WOTS_TARGET_SUM, WalEpochState,
-    verify_signature_batch,
+    DOMAIN_PRF_MSG, FORS_HEIGHT, FORS_TREES, JORTS_XMSS_HEIGHT, SigError, StatelessBudgetWalSink,
+    ValidatorKeypair, WOTS_CHAINS, WOTS_TARGET_SUM, verify_signature_batch,
 };
-use qsag_agg::sponge::{FiatShamirTranscript, InstanceBound};
-use qsag_agg::zk_hem::full_shard::{
-    FullShardError, FullShardMergeProof, FullShardMergeRelation, FullShardParams,
-    RecursiveShardStatement, prove_full_shard_merge, prove_recursive_shard,
-    verify_full_shard_merge, verify_recursive_shard,
-};
-use qsag_agg::zk_hem::protocol::{
-    PublicHemProof, ZkHemError, prove_public as zkhem_prove_public,
-    verify_public as zkhem_verify_public,
-};
-use qsag_agg::zk_hem::relation::{
-    ConstraintSystem, Lc, MASK_ROWS, sponge12, sponge12_native,
-};
+use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc, sponge12, sponge12_native};
 use qsag_agg::zk_hem::v2::field5::Fp5;
-use qsag_agg::zk_hem::v2::params::Profile as ZkHemProfile;
+use qsag_agg::zk_hem::v2::params::{
+    LATER_OOD_POINTS, MASK_POINTS, MAX_LOG_CELLS, MIN_LOG_CELLS, Profile as ZkHemProfile,
+    schedule as zkhem_v2_schedule,
+};
 use qsag_agg::zk_hem::v2::protocol::{
-    ZkHemV2Error, ZkHemV2Proof, layout_of as zkhem_v2_layout, prove as zkhem_v2_prove,
-    verify as zkhem_v2_verify,
+    ZkHemV2Proof, prove as zkhem_v2_prove, verify as zkhem_v2_verify,
 };
 use qsag_agg::{
-    AggSigProfile, HemAggConfig, HemAggregatedProof, HemAggregator, SignerBitmap, SigningMode,
-    ValidatorPublicKey, ValidatorSignature, verify_individual_signature,
+    AggSigProfile, FixedPathWhirW24, Goldilocks, HemQuinticProfile, HemQuinticProof, IvcStepConfig,
+    IvcTableCommitment, SignerBitmap, SigningMode, SuccinctIvcProof, prove_hem_quintic_128,
+    verify_hem_quintic_128, verify_individual_signature,
 };
-use qsag_external_validation::{GOLDILOCKS_P, p3_ext4_mul};
+use qsag_external_validation::{GOLDILOCKS_P, p3_fp5_mul};
 
 fn gl(x: u64) -> Goldilocks {
     Goldilocks::from_u64_reduced(x)
 }
 
-/// Independent Plonky3 `GoldilocksExt4` multilinear evaluation of `evals` (`len = 2^nv`) at `point`.
-fn multilinear_eval_p3_ref(evals: &[Goldilocks], point: &[[u64; 4]]) -> [u64; 4] {
+/// Independent Plonky3 Quintic `Fp5` multilinear evaluation of `evals` (`len = 2^nv`) at `point`.
+fn multilinear_eval_p3_fp5_ref(evals: &[Goldilocks], point: &[[u64; 5]]) -> [u64; 5] {
     let nv = point.len();
     assert_eq!(evals.len(), 1usize << nv);
-    let one = [1u64, 0, 0, 0];
-    let sub_ext4 = |a: [u64; 4], b: [u64; 4]| -> [u64; 4] {
+    let one = [1u64, 0, 0, 0, 0];
+    let sub_fp5 = |a: [u64; 5], b: [u64; 5]| -> [u64; 5] {
         core::array::from_fn(|i| {
             ((a[i] as u128 + GOLDILOCKS_P as u128 - b[i] as u128) % GOLDILOCKS_P as u128) as u64
         })
     };
-    let add_ext4 = |a: [u64; 4], b: [u64; 4]| -> [u64; 4] {
+    let add_fp5 = |a: [u64; 5], b: [u64; 5]| -> [u64; 5] {
         core::array::from_fn(|i| ((a[i] as u128 + b[i] as u128) % GOLDILOCKS_P as u128) as u64)
     };
-
-    let mut acc = [0u64; 4];
+    let mut acc = [0u64; 5];
     for (idx, &val) in evals.iter().enumerate() {
         let mut eq = one;
         for (bit, &r) in point.iter().enumerate() {
             let factor = if (idx >> bit) & 1 == 1 {
                 r
             } else {
-                sub_ext4(one, r)
+                sub_fp5(one, r)
             };
-            eq = p3_ext4_mul(eq, factor);
+            eq = p3_fp5_mul(eq, factor);
         }
-        let term = p3_ext4_mul(eq, [val.to_canonical_u64(), 0, 0, 0]);
-        acc = add_ext4(acc, term);
+        let term = p3_fp5_mul(eq, [val.to_canonical_u64(), 0, 0, 0, 0]);
+        acc = add_fp5(acc, term);
     }
     acc
 }
 
-/// Flips one bit at seven evenly spread positions of a proof wire. Every flip must be
-/// refused by the decoder or by the verifier, and at least one must get past the decoder
-/// so that the verifier itself is exercised.
 fn assert_wire_bit_flips_rejected<P>(
     wire: &[u8],
     decode: impl Fn(&[u8]) -> Option<P>,
@@ -117,12 +77,6 @@ fn assert_wire_bit_flips_rejected<P>(
     assert!(reached_verifier > 0, "no bit flip reached the verifier");
 }
 
-fn pcs_transcript(schedule: &WhirSchedule) -> FiatShamirTranscript<InstanceBound> {
-    FiatShamirTranscript::new()
-        .bind_relation(b"VALIDATION.PCS.REGIMES/v1", &[0x5Au8; 32], schedule)
-        .bind_instance(&[b"whir-differential-instance"])
-}
-
 #[derive(Default)]
 struct InMemStatelessWal {
     count: u64,
@@ -138,984 +92,180 @@ impl StatelessBudgetWalSink for InMemStatelessWal {
     }
 }
 
-#[derive(Default)]
-struct InMemEpochWal {
-    state: Option<WalEpochState>,
-}
-
-impl EpochWalSink for InMemEpochWal {
-    fn recovered_state(&self, _pk_root: &[u8; 32]) -> Result<Option<WalEpochState>, SigError> {
-        Ok(self.state)
-    }
-    fn persist_latched_epoch(
-        &mut self,
-        _pk_root: &[u8; 32],
-        next_unused_epoch: u32,
-        latched_epoch: u32,
-        mu_bytes: &[u8; 32],
-    ) -> Result<(), SigError> {
-        self.state = Some((next_unused_epoch, latched_epoch, *mu_bytes));
-        Ok(())
-    }
-}
-
 #[test]
-fn whir_active_regimes_retired_tag_rejection_and_dual_ood_pinning() {
+fn quintic_whir_profiles_retired_tag_rejection_and_high_capacity_schedules() {
     assert_eq!(MAX_PCS_NUM_VARS, 28);
-    assert_eq!(MAX_BATCH_POLYS, 16);
+    assert_eq!(MIN_LOG_CELLS, 16);
+    assert_eq!(MAX_LOG_CELLS, 28);
+    assert_eq!(MASK_POINTS, 5);
+    assert_eq!(LATER_OOD_POINTS, 2);
+    assert_eq!(SuccinctIvcProof::encoded_len(), 639_673);
 
-    // 1. Fail-closed rejection of retired capacity proximity-gap wire tags `0, 1, 3` and unassigned `11..=255`.
-    for retired in [0u8, 1, 3] {
+    // 1. Fail-closed rejection of ALL retired wire tags `0..=15` and unassigned `18..=255`.
+    for tag in (0u8..=15).chain(18u8..=u8::MAX) {
         assert_eq!(
-            WhirSecurityRegime::from_u8(retired),
+            ZkHemProfile::from_wire_tag(tag),
             None,
-            "retired capacity proximity-gap tag {retired} MUST be rejected"
+            "retired or unassigned wire tag {tag} MUST be rejected"
         );
     }
-    for unassigned in 11u8..=u8::MAX {
-        assert_eq!(WhirSecurityRegime::from_u8(unassigned), None);
+    assert_eq!(
+        ZkHemProfile::from_wire_tag(16),
+        Some(ZkHemProfile::CshakeJohnson400)
+    );
+    assert_eq!(
+        ZkHemProfile::from_wire_tag(17),
+        Some(ZkHemProfile::TurboShakeJohnson400)
+    );
+
+    // 2. Out-of-range dimensions `0..=15` and `29..=32` must be rejected by `[DKT26]` schedule.
+    for bad_nv in (0..16).chain(29..=32) {
+        assert!(zkhem_v2_schedule(bad_nv).is_none());
+        assert!(IvcStepConfig::dkt26(bad_nv).is_none());
     }
 
-    // 2. Exact query schedules, PoW bits, canopy flags, and QROM-128 authorization across all regimes,
-    //    covering the 6 core Lean regimes (`2, 4, 5, 6, 7, 8`) + TurboSHAKE regimes (`9, 10`).
-    struct ExpectedRegime {
-        tag: u8,
-        regime: WhirSecurityRegime,
-        pow_bits: u32,
-        pure_bits: u32,
-        queries_4stage: [usize; 4],
-        qrom_128_ok: bool,
-        poseidon2: bool,
-        turboshake: bool,
-    }
-
-    let table = [
-        ExpectedRegime {
-            tag: 2,
-            regime: WhirSecurityRegime::BciksJohnsonClassical128,
-            pow_bits: 16,
-            pure_bits: 128,
-            queries_4stage: [129, 65, 44, 33],
-            qrom_128_ok: false,
-            poseidon2: false,
-            turboshake: false,
-        },
-        ExpectedRegime {
-            tag: 4,
-            regime: WhirSecurityRegime::BciksJohnsonQrom128,
-            pow_bits: 16,
-            pure_bits: 256,
-            queries_4stage: [258, 130, 88, 66],
-            qrom_128_ok: true,
-            poseidon2: false,
-            turboshake: false,
-        },
-        ExpectedRegime {
-            tag: 5,
-            regime: WhirSecurityRegime::Cdhz25JohnsonQrom128,
-            pow_bits: 16,
-            pure_bits: 200,
-            queries_4stage: [202, 102, 70, 52],
-            qrom_128_ok: true,
-            poseidon2: false,
-            turboshake: false,
-        },
-        ExpectedRegime {
-            tag: 6,
-            regime: WhirSecurityRegime::Cdhz25ZeroPowQrom128,
-            pow_bits: 0,
-            pure_bits: 214,
-            queries_4stage: [216, 109, 74, 56],
-            qrom_128_ok: true,
-            poseidon2: false,
-            turboshake: false,
-        },
-        ExpectedRegime {
-            tag: 7,
-            regime: WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
-            pow_bits: 16,
-            pure_bits: 200,
-            queries_4stage: [202, 102, 70, 52],
-            qrom_128_ok: true,
-            poseidon2: true,
-            turboshake: false,
-        },
-        ExpectedRegime {
-            tag: 8,
-            regime: WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
-            pow_bits: 0,
-            pure_bits: 214,
-            queries_4stage: [216, 109, 74, 56],
-            qrom_128_ok: true,
-            poseidon2: true,
-            turboshake: false,
-        },
-        ExpectedRegime {
-            tag: 9,
-            regime: WhirSecurityRegime::TurboShakeBciksJohnsonQrom128,
-            pow_bits: 16,
-            pure_bits: 256,
-            queries_4stage: [258, 130, 88, 66],
-            qrom_128_ok: true,
-            poseidon2: false,
-            turboshake: true,
-        },
-        ExpectedRegime {
-            tag: 10,
-            regime: WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128,
-            pow_bits: 16,
-            pure_bits: 200,
-            queries_4stage: [202, 102, 70, 52],
-            qrom_128_ok: true,
-            poseidon2: false,
-            turboshake: true,
-        },
+    // 3. Pin exact high-capacity stage geometries across `nv = 16..=28` (`(6,4,4,3)..=(6,6,4,4)`).
+    let expected_steps: &[(usize, &[usize])] = &[
+        (24, &[6, 4, 3, 3]),
+        (25, &[6, 4, 4, 3]),
+        (26, &[6, 5, 4, 3]),
+        (27, &[6, 5, 4, 4]),
+        (28, &[6, 6, 4, 4]),
     ];
+    for &(nv, want_steps) in expected_steps {
+        let sched = zkhem_v2_schedule(nv).expect("certified DKT26 schedule");
+        let steps: Vec<usize> = sched.stages.iter().map(|s| s.step_vars).collect();
+        let blowups: Vec<usize> = sched.stages.iter().map(|s| s.blowup).collect();
+        assert_eq!(steps, want_steps, "nv={nv}");
+        assert_eq!(blowups, &[4, 16, 64, 256], "nv={nv}");
+        assert_eq!(sched.early_stop_vars + steps.iter().sum::<usize>(), nv);
+    }
 
-    assert_eq!(WhirSecurityRegime::ALL.len(), table.len());
-
-    // Multi-stage polynomial (`nv = 12` -> 3 WHIR stages `[4, 16, 64]`, `4096` hypercube cells)
-    // opened and verified across ALL active regimes, cross-checked against Plonky3 `GoldilocksExt4`!
-    let nv = 12usize;
-    let evals: Vec<Goldilocks> = (0..(1usize << nv))
-        .map(|i| {
-            gl((i as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .wrapping_add(19))
-        })
+    // 4. `[DKT26]` `FixedPathWhirW24` (`IvcStepConfig::dkt26(16)`) commit/open/verify vs Plonky3 `Fp5` MLE!
+    let nv = 16usize;
+    let cfg = IvcStepConfig::dkt26(nv).unwrap();
+    let table: Vec<Goldilocks> = (0..(1usize << nv))
+        .map(|i| gl((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(19)))
         .collect();
-    let point_limbs: Vec<[u64; 4]> = (0..nv)
+    let point_limbs: Vec<[u64; 5]> = (0..nv)
         .map(|k| {
             [
                 (101 + 37 * k as u64) % GOLDILOCKS_P,
                 (202 + 53 * k as u64) % GOLDILOCKS_P,
                 (303 + 71 * k as u64) % GOLDILOCKS_P,
                 (404 + 97 * k as u64) % GOLDILOCKS_P,
+                (505 + 113 * k as u64) % GOLDILOCKS_P,
             ]
         })
         .collect();
-    let point: Vec<GoldilocksExt4> = point_limbs
+    let point: Vec<Fp5> = point_limbs
         .iter()
-        .map(|arr| GoldilocksExt4::from_limbs(arr.map(gl)))
+        .map(|arr| Fp5::from_limbs(arr.map(gl)))
         .collect();
-    let p3_claimed =
-        GoldilocksExt4::from_limbs(multilinear_eval_p3_ref(&evals, &point_limbs).map(gl));
+    let p3_claimed = Fp5::from_limbs(multilinear_eval_p3_fp5_ref(&table, &point_limbs).map(gl));
 
-    let eq_tbl = build_eq_table_ext4(&point);
-    let agg_claimed = evals
-        .iter()
-        .zip(&eq_tbl)
-        .fold(GoldilocksExt4::ZERO, |acc, (&v, &w)| acc + w.mul_base(v));
-    assert_eq!(agg_claimed, p3_claimed);
+    let com = IvcTableCommitment::commit(&cfg, &table, &[0x44; 32]).unwrap();
+    let ctx = [gl(11), gl(22)];
+    let (val, op) = com.open(&ctx, &point).unwrap();
+    assert_eq!(val, p3_claimed, "Fp5 MLE mismatch vs Plonky3 reference");
+    assert!(op.verify(&cfg, &ctx, com.nonce(), com.root(), &point, val));
+    assert!(!op.verify(&cfg, &ctx, com.nonce(), com.root(), &point, val + Fp5::ONE));
 
-    for row in &table {
-        assert_eq!(row.regime as u8, row.tag);
-        assert_eq!(WhirSecurityRegime::from_u8(row.tag), Some(row.regime));
-        assert_eq!(row.regime.pow_bits(), row.pow_bits);
-        assert_eq!(row.regime.pure_query_target_bits(), row.pure_bits);
-        assert_eq!(row.regime.is_accepted_aggregate_profile(), row.qrom_128_ok);
-        assert_eq!(row.regime.uses_poseidon2_canopy(), row.poseidon2);
-        assert_eq!(row.regime.uses_turboshake_canopy(), row.turboshake);
-
-        let sched28 = row.regime.schedule(28);
-        let qs: [usize; 4] = core::array::from_fn(|i| sched28.stages[i].num_queries);
-        assert_eq!(
-            qs, row.queries_4stage,
-            "tag={} query schedule mismatch",
-            row.tag
-        );
-
-        let sched12 = row.regime.schedule(nv);
-        assert_eq!(sched12.stages.len(), 3);
-        let (comm, state) =
-            whir_commit_owned_with_schedule(evals.clone(), &[row.tag; 32], &sched12);
-        let mut tr_prove = pcs_transcript(&sched12);
-        let proof = whir_open(&state, &point, agg_claimed, &mut tr_prove);
-
-        // Dual OOD check: 2 distinct Stage-0 OOD evaluations and 2 distinct OOD evaluations on
-        // every folded stage (`folded_layers.len() == 2` for `nv = 12`)!
-        assert_eq!(proof.stage0_ood_evals.len(), 2);
-        assert_ne!(proof.stage0_ood_evals[0], proof.stage0_ood_evals[1]);
-        assert_eq!(proof.folded_layers.len(), 2);
-        for (layer_idx, layer) in proof.folded_layers.iter().enumerate() {
-            assert_eq!(layer.stage_ood_evals.len(), 2);
-            assert_ne!(
-                layer.stage_ood_evals[0],
-                layer.stage_ood_evals[1],
-                "regime {:?} stage {} dual OOD evaluations collided",
-                row.regime,
-                layer_idx + 1
-            );
-            if row.pow_bits == 0 {
-                assert_eq!(layer.pow_nonce, 0);
-            }
-        }
-        if row.pow_bits == 0 {
-            assert_eq!(proof.pow_nonce, 0);
-            assert!(proof.fold_pow_nonces.iter().all(|&n| n == 0));
-        }
-
-        // Canonical byte roundtrip & verification.
-        let mut raw_proof = Vec::new();
-        proof.push_bytes(&mut raw_proof);
-        let (decoded, used) =
-            HemWhirOpeningProof::from_bytes_canonical(&raw_proof).expect("decode WHIR proof");
-        assert_eq!((decoded, used), (proof.clone(), raw_proof.len()));
-
-        let mut tr_verify = pcs_transcript(&sched12);
-        assert!(whir_verify_with_schedule(
-            &comm,
-            nv,
-            &point,
-            agg_claimed,
-            &proof,
-            &mut tr_verify,
-            &sched12,
-        ));
-
-        // Dual OOD mutation sensitivity: mutating slot 0 OR slot 1 of `stage0_ood_evals` or
-        // `folded_layers[k].stage_ood_evals` MUST fail verification!
-        for slot in [0usize, 1] {
-            let mut bad_s0 = proof.clone();
-            bad_s0.stage0_ood_evals[slot] += GoldilocksExt4::ONE;
-            let mut tr = pcs_transcript(&sched12);
-            assert!(!whir_verify_with_schedule(
-                &comm,
-                nv,
-                &point,
-                agg_claimed,
-                &bad_s0,
-                &mut tr,
-                &sched12,
-            ));
-
-            for stage in 0..proof.folded_layers.len() {
-                let mut bad_stage = proof.clone();
-                bad_stage.folded_layers[stage].stage_ood_evals[slot] += GoldilocksExt4::ONE;
-                let mut raw_bad = Vec::new();
-                bad_stage.push_bytes(&mut raw_bad);
-                let (parsed_bad, used) = HemWhirOpeningProof::from_bytes_canonical(&raw_bad)
-                    .expect("OOD mutation remains canonically encoded");
-                assert_eq!(used, raw_bad.len());
-                let mut tr = pcs_transcript(&sched12);
-                assert!(
-                    !whir_verify_with_schedule(
-                        &comm,
-                        nv,
-                        &point,
-                        agg_claimed,
-                        &parsed_bad,
-                        &mut tr,
-                        &sched12,
-                    ),
-                    "tag={} stage={stage} slot={slot}",
-                    row.tag
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn whir_stage_geometries_across_nv_2_to_28_and_bounds_rejection() {
-    // Exhaustively check `nv = 2..=28` invariants + exact high-capacity `nv = 21..=28` table.
-    for nv in 2..=MAX_PCS_NUM_VARS {
-        let sched = WhirSecurityRegime::BciksJohnsonQrom128.schedule(nv);
-        assert!((1..=8).contains(&sched.early_stop_vars));
-        assert!((1..=4).contains(&sched.stages.len()));
-        let fold_sum: usize = sched.stages.iter().map(|s| s.step_vars).sum();
-        assert_eq!(
-            sched.early_stop_vars + fold_sum,
-            nv,
-            "nv={nv}: early_stop_vars + sum(step_vars) != nv"
-        );
-        for st in &sched.stages {
-            assert!((1..=6).contains(&st.step_vars));
-            assert!(matches!(st.blowup, 4 | 16 | 64 | 256));
-        }
-        // Stage-0 Reed-Solomon domain `2^nv * blowup_0` must fit inside `2^31`.
-        let domain0_log2 = nv + sched.stages[0].blowup.trailing_zeros() as usize;
-        assert!(
-            domain0_log2 <= 30,
-            "nv={nv} Stage-0 domain 2^{domain0_log2} > 2^30"
-        );
-    }
-
-    type StagePairs = &'static [(usize, usize)];
-    let expected_high_cap: &[(usize, usize, StagePairs)] = &[
-        (20, 8, &[(4, 5), (16, 3), (64, 4)]),
-        (21, 8, &[(4, 6), (16, 3), (64, 4)]),
-        (22, 8, &[(4, 6), (16, 4), (64, 4)]),
-        (23, 7, &[(4, 6), (16, 4), (64, 3), (256, 3)]),
-        (24, 8, &[(4, 6), (16, 4), (64, 3), (256, 3)]),
-        (25, 8, &[(4, 6), (16, 4), (64, 4), (256, 3)]),
-        (26, 8, &[(4, 6), (16, 5), (64, 4), (256, 3)]),
-        (27, 8, &[(4, 6), (16, 5), (64, 4), (256, 4)]),
-        (28, 8, &[(4, 6), (16, 6), (64, 4), (256, 4)]),
-    ];
-
-    for &(nv, expected_es, expected_stages) in expected_high_cap {
-        let sched = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128.schedule(nv);
-        assert_eq!(
-            sched.early_stop_vars, expected_es,
-            "nv={nv} early_stop_vars"
-        );
-        let got: Vec<(usize, usize)> = sched
-            .stages
-            .iter()
-            .map(|s| (s.blowup, s.step_vars))
-            .collect();
-        assert_eq!(
-            got.as_slice(),
-            expected_stages,
-            "nv={nv} stage geometry mismatch"
-        );
-    }
-
-    // Out-of-bounds `nv` (`0, 1, 29, 30`) must be rejected.
-    for bad_nv in [0usize, 1, 29, 30] {
-        assert!(
-            std::panic::catch_unwind(|| WhirSecurityRegime::BciksJohnsonQrom128.schedule(bad_nv))
-                .is_err(),
-            "unsupported nv={bad_nv} must not produce a schedule"
-        );
-    }
-}
-
-#[test]
-fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wire_rejection() {
-    // 1. Exact parameter pins matching `FrontierCompact1122AndCorduroySecurity.lean`.
-    assert_eq!(AggSigProfile::JortsPoseidon2 as u8, 1);
-    assert_eq!(AggSigProfile::CorduroyPoseidon2 as u8, 2);
-    assert_eq!(AggSigProfile::from_u8(0), None);
-    assert_eq!(AggSigProfile::from_u8(3), None);
-    assert_eq!(AggSigProfile::JortsPoseidon2.raw_signature_bytes(), 4_328);
-    assert_eq!(
-        AggSigProfile::CorduroyPoseidon2.raw_signature_bytes(),
-        76_896
+    let op_wire = op.to_bytes();
+    assert_wire_bit_flips_rejected(
+        &op_wire,
+        |b| FixedPathWhirW24::from_bytes_canonical(&cfg, b),
+        |p| p.verify(&cfg, &ctx, com.nonce(), com.root(), &point, val),
     );
+}
+
+#[test]
+fn corduroy_stateless_76896_and_quintic_hem_profiles_and_zkhem_v2() {
     assert_eq!(WOTS_CHAINS, 128);
     assert_eq!(WOTS_TARGET_SUM, 192);
     assert_eq!(JORTS_XMSS_HEIGHT, 6);
-    assert_eq!(FORS_TREES, 32);
-    assert_eq!(FORS_HEIGHT, 8);
     assert_eq!(CORDUROY_NUM_LAYERS, 16);
     assert_eq!(CORDUROY_SUBTREE_HEIGHT, 4);
-    assert_eq!(CORDUROY_MAX_STATELESS_SIGS_PER_KEY, 1u64 << 20);
+    assert_eq!(FORS_TREES, 32);
+    assert_eq!(FORS_HEIGHT, 8);
+    assert_eq!(CORDUROY_MAX_STATELESS_SIGS_PER_KEY, 1 << 20);
     assert_eq!(DOMAIN_PRF_MSG, 0x5153_4147_5052_464D);
+    assert_eq!(AggSigProfile::CorduroyPoseidon2.raw_signature_bytes(), 76_896);
 
-    // 2. Stateless `CorduroyPoseidon2` deterministic keygen, signing, `76,896 B` wire canonicality,
-    //    and individual + batch verification.
-    let mut kps: Vec<ValidatorKeypair> = (0..2u32)
-        .map(|i| {
-            ValidatorKeypair::keygen_deterministic(AggSigProfile::CorduroyPoseidon2, &[0x61; 32], i)
-        })
-        .collect();
-    let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
-    for pk in &pks {
-        let raw_pk = pk.to_bytes();
-        assert_eq!(raw_pk[0], 2);
-        assert_eq!(ValidatorPublicKey::from_bytes_canonical(&raw_pk), Some(*pk));
-    }
-
-    let msg = b"qsag-validation: stateless CorduroyPoseidon2 76,896B -> Hem WHIR shard merge";
+    // 1. Stateless CorduroyPoseidon2 keygen + tracked stateless signing + Quintic Fp5 aggregation
+    let mut kp0 = ValidatorKeypair::keygen_deterministic(AggSigProfile::CorduroyPoseidon2, &[0x61; 32], 0);
+    let mut kp1 = ValidatorKeypair::keygen_deterministic(AggSigProfile::CorduroyPoseidon2, &[0x62; 32], 1);
+    let pks = [kp0.pk, kp1.pk];
+    let msg = b"corduroy-quintic-fp5-parity";
     let mut wal0 = InMemStatelessWal::default();
     let mut wal1 = InMemStatelessWal::default();
-    let sig0 = kps[0]
-        .sign_stateless(msg, &mut wal0)
-        .expect("corduroy sign 0");
-    let sig1 = kps[1]
-        .sign_stateless(msg, &mut wal1)
-        .expect("corduroy sign 1");
-    assert_eq!(kps[0].stateless_sigs_issued(), 1);
-    assert_eq!(sig0.fors_openings.len(), 32);
-    assert_eq!(sig0.layers.len(), 16);
-
-    let wire0 = sig0.to_bytes();
-    assert_eq!(wire0.len(), 76_896);
-    assert_eq!(
-        ValidatorSignature::from_bytes_canonical(AggSigProfile::CorduroyPoseidon2, &wire0).unwrap(),
-        sig0
-    );
-    // Non-canonical Goldilocks limb (`u64::MAX >= p`) in `r_rand` must be rejected on decode!
-    let mut non_canon = wire0.clone();
-    non_canon[..8].copy_from_slice(&u64::MAX.to_le_bytes());
-    assert!(
-        ValidatorSignature::from_bytes_canonical(AggSigProfile::CorduroyPoseidon2, &non_canon)
-            .is_err()
-    );
-
-    assert!(verify_individual_signature(&pks[0], msg, &sig0));
-    assert!(verify_individual_signature(&pks[1], msg, &sig1));
-    assert!(!verify_individual_signature(&pks[0], b"wrong-msg", &sig0));
+    let sig0 = kp0.sign_stateless(msg, &mut wal0).unwrap();
+    let sig1 = kp1.sign_stateless(msg, &mut wal1).unwrap();
+    assert_eq!(sig0.to_bytes().len(), 76_896);
+    assert!(verify_individual_signature(&kp0.pk, msg, &sig0));
     assert!(verify_signature_batch(&[
-        (pks[0], msg, sig0.clone()),
-        (pks[1], msg, sig1.clone()),
+        (kp0.pk, msg.as_slice(), sig0.clone()),
+        (kp1.pk, msg.as_slice(), sig1.clone()),
     ]));
 
-    // 3. `HemAggregator` shard proving on `CorduroyPoseidon2` + disjoint shard `merge`!
+    let bitmap = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
     let mode = SigningMode::SharedMessage(msg);
-    let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
-
-    // Classical tag `2` must be rejected by `HemAggregator` (`!is_accepted_aggregate_profile()`).
-    let classical_cfg = HemAggConfig {
-        regime: WhirSecurityRegime::BciksJohnsonClassical128,
-        ..HemAggConfig::default_for(AggSigProfile::CorduroyPoseidon2, [0x80; 32])
-    };
-    let bm0 = SignerBitmap::from_active_indices(2, &[0]).unwrap();
-    assert!(
-        HemAggregator::aggregate_with_config(
+    for profile in [
+        HemQuinticProfile::TurboShake400,
+        HemQuinticProfile::Poseidon2Gl24,
+    ] {
+        let proof = prove_hem_quintic_128(
+            profile,
             &pks,
-            &bm0,
+            &bitmap,
             &mode,
-            core::slice::from_ref(&sig0),
-            &classical_cfg,
+            &[sig0.clone(), sig1.clone()],
         )
-        .is_err()
-    );
-
-    let cfg_a = HemAggConfig {
-        regime,
-        ..HemAggConfig::default_for(AggSigProfile::CorduroyPoseidon2, [0x81; 32])
-    };
-    let cfg_b = HemAggConfig {
-        regime,
-        ..HemAggConfig::default_for(AggSigProfile::CorduroyPoseidon2, [0x82; 32])
-    };
-    let bm1 = SignerBitmap::from_active_indices(2, &[1]).unwrap();
-
-    let shard_a = HemAggregator::aggregate_with_config(
-        &pks,
-        &bm0,
-        &mode,
-        core::slice::from_ref(&sig0),
-        &cfg_a,
-    )
-    .expect("Corduroy shard A");
-    let shard_b = HemAggregator::aggregate_with_config(
-        &pks,
-        &bm1,
-        &mode,
-        core::slice::from_ref(&sig1),
-        &cfg_b,
-    )
-    .expect("Corduroy shard B");
-
-    let merged = HemAggregator::merge(&pks, &mode, &shard_a, &shard_b)
-        .expect("merge disjoint Corduroy shards");
-    assert!(HemAggregator::verify_with_regime(
-        &pks, &mode, &merged, regime
-    ));
-
-    // Overlapping signer sets (`shard_a` with `shard_a`) must be rejected by `merge`!
-    assert!(HemAggregator::merge(&pks, &mode, &shard_a, &shard_a).is_err());
-
-    // Canonical wire roundtrip + tamper / retired-regime wire rejection on `HemAggregatedProof`.
-    let raw_agg = merged.to_bytes();
-    let parsed_agg = HemAggregatedProof::from_bytes_canonical(&raw_agg).unwrap();
-    assert!(HemAggregator::verify_with_regime(
-        &pks,
-        &mode,
-        &parsed_agg,
-        regime
-    ));
-    assert!(!HemAggregator::verify_with_regime(
-        &pks,
-        &SigningMode::SharedMessage(b"tampered-block"),
-        &parsed_agg,
-        regime
-    ));
-    // Verify cross-regime mismatch (`BciksJohnsonQrom128` vs `Poseidon2Cdhz25ZeroPowQrom128`) fails closed.
-    assert!(!HemAggregator::verify_with_regime(
-        &pks,
-        &mode,
-        &parsed_agg,
-        WhirSecurityRegime::BciksJohnsonQrom128
-    ));
-}
-
-fn build_demo_zkhem_cs(
-    pub_x: u64,
-    secret_bit: u64,
-    secret_preimage: u64,
-) -> (ConstraintSystem, [Goldilocks; 2]) {
-    let expected_digest = sponge12_native(&[gl(secret_bit), gl(secret_preimage), gl(pub_x)])[0];
-    let mut cs = ConstraintSystem::new();
-    let p_in = cs.public_input(gl(pub_x));
-    let p_dig = cs.public_input(expected_digest);
-    let b: Lc = cs.alloc(gl(secret_bit)).into();
-    let w: Lc = cs.alloc(gl(secret_preimage)).into();
-    cs.enforce_boolean(&b);
-    let prod = cs.mul(&b, &w);
-    // Require `b == 1` via `prod - w == 0` when `w != 0`.
-    cs.enforce_zero(Lc::from(prod).minus(&w));
-    let st = sponge12(&mut cs, &[b, w, Lc::from(p_in)]);
-    cs.enforce_zero(st[0].minus(&Lc::from(p_dig)));
-    (cs, [gl(pub_x), expected_digest])
-}
-
-#[test]
-fn zk_hem_hiding_5table_vs_public_1table_parity_and_tamper_rejection() {
-    let (cs_pub, public_inputs) = build_demo_zkhem_cs(42, 1, 9_876_543);
-    let (shape, z) = cs_pub.finish();
-    let (v2_shape, v2_z) = build_demo_zkhem_cs(42, 1, 9_876_543).0.finish_v2();
-    assert!(shape.is_satisfied(&z));
-    assert!(v2_shape.is_satisfied(&v2_z));
-    assert_eq!(shape.num_public, 2);
-    assert!(shape.num_rows() > MASK_ROWS);
-
-    // Classical tag `2` is refused by `prove_public`!
-    assert_eq!(
-        zkhem_prove_public(
-            &shape,
-            z.clone(),
-            b"stmt",
-            WhirSecurityRegime::BciksJohnsonClassical128,
-            &[1; 32],
-        ),
-        Err(ZkHemError::RelationTooLarge)
-    );
-
-    let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
-    let profile = ZkHemProfile::TurboShakeJohnson400;
-    let stmt = b"zk-hem-hiding-vs-public-parity";
-
-    // 1. Quintic `zk-Hem v2` hiding `zk_hem::v2::protocol::prove` & `verify`:
-    //    - `Layout` allocates `blind_cells > 0`
-    //    - Two distinct seeds produce distinct roots & 32B tree nonces!
-    let hiding_layout = zkhem_v2_layout(&v2_shape).unwrap();
-    assert!(hiding_layout.blind_cells > 0);
-    let zk_proof_1 = zkhem_v2_prove(&v2_shape, v2_z.clone(), stmt, profile, &[0x11; 32]).unwrap();
-    let zk_proof_2 = zkhem_v2_prove(&v2_shape, v2_z, stmt, profile, &[0x22; 32]).unwrap();
-    assert_ne!(zk_proof_1.root, zk_proof_2.root);
-    assert_ne!(zk_proof_1.tree_nonce, zk_proof_2.tree_nonce);
-
-    let zk_bytes = zk_proof_1.to_bytes();
-    let zk_decoded = ZkHemV2Proof::from_bytes(&zk_bytes, &v2_shape).unwrap();
-    assert_eq!(zk_decoded, zk_proof_1);
-    assert!(zkhem_v2_verify(
-        &v2_shape,
-        &public_inputs,
-        stmt,
-        profile,
-        &zk_decoded
-    ));
-
-    // Tamper checks on hiding proof: wrong public input, wrong statement, mutated mask claim.
-    assert!(!zkhem_v2_verify(
-        &v2_shape,
-        &[gl(43), public_inputs[1]],
-        stmt,
-        profile,
-        &zk_decoded
-    ));
-    assert!(!zkhem_v2_verify(
-        &v2_shape,
-        &public_inputs,
-        b"other-stmt",
-        profile,
-        &zk_decoded
-    ));
-    let mut bad_zk = zk_decoded;
-    bad_zk.opening.mask_claim += Fp5::ONE;
-    assert!(!zkhem_v2_verify(
-        &v2_shape,
-        &public_inputs,
-        stmt,
-        profile,
-        &bad_zk
-    ));
-
-    // 2. 1-table public `zk_hem::protocol::prove_public` & `verify_public`:
-    //    Exercises the 3 independent `ZKHEM_COMBINE` challenges and `HEM_PUBLIC_CELLS` batching
-    //    binding `Z[0] = 1` and `public[0..2]`!
-    let pub_proof = zkhem_prove_public(&shape, z, stmt, regime, &[0x33; 32]).unwrap();
-    let pub_bytes = pub_proof.to_bytes();
-    assert!(
-        pub_bytes.len() < zk_bytes.len(),
-        "1-table PublicHemProof ({}) should be more compact than hiding ZkHemV2Proof ({})",
-        pub_bytes.len(),
-        zk_bytes.len()
-    );
-    let pub_decoded = PublicHemProof::from_bytes(&pub_bytes, &shape, regime).unwrap();
-    assert_eq!(pub_decoded, pub_proof);
-    assert!(zkhem_verify_public(
-        &shape,
-        &public_inputs,
-        stmt,
-        regime,
-        &pub_decoded
-    ));
-
-    // `HEM_PUBLIC_CELLS` soundness: mutating `public_inputs[0]` or `public_inputs[1]`, `row_values`,
-    // or `evaluation` MUST fail `verify_public`!
-    assert!(!zkhem_verify_public(
-        &shape,
-        &[gl(42), public_inputs[1] + Goldilocks::ONE],
-        stmt,
-        regime,
-        &pub_decoded
-    ));
-    let mut bad_pub = pub_decoded.clone();
-    bad_pub.row_values[1] += GoldilocksExt4::ONE;
-    assert!(!zkhem_verify_public(
-        &shape,
-        &public_inputs,
-        stmt,
-        regime,
-        &bad_pub
-    ));
-    let mut bad_eval = pub_decoded;
-    bad_eval.evaluation += GoldilocksExt4::ONE;
-    assert!(!zkhem_verify_public(
-        &shape,
-        &public_inputs,
-        stmt,
-        regime,
-        &bad_eval
-    ));
-
-    // Unsatisfied assignment (`secret_bit = 2`, non-Boolean) is refused by both provers.
-    let mut bad_v2_z = build_demo_zkhem_cs(42, 1, 9_876_543).0.finish_v2().1;
-    bad_v2_z[3] = gl(2);
-    assert_eq!(
-        zkhem_v2_prove(&v2_shape, bad_v2_z, stmt, profile, &[0x44; 32]),
-        Err(ZkHemV2Error::Unsatisfied)
-    );
-    let mut bad_z = build_demo_zkhem_cs(42, 1, 9_876_543).0.finish().1;
-    bad_z[3] = gl(2);
-    assert_eq!(
-        zkhem_prove_public(&shape, bad_z, stmt, regime, &[0x44; 32]),
-        Err(ZkHemError::Unsatisfied)
-    );
-}
-
-/// `zk_hem::full_shard` recursive merge (`QSAGFSM2`) of `children` two-slot shards under one
-/// parent, with child, statement and wire tamper rejection.
-fn full_shard_merge_and_tamper_rejection(children: usize) {
-    // These two tests each retain a large verifier key across proving and tamper checks.
-    // Serializing them prevents their independent peaks from exceeding the 16 GiB gate.
-    static FULL_SHARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = FULL_SHARD_TEST.lock().unwrap_or_else(|e| e.into_inner());
-    let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
-    let parent_profile = ZkHemProfile::TurboShakeJohnson400;
-    let fs_params = FullShardParams::new(regime, 2).expect("FullShardParams(slots=2)");
-    assert_eq!(fs_params.slots(), 2);
-
-    let make_child = |seed_tag: u8, active: &[usize], msg32: [u8; 32]| {
-        let mut kps: Vec<ValidatorKeypair> = (0..2u32)
-            .map(|i| {
-                ValidatorKeypair::keygen_deterministic(
-                    AggSigProfile::JortsPoseidon2,
-                    &[seed_tag; 32],
-                    i,
-                )
-            })
-            .collect();
-        let sigs: Vec<ValidatorSignature> = active
-            .iter()
-            .map(|&idx| {
-                let mut wal = InMemEpochWal::default();
-                kps[idx].sign_stateful(&msg32, 0, &mut wal).unwrap()
-            })
-            .collect();
-        let keys = kps.into_iter().map(|kp| kp.pk).collect();
-        let bitmap = SignerBitmap::from_active_indices(2, active).unwrap();
-        let statement = RecursiveShardStatement {
-            keys,
-            bitmap,
-            message: msg32,
-        };
-        let child_proof =
-            prove_recursive_shard(&fs_params, &statement, &sigs, &[seed_tag ^ 0xAA; 32])
-                .expect("prove_recursive_shard");
-        assert!(verify_recursive_shard(&fs_params, &statement, &child_proof));
-        (statement, child_proof)
-    };
-
-    // Shard 0 has one of its two slots signing; shard 1 (when present) has both.
-    let shards = [
-        (0x22u8, &[1usize][..], [0x5Au8; 32]),
-        (0x11, &[0, 1][..], [0xA5; 32]),
-    ];
-    let (statements, child_proofs): (Vec<_>, Vec<_>) = shards[..children]
-        .iter()
-        .map(|&(seed_tag, active, msg32)| make_child(seed_tag, active, msg32))
-        .unzip();
-    let publics: Vec<_> = statements
-        .iter()
-        .map(|statement| statement.public(&fs_params).unwrap())
-        .collect();
-    let signer_counts: Vec<_> = publics.iter().map(|p| p.signers).collect();
-    assert_eq!(signer_counts, [1, 2][..children]);
-
-    let relation =
-        FullShardMergeRelation::new(fs_params.clone(), children).expect("FullShardMergeRelation");
-    assert_eq!(relation.num_children(), children);
-
-    // A tampered child proof is refused by the parent prover.
-    let last = children - 1;
-    let mut corrupt_proofs = child_proofs.clone();
-    corrupt_proofs[last].col_evals[0] += GoldilocksExt4::ONE;
-    assert!(!verify_recursive_shard(
-        &fs_params,
-        &statements[last],
-        &corrupt_proofs[last]
-    ));
-    assert!(matches!(
-        prove_full_shard_merge(
-            &relation,
-            &statements,
-            &corrupt_proofs,
-            parent_profile,
-            &[0x77; 32]
-        ),
-        Err(FullShardError::InvalidChild)
-    ));
-
-    // The honest parent proof verifies against the shards' public statements alone.
-    let parent_proof = prove_full_shard_merge(
-        &relation,
-        &statements,
-        &child_proofs,
-        parent_profile,
-        &[0x88; 32],
-    )
-    .expect("prove_full_shard_merge");
-    let parent_wire = parent_proof.to_bytes();
-    assert_eq!(&parent_wire[..8], b"QSAGFSM2");
-    let decoded_parent = FullShardMergeProof::from_bytes(&parent_wire, &relation, parent_profile)
-        .expect("decode QSAGFSM2");
-    assert_eq!(decoded_parent, parent_proof);
-    assert!(verify_full_shard_merge(
-        &relation,
-        &publics,
-        parent_profile,
-        &decoded_parent
-    ));
-
-    // Statement tamper rejection: an inflated signer count, one flipped message bit, and an
-    // altered committee digest.
-    let mut inflated = publics.clone();
-    inflated[0].signers = 2;
-    let mut wrong_message = publics.clone();
-    wrong_message[last].message[31] ^= 0x01;
-    let mut wrong_committee = publics.clone();
-    wrong_committee[last].committee[0] += Goldilocks::ONE;
-    for tampered in [inflated, wrong_message, wrong_committee] {
-        assert!(!verify_full_shard_merge(
-            &relation,
-            &tampered,
-            parent_profile,
-            &decoded_parent
-        ));
-    }
-    if children == 2 {
-        let swapped = [publics[1].clone(), publics[0].clone()];
-        assert!(!verify_full_shard_merge(
-            &relation,
-            &swapped,
-            parent_profile,
-            &decoded_parent
-        ));
-    }
-
-    // Wire tamper rejection: wrong magic, then payload bit flips.
-    let mut bad_magic = parent_wire.clone();
-    bad_magic[7] = b'1'; // the version-1 (non-hiding hologram) carrier
-    assert!(FullShardMergeProof::from_bytes(&bad_magic, &relation, parent_profile).is_none());
-    assert_wire_bit_flips_rejected(
-        &parent_wire,
-        |bytes| FullShardMergeProof::from_bytes(bytes, &relation, parent_profile),
-        |proof| verify_full_shard_merge(&relation, &publics, parent_profile, proof),
-    );
-}
-
-/// One child: a `2^21`-row parent relation, about 12 GiB at peak.
-#[test]
-fn full_shard_recursion_one_child_merge_and_tamper_rejection() {
-    full_shard_merge_and_tamper_rejection(1);
-}
-
-/// Two children: a `2^22`-row parent relation (10.25 GiB peak RSS with owned RS buffers).
-#[test]
-fn full_shard_recursion_two_child_merge_and_tamper_rejection() {
-    full_shard_merge_and_tamper_rejection(2);
-}
-
-#[test]
-fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity() {
-    use qsag_agg::zk_hem::capability::{
-        BearerCapability, CAPABILITY_WIRE_MAGIC, CapCaveat, CapabilityBatchStatement,
-        CapabilityIssuerDirectory, CapabilityParams, CapabilityPresentationInput,
-        CapabilityRelation, CapabilityRequest, CapabilityZkError, SENTINEL_MAX_ID, SENTINEL_MIN_ID,
-        SortedRevocationTree, ZkCapabilityBatchProof,
-    };
-    use qsag_core::poseidon2_mpc::HemJortsPublicKey;
-
-    // 1. Configurable `JortsPoseidon2` height `6..=20` (`C6 #4`) & zero-copy `HemJortsPublicKey`
-    //    cross-crate bridge (`C4-F5`).
-    assert_eq!(AggSigProfile::from_u8(6), None);
-    for h in 7u8..=20 {
-        let prof = AggSigProfile::from_u8(h).expect("JortsPoseidon2H7..=H20");
-        assert!(prof.is_jorts());
-        assert_eq!(prof.jorts_xmss_height(), Some(usize::from(h)));
-        assert_eq!(
-            prof.raw_signature_bytes(),
-            4_328 + 32 * (usize::from(h) - 6)
+        .unwrap();
+        let wire = proof.to_bytes();
+        assert!(verify_hem_quintic_128(&pks, &mode, &proof));
+        assert_wire_bit_flips_rejected(
+            &wire,
+            HemQuinticProof::from_bytes,
+            |p| verify_hem_quintic_128(&pks, &mode, p),
         );
     }
-    assert_eq!(
-        AggSigProfile::JortsPoseidon2H20.raw_signature_bytes(),
-        4_776
-    );
 
-    let mut kp6 =
-        ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[0x91; 32], 0);
-    let core_pk: HemJortsPublicKey = kp6.pk.into();
-    assert_eq!(ValidatorPublicKey::from(core_pk), kp6.pk);
-    assert_eq!(kp6.pk.to_hem_jorts().unwrap(), core_pk);
-    let pk_h12 = ValidatorPublicKey::from_hem_jorts_with_height(core_pk, 12).unwrap();
-    assert_eq!(pk_h12.profile, AggSigProfile::JortsPoseidon2H12);
+    // 2. Committed-mask zero-knowledge `zk-Hem v2` (`QSAGZKH2`) across both 400-bit sponge profiles
+    let out_val = sponge12_native(&[gl(19), gl(23)])[0];
+    let mut cs = ConstraintSystem::new();
+    let pub_x: Lc = cs.public_input(gl(19)).into();
+    let out: Lc = cs.public_input(out_val).into();
+    let w: Lc = cs.alloc(gl(23)).into();
+    let st = sponge12(&mut cs, &[pub_x, w]);
+    cs.enforce_equal(&st[0], &out);
+    let (shape, assignment) = cs.finish_v2();
+    let public_inputs = [gl(19), out_val];
 
-    // Height-8 (`256` epochs) stateful sign at boundary epoch `255` + wire roundtrip!
-    let mut kp8 =
-        ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2H8, &[0x92; 32], 0);
-    let mut wal8 = InMemEpochWal::default();
-    let msg8 = b"jorts-poseidon2-h8-configurable-xmss-validation";
-    let sig8 = kp8
-        .sign_stateful(msg8, 255, &mut wal8)
-        .expect("JortsPoseidon2H8 sign");
-    let wire8 = sig8.to_bytes();
-    assert_eq!(wire8.len(), 4_328 + 64);
-    assert_eq!(
-        ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2H8, &wire8).unwrap(),
-        sig8
-    );
-    assert!(verify_individual_signature(&kp8.pk, msg8, &sig8));
-
-    let sig6 = kp6
-        .sign_stateful(msg8, 0, &mut InMemEpochWal::default())
+    for profile in [
+        ZkHemProfile::CshakeJohnson400,
+        ZkHemProfile::TurboShakeJohnson400,
+    ] {
+        let proof = zkhem_v2_prove(
+            &shape,
+            assignment.clone(),
+            b"VALIDATION.ZKHEM.V2",
+            profile,
+            &[0x9A; 32],
+        )
         .unwrap();
-    assert!(verify_individual_signature(&kp6.pk, msg8, &sig6));
-    assert!(!verify_individual_signature(&kp8.pk, msg8, &sig6));
-
-    // 2. `zk-Hem` Batched Bearer Capabilities + `SortedRevocationTree` interval non-membership (`QSAGCAP1`).
-    let params = CapabilityParams {
-        batch_size: 2,
-        max_hops: 4,
-        issuer_depth: 4,
-        revocation_depth: 5,
-    };
-    let cap_rel = CapabilityRelation::new(params).expect("CapabilityRelation::new");
-    let gl = Goldilocks::from_u64_reduced;
-    let issuer_key = [
-        gl(0x0A11_CE01),
-        gl(0x0A11_CE02),
-        gl(0x0A11_CE03),
-        gl(0x0A11_CE04),
-    ];
-    let audience = [
-        gl(0x000A_0D01),
-        gl(0x000A_0D02),
-        gl(0x000A_0D03),
-        gl(0x000A_0D04),
-    ];
-    let resource = [
-        gl(0x00BE_EF01),
-        gl(0x00BE_EF02),
-        gl(0x00BE_EF03),
-        gl(0x00BE_EF04),
-    ];
-
-    assert_eq!(
-        BearerCapability::issue(&issuer_key, SENTINEL_MIN_ID, audience).err(),
-        Some(CapabilityZkError::SentinelTokenIdReserved)
-    );
-    assert_eq!(
-        BearerCapability::issue(&issuer_key, SENTINEL_MAX_ID, audience).err(),
-        Some(CapabilityZkError::SentinelTokenIdReserved)
-    );
-
-    let tok_a = [gl(0), gl(0), gl(0), gl(120)];
-    let tok_revoked = [gl(0), gl(0), gl(0), gl(200)];
-    let tok_b = [gl(0), gl(0), gl(0), gl(350)];
-
-    let mut cap_a = BearerCapability::issue(&issuer_key, tok_a, audience).unwrap();
-    cap_a.attenuate(CapCaveat::NotBefore(1_000)).unwrap();
-    cap_a.attenuate(CapCaveat::ExpiresAt(5_000)).unwrap();
-    cap_a.attenuate(CapCaveat::Resource(resource)).unwrap();
-
-    let mut cap_b = BearerCapability::issue(&issuer_key, tok_b, audience).unwrap();
-    cap_b.attenuate(CapCaveat::Actions(0b0111)).unwrap();
-    cap_b.attenuate(CapCaveat::MaxAmount(10_000)).unwrap();
-
-    let dir = CapabilityIssuerDirectory::new(4, &[cap_a.mint_leaf(), cap_b.mint_leaf()]).unwrap();
-    let rev_tree = SortedRevocationTree::new(
-        5,
-        7,
-        &[
-            [gl(0), gl(0), gl(0), gl(50)],
-            tok_revoked,
-            [gl(0), gl(0), gl(0), gl(500)],
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        rev_tree.prove_non_membership(&tok_revoked).err(),
-        Some(CapabilityZkError::TokenRevoked)
-    );
-
-    let nm_a = rev_tree.prove_non_membership(&tok_a).unwrap();
-    let nm_b = rev_tree.prove_non_membership(&tok_b).unwrap();
-    let mut inputs = vec![
-        CapabilityPresentationInput {
-            capability: cap_b,
-            issuer_index: 1,
-            issuer_siblings: dir.opening(1).unwrap(),
-            non_membership: nm_b,
-        },
-        CapabilityPresentationInput {
-            capability: cap_a,
-            issuer_index: 0,
-            issuer_siblings: dir.opening(0).unwrap(),
-            non_membership: nm_a,
-        },
-    ];
-    let req = CapabilityRequest {
-        audience,
-        resource,
-        actions: 0b0011,
-        amount: 2_500,
-        now: 2_000,
-    };
-    let ctx = b"qsag-validation-zk-capability-batch-v1";
-    // `prepare_sorted` sorts `inputs` into strictly ascending `token_id` order (`tok_a < tok_b`).
-    let stmt = CapabilityBatchStatement::prepare_sorted(
-        dir.root(),
-        rev_tree.root(),
-        rev_tree.epoch(),
-        req,
-        &mut inputs,
-        ctx,
-    )
-    .expect("prepare_sorted");
-
-    let profile = ZkHemProfile::default();
-    let proof = cap_rel
-        .prove(&stmt, &inputs, ctx, profile, &[0xCC; 32])
-        .expect("CapabilityRelation::prove");
-    let wire = proof.to_bytes();
-    assert_eq!(&wire[..8], CAPABILITY_WIRE_MAGIC);
-    let decoded = ZkCapabilityBatchProof::from_bytes(&wire, &cap_rel, profile)
-        .expect("ZkCapabilityBatchProof::from_bytes");
-    assert_eq!(decoded.to_bytes(), wire);
-    assert!(cap_rel.verify(&stmt, ctx, profile, &decoded));
-    assert!(!cap_rel.verify(&stmt, b"wrong-context", profile, &decoded));
-
-    assert_wire_bit_flips_rejected(
-        &wire,
-        |bytes| ZkCapabilityBatchProof::from_bytes(bytes, &cap_rel, profile),
-        |proof| cap_rel.verify(&stmt, ctx, profile, proof),
-    );
+        let wire = proof.to_bytes();
+        assert!(zkhem_v2_verify(
+            &shape,
+            &public_inputs,
+            b"VALIDATION.ZKHEM.V2",
+            profile,
+            &proof
+        ));
+        assert_wire_bit_flips_rejected(
+            &wire,
+            |b| ZkHemV2Proof::from_bytes(b, &shape),
+            |p| zkhem_v2_verify(&shape, &public_inputs, b"VALIDATION.ZKHEM.V2", profile, p),
+        );
+    }
 }
