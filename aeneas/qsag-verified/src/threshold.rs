@@ -12,8 +12,7 @@ use crate::goldilocks::{
 };
 pub use crate::tower::ct_eq_bytes32;
 use crate::tower::{
-    BdozCommittedBatchOpening2Lane, BdozWireOpening2Lane, Gf256, Tower128, gf256_add,
-    gf256_frobenius_residual, gf256_inv, gf256_is_boolean_frobenius, gf256_mul, verify_mac_2lane,
+    Gf256, gf256_add, gf256_frobenius_residual, gf256_inv, gf256_is_boolean_frobenius, gf256_mul,
 };
 
 // ============================================================================
@@ -279,28 +278,6 @@ pub const fn dkg_beaver_frobenius_share_shamir_gf256(
     gf256_add(s_sq_share, s_share)
 }
 
-/// Actively verify a non-empty batch of Shamir DKG key-bit shares over `Gf256`:
-/// 1. Authenticates all opened Frobenius residuals `z_k = s_k^2 ⊕ s_k` via committed, random-masked
-///    2-lane `Tower128` BDOZ `verify_mac_2lane`,
-/// 2. Accumulates `z_k.0` across all shares in constant time (no early-exit index leak) and accepts
-///    iff every key share satisfies `z_k == 0` (`s_k^2 ⊕ s_k == 0 <==> s_k in {0, 1}`).
-pub fn dkg_verify_key_shares_boolean_bdoz_gf256(
-    alpha_lanes: [Tower128; 2],
-    batch_opening: &BdozCommittedBatchOpening2Lane,
-    residual_openings: &[BdozWireOpening2Lane],
-) -> bool {
-    if !verify_mac_2lane(alpha_lanes, batch_opening, residual_openings) {
-        return false;
-    }
-    let mut non_boolean_acc: u8 = 0;
-    let mut i: usize = 0;
-    while i < residual_openings.len() {
-        non_boolean_acc |= residual_openings[i].opened_value.0;
-        i += 1;
-    }
-    non_boolean_acc == 0
-}
-
 /// Verify that a 2-of-3 Shamir DKG key-bit sharing `(s0, s1, s2)` at `points = [x0, x1, x2]`
 /// has degree `< 2` AND encodes a true prime-subfield bit `f(0) in {0, 1}` via Frobenius
 /// polynomial interpolation `Q(X) = f(X)^2 ⊕ f(X)` (`Q(0) = f(0)^2 ⊕ f(0) == 0`).
@@ -421,12 +398,6 @@ pub const fn rss_and_gate(a: RssShare64, b: RssShare64, seeds: RssZeroSeeds64) -
     }
 }
 
-/// Re-share reduced additive outputs `(z0, z1, z2)` into each party's new 2-of-3 replicated view.
-#[inline]
-pub const fn rss_reshare_views(z: RssShare64) -> ([u64; 2], [u64; 2], [u64; 2]) {
-    ([z.x0, z.x1], [z.x1, z.x2], [z.x2, z.x0])
-}
-
 /// 64-way bitsliced 2-of-3 RSS Keccak `chi` step `a ^ ((!b) & c)`.
 #[inline]
 pub const fn rss_keccak_chi_lane(
@@ -465,7 +436,8 @@ pub enum LastBoundEpoch {
 /// The caller must durably persist the updated state to a write-ahead log before releasing
 /// signing grants. This in-memory machine performs no durable writes or crash recovery.
 ///
-/// External callers cannot reset the authorization state.
+/// The cursor fields are private. Restoring a new latch requires the caller to authenticate
+/// the WAL and enforce its high-water mark.
 /// ```compile_fail,E0616
 /// use qsag_verified::EpochLatch;
 /// let mut guard = EpochLatch::new(10, [0; 32]);
@@ -545,6 +517,30 @@ impl EpochLatch {
             key_epoch_id,
             last_bound: LastBoundEpoch::Unset,
         }
+    }
+
+    /// Restore an authenticated WAL cursor. The last retryable epoch must precede
+    /// the high-water mark, which may equal the capacity after the final reservation.
+    pub const fn from_cursor(
+        next_epoch: u64,
+        max_epoch: u64,
+        key_epoch_id: [u8; 32],
+        last_bound: LastBoundEpoch,
+    ) -> Result<Self, EpochLatchError> {
+        if next_epoch > max_epoch {
+            return Err(EpochLatchError::TreeExhausted { max_epoch });
+        }
+        if let LastBoundEpoch::Bound(bound) = last_bound {
+            if bound.epoch >= next_epoch {
+                return Err(EpochLatchError::CorruptedWalState);
+            }
+        }
+        Ok(Self {
+            next_epoch,
+            max_epoch,
+            key_epoch_id,
+            last_bound,
+        })
     }
 
     /// Consume the latch to acquire a fresh sequential epoch or authorize an idempotent retry.
@@ -669,6 +665,36 @@ pub const fn epoch_latch_advance(
 #[cfg(test)]
 mod private_state_tests {
     use super::*;
+    #[test]
+    fn restored_cursor_rejects_unconsumed_bindings_and_keeps_the_last_retry() {
+        let key = [1; 32];
+        let record = BoundEpochRecord {
+            epoch: 3,
+            msg_digest: [2; 32],
+            r_rand: [3; 32],
+        };
+        let bound = LastBoundEpoch::Bound(record);
+        assert_eq!(
+            EpochLatch::from_cursor(3, 4, key, bound).err(),
+            Some(EpochLatchError::CorruptedWalState)
+        );
+        assert_eq!(
+            EpochLatch::from_cursor(5, 4, key, bound).err(),
+            Some(EpochLatchError::TreeExhausted { max_epoch: 4 })
+        );
+        let exhausted = EpochLatch::from_cursor(4, 4, key, bound).unwrap();
+        let (next, grant) = exhausted
+            .acquire_or_retry(EpochSignRequest {
+                key_epoch_id: key,
+                requested_epoch: 3,
+                msg_digest: record.msg_digest,
+                deterministic_r_rand: record.r_rand,
+            })
+            .unwrap();
+        assert!(grant.is_idempotent_retry);
+        assert_eq!(next.next_epoch(), 4);
+    }
+
     #[test]
     fn corrupted_epoch_state_fails_closed() {
         let key_id = [1u8; 32];

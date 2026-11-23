@@ -224,33 +224,13 @@ impl BeltQuorumCore {
     }
 
     #[inline]
-    pub const fn t(&self) -> u32 {
-        self.t
-    }
-
-    #[inline]
-    pub const fn f(&self) -> u32 {
-        self.f
-    }
-
-    #[inline]
     pub const fn q(&self) -> u32 {
         self.q
     }
 
     #[inline]
-    pub const fn global_liveness_mode(&self) -> bool {
-        self.global_liveness_mode
-    }
-
-    #[inline]
     pub const fn next_epoch(&self) -> u64 {
         self.next_epoch
-    }
-
-    #[inline]
-    pub const fn max_jump_window(&self) -> u64 {
-        self.max_jump_window
     }
 
     #[inline]
@@ -889,31 +869,6 @@ impl VerifiedWaistbandRootGuard {
     }
 
     #[inline]
-    pub const fn key_pk_tag(&self) -> [u8; 32] {
-        self.key_pk_tag
-    }
-
-    #[inline]
-    pub const fn key_params_tag(&self) -> [u8; 32] {
-        self.key_params_tag
-    }
-
-    #[inline]
-    pub const fn ancestor_layer(&self) -> u32 {
-        self.ancestor_layer
-    }
-
-    #[inline]
-    pub const fn ancestor_tree(&self) -> u64 {
-        self.ancestor_tree
-    }
-
-    #[inline]
-    pub const fn ancestor_kp(&self) -> u32 {
-        self.ancestor_kp
-    }
-
-    #[inline]
     pub const fn expected_static_child_root(&self) -> [u8; 32] {
         self.expected_static_child_root
     }
@@ -1036,12 +991,12 @@ mod core_tests {
             Err(e) => panic!("valid BFT config rejected: {e:?}"),
         };
         assert_eq!(g0.n(), 7);
-        assert_eq!(g0.t(), 3);
-        assert_eq!(g0.f(), 2);
+        assert_eq!(g0.t, 3);
+        assert_eq!(g0.f, 2);
         assert_eq!(g0.q(), 5);
-        assert!(g0.global_liveness_mode());
+        assert!(g0.global_liveness_mode);
         assert_eq!(g0.next_epoch(), 10);
-        assert_eq!(g0.max_jump_window(), 4);
+        assert_eq!(g0.max_jump_window, 4);
         assert_eq!(g0.phase(), BeltQuorumPhase::Idle);
         assert!(!g0.has_bound_epoch());
         assert!(!g0.is_poisoned());

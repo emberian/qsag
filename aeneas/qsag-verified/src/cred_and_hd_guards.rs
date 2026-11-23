@@ -220,32 +220,28 @@ impl MlDsaReleaseGate {
         checks: MlDsaBarrierChecks,
         out: &mut [u8; 32],
     ) -> Result<(), CredHdGuardError> {
-        let refusal = if self.aborted || self.released {
-            Some(CredHdGuardError::GateAbortedOrReleased)
-        } else if !ct_eq_bytes32(&self.session_id, &checks.req_session_id) {
-            Some(CredHdGuardError::SessionIdMismatch)
-        } else if self.attempt != checks.req_attempt {
-            Some(CredHdGuardError::AttemptMismatch)
-        } else if !(checks.z_norm_ok && checks.r0_norm_ok && checks.w1_match && checks.u_com_bound)
-        {
-            Some(CredHdGuardError::RejectionSamplingBarrierFailed)
-        } else {
-            None
+        // Only public control state moves through the consuming decision. The sealed
+        // share stays in its original slot until the decision authorizes its transfer.
+        let control = MlDsaReleaseGate {
+            session_id: self.session_id,
+            attempt: self.attempt(),
+            released: self.released(),
+            aborted: self.aborted(),
+            z_share_masked: [0; 32],
         };
-        match refusal {
-            Some(error) => {
-                *out = [0u8; 32];
-                self.abort_in_place();
-                Err(error)
-            }
-            None => {
+        let (next, result) = control.try_release_z_share(checks);
+        let outcome = match result {
+            Ok(_) => {
                 *out = self.z_share_masked;
-                self.z_share_masked = [0u8; 32];
-                self.released = true;
-                self.aborted = false;
                 Ok(())
             }
-        }
+            Err(error) => {
+                *out = [0; 32];
+                Err(error)
+            }
+        };
+        *self = next;
+        outcome
     }
 
     /// Zero `z_share_masked` where it is stored and mark the gate aborted. The owner calls
@@ -350,11 +346,6 @@ impl HdCommittedZeroTest {
     }
 
     /// Read-only state observation.
-    pub const fn frozen_peer_commitment(&self) -> [u8; 32] {
-        self.frozen_peer_commitment
-    }
-
-    /// Read-only state observation.
     pub const fn modulus_q(&self) -> u32 {
         self.modulus_q
     }
@@ -362,6 +353,15 @@ impl HdCommittedZeroTest {
     /// Read-only state observation.
     pub const fn family_quarantined(&self) -> bool {
         self.family_quarantined
+    }
+
+    /// Discard the residual when another lane or the enclosing protocol aborts.
+    pub const fn quarantine(self) -> Self {
+        quarantine_hd_family(
+            self.session_id(),
+            self.frozen_peer_commitment,
+            self.modulus_q,
+        )
     }
 
     /// Initialize a committed zero-test gate holding `local_residual` mod `modulus_q` privately.

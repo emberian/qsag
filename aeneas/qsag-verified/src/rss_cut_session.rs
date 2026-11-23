@@ -124,11 +124,6 @@ impl RssCutGateSession {
         self.session_id
     }
 
-    /// Read-only state observation.
-    pub const fn mask_commitment(&self) -> [u8; 32] {
-        self.mask_commitment
-    }
-
     /// Initialize a fresh Round-1 session bound to `session_id` and `mask_commitment`.
     #[inline]
     pub const fn new_round1_committed(
