@@ -77,10 +77,11 @@ def main():
         print(subprocess.check_output(command, text=True).strip(), flush=True)
     with tempfile.TemporaryDirectory() as tmp:
         netlist = Path(tmp) / "alu.smt2"
-        script = (f"read_slang --top {TOP} qsag_ass2_pkg.sv {TOP}.sv; "
+        script = (f"read_slang --top {TOP} qsag_ass2_pkg.sv qsag_ass2_add64.sv {TOP}.sv; "
                   f"synth -top {TOP} -noabc; check -assert; write_smt2 {netlist}")
         subprocess.run(["yosys", "-Q", "-q", "-m", "slang", "-p", script], cwd=RTL, check=True)
-        widths = dict(op=4, fn=4, flags=4, byte_idx=4, imm=20, ra=64, rb=64,
+        widths = dict(addr_mode_i=1, ext_add_en_i=1, crypto_rot_en_i=1,
+                      op=4, fn=4, flags=4, byte_idx=4, imm=20, ra=64, rb=64,
                       rc=64, pc=64, result=64)
         with subprocess.Popen(["z3", "-in"], stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, text=True) as z3:
@@ -91,7 +92,11 @@ def main():
             send(netlist.read_text())
             send(f"(declare-const chip |{TOP}_s|)")
             for port, width in widths.items():
-                send(f"(define-fun {port} () (_ BitVec {width}) (|{TOP}_n {port}| chip))")
+                expr_p = f"(ite (|{TOP}_n {port}| chip) #b1 #b0)" if width == 1 else f"(|{TOP}_n {port}| chip)"
+                send(f"(define-fun {port} () (_ BitVec {width}) {expr_p})")
+            send("(assert (= addr_mode_i #b0))")
+            send("(assert (= ext_add_en_i #b0))")
+            send("(assert (= crypto_rot_en_i #b0))")
             count = 0
             for name, opcode, fields, expr in cases():
                 send("(push)")

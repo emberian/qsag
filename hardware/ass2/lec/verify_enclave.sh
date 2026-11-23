@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Run from /home/build/p-ass2-lane2 on bb2 after sourcing the OSS CAD environment.
+# Run from hardware/ass2 on a Linux host after sourcing the OSS CAD environment.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-[[ $(uname -s) == Linux && $PWD == /home/build/p-ass2-lane2 ]]
+[[ $(uname -s) == Linux ]]
 export TMPDIR="$PWD/tmp"
 mkdir -p "$TMPDIR"
 work=$(mktemp -d "$TMPDIR/ass2-verify.XXXXXXXX")

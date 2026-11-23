@@ -2,7 +2,7 @@
 # Report GF180 standard-cell area, with SRAM instances checked before mapping.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-[[ $(uname -s) == Linux && $PWD == /home/build/p-ass2-lane2 ]]
+[[ $(uname -s) == Linux ]]
 export TMPDIR="$PWD/tmp"
 work=$(mktemp -d "$TMPDIR/ass2-area.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
