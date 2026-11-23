@@ -934,6 +934,7 @@ impl ConstraintSystem {
         Some(core::mem::take(&mut self.values))
     }
 
+    #[cfg(test)]
     pub(crate) fn fork_public_inputs(&self) -> Self {
         assert_eq!(self.values.len(), self.num_public + 1);
         assert!(self.p2_values.is_empty());
@@ -966,6 +967,7 @@ impl ConstraintSystem {
     }
 
     /// Append a disjoint circuit with the same public prefix, relocating private variables.
+    #[cfg(test)]
     pub(crate) fn append(&mut self, mut other: Self) {
         assert_eq!(self.num_public, other.num_public);
         assert_eq!(self.record_rows, other.record_rows);
@@ -1551,55 +1553,6 @@ pub fn poseidon2_perm(cs: &mut ConstraintSystem, st: &mut [Lc; 12]) {
         *slot = form(&basis, lane, F::ZERO);
     }
     cs.finish_p2_perm_block();
-}
-
-/// Universal 106-row (`12..118`) interior matrix coefficients of [`poseidon2_perm`].
-pub(crate) struct Poseidon2InteriorTemplate {
-    pub rows_a: Vec<Vec<(u8, F)>>,
-    pub const_a: [F; 106],
-}
-
-impl Poseidon2InteriorTemplate {
-    fn build() -> Self {
-        let mut cs = ConstraintSystem::new();
-        let mut st: [Lc; 12] = core::array::from_fn(|_| cs.alloc(F::ZERO).into());
-        poseidon2_perm(&mut cs, &mut st);
-        assert_eq!(cs.sbox.len(), 118);
-        let mut rows_a = Vec::with_capacity(106);
-        let mut const_a = [F::ZERO; 106];
-        for (r_off, constant) in const_a.iter_mut().enumerate() {
-            let mut terms = Vec::new();
-            for (v, coeff) in cs.sbox.a.row(12 + r_off) {
-                if v == 0 {
-                    *constant = coeff;
-                } else {
-                    assert!(
-                        (13..13 + 118).contains(&v),
-                        "interior Poseidon2 row touched non-local variable {v}"
-                    );
-                    terms.push(((v - 13) as u8, coeff));
-                }
-            }
-            assert!(cs.sbox.c.row(12 + r_off).eq([(13 + 12 + r_off, F::ONE)]));
-            rows_a.push(terms);
-        }
-        Self { rows_a, const_a }
-    }
-
-    #[inline]
-    pub fn with<R>(run: impl FnOnce(&Self) -> R) -> R {
-        #[cfg(feature = "std")]
-        {
-            static TEMPLATE: std::sync::OnceLock<Poseidon2InteriorTemplate> =
-                std::sync::OnceLock::new();
-            run(TEMPLATE.get_or_init(Self::build))
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            let built = Self::build();
-            run(&built)
-        }
-    }
 }
 
 /// Rate-6, capacity-6 sponge over [`poseidon2_perm`] with canonical padding.
