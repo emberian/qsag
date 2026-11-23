@@ -17,8 +17,8 @@ What the fixtures are and are not. `transparentVerify` is a non-succinct referen
 `boundary_of_hem_opening_batch` (proved in `ComposedQsAgAndMergeSecurity`) and
 `hemOpeningShardVerify` connect `ExtractionBoundary` directly
 to `HemExtractedOpeningBridge.verifyHemOpeningBatch` (`verifyOpeningBatch` + `verifyHemAffineWhir`)
-composed with `SuccinctAggregationIop`. Similarly, alongside the lightweight `toyHash` /
-`toyVerifier` negative controls, `cshakeHybridHash` (`evalCshake256Sponge keccakF1600`) and
+composed with `SuccinctAggregationIop`. Similarly, alongside the `envCshakeHash` /
+`cshakeTranscriptVerifier` envelope controls, `cshakeHybridHash` (`evalCshake256Sponge keccakF1600`) and
 `jortsNativeVerifier` (`verifyAggNativeSig compactAuditGeom`) instantiate `HybridSecurity` over
 modelled cryptographic primitives (`real_hybrid_keybound_instance`).
 -/
@@ -645,7 +645,7 @@ end Composed
 section Hybrid
 open Qsag.HybridSecurity
 
-/-! The toy-hash envelope fixtures (`toyHash`, `toyVerifier`, `envelopeFor`, `hk`, `paid`, …, the
+/-! The `cSHAKE256` envelope fixtures (`envCshakeHash`, `cshakeTranscriptVerifier`, `envelopeFor`, `hk`, `paid`, …, the
 `hybrid_*` and combiner instances) and the policy-release fixtures (`pol`, `payA`, `payB`, `acceptsA`,
 …, `rejects_*`, `window_advance_*`) are proved in
 `Protocol/Signing/HybridAddrPolicyAndFullPresetSecurity` under the same names. -/
@@ -660,7 +660,7 @@ def beNat (bs : Bytes) : Nat :=
   bs.foldl (fun acc b => acc * 256 + b.toNat) 0
 
 /-- Real 256-bit `cSHAKE256` (`evalCshake256Sponge keccakF1600`) domain-separated hash for
-`HybridSecurity.Hash`, replacing the polynomial checksum `toyHash`. -/
+`HybridSecurity.Hash` under customization tag `"QSAG.HYBRID.V2"`. -/
 def cshakeHybridHash : HybridSecurity.Hash := fun x =>
   ⟨beNat (evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes
       [] hybridCshakeTag (encodePre x) 32) % 256 ^ 32,
@@ -708,7 +708,7 @@ def decodeCompactJortsSig (bs : Bytes) : Option AggNativeSignature :=
   else none
 
 /-- Real `Poseidon2` Jorts signature verifier (`verifyAggNativeSig compactAuditGeom`) over decoded
-public-key and signature bytes, replacing the publicly forgeable `toyVerifier`. -/
+public-key and signature bytes for the native Jorts hybrid envelope. -/
 def jortsNativeVerifier : Verifier := fun pkBytes t sigBytes =>
   match decodeCompactJortsPk pkBytes, decodeCompactJortsSig sigBytes with
   | some pk, some sig => verifyAggNativeSig compactAuditGeom pk (transcriptFields t) sig

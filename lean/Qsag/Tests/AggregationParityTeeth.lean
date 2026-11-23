@@ -6,7 +6,7 @@ public import Qsag.Oracle.Qrom
 public import Qsag.Math.GoldilocksBase
 public import Qsag.Oracle.Keccak
 /-
-Witnesses and teeth for the Stage-2 aggregation parity statements.
+Witnesses and teeth for the aggregation parity statements.
 
 A. Canonical GF(p^4) (`Math/QuarticExt4`, `Protocol/Aggregation/FieldTransport`): the
    tower-to-polynomial-basis isomorphism on concrete elements, and the limb order it needs
