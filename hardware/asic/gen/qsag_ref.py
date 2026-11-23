@@ -41,74 +41,15 @@ def gl_pow7(x):
     return gl_mul(x6, x)
 
 
-# ---------------------------------------------------------------- Ext4
-# Limb order [c0.c0, c0.c1, c1.c0, c1.c1] = coefficients of [v^0, v^2, v^1, v^3]
-# in F_p[v]/(v^4 - 7), i.e. tower basis [1, u, v, u*v] with v^2 = u, u^2 = 7.
-LIMB_TO_POLY = [0, 2, 1, 3]  # poly index k -> limb index
-
-
-def ext4_muladd(x, y, z=(0, 0, 0, 0)):
-    a = [x[LIMB_TO_POLY[k]] % P for k in range(4)]
-    b = [y[LIMB_TO_POLY[k]] % P for k in range(4)]
-    c = [z[LIMB_TO_POLY[k]] % P for k in range(4)]
-    out = [0] * 4
-    for k in range(4):
-        acc = c[k]
-        for i in range(4):
-            if i <= k:
-                acc += a[i] * b[k - i]
-            else:
-                acc += 7 * a[i] * b[k + 4 - i]
-        out[k] = acc % P
-    return [out[0], out[2], out[1], out[3]]
-
-
-def ext4_karatsuba_muladd(x, y, z=(0, 0, 0, 0)):
-    """Tower Karatsuba 9-product Ext4 multiply-add matching qsag_ext4_kara_*."""
-    a = [v % P for v in x]
-    b = [v % P for v in y]
-    c = [v % P for v in z]
-    groups = [[0], [1], [0, 1], [2], [3], [2, 3], [0, 2], [1, 3], [0, 1, 2, 3]]
-    qa = [sum(a[i] for i in g) % P for g in groups]
-    qb = [sum(b[i] for i in g) % P for g in groups]
-    pr = [(qa[m] * qb[m]) % P for m in range(9)]
-    weights = [
-        [1, 7, 0, -7, -7, 7, 0, 0, 0],
-        [-1, -1, 1, 1, 7, 0, 0, 0, 0],
-        [-1, -7, 0, -1, -7, 0, 1, 7, 0],
-        [1, 1, -1, 1, 1, -1, -1, -1, 1],
-    ]
-    return [(c[j] + sum(w * pr[i] for i, w in enumerate(row))) % P for j, row in enumerate(weights)]
-
-
-def ext4_add(x, y):
-    return [gl_add(a, b) for a, b in zip(x, y)]
-
-
-def ext4_sub(x, y):
-    return [gl_sub(a, b) for a, b in zip(x, y)]
-
-
-def ext4_mul_base(x, s):
-    s %= P
-    return [(a * s) % P for a in x]
-
-
-def ext4_eval_poly(coeffs, r):
-    """Horner evaluation c_0 + c_1*r + ... + c_d*r^d."""
-    acc = [0, 0, 0, 0]
-    for c in reversed(coeffs):
-        acc = ext4_muladd(acc, r, c)
-    return acc
-
-
-# ---------------------------------------------------------------- [CWYZ26] DuetFold
-def cwyz_duet_step(v0, v1, theta, alpha, beta, inv_two, inv_two_x, x_sq):
-    even = ext4_mul_base(ext4_add(v0, v1), inv_two)
-    odd = ext4_mul_base(ext4_sub(v0, v1), inv_two_x)
-    mixed = ext4_add(even, ext4_muladd(theta, odd))
-    gamma = ext4_add(alpha, ext4_mul_base(beta, x_sq))
-    return ext4_add(odd, ext4_muladd(gamma, mixed))
+def fp5_muladd(a, b, c):
+    """Polynomial convolution in the Goldilocks extension defined by X^5 = 3."""
+    coeff = list(c) + [0] * 4
+    for i, x in enumerate(a):
+        for j, y in enumerate(b):
+            coeff[i+j] += x*y
+    for k in range(5, 9):
+        coeff[k-5] += 3*coeff[k]
+    return [x % P for x in coeff[:5]]
 
 
 # ---------------------------------------------------------------- Poseidon2-12
@@ -116,7 +57,6 @@ P2_IV = 0x504F53325F474C31
 P2_DOMAIN_CANOPY_SALT = 0x5032434E534C5401
 P2_DOMAIN_CANOPY_LEAF_R0 = 0x5032434E4C463001
 P2_DOMAIN_CANOPY_LEAF_BATCH = 0x5032434E4C464201
-P2_DOMAIN_CANOPY_LEAF_EXT4 = 0x5032434E4C464501
 P2_CANOPY_NODE_HI = 0x50324E4400000000
 P2_DOMAIN_CANOPY_ROOT = 0x5032434E524F4F54
 
@@ -218,11 +158,6 @@ def p2_round0_leaf(leaf_idx, salt16, num_polys, vals):
     return p2_sponge_limbs(dom, [leaf_idx, arity, num_polys, 0], salt_limbs + list(vals))
 
 
-def p2_ext4_leaf(stage_idx, leaf_idx, ext4_vals):
-    flat = [w for e in ext4_vals for w in e]
-    return p2_sponge_limbs(P2_DOMAIN_CANOPY_LEAF_EXT4, [leaf_idx, len(ext4_vals), stage_idx, 0], flat)
-
-
 def p2_merkle_2block(left, right, pk_seed, dom, meta0, tree_lo, tree_hi):
     st = [x % P for x in pk_seed] + [x % P for x in left] + [dom % P, meta0 % P, tree_lo % P, tree_hi % P]
     st = p2_perm(st)
@@ -270,7 +205,6 @@ TAG_MERKLE_ROOT = 0x01
 TAG_ROUND0_SALT = 0x02
 TAG_ROUND0_SINGLE = 0x10
 TAG_ROUND0_BATCH = 0x11
-TAG_EXT4_STAGE_LEAF = 0x12
 
 
 def _rol(v, n):
@@ -381,12 +315,6 @@ def ts_round0_leaf(leaf_idx, salt16, num_polys, vals):
     return ts_canopy_32(hdr + body)
 
 
-def ts_ext4_leaf(stage_idx, leaf_idx, ext4_vals):
-    hdr = bytes([TAG_EXT4_STAGE_LEAF, stage_idx, len(ext4_vals)]) + leaf_idx.to_bytes(4, "little")
-    body = b"".join(w.to_bytes(8, "little") for e in ext4_vals for w in e)
-    return ts_canopy_32(hdr + body)
-
-
 # ---------------------------------------------------------------- GF(2^128)
 M128 = 2**128 - 1
 
@@ -489,12 +417,6 @@ def selfcheck(fixture_path):
         assert gl(a) == int(e["a_canon"]) and gl_add(a, b) == int(e["add"])
         assert gl_sub(a, b) == int(e["sub"]) and gl_mul(a, b) == int(e["mul"])
         assert gl_pow7(a % P) == int(e["pow7_a"])
-        n += 1
-    for e in fx["goldilocks_ext4"]:
-        x = [int(v) for v in e["x"]]
-        y = [int(v) for v in e["y"]]
-        assert ext4_muladd(x, y) == [int(v) for v in e["mul"]]
-        assert ext4_karatsuba_muladd(x, y) == [int(v) for v in e["mul"]]
         n += 1
     for e in fx["poseidon2_12"]:
         assert p2_perm([int(v) for v in e["input"]]) == [int(v) for v in e["perm"]]

@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Generate unit vectors, KAT trace, tiled 16-variable Ext4 fold trace (inside 512 KiB 4-bank SRAM),
-and REAL QSAGSTA1 (Poseidon2 Canopy + TurboSHAKE256 Canopy) & [CWYZ26] DuetFold hardware verifier
-+ tamper-rejection traces from fixtures/real_proof_bundle.json.
+"""Generate leaf vectors and a command-port known-answer trace.
 
   python3 gen/gen_vectors.py fixtures/lean_external_oracle_vectors.json vec/
 """
 import json
 import os
-import pathlib
 import random
 import sys
 
@@ -26,11 +23,6 @@ def canon():
 
 def pack(lanes):
     return sum(v << (64 * i) for i, v in enumerate(lanes))
-
-
-def limbs_of_hex32(h):
-    bs = bytes.fromhex(h)
-    return [int.from_bytes(bs[8 * i:8 * i + 8], "little") for i in range(4)]
 
 
 def unit_vectors(fx, out):
@@ -242,69 +234,9 @@ class Emu:
             self.st = R.p2_perm(self.st)
         self.cmd(0x15, 0, base, num_blocks)
 
-    def emuladd(self):
-        self.st[0:4] = R.ext4_muladd(self.st[0:4], self.st[4:8], self.st[8:12])
-        self.cmd(0x20)
-
-    def emulbase(self):
-        self.st[0:4] = R.ext4_mul_base(self.st[0:4], self.st[4])
-        self.cmd(0x27)
-
-    def eadd(self):
-        self.st[0:4] = R.ext4_add(self.st[0:4], self.st[8:12])
-        self.cmd(0x21)
-
-    def esub(self):
-        self.st[0:4] = R.ext4_sub(self.st[0:4], self.st[8:12])
-        self.cmd(0x22)
-
     def glmul(self):
         self.st[0] = self.st[0] * self.st[1] % P
         self.cmd(0x23)
-
-    def fold(self, base, pairs, use_wptr=False):
-        base &= 0xFFFF
-        wb = self.wptr if use_wptr else base
-        r = self.st[4:8]
-        for i in range(pairs):
-            lo = [self.mem[(base + 8 * i + j) & 0xFFFF] for j in range(4)]
-            hi = [self.mem[(base + 8 * i + 4 + j) & 0xFFFF] for j in range(4)]
-            res = R.ext4_muladd(R.ext4_sub(hi, lo), r, lo)
-            for j in range(4):
-                self.mem[(wb + 4 * i + j) & 0xFFFF] = res[j]
-            self.st[8:12] = lo
-            self.st[0:4] = res
-        if use_wptr:
-            self.wptr = (wb + 4 * pairs) & 0xFFFF
-        self.cmd(0x24, 1 if use_wptr else 0, base, pairs)
-
-    def cwyz_duet_batch(self, base, count):
-        base &= 0xFFFF
-        for g in range(count):
-            off = (base + 27 * g) & 0xFFFF
-            ws = [self.mem[(off + i) & 0xFFFF] for i in range(27)]
-            v0, v1, theta, alpha, beta, claimed = [ws[4 * k:4 * k + 4] for k in range(6)]
-            inv_two, inv_two_x, x_sq = ws[24], ws[25], ws[26]
-            even = R.ext4_mul_base(R.ext4_add(v0, v1), inv_two)
-            odd = R.ext4_mul_base(R.ext4_sub(v0, v1), inv_two_x)
-            mixed = R.ext4_add(even, R.ext4_muladd(odd, theta))
-            gamma = R.ext4_add(alpha, R.ext4_mul_base(beta, x_sq))
-            got = R.ext4_add(odd, R.ext4_muladd(gamma, mixed))
-            self.st[0:4] = got
-            self.st[4:8] = mixed
-            self.st[8:12] = odd
-            if got != claimed:
-                self.verify_fail = 1
-            self.verify_checks += 1
-        self.cmd(0x25, 0, base, count)
-
-    def ext4_horner(self, base, count):
-        base &= 0xFFFF
-        for i in range(count):
-            c = [self.mem[(base + 4 * i + j) & 0xFFFF] for j in range(4)]
-            self.st[8:12] = c
-            self.st[0:4] = R.ext4_muladd(self.st[0:4], self.st[4:8], c)
-        self.cmd(0x26, 0, base, count)
 
     def k_xor(self, i, v):
         self.ks[i] ^= (v & R.M64)
@@ -415,24 +347,13 @@ def trace_kat(fx, out):
         assert e.st == [int(x) for x in v["perm"]]
         for l in range(12):
             e.rd_st(l)
-    # Goldilocks multiplier and Karatsuba Ext4 KATs
+    # Goldilocks multiplier edge KATs
     for v in fx["goldilocks_edges"]:
         e.wr_st(0, int(v["a_raw"]))
         e.wr_st(1, int(v["b_raw"]))
         e.glmul()
         assert e.st[0] == int(v["mul"])
         e.rd_st(0)
-    for v in fx["goldilocks_ext4"]:
-        e.wr_all([int(x) for x in v["x"]] + [int(x) for x in v["y"]] + [0] * 4)
-        e.mark(0)
-        e.emuladd()
-        e.mark(101)
-        assert e.st[0:4] == [int(x) for x in v["mul"]]
-        e.rd4()
-    for _ in range(200):
-        e.wr_all([canon() for _ in range(12)])
-        rnd.choice([e.emuladd, e.eadd, e.esub, e.emulbase])()
-        e.rd4()
     # Canopy node (1-slot) + 4-way C-slowed Canopy batch (`P2_CANOPY4_BATCH`)
     key = [canon() for _ in range(3)]
     for i in range(3):
@@ -536,319 +457,78 @@ def trace_kat(fx, out):
         e.rd_st(0)
         e.rd_st(1)
 
-    # [CWYZ26] DuetFold hardware gate batch KAT
-    v0 = [canon() for _ in range(4)]
-    v1 = [canon() for _ in range(4)]
-    theta = [canon() for _ in range(4)]
-    alpha = [canon() for _ in range(4)]
-    beta = [canon() for _ in range(4)]
-    inv2 = pow(2, P - 2, P)
-    inv2x = pow(14, P - 2, P)
-    xsq = 49
-    claimed = R.cwyz_duet_step(v0, v1, theta, alpha, beta, inv2, inv2x, xsq)
-    e.wr_mem_burst(0x0C00, v0 + v1 + theta + alpha + beta + claimed + [inv2, inv2x, xsq])
-    e.mark(0)
-    e.cwyz_duet_batch(0x0C00, 1)
-    e.mark(112, 1)
+    # Memory moves and sponge absorption.
+    base = 0x0c00
+    for j in range(8):
+        e.wr_mem(base+j, canon())
+    e.ld4(0, base)
+    e.sv4(base+8)
+    e.check_eq4(False, base+8)
+    e.absorb8(base)
     e.rd4()
-    e.rd_status(expect_ok=True)
-    e.close()
 
+    # Nonce injection, domain initialization, depth-zero root and odd squeeze.
+    e.cmd(0x3a, 0)
+    e.ks = R.turboshake256_midstate(b"QSAG.ZKHEM2.TRANSCRIPT")
+    nonce = [canon() for _ in range(4)]
+    for j, word in enumerate(nonce):
+        e.cmd(0x0c, j, data=word)
+    e.cmd(0x0d)
+    frame = pack(nonce) << 48
+    for j in range(5):
+        e.ks[j] ^= (frame >> (64*j)) & R.M64
+        e.k_rd(j)
+    e.k_save()
+    e.k_xor(0, 71)
+    for rounds in (12, 24):
+        e.k_perm(rounds)
+        e.k_rd(0)
+    e.k_restore()
+    e.k_rd(0)
+    child = pack(e.ks[:7]).to_bytes(56, "little")[:50]
+    stage = 5
+    e.cmd(0x16, data=stage << 32)
+    root = R.turboshake256(bytes([1, stage, 0]) + child, 40,
+                            state=R.turboshake256_midstate(b"QSAG.ZKHEM2.TREE/v1"))
+    e.cmd(0x39, addr=base, data=5)
+    for j in range(5):
+        e.mem[base+j] = int.from_bytes(root[8*j:8*j+8], "little")
+        e.rd_mem(base+j)
 
-def _emit_steiner_opening(e, op, tamper_sib=False):
-    """Execute a real Steiner-deduplicated CanopyMultiProof opening on the ASIC!
-    Uses 4-way C-slowed `P2_CANOPY4_BATCH` (Poseidon2) or `TS_CANOPY_BATCH` (TurboSHAKE256)
-    level by level, then computes the domain-bound commitment root and asserts `CHECK_EQ4`!
-    """
-    n = 1 << op["log_leaves"]
-    active = [(n + idx, limbs_of_hex32(h)) for idx, h in op["leaves"]]
-    sibs = [limbs_of_hex32(h) for h in op["siblings"]]
-    if tamper_sib and sibs:
-        sibs[0][0] ^= 1
-    cur_s = 0
-    is_p2 = (op["mode"] == "poseidon2")
-    if is_p2:
-        tkey = R.p2_canopy_tree_key(op["stage_idx"], op["log_leaves"])
-        for i in range(3):
-            e.wr_key(i, tkey[i])
-
-    nodes_hashed = 0
-    DESC_ADDR = 0x2000
-    OUT_ADDR = 0x6000
-    for _ in range(op["log_leaves"]):
-        step_nodes = []
-        k = 0
-        while k < len(active):
-            u, hu = active[k]
-            if k + 1 < len(active) and active[k + 1][0] == (u ^ 1):
-                hsib = active[k + 1][1]
-                k += 2
-            else:
-                hsib = sibs[cur_s]
-                cur_s += 1
-                k += 1
-            left, right = (hsib, hu) if (u & 1) else (hu, hsib)
-            step_nodes.append((u >> 1, left, right))
-        nodes_hashed += len(step_nodes)
-
-        if is_p2:
-            # Pad to multiple of 4 for 4-way C-slowed P2_CANOPY4_BATCH
-            quads = (len(step_nodes) + 3) // 4
-            padded = list(step_nodes) + [(1, [0] * 4, [0] * 4)] * (4 * quads - len(step_nodes))
-            words = [w for (pidx, l, r) in padded for w in ([pidx] + l + r)]
-            e.wr_mem_burst(DESC_ADDR, words)
-            e.set_wptr(OUT_ADDR)
-            e.canopy4_batch(DESC_ADDR, quads)
+    for op in (0x28, 0x29, 0x2a, 0x2b):
+        r = [canon() for _ in range(5)]
+        a = [canon() for _ in range(5)]
+        terms = [[canon() for _ in range(5)] for _ in range(3)]
+        if op == 0x2b:
+            a = [(2*x+y+z) % P for x,y,z in zip(*terms)]
+        e.wr_all(a+r)
+        e.wr_mem_burst(base, [v for row in terms for v in row])
+        if op == 0x28:
+            result = R.fp5_muladd(a, r, terms[0])
+            e.cmd(op, addr=base)
+        elif op == 0x29:
+            result = a
+            for term in terms:
+                result = R.fp5_muladd(result, r, term)
+            e.cmd(op, addr=base, data=len(terms))
+        elif op == 0x2a:
+            lo, hi = terms[:2]
+            result = R.fp5_muladd([y-x for x,y in zip(lo,hi)], r, lo)
+            e.cmd(op, addr=base, data=1)
+            for j, value in enumerate(result):
+                e.mem[base+j] = value
+                e.rd_mem(base+j)
         else:
-            words = [w for (pidx, l, r) in step_nodes for w in ([pidx] + l + r)]
-            e.wr_mem_burst(DESC_ADDR, words)
-            e.set_wptr(OUT_ADDR)
-            e.ts_canopy_batch(DESC_ADDR, len(step_nodes))
-
-        active = [
-            (pidx, [e.mem[OUT_ADDR + 4 * idx_n + j] for j in range(4)])
-            for idx_n, (pidx, _, _) in enumerate(step_nodes)
-        ]
-
-    top_limbs = active[0][1]
-    exp_root = limbs_of_hex32(op["root"])
-    e.wr_mem_burst(0x0080, exp_root)
-    if is_p2:
-        e.p2_sponge(R.P2_DOMAIN_CANOPY_ROOT, [0, 0, 0, 0],
-                    [op["stage_idx"], op["log_leaves"]] + top_limbs, 0x0100)
-        e.check_eq4(False, 0x0080, expect_match=not (tamper_sib and bool(sibs)))
-    else:
-        top_bytes = b"".join(w.to_bytes(8, "little") for w in top_limbs)
-        msg = bytes([R.TAG_MERKLE_ROOT, op["log_leaves"]]) + top_bytes
-        e.k_restore()
-        e.k_absorb_bytes_sram(msg, 12, 0x07, 0x0100)
-        e.check_eq4(True, 0x0080, expect_match=not (tamper_sib and bool(sibs)))
-    return nodes_hashed
-
-
-def trace_real_qsagsta1(bundle, out, mode, tamper=False):
-    key_name = "qsagsta1_poseidon2" if mode == "p2" else "qsagsta1_turboshake"
-    d = bundle[key_name]
-    suffix = "_tamper" if tamper else ""
-    e = Emu(f"{out}/trace_sta1_{mode}{suffix}.hex")
-    e.clr_status()
-
-    if mode == "ts":
-        mid = R.turboshake256_midstate(R.TURBOSHAKE_CANOPY_CUSTOM)
-        for l_i in range(25):
-            e.k_set(l_i, mid[l_i])
-        e.k_save()
-
-    # Pre-stage all 306 real [CWYZ26] DuetFoldStatement gates into SRAM (306 * 27 = 8,262 words @ 0x8000)
-    duet_words = []
-    for gi, g in enumerate(d["duet_gates"]):
-        claimed = [int(w, 16) for w in g["claimed"]]
-        if tamper and gi == 0:
-            claimed[0] = (claimed[0] + 1) % P
-        for fld in ("v0", "v1", "theta", "alpha", "beta"):
-            duet_words += [int(w, 16) for w in g[fld]]
-        duet_words += claimed
-        duet_words += [int(g["inv_two"], 16), int(g["inv_two_x"], 16), int(g["x_sq"], 16)]
-    e.wr_mem_burst(0x8000, duet_words)
-
-    e.mark(0)  # ---- BEGIN REAL PROOF VERIFICATION TIMING WINDOW ----
-
-    # 1. Transcript sample permutations (Poseidon2 Fiat-Shamir blocks)
-    for smp in d["p2_samples"]:
-        e.wr_all([int(w, 16) for w in smp["in"]])
-        e.perm()
-        e.wr_mem_burst(0x0040, [int(w, 16) for w in smp["out"][:4]])
-        e.check_eq4(False, 0x0040, expect_match=True)
-
-    # 2. All 13 real Hologram / Spark / LogUp-GKR sumcheck round checks:
-    #    Check g(0) + g(1) == claim_in AND Horner g(chal) == claim_out!
-    for si, sc in enumerate(d["sumcheck_rounds"]):
-        cin = [int(w, 16) for w in sc["claim_in"]]
-        coeffs = [[int(w, 16) for w in c] for c in sc["coeffs"]]
-        chal = [int(w, 16) for w in sc["chal"]]
-        cout = [int(w, 16) for w in sc["claim_out"]]
-        if tamper and si == 0:
-            coeffs[0][0] = (coeffs[0][0] + 1) % P
-        # g(0) + g(1) = c_0 + sum_j c_j
-        e.wr_all(coeffs[0], 0)
-        for c in coeffs:
-            e.wr_all(c, 8)
-            e.eadd()
-        e.wr_mem_burst(0x0050, cin)
-        e.check_eq4(False, 0x0050, expect_match=not (tamper and si == 0))
-        # Horner evaluation g(chal) via EXT4_HORNER
-        rev_flat = [w for c in reversed(coeffs) for w in c]
-        e.wr_mem_burst(0x0200, rev_flat)
-        e.wr_all([0, 0, 0, 0] + chal)
-        e.ext4_horner(0x0200, len(coeffs))
-        e.wr_mem_burst(0x0054, cout)
-        e.check_eq4(False, 0x0054, expect_match=not (tamper and si == 0))
-
-    # 3. All 3 real WHIR Stage-0 Dual-OOD evaluation pin checks
-    for oi, ood in enumerate(d["ood_checks"]):
-        cin = [int(w, 16) for w in ood["claim_in"]]
-        cout = [int(w, 16) for w in ood["claim_out"]]
-        e.wr_all(cin, 8)
-        for k in range(2):
-            xi = [int(w, 16) for w in ood["xis"][k]]
-            ev = [int(w, 16) for w in ood["evals"][k]]
-            if tamper and oi == 0 and k == 0:
-                ev[0] = (ev[0] + 1) % P
-            e.wr_all(xi, 0)
-            e.wr_all(ev, 4)
-            e.emuladd()
-            if k == 0:
-                e.wr_all(list(e.st[0:4]), 8)
-        e.wr_mem_burst(0x0060, cout)
-        e.check_eq4(False, 0x0060, expect_match=not (tamper and oi == 0))
-
-    # 4. Real Round-0 salted leaves & Stage-k Ext4 leaves
-    leaf_hashes = 0
-    for lf in d["r0_leaves"]:
-        salt = bytes.fromhex(lf["salt"])
-        vals = [int(w, 16) for w in lf["vals"]]
-        arity = len(vals) // lf["num_polys"]
-        s_limbs = [int.from_bytes(salt[off:min(off + 7, 16)].ljust(8, b"\x00"), "little") for off in (0, 7, 14)]
-        dom = R.P2_DOMAIN_CANOPY_LEAF_R0 if lf["num_polys"] == 1 else R.P2_DOMAIN_CANOPY_LEAF_BATCH
-        e.p2_sponge(dom, [lf["leaf_idx"], arity, lf["num_polys"], 0], s_limbs + vals, 0x0400)
-        e.wr_mem_burst(0x0070, limbs_of_hex32(lf["digest"]))
-        e.check_eq4(False, 0x0070, expect_match=True)
-        leaf_hashes += 1
-    for lf in d["ext4_leaves"]:
-        flat = [int(w, 16) for ext in lf["vals"] for w in ext]
-        e.p2_sponge(R.P2_DOMAIN_CANOPY_LEAF_EXT4, [lf["leaf_idx"], len(lf["vals"]), lf["stage_idx"], 0], flat, 0x0400)
-        e.wr_mem_burst(0x0074, limbs_of_hex32(lf["digest"]))
-        e.check_eq4(False, 0x0074, expect_match=True)
-        leaf_hashes += 1
-
-    # 5. All 6 real Steiner CanopyMultiProof Merkle openings
-    total_nodes = 0
-    for op_i, op in enumerate(d["canopy_openings"]):
-        total_nodes += _emit_steiner_opening(e, op, tamper_sib=(tamper and op_i == 1))
-
-    # 6. All 306 real [CWYZ26] DuetFoldStatement gates via hardware CWYZ_DUET_BATCH!
-    e.cwyz_duet_batch(0x8000, len(d["duet_gates"]))
-
-    # 7. Hardware accept/reject status check!
-    e.rd_status(expect_ok=not tamper)
-    e.mark(200 if mode == "p2" else 201, 1 if tamper else 0)
-    checks_done = e.verify_checks
+            result = [0]*5
+            for term in reversed(terms):
+                result = R.fp5_muladd(result, r, term)
+            e.cmd(op, addr=base, data=len(terms)-1)
+            e.verify_checks += 1
+        e.st[:5] = result
+        for j in range(10):
+            e.rd_st(j)
+    e.rd_status()
     e.close()
-    return dict(
-        trace=f"trace_sta1_{mode}{suffix}",
-        mode=mode,
-        tamper=tamper,
-        wire_bytes=d["wire_bytes"],
-        canopy_openings=len(d["canopy_openings"]),
-        canopy_internal_nodes=total_nodes,
-        leaf_sponges=leaf_hashes,
-        sumcheck_rounds=len(d["sumcheck_rounds"]),
-        ood_checks=len(d["ood_checks"]),
-        cwyz_duet_gates=len(d["duet_gates"]),
-        hw_assertions=checks_done,
-    )
-
-
-def trace_real_duet_component(bundle, out, tamper=False):
-    df = bundle["cwyz26_duet_fold"]
-    p2_gates = bundle["qsagsta1_poseidon2"]["duet_gates"][:df["num_statements"]]
-    suffix = "_tamper" if tamper else ""
-    e = Emu(f"{out}/trace_duet_comp{suffix}.hex")
-    e.clr_status()
-
-    # Pre-stage the 4 real 27-word DuetFoldStatements and 64-column MLE evaluations into SRAM
-    duet_words = []
-    for gi, g in enumerate(p2_gates):
-        claimed = [int(w, 16) for w in g["claimed"]]
-        if tamper and gi == 1:
-            claimed[2] = (claimed[2] + 1) % P
-        for fld in ("v0", "v1", "theta", "alpha", "beta"):
-            duet_words += [int(w, 16) for w in g[fld]]
-        duet_words += claimed
-        duet_words += [int(g["inv_two"], 16), int(g["inv_two_x"], 16), int(g["x_sq"], 16)]
-    e.wr_mem_burst(0x1000, duet_words)
-
-    col_words = [int(w, 16) for col in df["column_evaluations"] for w in col]
-    e.wr_mem_burst(0x2000, col_words)
-
-    e.mark(0)
-    # 1. Verify all [CWYZ26] DuetFoldStatement rows in hardware
-    e.cwyz_duet_batch(0x1000, len(p2_gates))
-    # 2. Verify cubic round polynomials g_r(0) + g_r(1) == claim (round 0 claim == 0!)
-    for ri, rp in enumerate(df["round_polynomials"]):
-        coeffs = [[int(w, 16) for w in c] for c in rp]
-        if ri == 0:
-            if tamper:
-                coeffs[2][0] = (coeffs[2][0] + 1) % P
-            e.wr_all(coeffs[0], 0)
-            for c in coeffs:
-                e.wr_all(c, 8)
-                e.eadd()
-            e.wr_mem_burst(0x0040, [0, 0, 0, 0])
-            e.check_eq4(False, 0x0040, expect_match=not tamper)
-    # 3. Fold the 64-column evaluations across 6 boolean hypercube variables in SRAM
-    for v in range(6):
-        e.wr_all([canon() for _ in range(4)], 4)
-        e.fold(0x2000, 32 >> v)
-    e.rd4()
-    e.rd_status(expect_ok=not tamper)
-    e.mark(310, 1 if tamper else 0)
-    checks_done = e.verify_checks
-    e.close()
-    return dict(trace=f"trace_duet_comp{suffix}", tamper=tamper, statements=len(p2_gates), hw_assertions=checks_done)
-
-
-def trace_fold16_tiled(out):
-    """Exact 16-variable Ext4 multilinear fold (65,536 Ext4 elements = 65,535 pair folds)
-    streamed through the 4-bank 512 KiB (65,536-word = 16,384-Ext4) SRAM in 4 subcube tiles!
-    Checked bit-for-bit against the monolithic 16-variable Python reference fold!
-    """
-    e = Emu(f"{out}/trace_fold16.hex")
-    chals = [[canon() for _ in range(4)] for _ in range(16)]
-    table = [[rnd.randrange(P) for _ in range(4)] for _ in range(1 << 16)]
-
-    # Reference monolithic 16-variable fold
-    ref_cur = list(table)
-    for r in chals:
-        h = len(ref_cur) // 2
-        # Note: in-place sequential pair fold pairs (2*i, 2*i+1): lo + r*(hi - lo)
-        ref_cur = [R.ext4_muladd(R.ext4_sub(ref_cur[2 * i + 1], ref_cur[2 * i]), r, ref_cur[2 * i]) for i in range(h)]
-    assert len(ref_cur) == 1
-    expected_final = ref_cur[0]
-
-    # Tiled hardware execution inside 512 KiB (AW=16, 16,384 Ext4 capacity):
-    # Each tile t in 0..3 holds 2^14 = 16,384 contiguous Ext4 elements (65,536 words = full 512 KiB!).
-    # Folding pairs (2*i, 2*i+1) for the first 14 challenges chals[0..13] reduces each tile to 1 Ext4!
-    tile_outs = []
-    total_folds = 0
-    for t in range(4):
-        sub_elems = table[t * (1 << 14):(t + 1) * (1 << 14)]
-        e.wr_mem_burst(0x0000, [w for ext in sub_elems for w in ext])
-        e.mark(0 if t == 0 else 1, t)
-        pairs = (1 << 14) // 2
-        for v in range(14):
-            e.wr_all(chals[v], 4)
-            e.fold(0x0000, pairs)
-            total_folds += pairs
-            pairs //= 2
-        tile_outs.append([e.mem[j] for j in range(4)])
-
-    # Fold the 4 tile scalars across chals[14] and chals[15]
-    e.wr_mem_burst(0x0000, [w for ext in tile_outs for w in ext])
-    for v, pairs in ((14, 2), (15, 1)):
-        e.wr_all(chals[v], 4)
-        e.fold(0x0000, pairs)
-        total_folds += pairs
-
-    assert total_folds == (1 << 16) - 1
-    assert [e.mem[j] for j in range(4)] == expected_final
-    e.mark(300, 16)
-    e.wr_mem_burst(0x0100, expected_final)
-    e.ld4(0, 0x0000)
-    e.check_eq4(False, 0x0100, expect_match=True)
-    e.rd4()
-    e.close()
-    return dict(nvars=16, pair_folds=total_folds, tiles=4, sram_kib=512)
 
 
 if __name__ == "__main__":
@@ -856,18 +536,5 @@ if __name__ == "__main__":
     os.makedirs(out, exist_ok=True)
     print("reference selfcheck:", R.selfcheck(fixture))
     fx = json.load(open(fixture))
-    bundle_path = pathlib.Path(fixture).with_name("real_proof_bundle.json")
-    bundle = json.load(open(bundle_path))
     unit_vectors(fx, out)
     trace_kat(fx, out)
-    info = [
-        trace_real_qsagsta1(bundle, out, "p2", tamper=False),
-        trace_real_qsagsta1(bundle, out, "p2", tamper=True),
-        trace_real_qsagsta1(bundle, out, "ts", tamper=False),
-        trace_real_qsagsta1(bundle, out, "ts", tamper=True),
-        trace_real_duet_component(bundle, out, tamper=False),
-        trace_real_duet_component(bundle, out, tamper=True),
-        trace_fold16_tiled(out),
-    ]
-    json.dump(info, open(f"{out}/workloads.json", "w"), indent=2)
-    print(json.dumps(info, indent=2))
