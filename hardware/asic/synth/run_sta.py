@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""bb2 only: Run OpenSTA 3.1.0 across all 4 PDKs + multi-corner PVT (IHP130 FF/TT/SS)
-+ wire-load-aware timing & dynamic/leakage power analysis on the full whole-top standard-cell netlist!
+"""Hierarchical OpenSTA timing and power sweep on the manufacturable IHP SG13G2 and
+Sky130 HD libraries. The v2 foundry flow is run_foundry_v2.py.
 """
 import json
 import os
@@ -11,9 +11,9 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
-RUN = ["env", "SWARM_MEM_MAX=16G", "swarm-build", "timeout", "--kill-after=10s", "600s"]
-PDK = pathlib.Path("/home/build/qsag-ni-asic/pdk")
-STA = pathlib.Path("/home/build/qsag-ni-asic/tools/opensta/bin/sta")
+RUN = ["timeout", "--kill-after=10s", "600s"]
+PDK = pathlib.Path(os.environ.get("PDK_ROOT", "/opt/pdk"))
+STA = pathlib.Path(os.environ.get("OPENSTA_BIN", "sta"))
 os.environ["TMPDIR"] = str(ROOT / "synth" / "work_hier")
 
 # (netlist_lib_dir, corner_tag, stdcell_lib, wire_load_name_or_None, nom_period_in_lib_units, unit_to_ns)
@@ -22,9 +22,6 @@ CORNERS = [
     ("ihp130",    "ff_m40C_1v32",      "sg13g2_stdcell_fast_1p32V_m40C.lib",    None,              10.0,   1.0),
     ("ihp130",    "tt_025C_1v20",      "sg13g2_stdcell_typ_1p20V_25C.lib",      None,              12.0,   1.0),
     ("ihp130",    "ss_125C_1v08",      "sg13g2_stdcell_slow_1p08V_125C.lib",    None,              18.0,   1.0),
-    ("nangate45", "tt_ideal",          "NangateOpenCellLibrary_typical.lib",    None,               3.5,   1.0),
-    ("nangate45", "tt_wlm_5K",         "NangateOpenCellLibrary_typical.lib",    "5K_hvratio_1_1",   4.0,   1.0),
-    ("asap7",     "rvt_tt_025C_0v70",  "asap7_merged_RVT_TT.lib",               None,            2000.0, 0.001),
 ]
 
 

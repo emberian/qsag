@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce the mapped-area gate on two complete Nangate45 stat reports."""
+"""Compare synth/area.sh mapped-area reports (IHP SG13G2 or Sky130 HD liberty)."""
 import re
 import sys
 from pathlib import Path

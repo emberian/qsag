@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# From the build directory. Use the same frontend, library and mapping for both designs.
+# Mapped-area comparison on the IHP SG13G2 (or Sky130 HD) typical-corner foundry liberty.
 set -euo pipefail
 design=${1:?source directory}
 label=${2:?result label}
-lib=${LIBERTY:?set LIBERTY to the Nangate45 typical liberty path}
+lib=${LIBERTY:?set LIBERTY to sg13g2_stdcell_typ_1p20V_25C.lib or sky130_fd_sc_hd__tt_025C_1v80.lib}
 mkdir -p logs
 yosys -Q -T -l "logs/area_$label.log" -p "
   plugin -i slang

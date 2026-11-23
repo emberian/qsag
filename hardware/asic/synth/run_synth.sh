@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
-# bb2 only. Yosys + ABC standard-cell synthesis.
+# Linux build host. Yosys + ABC standard-cell synthesis.
 #   run_synth.sh pre                  elaborate qsag_ni_asic_top (the slang frontend flattens it) and run `synth` once
 #   run_synth.sh top   <lib>          map the whole flat top (SRAM macro stays a black box): total standard-cell area
 #   run_synth.sh stage <lib> <module> [ks]  one flattened module or register-to-register stage: mapped area and
 #                                     critical-path delay (ABC stime)
 #   run_synth.sh nand  <module>       generic NAND2/INV mapping: gate counts, CMOS transistor count, logic depth
-# libs: sky130 ihp130 nangate45 asap7 (Liberty files under /home/build/qsag-ni-asic/pdk)
+# libs: sky130 ihp130 (Liberty files under ${PDK_ROOT:-/opt/pdk})
 set -uo pipefail
 cd "$(dirname "$0")/.."
-export PATH=/home/build/qsag-ni-asic/tools/oss-cad-suite/bin:$PATH
-RUN="env SWARM_MEM_MAX=16G swarm-build timeout --kill-after=10s 600s"
+export PATH="${OSS_CAD_BIN:-/opt/oss-cad-suite/bin}:$PATH"
+RUN="timeout --kill-after=10s 600s"
 ABCS="+strash;dretime;&get,-n;&dch,-f;&nf,{D};&put;buffer,-c;topo;upsize,{D};dnsize,{D};stime,-p"
-PDK=/home/build/qsag-ni-asic/pdk
-RTL="rtl/qsag_asic_gl64_csa.sv rtl/qsag_asic_gl64_csa_gen.sv rtl/qsag_asic_ext4_p2_gen.sv rtl/qsag_asic_ext4_p2_shared.sv rtl/qsag_asic_tower_maps_gen.sv rtl/qsag_asic_keccak_clmul.sv rtl/qsag_ni_asic_top.sv rtl/sram_dp_blackbox.sv synth/stages.sv"
+PDK="${PDK_ROOT:-/opt/pdk}"
+RTL="$(echo rtl/*.sv) synth/stages.sv"
 mode="$1"; mkdir -p synth/logs synth/netlists
 libs() {
   case "$1" in
     sky130)    echo "$PDK/sky130_fd_sc_hd__tt_025C_1v80.lib" ;;
     ihp130)    echo "$PDK/sg13g2_stdcell_typ_1p20V_25C.lib" ;;
-    nangate45) echo "$PDK/NangateOpenCellLibrary_typical.lib" ;;
-    asap7)     echo "$PDK/asap7_merged_RVT_TT.lib" ;;
   esac
 }
 if [[ $mode == pre ]]; then

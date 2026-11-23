@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""bb2 only: Delay-driven hierarchical Liberty synthesis across 4 open PDKs
-(Sky130 HD, IHP SG13G2 130nm, Nangate45, ASAP7 7nm RVT).
+"""Delay-driven hierarchical Liberty synthesis for Sky130 HD and IHP SG13G2.
 
-Maps all 12 reusable datapath macros and the top-level controller independently with
+Maps the reusable datapath macros and the top-level controller independently with
 ABC delay-driven technology mapping, fanout buffering, and gate sizing (`&dch -f; &nf; buffer -c; upsize; dnsize`),
 then links all mapped netlists (zero unmapped logic; only the 4-bank 128 KiB foundry SRAM macro
-`sram_dp_64x16384_bank` remains a parameter-free black box) for exact whole-chip area & OpenSTA/OpenROAD signoff.
+`sram_dp_64x16384_bank` remains a parameter-free black box) to estimate standard-cell area and pre-layout timing.
 """
 import concurrent.futures
 import json
@@ -17,20 +16,17 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
-os.environ["PATH"] = "/home/build/qsag-ni-asic/tools/oss-cad-suite/bin:" + os.environ["PATH"]
-WORK = ROOT / "synth" / "work_hier"
+os.environ["PATH"] = os.environ.get("OSS_CAD_BIN", "/opt/oss-cad-suite/bin") + ":" + os.environ["PATH"]
+WORK = pathlib.Path(os.environ["TMPDIR"]) / "work_hier"
 WORK.mkdir(parents=True, exist_ok=True)
-os.environ["TMPDIR"] = str(WORK)
 
-RUN = ["env", "SWARM_MEM_MAX=16G", "swarm-build", "timeout", "--kill-after=10s", "600s"]
-PDK = "/home/build/qsag-ni-asic/pdk/"
+RUN = ["timeout", "--kill-after=10s", "600s"]
+PDK = os.environ.get("PDK_ROOT", "/opt/pdk").rstrip("/") + "/"
 
 # (liberty_file, nand2_area_um2, abc_target_ps, lib_time_unit)
 LIBS = {
     "sky130":    ("sky130_fd_sc_hd__tt_025C_1v80.lib",    3.7536,  10500, "ns"),
     "ihp130":    ("sg13g2_stdcell_typ_1p20V_25C.lib",     7.2576,   8500, "ns"),
-    "nangate45": ("NangateOpenCellLibrary_typical.lib",   0.7980,   2500, "ns"),
-    "asap7":     ("asap7_merged_RVT_TT.lib",              0.05832,  1400, "ps"),
 }
 
 MACROS = [
@@ -39,8 +35,6 @@ MACROS = [
     "qsag_p2_mi_tail",
     "qsag_p2_mi_apply",
     "qsag_p2_canopy_ff",
-    "qsag_ext4_kara_inputs",
-    "qsag_ext4_kara_combine",
     "qsag_keccak_round",
     "qsag_gf128_mul",
     "qsag_tower128_to_poly",
@@ -56,13 +50,7 @@ def write_sram_stub_lib(lib_name, out_dir):
     stdcell logic kGE is unpolluted, while setup & clk-to-Q arcs are timed by OpenSTA/OpenROAD)."""
     _, _, _, tunit = LIBS[lib_name]
     # Realistic foundry SRAM macro setup / clk-to-q in library time units
-    if lib_name == "asap7":       # ps
-        t_setup, t_ckq, cap = 80.0, 180.0, "1.5"
-        cunit, v_nom = "1ff", 0.7
-    elif lib_name == "nangate45": # ns
-        t_setup, t_ckq, cap = 0.18, 0.35, "0.004"
-        cunit, v_nom = "1pf", 1.1
-    elif lib_name == "ihp130":    # ns
+    if lib_name == "ihp130":    # ns
         t_setup, t_ckq, cap = 0.55, 1.10, "0.010"
         cunit, v_nom = "1pf", 1.2
     else:                         # sky130, ns
