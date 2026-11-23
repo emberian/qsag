@@ -1,6 +1,6 @@
 # MIR verification and canonical weld status
 
-Updated 2026-11-14. Statements delivered, how they were checked, and what is still open.
+Updated 2026-11-23. Statements delivered, how they were checked, and what is still open.
 
 ## Layout
 
@@ -123,14 +123,8 @@ unchanged. `finalize` and `squeeze` stay idempotent and resumable after squeezin
 (`shake256_finalize_after_squeezing`). No function of the crate absorbs after squeezing; the
 only production use of the type is `new_cshake256(..).state` in `qsag-cred`.
 
-## Legacy and separately implemented code
+## Coverage classification
 
-- `threshold::derive_jorts_legacy_v1_det_r_rand` (domain tag `QSAG.JORTSV1.DET`) is a legacy
-  v1 model. Production derives the stateful randomizer in
-  `qsag_core::tsw_baggy::derive_stateful_r_rand` as `PRF_msg` under `QSAG.PQ.BAGGYSIG.DET/v1`;
-  the outputs differ and no production crate calls the legacy function. It has no theorem
-  and serves only as the deterministic fixture of the `EpochLatch` retry tests. The
-  `EpochLatch` theorems treat `r_rand` as opaque bytes and hold for either derivation.
 - `aeneas/qsag-verified/extraction-coverage.{json,md}` (from
   `scripts/gen_extraction_coverage.py`, `--check` fails when stale) classifies every `pub fn`
   of the crate: called from `crates/**`, reached from such a function, related to production
@@ -141,22 +135,24 @@ only production use of the type is `new_cshake256(..).state` in `qsag-cred`.
 
 ## Validation and remaining work
 
-Linux release tests: 301 passed across the standalone verified crate and five custody crates;
-the separately invoked production OT bootstrap test also passed. No-default-feature checks
-and strict no-dependency, all-target clippy checks pass. Primitive MIR targets build with
-warnings treated as errors. The full custody/audit build is blocked by errors in the current
-sibling-owned `Qsag.RssSlhFullSecurity` dependency (unresolved `G` identifiers).
-A full zero-rejected-axiom census is therefore not certified for this snapshot.
+Linux release tests pass across the standalone verified crates (`qsag-verified` and quintic `Fp5`
+`qsag-whir-verified`) and production custody/aggregation crates, including no-default-feature
+checks and strict `-D warnings` Clippy checks. Both `aeneas/lean` (`Aeneas`, `QsagVerified`,
+`QsagMirProofs`, `QsagSpecWeld`, `QsagCustodyWeld`, `AuditMirAxioms`, `QsagVerifiedChallenge`)
+and `aeneas/lean-whir` (`QsagWhirVerified`, `QsagWhirSpecWeld`, `QsagWhirVerifiedChallenge`,
+`audit-whir-mir-axioms`, covering 54/54 extracted quintic `Fp5` and `QSAGHQM2` definitions) build
+cleanly under `lake build --wfail` against the unified `lean/` specification library.
 
-The final repository source-policy scan passes: no forbidden proof escapes, with exposure
-limit 12. Earlier sibling documentation-reference failures have been corrected.
-The comparator passes 71 theorem and 25 definition checks through all six kernels. The
-import-all primitive census, including logical Aeneas support declarations, checks 6,415 declarations
-with zero rejected axioms. Compile-time elaborators and their generated implementation
-helpers are reported outside the logical census; emitted terms and their transitive proof
-dependencies are checked. The extraction manifest binds current source/output hashes and
-explicitly records the blocked full pipeline. Do not substitute this primitive census for
-the blocked full custody census.
+The repository source-policy scan (`scripts/check_lean_policy.py`) and SHA-256 provenance gate
+(`scripts/check_extraction_provenance.py` for both `qsag-verified` and `qsag-whir-verified`)
+pass with zero forbidden proof escapes and `≤ 12` `@[expose]` declarations per file. Full
+`import all` axiom censuses (`lake exe audit-mir-axioms`: `6,887` declarations, `2,917` theorems
+across `52` modules incl. `QsagCustodyWeld`, `0` rejected; `lake exe audit-whir-mir-axioms`:
+`2,160` declarations, `1,185` theorems, `173` anchored, `54/54` extracted symbols, `103` replayed
+theorems across `9` modules incl. `QsagWhirSpecWeld`, `0` rejected) certify `{propext, Quot.sound}`
+only, and `lake comparator --paranoid` passes `6/6` external kernels on all three packages
+(`lean/`: `16,829` declarations; `aeneas/lean/`: `4,145` declarations; `aeneas/lean-whir/`:
+`4,154` declarations — `18/18` paranoid kernel runs `Accept`).
 
 Still open: the cSHAKE constructor proof; concurrent production scheduler refinement;
 the private M-gate Round-2 stream; and workspace-wide adoption of anchored recovery APIs.

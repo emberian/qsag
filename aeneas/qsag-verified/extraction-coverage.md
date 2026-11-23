@@ -5,24 +5,24 @@ The analysis is lexical. Statuses are defined in the script docstring.
 
 | Status | Functions |
 |---|---|
-| direct | 35 |
+| direct | 57 |
 | direct-lexical | 16 |
 | reached | 14 |
-| spec-welded | 16 |
-| proof-only | 70 |
-| test-only | 56 |
+| spec-welded | 7 |
+| proof-only | 60 |
+| test-only | 52 |
 | unreferenced | 32 |
-| **total** | **239** |
+| **total** | **238** |
 
 `pub fn`s with no definition in `Funs.lean`: 0.
 
-## direct (35)
+## direct (57)
 
 | Function | Production call sites | First |
 |---|---|---|
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::new_validated` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1594` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::new_validated` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1631` |
 | `qsag_verified::authenticated_belt::custodian_ack_tag` | 4 | `crates/qsag-quorum/src/access.rs:480` |
-| `qsag_verified::authenticated_belt::wal_receipt_tag` | 2 | `crates/qsag-quorum/src/quorum_jorts.rs:1614` |
+| `qsag_verified::authenticated_belt::wal_receipt_tag` | 2 | `crates/qsag-quorum/src/quorum_jorts.rs:1651` |
 | `qsag_verified::belt_latch_kernel::BeltLatchKernel::recover` | 1 | `crates/qsag-core/src/belt_latch.rs:1126` |
 | `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::new_awaiting_peer_commit` | 1 | `crates/qsag-hd/src/zero_gate.rs:45` |
 | `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::new_sealed` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2050` |
@@ -36,25 +36,47 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::fips205::encode_fips205_adrs` | 1 | `crates/qsag-core/src/fips205.rs:293` |
 | `qsag_verified::fts_spn_guard::FtsDeferredMacSession::new_spn48_evaluated` | 2 | `crates/qsag-fts/src/release_gate.rs:148` |
 | `qsag_verified::fts_spn_guard::FtsEpochGuard::new_unused` | 2 | `crates/qsag-fts/src/parallel_mpc.rs:1340` |
+| `qsag_verified::goldilocks::goldilocks_add` | 1 | `crates/qsag-core/src/field/goldilocks.rs:202` |
+| `qsag_verified::goldilocks::goldilocks_canon` | 1 | `crates/qsag-core/src/field/goldilocks.rs:111` |
+| `qsag_verified::goldilocks::goldilocks_ext2_add` | 1 | `crates/qsag-core/src/field/goldilocks.rs:459` |
+| `qsag_verified::goldilocks::goldilocks_ext2_mul` | 1 | `crates/qsag-core/src/field/goldilocks.rs:484` |
+| `qsag_verified::goldilocks::goldilocks_ext2_neg` | 1 | `crates/qsag-core/src/field/goldilocks.rs:475` |
+| `qsag_verified::goldilocks::goldilocks_ext2_sub` | 1 | `crates/qsag-core/src/field/goldilocks.rs:467` |
+| `qsag_verified::goldilocks::goldilocks_from_canonical` | 1 | `crates/qsag-core/src/field/goldilocks.rs:62` |
+| `qsag_verified::goldilocks::goldilocks_inv` | 1 | `crates/qsag-core/src/field/goldilocks.rs:286` |
+| `qsag_verified::goldilocks::goldilocks_inv_or_zero` | 1 | `crates/qsag-core/src/field/goldilocks.rs:271` |
+| `qsag_verified::goldilocks::goldilocks_mul` | 1 | `crates/qsag-core/src/field/goldilocks.rs:228` |
+| `qsag_verified::goldilocks::goldilocks_neg` | 1 | `crates/qsag-core/src/field/goldilocks.rs:220` |
+| `qsag_verified::goldilocks::goldilocks_pow7` | 1 | `crates/qsag-core/src/field/goldilocks.rs:244` |
+| `qsag_verified::goldilocks::goldilocks_reduce128` | 1 | `crates/qsag-core/src/field/goldilocks.rs:131` |
+| `qsag_verified::goldilocks::goldilocks_square` | 1 | `crates/qsag-core/src/field/goldilocks.rs:236` |
+| `qsag_verified::goldilocks::goldilocks_sub` | 1 | `crates/qsag-core/src/field/goldilocks.rs:211` |
 | `qsag_verified::keccak::Shake256Sponge::new_cshake256` | 1 | `crates/qsag-cred/src/toprf_engine.rs:266` |
 | `qsag_verified::keccak::shake256_32` | 1 | `crates/qsag-addr/src/lib.rs:1119` |
 | `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::new` | 3 | `crates/qsag-fts/src/release_gate.rs:236` |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_poisoned` | 1 | `crates/qsag-quorum/src/party_node.rs:933` |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_unverified` | 1 | `crates/qsag-quorum/src/party_node.rs:942` |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::new_clean` | 4 | `crates/qsag-core/src/rss256.rs:1577` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_poisoned` | 1 | `crates/qsag-quorum/src/party_node.rs:1011` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_unverified` | 1 | `crates/qsag-quorum/src/party_node.rs:1020` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::new_clean` | 4 | `crates/qsag-core/src/rss256.rs:1614` |
 | `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::new_enrolled` | 1 | `crates/qsag-core/src/baggy.rs:1473` |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::from_digest_verified` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:303` |
-| `qsag_verified::pants_and_quorum_guards::validate_belt_quorum_config` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1361` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::from_digest_verified` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:306` |
+| `qsag_verified::pants_and_quorum_guards::validate_belt_quorum_config` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1398` |
 | `qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits` | 1 | `crates/qsag-core/src/wots_c.rs:80` |
 | `qsag_verified::pants_and_quorum_guards::verified_wotsc256_verify_sum` | 1 | `crates/qsag-core/src/wots_c.rs:79` |
 | `qsag_verified::policy_and_addr::StatefulVelocityGuard::new_window` | 4 | `crates/qsag-policy/src/durable.rs:656` |
 | `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | 1 | `crates/qsag-addr/src/lib.rs:676` |
-| `qsag_verified::policy_and_addr::checked_velocity_spend` | 2 | `crates/qsag-policy/src/lib.rs:254` |
+| `qsag_verified::policy_and_addr::checked_velocity_spend` | 2 | `crates/qsag-policy/src/lib.rs:258` |
 | `qsag_verified::policy_and_addr::decode_intent_128` | 1 | `crates/qsag-addr/src/lib.rs:405` |
 | `qsag_verified::policy_and_addr::derive_hybrid_transcript_digest` | 1 | `crates/qsag-addr/src/lib.rs:697` |
-| `qsag_verified::rss_cut_session::RssCutGateSession::new_round1_committed` | 1 | `crates/qsag-core/src/rss256.rs:2668` |
-| `qsag_verified::rss_cut_session::compute_rss_mask_commitment` | 2 | `crates/qsag-core/src/rss256.rs:2662` |
-| `qsag_verified::tower::ct_eq_bytes32` | 10 | `crates/qsag-quorum/src/quorum_jorts.rs:400` |
+| `qsag_verified::rss_cut_session::RssCutGateSession::new_round1_committed` | 1 | `crates/qsag-core/src/rss256.rs:2706` |
+| `qsag_verified::rss_cut_session::compute_rss_mask_commitment` | 2 | `crates/qsag-core/src/rss256.rs:2700` |
+| `qsag_verified::tower::ct_eq_bytes32` | 10 | `crates/qsag-quorum/src/quorum_jorts.rs:403` |
+| `qsag_verified::tower::embed_gf256_to_tower128` | 1 | `crates/qsag-core/src/field/tower.rs:213` |
+| `qsag_verified::tower::gf16_mul` | 1 | `crates/qsag-core/src/field/tower.rs:76` |
+| `qsag_verified::tower::gf256_add` | 1 | `crates/qsag-core/src/field/tower.rs:163` |
+| `qsag_verified::tower::gf256_inv_or_zero` | 1 | `crates/qsag-core/src/field/tower.rs:115` |
+| `qsag_verified::tower::gf256_mul` | 2 | `crates/qsag-core/src/field/tower.rs:42` |
+| `qsag_verified::tower::tower128_add` | 1 | `crates/qsag-core/src/field/tower.rs:235` |
+| `qsag_verified::tower::tower128_mul` | 2 | `crates/qsag-core/src/field/tower.rs:53` |
 
 ## direct-lexical (16)
 
@@ -96,28 +118,19 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::policy_and_addr::IntentIdentityKind::to_u8` | `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | lexical |
 | `qsag_verified::policy_and_addr::IntentSuiteTag::admits_identity_kind` | `qsag_verified::policy_and_addr::decode_intent_128` | lexical |
 
-## spec-welded (16)
+## spec-welded (7)
 
 | Function | Lean welds | Lean proofs | Crate tests | Same-named production fns |
 |---|---|---|---|---|
 | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::step` | 1 | 3 | 1 | 0 |
-| `qsag_verified::goldilocks::goldilocks_add` | 1 | 2 | 2 | 0 |
-| `qsag_verified::goldilocks::goldilocks_inv` | 1 | 1 | 2 | 0 |
-| `qsag_verified::goldilocks::goldilocks_inv_or_zero` | 1 | 1 | 2 | 0 |
-| `qsag_verified::goldilocks::goldilocks_mul` | 1 | 2 | 2 | 0 |
-| `qsag_verified::goldilocks::goldilocks_sub` | 1 | 2 | 2 | 0 |
 | `qsag_verified::rss_cut_session::RssCutGateSession::advance_round2_chi` | 1 | 2 | 1 | 0 |
 | `qsag_verified::rss_cut_session::RssCutGateSession::advance_round3_verify_consistency` | 1 | 2 | 1 | 0 |
 | `qsag_verified::rss_cut_session::RssCutGateSession::open_verified_cut` | 1 | 2 | 1 | 0 |
 | `qsag_verified::rss_cut_session::RssCutGateSession::step` | 1 | 3 | 1 | 0 |
-| `qsag_verified::tower::gf256_add` | 1 | 2 | 2 | 0 |
-| `qsag_verified::tower::gf256_mul` | 1 | 2 | 2 | 0 |
-| `qsag_verified::tower::tower128_add` | 1 | 2 | 3 | 0 |
-| `qsag_verified::tower::tower128_mul` | 1 | 3 | 3 | 0 |
 | `qsag_verified::tower::tower256_add` | 1 | 0 | 1 | 0 |
 | `qsag_verified::tower::tower256_mul` | 1 | 1 | 1 | 0 |
 
-## proof-only (70)
+## proof-only (60)
 
 | Function | Lean welds | Lean proofs | Crate tests | Same-named production fns |
 |---|---|---|---|---|
@@ -134,14 +147,6 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::fips205::wots_extract_base16_digits` | 0 | 1 | 1 | 0 |
 | `qsag_verified::fts_spn_guard::FtsEpochGuard::consume_epoch_once` | 0 | 1 | 1 | 0 |
 | `qsag_verified::fts_spn_guard::wots_cs_verify_68_array` | 0 | 1 | 1 | 0 |
-| `qsag_verified::goldilocks::goldilocks_canon` | 0 | 1 | 2 | 0 |
-| `qsag_verified::goldilocks::goldilocks_ext2_add` | 0 | 1 | 2 | 0 |
-| `qsag_verified::goldilocks::goldilocks_ext2_mul` | 0 | 1 | 2 | 0 |
-| `qsag_verified::goldilocks::goldilocks_from_canonical` | 0 | 2 | 2 | 0 |
-| `qsag_verified::goldilocks::goldilocks_neg` | 0 | 1 | 1 | 0 |
-| `qsag_verified::goldilocks::goldilocks_pow7` | 0 | 1 | 2 | 0 |
-| `qsag_verified::goldilocks::goldilocks_reduce128` | 0 | 1 | 1 | 0 |
-| `qsag_verified::goldilocks::goldilocks_square` | 0 | 1 | 1 | 0 |
 | `qsag_verified::keccak::cshake256_32` | 0 | 1 | 2 | 2 |
 | `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::ack_count` | 0 | 3 | 1 | 0 |
 | `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::authorize_shares` | 0 | 2 | 1 | 0 |
@@ -184,15 +189,13 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::threshold::shamir_validate_points_gf256` | 0 | 2 | 1 | 0 |
 | `qsag_verified::tower::BdozOpeningGuard2Lane::verify_once` | 0 | 1 | 2 | 0 |
 | `qsag_verified::tower::bdoz_commit_masked_tag` | 0 | 2 | 2 | 0 |
-| `qsag_verified::tower::embed_gf256_to_tower128` | 0 | 2 | 2 | 0 |
 | `qsag_verified::tower::gf256_frobenius_residual` | 0 | 2 | 1 | 0 |
 | `qsag_verified::tower::gf256_inv` | 0 | 2 | 2 | 0 |
-| `qsag_verified::tower::gf256_inv_or_zero` | 0 | 1 | 1 | 0 |
 | `qsag_verified::tower::gf256_is_boolean_frobenius` | 0 | 2 | 1 | 0 |
 | `qsag_verified::tower::verify_mac_2lane` | 0 | 4 | 1 | 0 |
 | `qsag_verified::tower::verify_mac_2lane_with_burn` | 0 | 3 | 1 | 0 |
 
-## test-only (56)
+## test-only (52)
 
 | Function | Lean welds | Lean proofs | Crate tests | Same-named production fns |
 |---|---|---|---|---|
@@ -215,8 +218,6 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::fts_spn_guard::FtsEpochGuard::poisoned` | 0 | 0 | 1 | 0 |
 | `qsag_verified::fts_spn_guard::FtsEpochGuard::used` | 0 | 0 | 1 | 0 |
 | `qsag_verified::fts_spn_guard::FtsEpochPermit::into_binding` | 0 | 0 | 1 | 0 |
-| `qsag_verified::goldilocks::goldilocks_ext2_neg` | 0 | 0 | 1 | 0 |
-| `qsag_verified::goldilocks::goldilocks_ext2_sub` | 0 | 0 | 2 | 0 |
 | `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::absorbed` | 0 | 0 | 1 | 0 |
 | `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::is_consumed` | 0 | 0 | 2 | 0 |
 | `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::next_epoch` | 0 | 0 | 2 | 0 |
@@ -240,7 +241,6 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::threshold::EpochLatch::last_bound` | 0 | 0 | 1 | 0 |
 | `qsag_verified::threshold::EpochLatch::max_epoch` | 0 | 0 | 1 | 0 |
 | `qsag_verified::threshold::EpochLatch::next_epoch` | 0 | 0 | 2 | 0 |
-| `qsag_verified::threshold::derive_jorts_legacy_v1_det_r_rand` | 0 | 0 | 1 | 0 |
 | `qsag_verified::threshold::dkg_beaver_frobenius_share_shamir_gf256` | 0 | 0 | 1 | 0 |
 | `qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256` | 0 | 0 | 1 | 0 |
 | `qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks` | 0 | 0 | 2 | 0 |
@@ -251,7 +251,6 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::tower::BdozVerifierSession2Lane::new` | 0 | 0 | 1 | 0 |
 | `qsag_verified::tower::bdoz_fold_masked_value` | 0 | 0 | 1 | 0 |
 | `qsag_verified::tower::gf16_add` | 0 | 0 | 1 | 0 |
-| `qsag_verified::tower::gf16_mul` | 0 | 0 | 2 | 0 |
 
 ## unreferenced (32)
 

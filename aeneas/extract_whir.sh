@@ -96,7 +96,7 @@ for name in ("Types.lean", "Funs.lean"):
         # Publish kernel-checked equations rather than importing private bodies in clients.
         imports.append("Qsag.Tactic.AssuranceKit")
         definitions = re.findall(r"(?m)^(?:@\[[^]]*\]\s*)?def\s+([A-Za-z_][A-Za-z0-9_'.]*)", body_text)
-        if len(definitions) != 37 or len(set(definitions)) != 37:
+        if len(definitions) != 54 or len(set(definitions)) != 54:
             raise SystemExit("Unexpected WHIR extraction API inventory")
         body_text += ("\npublic section\n#export_eqns " +
                       " ".join("qsag_whir_verified." + n for n in definitions) + "\nend\n")
@@ -116,8 +116,9 @@ echo "[4/5] Verifying Aeneas prelude, extracted MIR functions, and refinement th
 echo "[5/5] Checking production linkage, hierarchical composition, and lint policy..."
 (
   cd "${SCRIPT_DIR}/.."
-  cargo test -p qsag-agg --lib extracted_affine_core_matches_tower_arithmetic
-  cargo test -p qsag-agg --lib pcs::affine::tests
+  cargo test -p qsag-agg --lib extracted_quintic_whir_kernels_match_production_fp5_and_canopy
+  cargo test -p qsag-agg --lib zk_hem::v2::pcs::tests
+  cargo test -p qsag-agg --lib hem_quintic::tests
   cargo test -p qsag-agg --lib recursive::tests
   cargo clippy -p qsag-agg --all-targets -- -D warnings
   cargo check -p qsag-agg --no-default-features
