@@ -1,6 +1,9 @@
 module
-public import Qsag.Exec.WhirKernels
+public import Qsag.Math.QuinticExt5
+public import Qsag.Math.Poseidon2Gl24
 public import Qsag.Protocol.Aggregation.HemRbrSoundness
+public import Qsag.Protocol.Aggregation.PublicHemQuintic128
+public import Qsag.Protocol.Aggregation.QuinticMultiStageWhir
 public import Aeneas
 public import QsagWhirVerified.Types
 public import QsagWhirVerified.Funs
@@ -13,8 +16,22 @@ abbrev goldilocksMod : Nat := 18446744069414584321
 
 abbrev IsCanonical (x : U64) : Prop := x.val < 18446744069414584321
 
-abbrev IsCanonicalExt4 (x : Ext4) : Prop :=
-  IsCanonical x.a ∧ IsCanonical x.b ∧ IsCanonical x.c ∧ IsCanonical x.d
+abbrev IsCanonicalFp5 (x : Fp5) : Prop :=
+  IsCanonical x.c0 ∧ IsCanonical x.c1 ∧ IsCanonical x.c2 ∧ IsCanonical x.c3 ∧ IsCanonical x.c4
+
+abbrev IsCanonicalGl24 (d : Gl24Digest) : Prop :=
+  IsCanonical d.l0 ∧ IsCanonical d.l1 ∧ IsCanonical d.l2 ∧ IsCanonical d.l3 ∧
+  IsCanonical d.l4 ∧ IsCanonical d.l5 ∧ IsCanonical d.l6
+
+@[expose] def lePackU64At (bs : List U8) (off : Nat) : U64 :=
+  ⟨(UScalar.cast .U64 (bs.getD off 0#u8)).bv |||
+    ((UScalar.cast .U64 (bs.getD (off + 1) 0#u8)).bv <<< 8) |||
+    ((UScalar.cast .U64 (bs.getD (off + 2) 0#u8)).bv <<< 16) |||
+    ((UScalar.cast .U64 (bs.getD (off + 3) 0#u8)).bv <<< 24) |||
+    ((UScalar.cast .U64 (bs.getD (off + 4) 0#u8)).bv <<< 32) |||
+    ((UScalar.cast .U64 (bs.getD (off + 5) 0#u8)).bv <<< 40) |||
+    ((UScalar.cast .U64 (bs.getD (off + 6) 0#u8)).bv <<< 48) |||
+    ((UScalar.cast .U64 (bs.getD (off + 7) 0#u8)).bv <<< 56)⟩
 
 @[expose] def fieldAdd (a b : U64) : U64 :=
   UScalar.ofNat .U64 ((a.val + b.val) % 18446744069414584321)
@@ -25,58 +42,55 @@ abbrev IsCanonicalExt4 (x : Ext4) : Prop :=
 @[expose] def fieldMul (a b : U64) : U64 :=
   UScalar.ofNat .U64 ((a.val * b.val) % 18446744069414584321)
 
-@[expose] def extZero : Ext4 := ⟨0#u64, 0#u64, 0#u64, 0#u64⟩
-@[expose] def extOne : Ext4 := ⟨1#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5Zero : Fp5 := ⟨0#u64, 0#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5One : Fp5 := ⟨1#u64, 0#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5FromBase (x : U64) : Fp5 :=
+  ⟨UScalar.ofNat .U64 (x.val % 18446744069414584321), 0#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5X : Fp5 := ⟨0#u64, 1#u64, 0#u64, 0#u64, 0#u64⟩
+abbrev fp5Three : Fp5 := ⟨3#u64, 0#u64, 0#u64, 0#u64, 0#u64⟩
 
-@[expose] def extAdd (x y : Ext4) : Ext4 :=
-  ⟨fieldAdd x.a y.a, fieldAdd x.b y.b, fieldAdd x.c y.c, fieldAdd x.d y.d⟩
+@[expose] def fp5Add (x y : Fp5) : Fp5 :=
+  ⟨fieldAdd x.c0 y.c0, fieldAdd x.c1 y.c1, fieldAdd x.c2 y.c2, fieldAdd x.c3 y.c3, fieldAdd x.c4 y.c4⟩
 
-@[expose] def extSub (x y : Ext4) : Ext4 :=
-  ⟨fieldSub x.a y.a, fieldSub x.b y.b, fieldSub x.c y.c, fieldSub x.d y.d⟩
+@[expose] def fp5Sub (x y : Fp5) : Fp5 :=
+  ⟨fieldSub x.c0 y.c0, fieldSub x.c1 y.c1, fieldSub x.c2 y.c2, fieldSub x.c3 y.c3, fieldSub x.c4 y.c4⟩
 
-@[expose] def extScale (x : Ext4) (s : U64) : Ext4 :=
-  ⟨fieldMul x.a s, fieldMul x.b s, fieldMul x.c s, fieldMul x.d s⟩
+abbrev fp5Neg (x : Fp5) : Fp5 := fp5Sub fp5Zero x
 
-@[expose] def extMul (x y : Ext4) : Ext4 :=
-  ⟨fieldAdd (fieldMul x.a y.a) (fieldMul 7#u64 (fieldAdd (fieldAdd (fieldMul x.b y.d) (fieldMul x.c y.c)) (fieldMul x.d y.b))),
-   fieldAdd (fieldAdd (fieldMul x.a y.b) (fieldMul x.b y.a)) (fieldMul 7#u64 (fieldAdd (fieldMul x.c y.d) (fieldMul x.d y.c))),
-   fieldAdd (fieldAdd (fieldAdd (fieldMul x.a y.c) (fieldMul x.b y.b)) (fieldMul x.c y.a)) (fieldMul 7#u64 (fieldMul x.d y.d)),
-   fieldAdd (fieldAdd (fieldMul x.a y.d) (fieldMul x.b y.c)) (fieldAdd (fieldMul x.c y.b) (fieldMul x.d y.a))⟩
+@[expose] def fp5Scale (x : Fp5) (s : U64) : Fp5 :=
+  ⟨fieldMul x.c0 s, fieldMul x.c1 s, fieldMul x.c2 s, fieldMul x.c3 s, fieldMul x.c4 s⟩
 
-@[expose] def hornerSpec (coeffs : List Ext4) (z : U64) (init : Ext4 := extZero) : Ext4 :=
-  coeffs.foldr (fun c acc => extAdd (extScale acc z) c) init
+@[expose] def fp5Mul (x y : Fp5) : Fp5 :=
+  ⟨fieldAdd (fieldMul x.c0 y.c0)
+     (fieldMul 3#u64
+       (fieldAdd (fieldAdd (fieldMul x.c1 y.c4) (fieldMul x.c2 y.c3))
+                 (fieldAdd (fieldMul x.c3 y.c2) (fieldMul x.c4 y.c1)))),
+   fieldAdd (fieldAdd (fieldMul x.c0 y.c1) (fieldMul x.c1 y.c0))
+     (fieldMul 3#u64
+       (fieldAdd (fieldAdd (fieldMul x.c2 y.c4) (fieldMul x.c3 y.c3))
+                 (fieldMul x.c4 y.c2))),
+   fieldAdd (fieldAdd (fieldAdd (fieldMul x.c0 y.c2) (fieldMul x.c1 y.c1)) (fieldMul x.c2 y.c0))
+     (fieldMul 3#u64 (fieldAdd (fieldMul x.c3 y.c4) (fieldMul x.c4 y.c3))),
+   fieldAdd (fieldAdd (fieldAdd (fieldMul x.c0 y.c3) (fieldMul x.c1 y.c2))
+                      (fieldAdd (fieldMul x.c2 y.c1) (fieldMul x.c3 y.c0)))
+     (fieldMul 3#u64 (fieldMul x.c4 y.c4)),
+   fieldAdd (fieldAdd (fieldAdd (fieldMul x.c0 y.c4) (fieldMul x.c1 y.c3))
+                      (fieldAdd (fieldMul x.c2 y.c2) (fieldMul x.c3 y.c1)))
+     (fieldMul x.c4 y.c0)⟩
 
-@[expose] def evalPolyAscending : List Ext4 → U64 → Ext4
-  | [], _ => extZero
-  | c :: rest, z => extAdd c (extScale (evalPolyAscending rest z) z)
+@[expose] def fp5Frob (x : Fp5) : Fp5 :=
+  ⟨UScalar.ofNat .U64 (x.c0.val % 18446744069414584321),
+   fieldMul x.c1 1041288259238279555#u64,
+   fieldMul x.c2 15820824984080659046#u64,
+   fieldMul x.c3 211587555138949697#u64,
+   fieldMul x.c4 1373043270956696022#u64⟩
 
-end qsag_whir_verified.proofs
+@[expose] def hornerSpec (coeffs : List Fp5) (z : U64) (init : Fp5 := fp5Zero) : Fp5 :=
+  coeffs.foldr (fun c acc => fp5Add (fp5Scale acc z) c) init
 
-public section
-namespace qsag_whir_verified.proofs
-def fieldAbs (x : U64) : Qsag.Goldilocks := Qsag.Goldilocks.ofNat x.val
+@[expose] def evalPolyAscending : List Fp5 → U64 → Fp5
+  | [], _ => fp5Zero
+  | c :: rest, z => fp5Add c (fp5Scale (evalPolyAscending rest z) z)
 
-def ext4Abs (x : Ext4) : Qsag.Aggregation.GoldilocksExt4 :=
-  Qsag.Math.aggOfPolynomial ⟨fieldAbs x.a, fieldAbs x.b, fieldAbs x.c, fieldAbs x.d⟩
-
-def canonicalFieldWord (x : Qsag.Goldilocks) : U64 := ⟨BitVec.ofNat 64 x.val⟩
-
-def canonicalExt4 (z : Qsag.Aggregation.GoldilocksExt4) : Ext4 :=
-  ⟨canonicalFieldWord z.c0.c0, canonicalFieldWord z.c1.c0,
-   canonicalFieldWord z.c0.c1, canonicalFieldWord z.c1.c1⟩
-
-def extInv (x : Ext4) : Ext4 :=
-  canonicalExt4 (Qsag.Aggregation.GoldilocksExt4.inv (ext4Abs x))
-
-def canonicalQuadraticWirePoly (c0 c2 claim : Qsag.Aggregation.GoldilocksExt4) :
-    List Qsag.Aggregation.GoldilocksExt4 :=
-  [c0, Qsag.Aggregation.GoldilocksExt4.sub
-         (Qsag.Aggregation.GoldilocksExt4.sub claim (Qsag.Aggregation.GoldilocksExt4.add c0 c0))
-         c2, c2]
-
-def ext4SliceWords (xs : List Qsag.Aggregation.GoldilocksExt4) : List U64 :=
-  xs.flatMap (fun z =>
-    [canonicalFieldWord z.c0.c0, canonicalFieldWord z.c0.c1,
-     canonicalFieldWord z.c1.c0, canonicalFieldWord z.c1.c1])
 end qsag_whir_verified.proofs
 end

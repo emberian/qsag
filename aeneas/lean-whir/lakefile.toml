@@ -1,6 +1,6 @@
 name = "qsag_whir_aeneas"
 version = "0.1.0"
-defaultTargets = ["QsagWhirVerified", "QsagWhirSpecWeld", "audit-whir-mir-axioms"]
+defaultTargets = ["Aeneas", "QsagWhirVerified", "QsagWhirSpecWeld", "AuditWhirMirAxioms", "audit-whir-mir-axioms"]
 [leanOptions]
 autoImplicit = false
 [[lean_lib]]
@@ -10,12 +10,14 @@ name = "QsagWhirVerified"
 [[lean_lib]]
 name = "QsagWhirSpecWeld"
 [[lean_lib]]
+name = "AuditWhirMirAxioms"
+[[lean_lib]]
 name = "QsagWhirVerifiedChallengeDefs"
 [[lean_lib]]
 name = "QsagWhirVerifiedChallenge"
 [[lean_exe]]
 name = "audit-whir-mir-axioms"
-root = "AuditWhirMirAxioms"
+root = "AuditWhirMirAxiomsMain"
 
 [[require]]
 name = "qsag"

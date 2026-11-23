@@ -17,189 +17,182 @@ import all Aeneas.Std.Types
 open Lean
 
 private def requiredWhirMirTheorems : Array Name := #[
-  ``qsag_whir_verified.proofs.fieldAbs_add,
-  ``qsag_whir_verified.proofs.ext4Abs_canonicalExt4,
-  ``qsag_whir_verified.proofs.ext4Abs_inv,
-  ``qsag_whir_verified.proofs.fieldAbs_one,
-  ``qsag_whir_verified.proofs.ext4Abs_one,
-  ``qsag_whir_verified.proofs.canonicalFieldWord_val,
-  ``qsag_whir_verified.proofs.isCanonical_canonicalFieldWord,
-  ``qsag_whir_verified.proofs.canonicalFieldWord_fieldAbs,
-  ``qsag_whir_verified.proofs.fieldAbs_inj,
-  ``qsag_whir_verified.proofs.isCanonicalExt4_canonicalExt4,
-  ``qsag_whir_verified.proofs.canonicalExt4_ext4Abs,
-  ``qsag_whir_verified.proofs.ext4Abs_inj,
-  ``qsag_whir_verified.proofs.isCanonicalExt4_extInv,
-  ``qsag_whir_verified.proofs.ext_mul_extInv_ok_one,
-  ``qsag_whir_verified.proofs.canonicalFieldWord_two_inv,
-  ``qsag_whir_verified.proofs.canonicalFieldWord_two_x_inv,
-  ``qsag_whir_verified.proofs.decode_canonical_u64_refines_qsag,
-  ``qsag_whir_verified.proofs.decode_canonical_ext4_refines_qsag,
-  ``qsag_whir_verified.proofs.decode_canonical_ext4_canonicalExt4,
-  ``qsag_whir_verified.proofs.embedBase_inv,
-  ``qsag_whir_verified.proofs.hemAffineDuetFold_eq_hemVirtualFoldOracle,
-  ``qsag_whir_verified.proofs.fold_duet_affine_ext4_refines_hemVirtualFoldOracle,
-  ``qsag_whir_verified.proofs.verify_cwyz_duet_fold_step_sound_qsag,
-  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_sound_qsag,
-  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_roots_le_one,
-  ``qsag_whir_verified.proofs.hemBridgeClaimStep_eq_hemBridgeFoldClaim,
-  ``qsag_whir_verified.proofs.verify_cwyz_bridge_claim_step_sound_qsag,
-  ``qsag_whir_verified.proofs.affine_cascade_claim_step_refines_evalCascadeClaim,
-  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_refines_qsag,
-  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_bad_challenges_le_two,
-  ``qsag_whir_verified.proofs.hemHorner_zero_eq_evalCoeffs,
-  ``qsag_whir_verified.proofs.eval_ext4_univariate_at_base_refines_evalCoeffs,
-  ``qsag_whir_verified.proofs.verify_ext4_univariate_at_base_pin_sound_qsag,
-  ``qsag_whir_verified.proofs.verify_ext4_univariate_at_base_pin_roots_le_degree,
-  ``qsag_whir_verified.proofs.ext4SliceWords_injective,
-  ``qsag_whir_verified.proofs.verify_ood_pin_eq_canonical_ext4_iff,
-  ``qsag_whir_verified.proofs.verify_stage_pow_mask_16_iff_verifyWhirStagePow,
-  ``qsag_whir_verified.proofs.step_merkle_pair_order_canonical_parity,
-  ``qsag_whir_verified.proofs.checked_quorum_sum_sound_qsag,
-  ``qsag_whir_verified.proofs.tooth_canonical_cwyz_fold_rejects_wrong_twiddle_and_forged_claim,
-  ``qsag_whir_verified.proofs.fieldAbs_mul,
-  ``qsag_whir_verified.proofs.fieldAbs_sub,
-  ``qsag_whir_verified.proofs.ext4Abs_add,
-  ``qsag_whir_verified.proofs.ext4Abs_sub,
-  ``qsag_whir_verified.proofs.ext4Abs_mul,
-  ``qsag_whir_verified.proofs.ext_mul_refines_exec,
-  ``qsag_whir_verified.proofs.cwyz_bridge_refines_exec,
-  ``qsag_whir_verified.proofs.ext4Abs_scale,
-  ``qsag_whir_verified.proofs.fieldAbs_zero,
-  ``qsag_whir_verified.proofs.ext4Abs_zero,
-  ``qsag_whir_verified.proofs.duet_fold_refines_exec,
-  ``qsag_whir_verified.proofs.hornerSpec_refines_exec,
-  ``qsag_whir_verified.proofs.eval_ext4_univariate_refines_exec,
-  ``qsag_whir_verified.proofs.fold_duet_affine_ext4_refines_exec,
-  ``qsag_whir_verified.proofs.fieldAbs_canonicalFieldWord,
-  ``qsag_whir_verified.proofs.fold_duet_affine_ext4_canonical_twiddles,
-  ``qsag_whir_verified.proofs.verify_stage_pow_mask_refines_canonical,
   ``qsag_whir_verified.proofs.goldilocks_p_val,
   ``qsag_whir_verified.proofs.max_u64_word_val,
-  ``qsag_whir_verified.proofs.tag_canopy_merkle_internal_eq,
+  ``qsag_whir_verified.proofs.fp5_nonresidue_w_val,
+  ``qsag_whir_verified.proofs.frobenius_zeta5_1_val,
+  ``qsag_whir_verified.proofs.frobenius_zeta5_2_val,
+  ``qsag_whir_verified.proofs.frobenius_zeta5_3_val,
+  ``qsag_whir_verified.proofs.frobenius_zeta5_4_val,
+  ``qsag_whir_verified.proofs.qsaghqm2_profile_turbo400_val,
+  ``qsag_whir_verified.proofs.qsaghqm2_profile_gl24_val,
+  ``qsag_whir_verified.proofs.min_quintic_log_cells_val,
+  ``qsag_whir_verified.proofs.max_quintic_log_cells_val,
+  ``qsag_whir_verified.proofs.max_canopy_log_leaves_val,
+  ``qsag_whir_verified.proofs.copy_fp5_spec,
+  ``qsag_whir_verified.proofs.zeta5_powers_spec,
   ``qsag_whir_verified.proofs.add_refines,
   ``qsag_whir_verified.proofs.sub_refines,
   ``qsag_whir_verified.proofs.mul_refines,
-  ``qsag_whir_verified.proofs.ext_add_refines,
-  ``qsag_whir_verified.proofs.ext_sub_refines,
-  ``qsag_whir_verified.proofs.ext_scale_refines,
-  ``qsag_whir_verified.proofs.ext_mul_refines,
-  ``qsag_whir_verified.proofs.affine_combine_refines,
-  ``qsag_whir_verified.proofs.extU_pow4_eq_seven,
-  ``qsag_whir_verified.proofs.towerToPoly_mul_hom,
-  ``qsag_whir_verified.proofs.duet_refines,
-  ``qsag_whir_verified.proofs.duet_fold_algebraic_sound,
-  ``qsag_whir_verified.proofs.cwyz_duet_refines,
-  ``qsag_whir_verified.proofs.cwyz_duet_fold_algebraic_sound,
-  ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_refines,
-  ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_dual_sound,
-  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_refines,
-  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_hypercube_sum,
-  ``qsag_whir_verified.proofs.affine_cascade_claim_step_refines,
+  ``qsag_whir_verified.proofs.fp5_zero_refines,
+  ``qsag_whir_verified.proofs.fp5_one_refines,
+  ``qsag_whir_verified.proofs.fp5_from_base_refines,
+  ``qsag_whir_verified.proofs.fp5_add_refines,
+  ``qsag_whir_verified.proofs.fp5_sub_refines,
+  ``qsag_whir_verified.proofs.fp5_neg_refines,
+  ``qsag_whir_verified.proofs.fp5_scale_refines,
+  ``qsag_whir_verified.proofs.fp5_mul_refines,
+  ``qsag_whir_verified.proofs.fp5_frobenius_refines,
+  ``qsag_whir_verified.proofs.fp5Frob_pow5_id,
+  ``qsag_whir_verified.proofs.affine_combine_fp5_refines,
+  ``qsag_whir_verified.proofs.fp5X_pow5_eq_three,
+  ``qsag_whir_verified.proofs.duet_fold_fp5_refines,
+  ``qsag_whir_verified.proofs.duet_fold_fp5_algebraic_sound,
+  ``qsag_whir_verified.proofs.cwyz_duet_fold_fp5_refines,
+  ``qsag_whir_verified.proofs.cwyz_duet_fold_fp5_algebraic_sound,
+  ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_fp5_refines,
+  ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_fp5_dual_sound,
+  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_fp5_refines,
+  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_fp5_hypercube_sum,
   ``qsag_whir_verified.proofs.hornerSpec_eq_evalPolyAscending,
+  ``qsag_whir_verified.proofs.load_le_u64_40_spec,
+  ``qsag_whir_verified.proofs.load_le_u64_56_spec,
   ``qsag_whir_verified.proofs.decode_canonical_u64_spec,
   ``qsag_whir_verified.proofs.decode_canonical_u64_some_iff,
   ``qsag_whir_verified.proofs.decode_canonical_u64_none_iff,
   ``qsag_whir_verified.proofs.decode_canonical_u64_rejects_noncanonical,
-  ``qsag_whir_verified.proofs.decode_canonical_ext4_spec,
-  ``qsag_whir_verified.proofs.decode_canonical_ext4_some_iff,
-  ``qsag_whir_verified.proofs.decode_canonical_ext4_none_iff,
-  ``qsag_whir_verified.proofs.ext_eq_spec,
-  ``qsag_whir_verified.proofs.ext_eq_sound,
-  ``qsag_whir_verified.proofs.duet_fold_coset_sound,
-  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_spec,
-  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_sound,
-  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_coset_sound,
-  ``qsag_whir_verified.proofs.cwyz_duet_fold_coset_sound,
-  ``qsag_whir_verified.proofs.fold_duet_affine_ext4_spec,
-  ``qsag_whir_verified.proofs.fold_duet_affine_ext4_coset_sound,
-  ``qsag_whir_verified.proofs.verify_cwyz_duet_fold_step_spec,
-  ``qsag_whir_verified.proofs.verify_cwyz_duet_fold_step_sound,
-  ``qsag_whir_verified.proofs.verify_cwyz_duet_fold_step_coset_sound,
-  ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_dual_spec,
-  ``qsag_whir_verified.proofs.verify_cwyz_bridge_claim_step_spec,
-  ``qsag_whir_verified.proofs.verify_cwyz_bridge_claim_step_sound,
-  ``qsag_whir_verified.proofs.verify_cwyz_bridge_claim_step_dual_sound,
-  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_hypercube_spec,
-  ``qsag_whir_verified.proofs.affine_cascade_claim_step_spec,
-  ``qsag_whir_verified.proofs.eval_ext4_univariate_at_base_spec,
-  ``qsag_whir_verified.proofs.eval_ext4_univariate_at_base_ascending_sound,
-  ``qsag_whir_verified.proofs.eval_univariate_ext4_at_base_spec,
-  ``qsag_whir_verified.proofs.eval_univariate_ext4_at_base_ascending_sound,
-  ``qsag_whir_verified.proofs.verify_ext4_univariate_at_base_pin_spec,
-  ``qsag_whir_verified.proofs.verify_ext4_univariate_at_base_pin_sound,
-  ``qsag_whir_verified.proofs.verify_ext4_univariate_at_base_pin_ascending_sound,
-  ``qsag_whir_verified.proofs.verify_stage_pow_mask_spec,
-  ``qsag_whir_verified.proofs.verify_stage_pow_mask_sound,
-  ``qsag_whir_verified.proofs.verify_stage_pow_mask_mod_sound,
-  ``qsag_whir_verified.proofs.verify_ood_pin_eq_spec,
-  ``qsag_whir_verified.proofs.verify_ood_pin_eq_sound,
-  ``qsag_whir_verified.proofs.verify_ood_pin_eq_false_iff,
+  ``qsag_whir_verified.proofs.decode_canonical_fp5_limbs_spec,
+  ``qsag_whir_verified.proofs.decode_canonical_fp5_limbs_some_iff,
+  ``qsag_whir_verified.proofs.decode_canonical_fp5_limbs_none_iff,
+  ``qsag_whir_verified.proofs.decode_canonical_fp5_spec,
+  ``qsag_whir_verified.proofs.decode_canonical_fp5_some_iff,
+  ``qsag_whir_verified.proofs.decode_canonical_fp5_none_iff,
+  ``qsag_whir_verified.proofs.decode_canonical_gl24_limbs_spec,
+  ``qsag_whir_verified.proofs.decode_canonical_gl24_limbs_some_iff,
+  ``qsag_whir_verified.proofs.decode_canonical_gl24_limbs_none_iff,
+  ``qsag_whir_verified.proofs.decode_canonical_gl24_digest_spec,
+  ``qsag_whir_verified.proofs.decode_canonical_gl24_digest_some_iff,
+  ``qsag_whir_verified.proofs.decode_canonical_gl24_digest_none_iff,
+  ``qsag_whir_verified.proofs.fp5_eq_spec,
+  ``qsag_whir_verified.proofs.fp5_eq_sound,
+  ``qsag_whir_verified.proofs.verify_ood_pin_eq_fp5_spec,
+  ``qsag_whir_verified.proofs.verify_ood_pin_eq_fp5_sound,
+  ``qsag_whir_verified.proofs.verify_ood_pin_eq_fp5_false_iff,
+  ``qsag_whir_verified.proofs.duet_fold_fp5_coset_sound,
+  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_fp5_spec,
+  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_fp5_sound,
+  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_fp5_coset_sound,
+  ``qsag_whir_verified.proofs.cwyz_duet_fold_fp5_coset_sound,
+  ``qsag_whir_verified.proofs.verify_cwyz_duet_fold_step_fp5_spec,
+  ``qsag_whir_verified.proofs.verify_cwyz_duet_fold_step_fp5_sound,
+  ``qsag_whir_verified.proofs.verify_cwyz_duet_fold_step_fp5_coset_sound,
+  ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_fp5_dual_spec,
+  ``qsag_whir_verified.proofs.verify_cwyz_bridge_claim_step_fp5_spec,
+  ``qsag_whir_verified.proofs.verify_cwyz_bridge_claim_step_fp5_sound,
+  ``qsag_whir_verified.proofs.verify_cwyz_bridge_claim_step_fp5_dual_sound,
+  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_fp5_hypercube_spec,
+  ``qsag_whir_verified.proofs.eval_fp5_univariate_at_base_spec,
+  ``qsag_whir_verified.proofs.eval_fp5_univariate_at_base_ascending_sound,
+  ``qsag_whir_verified.proofs.verify_fp5_univariate_at_base_pin_spec,
+  ``qsag_whir_verified.proofs.verify_fp5_univariate_at_base_pin_sound,
+  ``qsag_whir_verified.proofs.verify_fp5_univariate_at_base_pin_ascending_sound,
   ``qsag_whir_verified.proofs.canonical_query_group_idx_spec,
   ``qsag_whir_verified.proofs.canonical_query_group_idx_some_iff,
   ``qsag_whir_verified.proofs.canonical_query_group_idx_none_iff,
   ``qsag_whir_verified.proofs.canonical_query_group_idx_lt_groups,
-  ``qsag_whir_verified.proofs.step_merkle_pair_order_spec,
-  ``qsag_whir_verified.proofs.step_merkle_pair_order_some_iff,
-  ``qsag_whir_verified.proofs.step_merkle_pair_order_none_iff,
-  ``qsag_whir_verified.proofs.step_merkle_pair_order_tag_eq,
+  ``qsag_whir_verified.proofs.step_merkle_pair_order_400_spec,
+  ``qsag_whir_verified.proofs.step_merkle_pair_order_400_some_iff,
+  ``qsag_whir_verified.proofs.step_merkle_pair_order_400_none_iff,
+  ``qsag_whir_verified.proofs.step_merkle_pair_order_gl24_spec,
+  ``qsag_whir_verified.proofs.step_merkle_pair_order_gl24_some_iff,
+  ``qsag_whir_verified.proofs.step_merkle_pair_order_gl24_none_iff,
   ``qsag_whir_verified.proofs.checked_quorum_sum_total,
   ``qsag_whir_verified.proofs.checked_quorum_sum_sound,
   ``qsag_whir_verified.proofs.checked_quorum_sum_none_iff,
   ``qsag_whir_verified.proofs.checked_quorum_sum_le_max_u64_word,
-  ``qsag_whir_verified.proofs.tooth_unchecked_mod_p_accepts_aliased_field_limb,
-  ``qsag_whir_verified.proofs.tooth_decode_canonical_ext4_rejects_fourth_limb_alias,
-  ``qsag_whir_verified.proofs.tooth_pow_rejects_excessive_bits_and_nonzero_low_bits,
-  ``qsag_whir_verified.proofs.tooth_merkle_pair_swaps_on_direction_bit_and_rejects_shift64,
-  ``qsag_whir_verified.proofs.tooth_checked_quorum_sum_rejects_u64_wraparound_forgery,
-  ``qsag_whir_verified.proofs.tooth_ood_pin_rejects_perturbation_and_length_mismatch,
-  ``qsag_whir_verified.proofs.tooth_coset_inverse_premises_inhabited_and_fold_rejects_perturbation,
-  ``qsag_whir_verified.proofs.tooth_cwyz_bridge_accepts_dual_and_rejects_perturbation,
-  ``qsag_whir_verified.proofs.tooth_horner_and_pin_accepts_ascending_and_rejects_perturbation,
-  ``qsag_whir_verified.proofs.tooth_quadratic_sumcheck_wire_nontrivial_eval,
-  ``qsag_whir_verified.proofs.whirWp_ok,
-  ``qsag_whir_verified.proofs.whirWp_mono,
-  ``qsag_whir_verified.proofs.FieldRefines_canonicalFieldWord,
-  ``qsag_whir_verified.proofs.FieldRefines_iff_eq_canonicalFieldWord,
-  ``qsag_whir_verified.proofs.Ext4Refines_canonicalExt4,
-  ``qsag_whir_verified.proofs.Ext4Refines_iff_eq_canonicalExt4,
-  ``qsag_whir_verified.proofs.extAdd_rel2,
-  ``qsag_whir_verified.proofs.extSub_rel2,
-  ``qsag_whir_verified.proofs.extMul_rel2,
-  ``qsag_whir_verified.proofs.extInv_rel1,
-  ``qsag_whir_verified.proofs.decode_canonical_ext4_wp_ext4Refines,
-  ``qsag_whir_verified.proofs.fold_duet_affine_ext4_wp_ext4Refines,
-  ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_wp_ext4Refines,
-  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_wp_ext4Refines,
-  ``qsag_whir_verified.proofs.verify_ood_pin_eq_wp_ext4Refines,
+  ``qsag_whir_verified.proofs.verify_qsaghqm2_header_spec,
+  ``qsag_whir_verified.proofs.verify_qsaghqm2_header_some_iff,
+  ``qsag_whir_verified.proofs.verify_qsaghqm2_header_none_iff,
+  ``qsag_whir_verified.proofs.verify_quintic_schedule_envelope_spec,
+  ``qsag_whir_verified.proofs.verify_quintic_schedule_envelope_sound,
+  ``qsag_whir_verified.proofs.verify_quintic_schedule_envelope_le_max_canopy,
+  ``qsag_whir_verified.proofs.fieldAbs_add,
+  ``qsag_whir_verified.proofs.fieldAbs_mul,
+  ``qsag_whir_verified.proofs.fieldAbs_sub,
+  ``qsag_whir_verified.proofs.fp5Abs_add,
+  ``qsag_whir_verified.proofs.fp5Abs_sub,
+  ``qsag_whir_verified.proofs.fp5Abs_mul,
+  ``qsag_whir_verified.proofs.fp5Abs_frob,
+  ``qsag_whir_verified.proofs.fp5Abs_canonicalFp5,
+  ``qsag_whir_verified.proofs.gl24Abs_canonicalGl24,
+  ``qsag_whir_verified.proofs.fp5_mul_fp5Inv_ok_one,
+  ``qsag_whir_verified.proofs.canonicalFieldWord_two_inv,
+  ``qsag_whir_verified.proofs.canonicalFieldWord_two_x_inv,
+  ``qsag_whir_verified.proofs.load_le_u64_40_refines_qsag,
+  ``qsag_whir_verified.proofs.load_le_u64_56_refines_qsag,
+  ``qsag_whir_verified.proofs.decode_canonical_u64_refines_qsag,
+  ``qsag_whir_verified.proofs.decode_canonical_fp5_limbs_refines_qsag,
+  ``qsag_whir_verified.proofs.decode_canonical_fp5_refines_qsag,
+  ``qsag_whir_verified.proofs.decode_canonical_gl24_limbs_refines_qsag,
+  ``qsag_whir_verified.proofs.decode_canonical_gl24_digest_refines_qsag,
+  ``qsag_whir_verified.proofs.ofBase_inv,
+  ``qsag_whir_verified.proofs.duet_fold_fp5_refines_qsag,
+  ``qsag_whir_verified.proofs.cwyz_duet_fold_fp5_refines_hemVirtualFoldOracle,
+  ``qsag_whir_verified.proofs.verify_cwyz_duet_fold_step_fp5_sound_qsag,
+  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_fp5_sound_qsag,
+  ``qsag_whir_verified.proofs.verify_affine_duet_fold_step_fp5_roots_le_one,
+  ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_fp5_refines_hemBridgeFoldClaim,
+  ``qsag_whir_verified.proofs.verify_cwyz_bridge_claim_step_fp5_sound_qsag,
+  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_fp5_refines_qsag,
+  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_fp5_bad_challenges_le_two,
+  ``qsag_whir_verified.proofs.eval_fp5_univariate_at_base_refines_evalCoeffs,
+  ``qsag_whir_verified.proofs.verify_fp5_univariate_at_base_pin_sound_qsag,
+  ``qsag_whir_verified.proofs.verify_fp5_univariate_at_base_pin_roots_le_degree,
+  ``qsag_whir_verified.proofs.verify_ood_pin_eq_fp5_canonical_iff_qsag,
+  ``qsag_whir_verified.proofs.step_merkle_pair_order_400_canonical_parity,
+  ``qsag_whir_verified.proofs.step_merkle_pair_order_gl24_refines_poseidon2Gl24,
+  ``qsag_whir_verified.proofs.checked_quorum_sum_sound_qsag,
   ``qsag_whir_verified.proofs.checked_quorum_sum_wp_u64NatRefines,
   ``qsag_whir_verified.proofs.goldilocks_p_eq_qsag_prime,
   ``qsag_whir_verified.proofs.max_u64_word_lt_two_pow_64_qsag,
-  ``qsag_whir_verified.proofs.tag_canopy_merkle_internal_qsag,
+  ``qsag_whir_verified.proofs.fp5_nonresidue_w_eq_qsag,
+  ``qsag_whir_verified.proofs.frobenius_zeta5_constants_eq_qsag,
+  ``qsag_whir_verified.proofs.copy_fp5_refines_qsag,
   ``qsag_whir_verified.proofs.add_refines_qsag,
   ``qsag_whir_verified.proofs.sub_refines_qsag,
   ``qsag_whir_verified.proofs.mul_refines_qsag,
-  ``qsag_whir_verified.proofs.ext_eq_iff_qsag,
-  ``qsag_whir_verified.proofs.ext_add_refines_qsag,
-  ``qsag_whir_verified.proofs.ext_sub_refines_qsag,
-  ``qsag_whir_verified.proofs.ext_scale_refines_qsag,
-  ``qsag_whir_verified.proofs.cwyz_duet_fold_refines_foldDuetExt4,
-  ``qsag_whir_verified.proofs.eval_univariate_ext4_at_base_refines_evalCoeffs,
+  ``qsag_whir_verified.proofs.fp5_zero_refines_qsag,
+  ``qsag_whir_verified.proofs.fp5_one_refines_qsag,
+  ``qsag_whir_verified.proofs.fp5_from_base_refines_qsag,
+  ``qsag_whir_verified.proofs.fp5_eq_iff_qsag,
+  ``qsag_whir_verified.proofs.fp5_add_refines_qsag,
+  ``qsag_whir_verified.proofs.fp5_sub_refines_qsag,
+  ``qsag_whir_verified.proofs.fp5_neg_refines_qsag,
+  ``qsag_whir_verified.proofs.fp5_scale_refines_qsag,
+  ``qsag_whir_verified.proofs.fp5_mul_refines_qsag,
+  ``qsag_whir_verified.proofs.fp5_frobenius_refines_qsag,
   ``qsag_whir_verified.proofs.canonical_query_group_idx_refines_qsag,
-  ``qsag_whir_verified.proofs.affine_combine_refines_zkHemV2_maskLine,
-  ``qsag_whir_verified.proofs.mir_affine_combine_coin_bijection_simulated,
-  ``qsag_whir_verified.proofs.mirVerifyShiftSumcheckChain_iff_qsag,
-  ``qsag_whir_verified.proofs.mirEvalCascadeBatch_refines_evalCascadeClaim,
-  ``qsag_whir_verified.proofs.mirStageGates_sound_for_verifyHemAffineWhir
+  ``qsag_whir_verified.proofs.duet_fold_fp5_antipodal_fiberPoint_qsag,
+  ``qsag_whir_verified.proofs.affine_combine_fp5_refines_zkHemV2_maskLine,
+  ``qsag_whir_verified.proofs.mir_affine_combine_fp5_coin_bijection_simulated,
+  ``qsag_whir_verified.proofs.mirVerifyShiftSumcheckChainFp5_iff_qsag,
+  ``qsag_whir_verified.proofs.verify_qsaghqm2_header_refines_qsag,
+  ``qsag_whir_verified.proofs.verify_quintic_schedule_envelope_accepts_zkHemV2ProdStages,
+  ``qsag_whir_verified.proofs.mirStageGatesFp5_sound_for_verifyHemAffineWhir,
+  ``qsag_whir_verified.proofs.tooth_unchecked_mod_p_accepts_aliased_field_limb,
+  ``qsag_whir_verified.proofs.tooth_decode_canonical_fp5_rejects_fifth_limb_alias,
+  ``qsag_whir_verified.proofs.tooth_decode_canonical_gl24_rejects_seventh_limb_alias,
+  ``qsag_whir_verified.proofs.tooth_merkle_400_and_gl24_swap_and_reject,
+  ``qsag_whir_verified.proofs.tooth_checked_quorum_sum_rejects_u64_wraparound_forgery,
+  ``qsag_whir_verified.proofs.tooth_ood_pin_fp5_rejects_perturbation,
+  ``qsag_whir_verified.proofs.tooth_coset_inverse_premises_inhabited_and_fp5_fold_rejects_perturbation,
+  ``qsag_whir_verified.proofs.tooth_cwyz_bridge_fp5_accepts_dual_and_rejects_perturbation,
+  ``qsag_whir_verified.proofs.tooth_horner_fp5_accepts_ascending_and_rejects_perturbation,
+  ``qsag_whir_verified.proofs.tooth_qsaghqm2_header_and_schedule_reject_tamper,
+  ``qsag_whir_verified.proofs.tooth_canonical_cwyz_fp5_fold_rejects_wrong_twiddle_and_forged_claim
 ]
 
-/-! ## Symbol coverage
-
-Every Rust item extracted into `QsagWhirVerified.Funs` must occur in the *statement* of at
-least one non-`tooth_*` specification or soundness theorem from the supplied list. Aeneas
-splits a Rust loop into `f_loop` and `f_loop.body`; these are not Rust items, so each is
-accepted only when the Rust function `f` it was split from is itself covered by a
-non-`tooth_*` theorem and reaches the helper through its definition. -/
+/-! ## Symbol coverage -/
 
 private def funsModule : Name := `QsagWhirVerified.Funs
 
@@ -221,7 +214,6 @@ private def definitionUses (env : Environment) (name used : Name) : Bool :=
   | some (.defnInfo d) => d.value.getUsedConstants.contains used
   | _ => false
 
-/-- For `f_loop` and `f_loop.body`, the pair `(f, f_loop)`. -/
 private def loopOrigin? (name : Name) : Option (Name × Name) :=
   let loopName := match name with
     | .str pre "body" => pre
@@ -233,7 +225,6 @@ private def loopOrigin? (name : Name) : Option (Name × Name) :=
     else none
   | _ => none
 
-/-- Returns the extracted symbols and the subset no non-`tooth_*` theorem statement covers. -/
 private def symbolCoverage (env : Environment) (theorems : Array Name) :
     Array Name × Array Name := Id.run do
   let symbols := extractedSymbols env
@@ -255,9 +246,6 @@ private def symbolCoverage (env : Environment) (theorems : Array Name) :
     if !covered then gaps := gaps.push symbol
   return (symbols, gaps)
 
-/-- The gate must notice a missing specification theorem: with no theorems every symbol is a
-gap, with only `tooth_*` theorems every symbol is still a gap, and without the
-`checked_quorum_sum` theorems that function and both loop helpers are gaps. -/
 private def symbolCoverageControlsFail (env : Environment) (theorems : Array Name) : Bool :=
   let (symbols, allGaps) := symbolCoverage env #[]
   let (_, toothOnlyGaps) := symbolCoverage env (theorems.filter isToothTheorem)
@@ -272,9 +260,6 @@ private def symbolCoverageControlsFail (env : Environment) (theorems : Array Nam
       targetGaps.contains `qsag_whir_verified.checked_quorum_sum_loop &&
       targetGaps.contains `qsag_whir_verified.checked_quorum_sum_loop.body)
 
-/- Compile-time linter/attribute registration is meta infrastructure. Only declarations
-marked meta in Aeneas.Elab.Attrs are excluded; pure declarations and all proof
-dependency closures keep the constructive allowlist. -/
 open Lean Elab Command in
 run_cmd do
   let negative ← Lean.collectAxioms ``Classical.choice
@@ -316,56 +301,3 @@ run_cmd do
     throwError "WHIR MIR axiom policy failed: {rejectedCount} of {checked} declarations rejected"
   logInfo m!"WHIR MIR audit: {checked} declarations across QsagWhirVerified + Aeneas ({requiredWhirMirTheorems.size} anchored theorems), zero rejected (allowlist: propext, Quot.sound)"
 
-public def main : IO UInt32 := do
-  initSearchPath (← findSysroot) [".lake/build/lib/lean", "../../lean/.lake/build/lib/lean"]
-  let imported ← importModules #[{ module := `AuditWhirMirAxioms, importAll := true }] {}
-  let env := imported.setExporting false
-  let summaries := exportedAxiomsExt.getState (asyncMode := .mainOnly) env
-  let mut missingAnchors : Array Name := #[]
-  for req in requiredWhirMirTheorems do
-    match env.find? req with
-    | some (.thmInfo _) => pure ()
-    | _ => missingAnchors := missingAnchors.push req
-  let (negative, checked, theorems, modules, failures) := CollectAxioms.runM (env.setExporting false) do
-    let negative ← CollectAxioms.collectAndGet summaries.find? ``Classical.choice
-    let mut checked := 0
-    let mut theorems := 0
-    let mut modules : Array Name := #[]
-    let mut failures : Array (Name × Array Name) := #[]
-    for (name, _) in env.constants.toList do
-      if let some idx := env.getModuleIdxFor? name then
-        let owner := env.header.moduleNames[idx.toNat]!.toString
-        if (owner == "QsagWhirSpecWeld" || owner == "QsagWhirVerified" || owner.startsWith "QsagWhirVerified." ||
-            owner == "Aeneas" || owner.startsWith "Aeneas.") &&
-            !(owner == "Aeneas.Elab.Attrs" && isMarkedMeta env name) then
-          checked := checked + 1
-          if let some (.thmInfo _) := env.find? name then theorems := theorems + 1
-          let ownerName := env.header.moduleNames[idx.toNat]!
-          if !modules.contains ownerName then modules := modules.push ownerName
-          let axioms ← CollectAxioms.collectAndGet summaries.find? name
-          let forbidden := axioms.filter fun ax => ax != ``propext && ax != ``Quot.sound
-          if !forbidden.isEmpty then
-            failures := failures.push (name, forbidden)
-    return (negative, checked, theorems, modules, failures)
-  if (negative.filter fun ax => ax != ``propext && ax != ``Quot.sound).isEmpty then
-    throw (IO.userError "WHIR MIR axiom audit negative control unexpectedly passed")
-  -- The replayed theorem list is read from the comparator configuration in the package root.
-  let config ← IO.ofExcept (Json.parse (← IO.FS.readFile "comparator.json"))
-  let replayed := (← IO.ofExcept (config.getObjValAs? (Array String) "theorem_names")).map
-    String.toName
-  let unanchored := replayed.filter fun thm => !requiredWhirMirTheorems.contains thm
-  let (symbols, gaps) := symbolCoverage env replayed
-  if symbolCoverageControlsFail env replayed then
-    throw (IO.userError "WHIR symbol coverage negative control unexpectedly passed")
-  for thm in unanchored do
-    IO.println s!"REPLAYED THEOREM WITHOUT AN AXIOM ANCHOR {thm}"
-  for symbol in gaps do
-    IO.println s!"EXTRACTED SYMBOL WITHOUT A REPLAYED THEOREM STATEMENT {symbol}"
-  IO.println s!"WHIR symbol coverage: {symbols.size} extracted symbols, {replayed.size} replayed theorems; {gaps.size} uncovered, {unanchored.size} unanchored"
-  for req in missingAnchors do
-    IO.println s!"MISSING ANCHOR THEOREM {req}"
-  for (name, forbidden) in failures do
-    IO.println s!"REJECT {name}: {forbidden}"
-  IO.println s!"WHIR MIR axiom audit: {checked} declarations, {theorems} theorems ({requiredWhirMirTheorems.size} anchored), {modules.size} modules; {failures.size} rejected, {missingAnchors.size} missing anchors"
-  return if checked > 0 && failures.isEmpty && missingAnchors.isEmpty &&
-      !symbols.isEmpty && gaps.isEmpty && unanchored.isEmpty then 0 else 1
