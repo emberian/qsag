@@ -481,6 +481,11 @@ impl<T: Transport> Engine<T> {
         )
     }
 
+    /// Permanently mark this engine failed so no further preprocessing, openings, or broadcasts run.
+    pub(super) fn poison(&mut self) {
+        self.failed = true;
+    }
+
     /// Broadcast `payload` and collect one message from every party, in party order (the
     /// own message included).
     pub fn exchange(&mut self, payload: Vec<u8>) -> Result<Vec<Vec<u8>>, MpcError> {

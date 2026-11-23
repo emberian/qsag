@@ -275,6 +275,7 @@ impl<L: Link> Transport for Framed<L> {
                 Some((&more, data))
                     if more <= 1
                         && (more == 0 || data.len() == MAX_FRAGMENT_BYTES)
+                        && !(more == 0 && data.is_empty() && !partial.is_empty())
                         && partial.len() + data.len() <= MAX_MESSAGE_BYTES =>
                 {
                     qsag_core::wipe::secret_vec_extend_from_slice(partial, data);
@@ -758,5 +759,27 @@ mod tests {
         assert!(!written.windows(8).any(|w| w == &big[..8]));
         replayer.write_all(&written[..first]).unwrap();
         assert_eq!(b.recv(0), BAD);
+    }
+
+    #[test]
+    fn tooth_framed_recv_rejects_empty_final_continuation_fragment() {
+        // `#tooth`: `Framed::send` encodes an exact `MAX_FRAGMENT_BYTES` message as a
+        // single `[0x00, data...]` frame (`tail.is_empty()`). Previously `Framed::recv` also
+        // accepted `[0x01, data...]` followed by `[0x00]` (an empty trailing fragment), breaking
+        // unique canonical multi-fragment framing.
+        let (mut mesh, _) = tap_mesh(SESSION, 2, one_key);
+        let mut full_cont = Vec::with_capacity(1 + MAX_FRAGMENT_BYTES);
+        full_cont.push(1u8);
+        full_cont.extend(core::iter::repeat_n(0xABu8, MAX_FRAGMENT_BYTES));
+        mesh[0]
+            .channel
+            .send_frame(1, ROUND_TAG, &full_cont)
+            .unwrap();
+        mesh[0].channel.send_frame(1, ROUND_TAG, &[0u8]).unwrap();
+        assert_eq!(mesh[1].recv(0), BAD);
+
+        // Single-frame empty message `[0x00]` with empty `partial` remains valid.
+        mesh[0].send(1, b"").unwrap();
+        assert_eq!(mesh[1].recv(0).unwrap(), b"");
     }
 }

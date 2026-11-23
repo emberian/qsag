@@ -61,7 +61,11 @@ pub fn xor_share_from_shamir(quorum: &[usize], party: usize, share: &[u8]) -> Op
 
 /// Triples and uniform values one custodian consumes in [`input_secret_bits`].
 pub const fn input_demand(parties: usize, bytes: usize) -> (usize, usize) {
-    (8 * bytes * (2 * parties - 1), 8 * bytes * parties)
+    let bits = 8usize.saturating_mul(bytes);
+    (
+        bits.saturating_mul(2usize.saturating_mul(parties).saturating_sub(1)),
+        bits.saturating_mul(parties),
+    )
 }
 
 /// Authenticated shares of the bits of the secret whose XOR shares the custodians hold,
@@ -208,5 +212,13 @@ pub(super) mod tests {
         });
         assert_eq!(out[0], Err(InputError::NotBits));
         assert_eq!(out[1], Err(InputError::NotBits));
+    }
+
+    #[test]
+    fn tooth_input_demand_zero_parties_does_not_underflow() {
+        // `#tooth`: `input_demand(0, 32)` previously panicked with `2 * 0 - 1` underflow.
+        assert_eq!(input_demand(0, 32), (0, 0));
+        assert_eq!(input_demand(1, 4), (32, 32));
+        assert_eq!(input_demand(3, 4), (160, 96));
     }
 }

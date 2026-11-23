@@ -1011,7 +1011,7 @@ pub fn prove_party_with_fault<T: Transport>(
     fault: &mut dyn FnMut(Fault<'_>),
 ) -> Result<ZkHemV2SplitProof, ProveError> {
     let mut z = SecretScratch::from(z);
-    let (me, parties) = (e.me(), e.parties());
+    let parties = e.parties();
     if shape.num_sbox != 0 {
         return Err(ProveError::SboxRows);
     }
@@ -1022,6 +1022,25 @@ pub fn prove_party_with_fault<T: Transport>(
     if z.len() != shape.num_vars || public_inputs.len() != shape.num_public {
         return Err(ProveError::Malformed);
     }
+    let res = prove_party_validated(e, shape, &layout, public_inputs, statement, profile, &mut z, fault);
+    if res.is_err() {
+        e.poison();
+    }
+    res
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_party_validated<T: Transport>(
+    e: &mut Engine<T>,
+    shape: &Shape,
+    layout: &qsag_agg::zk_hem::v2::params::Layout,
+    public_inputs: &[F],
+    statement: &[u8],
+    profile: Profile,
+    z: &mut SecretScratch<Sb>,
+    fault: &mut dyn FnMut(Fault<'_>),
+) -> Result<ZkHemV2SplitProof, ProveError> {
+    let me = e.me();
     let cells = 1usize << layout.log_cells;
 
     z[0] = e.public(F::ONE);
@@ -1048,7 +1067,7 @@ pub fn prove_party_with_fault<T: Transport>(
         COL_MASK_BITS,
         |i, j| layout.col_mask_block(shape.log_rows, i, j),
     )?;
-    table[..shape.num_vars].copy_from_slice(&z);
+    table[..shape.num_vars].copy_from_slice(z);
     for slot in &mut table[cells - layout.blind_cells..] {
         *slot = e.random()?;
     }
@@ -1061,7 +1080,7 @@ pub fn prove_party_with_fault<T: Transport>(
             })
             .collect()
     });
-    drop(z);
+    z.clear();
 
     let state = commit_shares(
         e,
@@ -1643,5 +1662,52 @@ pub(super) mod tests {
             .collect();
         assert_eq!(runs[0].1, runs[1].1);
         assert_ne!(runs[0].0, runs[1].0);
+    }
+
+    #[test]
+    fn tooth_malformed_peer_word_poisons_collab_engine_against_reuse() {
+        // `#tooth`: Previously an unauthenticated Stage-0 `BadPeerMessage` (e.g. a peer
+        // sending a non-canonical `Fp5` limb or truncated Stage-0 `g` word after `e.exchange`)
+        // returned `Err(ProveError::BadPeerMessage)` while leaving `e.failed == false`!
+        let (shape, assignment) = small_relation(5);
+        let profile = Profile::default();
+        let (triples, randoms) = prover_demand(&shape, profile).unwrap();
+        let mut dealer = super::super::engine::Dealer::new(2, &[0xE7; 32]);
+        let shared: Vec<Vec<Sb>> = {
+            let mut per_party = vec![Vec::with_capacity(assignment.len()); 2];
+            for &val in &assignment {
+                let sh = dealer.share(val);
+                per_party[0].push(sh[0]);
+                per_party[1].push(sh[1]);
+            }
+            per_party
+        };
+        let preps = dealer.preprocessing(triples + 4, randoms + 4);
+        let out = super::super::engine::tests::run_parties(preps, |mut e| {
+            let me = e.me();
+            let res = prove_party_with_fault(
+                &mut e,
+                &shape,
+                &assignment[1..1 + shape.num_public],
+                b"tooth-poison",
+                profile,
+                shared[me].clone(),
+                &mut |point| {
+                    if me == 1
+                        && let Fault::Word(bytes) = point
+                    {
+                        // Truncate Stage-0 reduced polynomial `g` so `e.exchange_guarded` succeeds
+                        // (`e.failed` reset to `false`), then `open_table` hits `BadPeerMessage`.
+                        bytes.truncate(1);
+                    }
+                },
+            );
+            let post_random = e.random();
+            let post_check = e.check();
+            (res, post_random, post_check)
+        });
+        assert_eq!(out[0].0, Err(ProveError::BadPeerMessage { from: 1 }));
+        assert_eq!(out[0].1, Err(MpcError::MacCheck));
+        assert_eq!(out[0].2, Err(MpcError::MacCheck));
     }
 }

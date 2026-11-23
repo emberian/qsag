@@ -78,13 +78,16 @@ impl<'a> CustodyInput<'a> {
 }
 
 /// Triples and uniform values one custodian consumes in [`prove_ownership_party`], by
-/// stage, for a secret of `secret_bytes` bytes. `None` for a malformed statement.
+/// stage, for a secret of `secret_bytes` bytes. `None` for a malformed statement or quorum size.
 pub fn ownership_demand(
     statement: &OwnershipStatement,
     profile: Profile,
     parties: usize,
     secret_bytes: usize,
 ) -> Option<[(Stage, usize, usize); 3]> {
+    if !(2..=qsag_agg::zk_hem::v2::pcs::MAX_STAGE0_SHARES).contains(&parties) {
+        return None;
+    }
     let (shape, defs) = ownership_definitions(statement)?;
     let input = custody::input_demand(parties, secret_bytes);
     let witness = witgen::demand(&shape, &defs).ok()?;
