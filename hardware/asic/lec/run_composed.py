@@ -9,11 +9,10 @@ import time
 
 root = pathlib.Path(__file__).resolve().parents[1]
 os.chdir(root)
-os.environ["PATH"] = "/home/build/qsag-ni-asic/tools/oss-cad-suite/bin:" + os.environ["PATH"]
-w = pathlib.Path("lec/work/composed")
+os.environ["PATH"] = os.environ.get("OSS_CAD_BIN", "/opt/oss-cad-suite/bin") + ":" + os.environ["PATH"]
+w = pathlib.Path(os.environ["TMPDIR"]) / "lec-composed"
 w.mkdir(parents=True, exist_ok=True)
-os.environ["TMPDIR"] = str(w.resolve())
-run = ["env", "SWARM_MEM_MAX=16G", "swarm-build", "timeout", "--kill-after=10s", "600s"]
+run = ["timeout", "--kill-after=10s", "600s"]
 results = []
 
 
@@ -21,8 +20,8 @@ def check(name, base, query, expect):
     p = w / (name + ".smt2")
     p.write_text(base + query + "\n(check-sat)\n")
     t = time.monotonic()
-    out = subprocess.run(run + ["bitwuzla", "-t", "55000", str(p)], capture_output=True, text=True)
-    lines = [ln for ln in out.stdout.splitlines() if not ln.startswith("swarm-build")]
+    out = subprocess.run(run + ["timeout", "60s", "bitwuzla", "-t", "55000", str(p)], capture_output=True, text=True)
+    lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
     value = lines[0].strip() if lines else ""
     dt = time.monotonic() - t
     print(f"COMPOSED {name}: expect={expect} got={value} ({dt:.2f}s)", flush=True)
@@ -146,8 +145,8 @@ for name, expr in lemmas.items():
         path = w / (name + ("_mut" if mut else "") + ".smt2")
         path.write_text(query)
         t = time.monotonic()
-        o = subprocess.run(run + ["z3", "-T:30", str(path)], capture_output=True, text=True)
-        lines = [ln for ln in o.stdout.splitlines() if not ln.startswith("swarm-build")]
+        o = subprocess.run(run + ["timeout", "60s", "z3", "-T:30", str(path)], capture_output=True, text=True)
+        lines = [ln for ln in o.stdout.splitlines() if ln.strip()]
         v = lines[0].strip() if lines else ""
         expected = "sat" if mut else "unsat"
         dt = time.monotonic() - t
@@ -156,11 +155,11 @@ for name, expr in lemmas.items():
         ok &= v == expected
 
 # ------------------------------------------------------------------
-# Compositional RTL LEC for `rtl/qsag_asic_ext4_p2_shared.sv`
+# Compositional RTL LEC for `rtl/qsag_asic_p2_shared.sv`
 # ------------------------------------------------------------------
 stubs_sv = w / "shared_leaf_stubs.sv"
 stubs_sv.write_text("""`default_nettype none
-// Compositional leaf abstractions for `qsag_asic_ext4_p2_shared`:
+// Compositional leaf abstractions for `qsag_asic_p2_shared`:
 // `qsag_gl64_mul_csa` and `qsag_gl64_addsub` emit `(bvmul ...)` and `(bvudiv ...)`, which
 // `flatten_ys_smt2` rewrites to uninterpreted functions `uf_mul64` and `uf_addsub` in QF_UFBV
 // (proving exact pipeline equivalence for ALL 64-bit operations!).
@@ -179,33 +178,6 @@ module qsag_gl64_addsub (
   output wire [63:0] r
 );
   assign r = (a / (b | 64'd1)) ^ (sub ? 64'h94d049bb133111eb : 64'd0);
-endmodule
-
-module qsag_ext4_kara_inputs (
-  input  wire [255:0] a,
-  output wire [575:0] q
-);
-  wire [63:0] a0 = a[63:0], a1 = a[127:64], a2 = a[191:128], a3 = a[255:192];
-  assign q[0*64 +: 64] = a0;
-  assign q[1*64 +: 64] = a1;
-  assign q[2*64 +: 64] = a0 ^ a1;
-  assign q[3*64 +: 64] = a2;
-  assign q[4*64 +: 64] = a3;
-  assign q[5*64 +: 64] = a2 ^ a3;
-  assign q[6*64 +: 64] = a0 ^ a2;
-  assign q[7*64 +: 64] = a1 ^ a3;
-  assign q[8*64 +: 64] = a0 ^ a1 ^ a2 ^ a3;
-endmodule
-
-module qsag_ext4_kara_combine (
-  input  wire [575:0] p,
-  input  wire [255:0] z,
-  output wire [255:0] r
-);
-  assign r[0*64 +: 64] = z[0*64 +: 64] ^ p[0*64 +: 64] ^ p[1*64 +: 64] ^ p[3*64 +: 64] ^ p[4*64 +: 64] ^ p[5*64 +: 64];
-  assign r[1*64 +: 64] = z[1*64 +: 64] ^ p[0*64 +: 64] ^ p[1*64 +: 64] ^ p[2*64 +: 64] ^ p[4*64 +: 64];
-  assign r[2*64 +: 64] = z[2*64 +: 64] ^ p[0*64 +: 64] ^ p[3*64 +: 64] ^ p[6*64 +: 64] ^ p[7*64 +: 64];
-  assign r[3*64 +: 64] = z[3*64 +: 64] ^ p[2*64 +: 64] ^ p[5*64 +: 64] ^ p[6*64 +: 64] ^ p[7*64 +: 64] ^ p[8*64 +: 64];
 endmodule
 
 module qsag_p2_rc (
@@ -269,82 +241,6 @@ endmodule
 
 miters_sv = w / "shared_miters.sv"
 miters_sv.write_text("""`default_nettype none
-module miter_shared_ops (
-  input  wire         clk,
-  input  wire         rst,
-  input  wire         op_emuladd,
-  input  wire         op_emulbase,
-  input  wire         op_eadd,
-  input  wire         op_esub,
-  input  wire         op_glmul,
-  input  wire [1:0]   wr_slot,
-  input  wire [11:0]  wr_en,
-  input  wire [767:0] wr_data,
-  input  wire [1:0]   rd_slot,
-  output wire         busy,
-  output wire         done,
-  output wire         is_idle,
-  output wire [767:0] st_o,
-  output wire [767:0] st_rd_o,
-  output wire [767:0] ref_op_st0,
-  output wire [767:0] ref_wr_strd
-);
-  qsag_asic_ext4_p2_shared dut (
-    .clk(clk), .rst(rst),
-    .op_perm(1'b0), .op_canopy(1'b0), .op_perm4(1'b0), .op_canopy4(1'b0),
-    .op_emuladd(op_emuladd), .op_emulbase(op_emulbase),
-    .op_eadd(op_eadd), .op_esub(op_esub), .op_glmul(op_glmul),
-    .wr_slot(wr_slot), .wr_en(wr_en), .wr_data(wr_data), .rd_slot(rd_slot),
-    .st_o(st_o), .st_rd_o(st_rd_o), .busy(busy), .done(done)
-  );
-
-  assign is_idle = (5'(dut.state) == 5'd0) &&
-    (5'(dut.state_m[0]) == 5'd0) && (5'(dut.state_m[1]) == 5'd0) && (5'(dut.state_m[2]) == 5'd0) &&
-    (5'(dut.state_m[3]) == 5'd0) && (5'(dut.state_m[4]) == 5'd0) && (5'(dut.state_m[5]) == 5'd0) &&
-    (5'(dut.state_m[6]) == 5'd0) && (5'(dut.state_m[7]) == 5'd0) && (5'(dut.state_m[8]) == 5'd0);
-
-  // Reference combinational models using the exact same stub leaves
-  wire [575:0] r_ka, r_kb, r_kp;
-  wire [255:0] r_kr;
-  qsag_ext4_kara_inputs u_rka (.a(st_o[255:0]),   .q(r_ka));
-  qsag_ext4_kara_inputs u_rkb (.a(st_o[511:256]), .q(r_kb));
-  for (genvar m = 0; m < 9; m++) begin : g_rmul
-    qsag_gl64_mul_csa u_rm (.a(r_ka[64*m +: 64]), .b(r_kb[64*m +: 64]), .r(r_kp[64*m +: 64]));
-  end
-  qsag_ext4_kara_combine u_rkc (.p(r_kp), .z(st_o[767:512]), .r(r_kr));
-
-  wire [255:0] r_ebase;
-  for (genvar i = 0; i < 4; i++) begin : g_rems
-    qsag_gl64_mul_csa u_rems (.a(st_o[64*i +: 64]), .b(st_o[256 +: 64]), .r(r_ebase[64*i +: 64]));
-  end
-
-  wire [63:0] r_glmul;
-  qsag_gl64_mul_csa u_rgl (.a(st_o[63:0]), .b(st_o[127:64]), .r(r_glmul));
-
-  wire [255:0] r_as;
-  for (genvar i = 0; i < 4; i++) begin : g_ras
-    qsag_gl64_addsub u_ras (.a(st_o[64*i +: 64]), .b(st_o[64*(8+i) +: 64]), .sub(op_esub), .r(r_as[64*i +: 64]));
-  end
-
-  logic [767:0] rop;
-  always_comb begin
-    rop = st_o;
-    if (op_emuladd)             rop[255:0] = r_kr;
-    else if (op_emulbase)       rop[255:0] = r_ebase;
-    else if (op_eadd || op_esub) rop[255:0] = r_as;
-    else if (op_glmul)          rop[63:0]  = r_glmul;
-  end
-  assign ref_op_st0 = rop;
-
-  logic [767:0] rwr;
-  always_comb begin
-    for (int l = 0; l < 12; l++) begin
-      rwr[64*l +: 64] = wr_en[l] ? wr_data[64*l +: 64] : st_rd_o[64*l +: 64];
-    end
-  end
-  assign ref_wr_strd = rwr;
-endmodule
-
 module miter_shared_rounds (
   input  wire         clk,
   input  wire         rst,
@@ -355,11 +251,11 @@ module miter_shared_rounds (
   output wire [767:0] ref_full_out,
   output wire [767:0] ref_part_out
 );
-  qsag_asic_ext4_p2_shared dut (
+  qsag_asic_p2_shared dut (
     .clk(clk), .rst(rst),
     .op_perm(1'b0), .op_canopy(1'b0), .op_perm4(1'b0), .op_canopy4(1'b0),
-    .op_emuladd(1'b0), .op_emulbase(1'b0),
-    .op_eadd(1'b0), .op_esub(1'b0), .op_glmul(1'b0),
+    .op_glmul(1'b0), .fp5_active(1'b0), .fp5_a(64'd0), .fp5_b(64'd0),
+    .fp5_product(), .auto_regs(),
     .wr_slot(2'd0), .wr_en(12'd0), .wr_data(768'd0), .rd_slot(2'd0),
     .st_o(st_o), .st_rd_o(), .busy(), .done()
   );
@@ -404,41 +300,11 @@ endmodule
 
 
 def make_shared_mutant(tag, old, new):
-    src = pathlib.Path("rtl/qsag_asic_ext4_p2_shared.sv").read_text()
+    src = pathlib.Path("rtl/qsag_asic_p2_shared.sv").read_text()
     assert src.count(old) == 1, (tag, old, src.count(old))
     p_mut = w / f"{tag}.sv"
     p_mut.write_text(src.replace(old, new, 1))
     return p_mut
-
-
-def shared_ops_query(base):
-    def sig(port, k): return f"|miter_shared_ops_n {port}@s{k}|"
-    ops = [sig("op_emuladd", 1), sig("op_emulbase", 1), sig("op_eadd", 1), sig("op_esub", 1), sig("op_glmul", 1)]
-    one_op = (
-        "(or "
-        + " ".join(f"(and {ops[i]} " + " ".join(f"(not {ops[j]})" for j in range(5) if j != i) + ")" for i in range(5))
-        + ")"
-    )
-    wr_zero = f"(= {sig('wr_en', 1)} (_ bv0 12))"
-    ops_zero = "(and " + " ".join(f"(not {o})" for o in ops) + ")"
-    mode_op = (
-        f"(=> (and {wr_zero} {one_op}) "
-        f"(and (= {sig('st_o', 2)} {sig('ref_op_st0', 1)}) "
-        f"(=> (and (= {sig('rd_slot', 1)} {sig('rd_slot', 2)}) (not (= {sig('rd_slot', 1)} (_ bv0 2)))) "
-        f"(= {sig('st_rd_o', 2)} {sig('st_rd_o', 1)}))))"
-    )
-    mode_wr = (
-        f"(=> (and {ops_zero} (= {sig('rd_slot', 1)} {sig('wr_slot', 1)}) (= {sig('rd_slot', 2)} {sig('wr_slot', 1)})) "
-        f"(= {sig('st_rd_o', 2)} {sig('ref_wr_strd', 1)}))"
-    )
-    rd0 = f"(=> (= {sig('rd_slot', 1)} (_ bv0 2)) (= {sig('st_rd_o', 1)} {sig('st_o', 1)}))"
-    hyps = (
-        f"(assert {sig('rst', 0)})\n"
-        f"(assert (not {sig('rst', 1)}))\n"
-        f"(assert (or (and {wr_zero} {one_op}) {ops_zero}))\n"
-    )
-    goal = f"(assert (not (and {sig('is_idle', 1)} (not {sig('busy', 1)}) (not {sig('busy', 2)}) {rd0} {mode_op} {mode_wr})))\n"
-    return flatten_ys_smt2(base, "miter_shared_ops", 2) + hyps + goal
 
 
 def shared_full_query(base):
@@ -461,16 +327,8 @@ def shared_part_query(base):
     return flatten_ys_smt2(base, "miter_shared_rounds", 4) + hyps + goal
 
 
-# 1) shared_ops_1clk + mutant
-base_ops = compile_slang("shared_ops_1clk", [stubs_sv, "rtl/qsag_asic_ext4_p2_shared.sv", miters_sv], "miter_shared_ops")
-ok &= check("shared_ops_1clk", "", shared_ops_query(base_ops), "unsat")
-
-mut_ops_sv = make_shared_mutant("mut_shared_ops", "ma[m] = st_b[0][m];\n            mb[m] = st_b[0][4];", "ma[m] = st_b[0][0];\n            mb[m] = st_b[0][4];")
-base_ops_mut = compile_slang("shared_ops_1clk_mut", [stubs_sv, mut_ops_sv, miters_sv], "miter_shared_ops")
-ok &= check("shared_ops_1clk_mut", "", shared_ops_query(base_ops_mut), "sat")
-
 # 2) shared_full_9plus3 + mutant
-base_rnd = compile_slang("shared_rounds", [stubs_sv, "rtl/qsag_asic_ext4_p2_shared.sv", miters_sv], "miter_shared_rounds")
+base_rnd = compile_slang("shared_rounds", [stubs_sv, "rtl/qsag_asic_p2_shared.sv", miters_sv], "miter_shared_rounds")
 ok &= check("shared_full_9plus3", "", shared_full_query(base_rnd), "unsat")
 
 mut_full_sv = make_shared_mutant("mut_shared_full", "S1_G1: if (m < 3) begin ma[m] = st_b[0][9 + m]; mb[m] = st_b[0][9 + m]; end", "S1_G1: if (m < 3) begin ma[m] = st_b[0][8 + m]; mb[m] = st_b[0][9 + m]; end")

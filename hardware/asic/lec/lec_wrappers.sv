@@ -1,5 +1,5 @@
 // Compositional SMT-LIB2 Equivalence Wrappers for QSAG-NI Silicon (`0` Undecided Miters!).
-// Every arithmetic, carry-save, 2-level Tower Karatsuba Ext4, Poseidon2 (M_4, M_E, M_I, Canopy FF),
+// Every arithmetic, carry-save, Poseidon2 (M_4, M_E, M_I, Canopy FF),
 // GF(2^128) recursive Karatsuba CLMUL, 0x87 reducer, and Cantor/Wiedemann T_7 ring isomorphism
 // sub-block has an exact `gold` vs `gate` miter AND a planted-fault `mut` wrapper.
 `default_nettype none
@@ -337,158 +337,6 @@ module lec_step_mut (input wire [70:0] t, input wire [63:0] x, output wire [63:0
 endmodule
 
 // ============================================================================
-// 2. 2-Level 9-Product Tower Karatsuba `GoldilocksExt4` Sub-Blocks
-// ============================================================================
-module lec_kara_in_gold (input wire [255:0] a, output wire [575:0] q);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c0 = (a[63:0] >= P) ? a[63:0] - P : a[63:0];
-  wire [63:0] c1 = (a[127:64] >= P) ? a[127:64] - P : a[127:64];
-  wire [63:0] c2 = (a[191:128] >= P) ? a[191:128] - P : a[191:128];
-  wire [63:0] c3 = (a[255:192] >= P) ? a[255:192] - P : a[255:192];
-  wire [63:0] s01, s23, s02, s13, sall;
-  qsag_gl64_final_seq #(.W(66)) u01 (.x({2'd0,c0}+{2'd0,c1}), .y(66'd0), .r(s01));
-  qsag_gl64_final_seq #(.W(66)) u23 (.x({2'd0,c2}+{2'd0,c3}), .y(66'd0), .r(s23));
-  qsag_gl64_final_seq #(.W(66)) u02 (.x({2'd0,c0}+{2'd0,c2}), .y(66'd0), .r(s02));
-  qsag_gl64_final_seq #(.W(66)) u13 (.x({2'd0,c1}+{2'd0,c3}), .y(66'd0), .r(s13));
-  qsag_gl64_final_seq #(.W(66)) ual (.x({2'd0,c0}+{2'd0,c1}+{2'd0,c2}+{2'd0,c3}), .y(66'd0), .r(sall));
-  assign q = {sall, s13, s02, s23, c3, c2, s01, c1, c0};
-endmodule
-module lec_kara_in_gate (input wire [255:0] a, output wire [575:0] q);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c0 = (a[63:0] >= P) ? a[63:0] - P : a[63:0];
-  wire [63:0] c1 = (a[127:64] >= P) ? a[127:64] - P : a[127:64];
-  wire [63:0] c2 = (a[191:128] >= P) ? a[191:128] - P : a[191:128];
-  wire [63:0] c3 = (a[255:192] >= P) ? a[255:192] - P : a[255:192];
-  qsag_ext4_kara_inputs u_dut (.a({c3,c2,c1,c0}), .q(q));
-endmodule
-module lec_kara_in_mut (input wire [255:0] a, output wire [575:0] q);
-  wire [575:0] g;
-  lec_kara_in_gate u (.a(a), .q(g));
-  assign q = g ^ {575'd0, 1'b1};
-endmodule
-
-// Level-1 F_{p^2} Karatsuba combiners: re = m0 + 7*m1, im = m2 - m0 - m1
-module lec_fp2_re_gold (input wire [63:0] m0, m1, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c0=(m0>=P)?m0-P:m0, c1=(m1>=P)?m1-P:m1;
-  wire [68:0] sum = {5'd0, c0} + ({2'd0, c1, 3'd0} - {5'd0, c1});
-  qsag_gl64_final_seq #(.W(69)) u (.x(sum), .y(69'd0), .r(r));
-endmodule
-module lec_fp2_re_gate (input wire [63:0] m0, m1, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c0=(m0>=P)?m0-P:m0, c1=(m1>=P)?m1-P:m1;
-  qsag_fp2_kara_re u (.m0(c0), .m1(c1), .r(r));
-endmodule
-module lec_fp2_re_mut (input wire [63:0] m0, m1, output wire [63:0] r);
-  wire [63:0] g;
-  lec_fp2_re_gate u (.*, .r(g));
-  assign r = g ^ 64'd1;
-endmodule
-
-module lec_fp2_im_gold (input wire [63:0] m2, m0, m1, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c2=(m2>=P)?m2-P:m2, c0=(m0>=P)?m0-P:m0, c1=(m1>=P)?m1-P:m1;
-  wire [66:0] sum = {3'd0, c2} + {2'd0, P, 1'b0} - {3'd0, c0} - {3'd0, c1};
-  qsag_gl64_final_seq #(.W(67)) u (.x(sum), .y(67'd0), .r(r));
-endmodule
-module lec_fp2_im_gate (input wire [63:0] m2, m0, m1, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c2=(m2>=P)?m2-P:m2, c0=(m0>=P)?m0-P:m0, c1=(m1>=P)?m1-P:m1;
-  qsag_fp2_kara_im u (.m2(c2), .m0(c0), .m1(c1), .r(r));
-endmodule
-module lec_fp2_im_mut (input wire [63:0] m2, m0, m1, output wire [63:0] r);
-  wire [63:0] g;
-  lec_fp2_im_gate u (.*, .r(g));
-  assign r = g ^ 64'd1;
-endmodule
-
-// Level-2 Outer Ext4 Karatsuba combiners: r0..r3
-module lec_kara_r0_gold (input wire [63:0] re_a, im_b, z0, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] ca=(re_a>=P)?re_a-P:re_a, cb=(im_b>=P)?im_b-P:im_b, cz=(z0>=P)?z0-P:z0;
-  wire [68:0] sum = {5'd0, ca} + ({2'd0, cb, 3'd0} - {5'd0, cb}) + {5'd0, cz};
-  qsag_gl64_final_seq #(.W(69)) u (.x(sum), .y(69'd0), .r(r));
-endmodule
-module lec_kara_r0_gate (input wire [63:0] re_a, im_b, z0, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] ca=(re_a>=P)?re_a-P:re_a, cb=(im_b>=P)?im_b-P:im_b, cz=(z0>=P)?z0-P:z0;
-  qsag_ext4_kara_r0 u (.re_a(ca), .im_b(cb), .z0(cz), .r(r));
-endmodule
-module lec_kara_r0_mut (input wire [63:0] re_a, im_b, z0, output wire [63:0] r);
-  wire [63:0] g;
-  lec_kara_r0_gate u (.*, .r(g));
-  assign r = g ^ 64'd1;
-endmodule
-
-module lec_kara_r1_gold (input wire [63:0] im_a, re_b, z1, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] ca=(im_a>=P)?im_a-P:im_a, cb=(re_b>=P)?re_b-P:re_b, cz=(z1>=P)?z1-P:z1;
-  wire [66:0] sum = {3'd0, ca} + {3'd0, cb} + {3'd0, cz};
-  qsag_gl64_final_seq #(.W(67)) u (.x(sum), .y(67'd0), .r(r));
-endmodule
-module lec_kara_r1_gate (input wire [63:0] im_a, re_b, z1, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] ca=(im_a>=P)?im_a-P:im_a, cb=(re_b>=P)?re_b-P:re_b, cz=(z1>=P)?z1-P:z1;
-  qsag_ext4_kara_r1 u (.im_a(ca), .re_b(cb), .z1(cz), .r(r));
-endmodule
-module lec_kara_r1_mut (input wire [63:0] im_a, re_b, z1, output wire [63:0] r);
-  wire [63:0] g;
-  lec_kara_r1_gate u (.*, .r(g));
-  assign r = g ^ 64'd1;
-endmodule
-
-// Exact two-complement bias lemma `3*P - a - b == ~a + ~b + (3*P - 2*(2^64-1))` + `kara_r2`/`kara_r3`:
-module lec_kara_sub2_gold (input wire [63:0] a, b, output wire [67:0] s);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  assign s = 68'd3 * {4'd0, P} - {4'd0, a} - {4'd0, b};
-endmodule
-module lec_kara_sub2_gate (input wire [63:0] a, b, output wire [67:0] s);
-  localparam logic [63:0] C = 64'hFFFF_FFFD_0000_0005;
-  assign s = {4'd0, ~a} + {4'd0, ~b} + {4'd0, C};
-endmodule
-module lec_kara_sub2_mut (input wire [63:0] a, b, output wire [67:0] s);
-  wire [67:0] g;
-  lec_kara_sub2_gate u (.*, .s(g));
-  assign s = g ^ 68'd1;
-endmodule
-
-module lec_kara_r2_gold (input wire [63:0] re_m, re_a, re_b, z2, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  localparam logic [63:0] C = 64'hFFFF_FFFD_0000_0005;
-  wire [63:0] cm=(re_m>=P)?re_m-P:re_m, ca=(re_a>=P)?re_a-P:re_a, cb=(re_b>=P)?re_b-P:re_b, cz=(z2>=P)?z2-P:z2;
-  wire [67:0] sum = {4'd0, cm} + {4'd0, ~ca} + {4'd0, ~cb} + {4'd0, cz} + {4'd0, C};
-  qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
-endmodule
-module lec_kara_r2_gate (input wire [63:0] re_m, re_a, re_b, z2, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cm=(re_m>=P)?re_m-P:re_m, ca=(re_a>=P)?re_a-P:re_a, cb=(re_b>=P)?re_b-P:re_b, cz=(z2>=P)?z2-P:z2;
-  qsag_ext4_kara_r2 u (.re_m(cm), .re_a(ca), .re_b(cb), .z2(cz), .r(r));
-endmodule
-module lec_kara_r2_mut (input wire [63:0] re_m, re_a, re_b, z2, output wire [63:0] r);
-  wire [63:0] g;
-  lec_kara_r2_gate u (.*, .r(g));
-  assign r = g ^ 64'd1;
-endmodule
-
-module lec_kara_r3_gold (input wire [63:0] im_m, im_a, im_b, z3, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  localparam logic [63:0] C = 64'hFFFF_FFFD_0000_0005;
-  wire [63:0] cm=(im_m>=P)?im_m-P:im_m, ca=(im_a>=P)?im_a-P:im_a, cb=(im_b>=P)?im_b-P:im_b, cz=(z3>=P)?z3-P:z3;
-  wire [67:0] sum = {4'd0, cm} + {4'd0, ~ca} + {4'd0, ~cb} + {4'd0, cz} + {4'd0, C};
-  qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
-endmodule
-module lec_kara_r3_gate (input wire [63:0] im_m, im_a, im_b, z3, output wire [63:0] r);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cm=(im_m>=P)?im_m-P:im_m, ca=(im_a>=P)?im_a-P:im_a, cb=(im_b>=P)?im_b-P:im_b, cz=(z3>=P)?z3-P:z3;
-  qsag_ext4_kara_r3 u (.im_m(cm), .im_a(ca), .im_b(cb), .z3(cz), .r(r));
-endmodule
-module lec_kara_r3_mut (input wire [63:0] im_m, im_a, im_b, z3, output wire [63:0] r);
-  wire [63:0] g;
-  lec_kara_r3_gate u (.*, .r(g));
-  assign r = g ^ 64'd1;
-endmodule
-
-// ============================================================================
 // 3. Poseidon2 `csa3`, `csa4`, `M_4` Lane, `M_E` Col Lane, `sum4`, `M_I` Lanes 0..11, & Canopy FF
 // ============================================================================
 module lec_csa3_gold (input wire [63:0] a0, a1, a2, output wire [66:0] sum);
@@ -496,7 +344,7 @@ module lec_csa3_gold (input wire [63:0] a0, a1, a2, output wire [66:0] sum);
 endmodule
 module lec_csa3_gate (input wire [63:0] a0, a1, a2, output wire [66:0] sum);
   wire [65:0] sx, sy;
-  qsag_gl64_csa3 u (.a0(a0), .a1(a1), .a2(a2), .sx(sx), .sy(sy));
+  qsag_gl_csa3_66 u (.a0(a0), .a1(a1), .a2(a2), .sx(sx), .sy(sy));
   assign sum = {1'b0, sx} + {1'b0, sy};
 endmodule
 module lec_csa3_mut (input wire [63:0] a0, a1, a2, output wire [66:0] sum);
@@ -510,7 +358,7 @@ module lec_csa4_gold (input wire [63:0] a0, a1, a2, a3, output wire [66:0] sum);
 endmodule
 module lec_csa4_gate (input wire [63:0] a0, a1, a2, a3, output wire [66:0] sum);
   wire [65:0] sx, sy;
-  qsag_gl64_csa4 u (.a0(a0), .a1(a1), .a2(a2), .a3(a3), .sx(sx), .sy(sy));
+  qsag_gl_csa4_66 u (.a0(a0), .a1(a1), .a2(a2), .a3(a3), .sx(sx), .sy(sy));
   assign sum = {1'b0, sx} + {1'b0, sy};
 endmodule
 module lec_csa4_mut (input wire [63:0] a0, a1, a2, a3, output wire [66:0] sum);
@@ -558,7 +406,7 @@ module lec_sum4_csa_gold (input wire [65:0] sx0, sy0, sx1, sy1, output wire [63:
   qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
 endmodule
 module lec_sum4_csa_gate (input wire [65:0] sx0, sy0, sx1, sy1, output wire [63:0] r);
-  qsag_gl64_sum4_csa u (.sx0(sx0), .sy0(sy0), .sx1(sx1), .sy1(sy1), .r(r));
+  qsag_p2_sum4_csa u (.sx0(sx0), .sy0(sy0), .sx1(sx1), .sy1(sy1), .r(r));
 endmodule
 module lec_sum4_csa_mut (input wire [65:0] sx0, sy0, sx1, sy1, output wire [63:0] r);
   wire [63:0] g;
@@ -589,18 +437,7 @@ module lec_mi_lane_gate #(parameter int LANE = 0) (
 );
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
   wire [63:0] cx0=(x0>=P)?x0-P:x0, cxl=(xl>=P)?xl-P:xl, cst=(s_tail>=P)?s_tail-P:s_tail, crc=(rcl>=P)?rcl-P:rcl;
-  if      (LANE == 0)  begin : g0  qsag_p2_mi_lane0  u (.x0(cx0), .s_tail(cst), .rcl(crc), .y(y)); wire u_ok = ^cxl; end
-  else if (LANE == 1)  begin : g1  qsag_p2_mi_lane1  u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else if (LANE == 2)  begin : g2  qsag_p2_mi_lane2  u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else if (LANE == 3)  begin : g3  qsag_p2_mi_lane3  u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else if (LANE == 4)  begin : g4  qsag_p2_mi_lane4  u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else if (LANE == 5)  begin : g5  qsag_p2_mi_lane5  u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else if (LANE == 6)  begin : g6  qsag_p2_mi_lane6  u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else if (LANE == 7)  begin : g7  qsag_p2_mi_lane7  u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else if (LANE == 8)  begin : g8  qsag_p2_mi_lane8  u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else if (LANE == 9)  begin : g9  qsag_p2_mi_lane9  u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else if (LANE == 10) begin : g10 qsag_p2_mi_lane10 u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
-  else                 begin : g11 qsag_p2_mi_lane11 u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
+  qsag_p2_mi_lane #(.LANE(LANE)) lane (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y);
 endmodule
 module lec_mi_lane_mut #(parameter int LANE = 0) (
   input wire [63:0] x0, xl, s_tail, rcl,
@@ -620,7 +457,9 @@ endmodule
 module lec_canopy_ff_gate (input wire [63:0] l, r, c, output wire [63:0] ff);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
   wire [63:0] cl=(l>=P)?l-P:l, cr=(r>=P)?r-P:r, cc=(c>=P)?c-P:c;
-  qsag_p2_canopy_ff_lane u (.l(cl), .r(cr), .c(cc), .ff(ff));
+  wire [255:0] result;
+  qsag_p2_canopy_ff u (.x({192'd0,cc,192'd0,cr,192'd0,cl}), .ff(result));
+  assign ff = result[63:0];
 endmodule
 module lec_canopy_ff_mut (input wire [63:0] l, r, c, output wire [63:0] ff);
   wire [63:0] g;

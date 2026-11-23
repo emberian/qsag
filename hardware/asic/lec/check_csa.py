@@ -131,18 +131,12 @@ def main(root):
         "qsag_gl64_sk_m0": (["m0x", "m0y"], words(d0x_w66=1, d0y_w66=1, e1x_w66=1, e1y_w66=1), 0),
         "qsag_gl64_sk_m1": (["m1x", "m1y"], words(m0x_w68=1, m0y_w68=1, e2x_w66=1, e2y_w66=1), 0),
         "qsag_gl64_sk_s2": (["rx", "ry"], {"1": 6, **words(bx_w69=1, by_w69=1)}, P),
-        "qsag_gl64_csa3": (["sx", "sy"], words(a0=1, a1=1, a2=1), 0),
-        "qsag_gl64_csa4": (["sx", "sy"], words(a0=1, a1=1, a2=1, a3=1), 0),
-        "qsag_fp2_kara_re": (["o_x", "o_y"], words(m0=1, m1=7), P),
-        "qsag_fp2_kara_im": (["o_x", "o_y"], words(m2=1, m0=-1, m1=-1), P),
-        "qsag_ext4_kara_r0": (["o_x", "o_y"], words(re_a=1, im_b=7, z0=1), P),
-        "qsag_ext4_kara_r1": (["o_x", "o_y"], words(im_a=1, re_b=1, z1=1), P),
-        "qsag_ext4_kara_r2": (["o_x", "o_y"], words(re_m=1, re_a=-1, re_b=-1, z2=1), P),
-        "qsag_ext4_kara_r3": (["o_x", "o_y"], words(im_m=1, im_a=-1, im_b=-1, z3=1), P),
+        "qsag_gl_csa3_66": (["sx", "sy"], words(a0=1, a1=1, a2=1), 0),
+        "qsag_gl_csa4_66": (["sx", "sy"], words(a0=1, a1=1, a2=1, a3=1), 0),
         "qsag_p2_m4_lane": (["o_x", "o_y"], words(sx_w66=1, sy_w66=1, bi=1, bj=2), P),
         "qsag_p2_me_col_lane": (["o_x", "o_y"], words(sx_w66=1, sy_w66=1, yb=1, rcb=1), P),
-        "qsag_gl64_sum4_csa": (["o_x", "o_y"], words(sx0_w66=1, sy0_w66=1, sx1_w66=1, sy1_w66=1), P),
-        "qsag_p2_canopy_ff_lane": (["o_x", "o_y"], words(l=1, r=2, c=4), P),
+        "qsag_p2_sum4_csa": (["o_x", "o_y"], words(sx0_w66=1, sy0_w66=1, sx1_w66=1, sy1_w66=1), P),
+        "qsag_p2_canopy_ff": (["o_x", "o_y"], words(l=1, r=2, c=4), P),
     }
     for l in range(12):
         if l == 0:
@@ -151,13 +145,19 @@ def main(root):
             specs[f"qsag_p2_mi_lane{l}"] = (["o_x", "o_y"], words(s_tail=1, rcl=1, x0=1, xl=1 << (l - 1)), P)
 
     seen = set()
-    for fname in ["qsag_asic_gl64_csa_gen.sv", "qsag_asic_ext4_p2_gen.sv"]:
+    for fname in ["qsag_asic_gl64_csa_gen.sv", "qsag_asic_p2_gen.sv"]:
         source = (root / "rtl" / fname).read_text()
-        for name, body in re.findall(r"module (\w+)\s*\((.*?)endmodule", source, re.S):
+        bodies = re.findall(r"module (\w+)\s*\((.*?)endmodule", source, re.S)
+        for lane, body in re.findall(r"if \(LANE == (\d+)\) begin : g_lane\d+\n(.*?)\n  end", source, re.S):
+            bodies.append((f"qsag_p2_mi_lane{lane}", body.replace("    wire unused_xl = ^xl;", "")))
+        for name, body in bodies:
             if name not in specs:
                 continue
             rows, want, mod_v = specs[name]
-            c = Circuit(body)
+            arithmetic = body
+            if name == "qsag_p2_canopy_ff":
+                arithmetic = body.split("wire [63:0] result;", 1)[1]
+            c = Circuit(arithmetic)
             c.prove(rows, want, mod=mod_v)
             seen.add(name)
             out.append({
