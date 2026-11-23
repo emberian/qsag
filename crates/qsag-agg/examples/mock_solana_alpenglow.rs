@@ -1,79 +1,22 @@
-//! Solana Alpenglow (`Rotor` + `Votor`) Consensus Benchmark (`N = 1,500` Stake-Weighted Validators).
-//!
-//! Benchmarks single-key validator notarization/finalization voting and `Hem` finality-checkpoint
-//! compression across realistic Solana Alpenglow consensus parameters (zero threshold-DVT cosplay):
-//! 1. **Section 1 — `Rotor` / `Votor` Notarization & Finalization Vote Matrix (`N = 1,500`)**:
-//!    - `80%` stake (`1,200` votes): 1-round fast finalization (`150.0 ms` slot budget).
-//!    - `60%` stake (`900` votes): 2-round slow finalization (`400.0 ms` slot budget).
-//!    - Comparison of 32-byte-node `Compact1122` and `Full256Bit` profiles.
-//!      The full-width single-datagram `Compact1122` (`1,122 B` + `96 B` vote
-//!      header = `1,218 B`, which fits the `1,232 B` IPv6 / Agave `PACKET_DATA_SIZE` payload but
-//!      not the `1,200 B` RFC 9000 floor), the forward-secret `RotatedEpochVote` envelope over
-//!      `Compact1122` (`1,194 B`), `Full256Bit` (`2,338 B`), `JortsPoseidon2` (`4,328 B`,
-//!      `Hem`-aggregatable), and reference `FIPS 204 ML-DSA-44` (`2,420 B`, NIST Cat-2).
-//!    - Durable vote signing through `FsWalFtsEpochLatch` (journal record + `fsync` before the
-//!      signature is released) next to an in-memory WAL; the journal directory (`QSAG_WAL_DIR`,
-//!      default the system temp dir) is reported with its filesystem type.
-//!    - `Votor` all-to-all vote broadcast and `Rotor` erasure-coded slice relay bandwidth model
-//!      (`QSAG_ROTOR_SHREDS`, `QSAG_ROTOR_DATA_SHREDS`).
-//! 2. **Section 2 — `Hem` Finality Certificates (`BciksJohnsonQrom128`)**:
-//!    - Full-density `K = 128` single shard (`max_shard_signers(JortsPoseidon2) = 128`), warm
-//!      prover latency as one distributed shard aggregator would see it,
-//!    - The full `1,200`-validator 80% fast-finality committee by default (`9 x 128 + 48`,
-//!      `M = 10` shards; `QSAG_ALPENGLOW_SHARDS=n` selects `n x 128` instead): jointly-batched
-//!      `HemAggregatedProof`, `HierarchicalHemAggregate`, and the `M = 10` succinct outer
-//!      compression with its verification latency,
-//!    - Unconditional Johnson-radius QROM (`BciksJohnsonQrom128`) only; refuted capacity-proximity
-//!      conjectures (`[CS25]`, `[KKH26]`) are purged.
-//!    - `QSAG_ALPENGLOW_FULL_COMMITTEE=1` gives every compact FTS profile 1,500 distinct key trees;
-//!      `QSAG_ALPENGLOW_JOINT_WORKERS=n` bounds CPU workers; `QSAG_PROVER_JOBS` bounds active batches.
-//!      `QSAG_ALPENGLOW_SHARDS_PER_BATCH` (default2) bounds each joint opening's shard count.
-//!    - `QSAG_ALPENGLOW_SECTIONS=1`, `=2` or `=1,2` (default) selects the sections to run.
+//! Solana Alpenglow (`Rotor` + `Votor`) Consensus Benchmark over `[DKT26]` `< 2^{-128}` QROM
+//! Quintic `Fp5` (`QSAGHQM2` / `QSAGHEM\x04`) and `Compact1122` / `Full256Bit` Frontier FTS.
 
-use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use qsag_accel::CpuReferenceBackend;
 use qsag_agg::{
-    AggSigProfile, DEFAULT_MAX_SHARD_SIGNERS_JORTS, EpochWalSink, HemAggConfig,
-    HierarchicalHemAggregate, PreparedPolicyRegistry, ShardHemPolicy, ShardHemWitness, SigError,
-    SignerBitmap, SigningMode, SuccinctHierarchicalHemAggregate, ValidatorKeypair,
-    ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime, aggregate_signatures_with_config,
-    compress_hierarchical_hem_evidence, compute_policy_registry_root, hierarchical_hem_message,
-    prove_hierarchical_hem_prepared, verify_aggregate_with_regime, verify_hierarchical_hem,
-    verify_hierarchical_hem_evidence_prepared, verify_hierarchical_hem_prepared,
-    verify_individual_signature, verify_succinct_hierarchical_hem_prepared, with_worker_limit,
+    AggSigProfile, EpochWalSink, HemQuinticProfile, HierarchicalHemAggregate,
+    PreparedPolicyRegistry, ShardHemPolicy, ShardHemWitness, SigError, SignerBitmap, SigningMode,
+    ValidatorKeypair, ValidatorSignature, hierarchical_hem_message, prove_hem_quintic_128,
+    prove_hierarchical_hem_prepared, verify_hem_quintic_128, verify_hierarchical_hem_prepared,
+    with_worker_limit,
 };
 use qsag_fts::{
-    EpochKeyLink, FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
-    FrontierFtsSignature, FrontierFtsSigningKey, FrontierVerifyInput, FsWalFtsEpochLatch,
-    FtsEpochWal, RotatedEpochVerifyInput, RotatedEpochVote, verify_frontier_fts,
-    verify_frontier_fts_batch, verify_rotated_epoch_votes_batch,
+    FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsSigningKey,
+    FrontierVerifyInput, FtsEpochWal, verify_frontier_fts_batch,
 };
 
-const ALPENGLOW_VALIDATORS: usize = 1_500;
-const FAST_QUORUM_80PCT: usize = 1_200; // 80% 1-round fast finalization
-const SLOW_QUORUM_60PCT: usize = 900; // 60% 2-round slow finalization
-const FAST_BUDGET_MS: f64 = 150.0;
-const SLOW_BUDGET_MS: f64 = 400.0;
-
-/// Votor vote metadata + QUIC short-header / AEAD tag (`slot + block_id + validator_id + flags + AEAD`).
-const VOTOR_HEADER_BYTES: usize = 96;
-/// RFC 9000 §14.1 minimum QUIC UDP payload ceiling (`1,200 B`).
-const QUIC_PAYLOAD_MTU_BYTES: usize = 1_200;
-/// IPv6 minimum-MTU UDP payload (`1,280 - 40 - 8`), Agave `PACKET_DATA_SIZE` (`1,232 B`).
-const IPV6_PAYLOAD_BYTES: usize = 1_232;
-/// Chain identifier and key epoch bound into every `RotatedEpochVote`.
-const ROTATION_CHAIN_ID: [u8; 32] = *b"solana.alpenglow.mainnet.votor.0";
-const ROTATION_EPOCH: u64 = 731;
-/// FIPS 204 ML-DSA-44 reference sizes (`sig = 2,420 B`, `pk = 1,312 B`).
-const ML_DSA_44_SIG_BYTES: usize = 2_420;
-const ML_DSA_44_PK_BYTES: usize = 1_312;
-
-/// Nominal 4.0 GHz reference clock for cycle estimation & Solana Agave/Firedancer CU calibration
-/// (`Ed25519` precompile = `2,280 CU` at ~`35 us` single-core -> ~`65 CU/us`).
-const NOMINAL_GHZ: f64 = 4.0;
-const SOLANA_CU_PER_US: f64 = 65.0;
+type EpochReceipt = (u32, u32, [u8; 32]);
 
 #[derive(Default)]
 struct MemFtsWal {
@@ -105,18 +48,13 @@ impl FtsEpochWal for MemFtsWal {
     }
 }
 
-type EpochReceipt = (u32, u32, [u8; 32]);
-
 #[derive(Default)]
 struct MemEpochWal {
     state: Option<([u8; 32], EpochReceipt)>,
 }
 
 impl EpochWalSink for MemEpochWal {
-    fn recovered_state(
-        &self,
-        pk_root: &[u8; 32],
-    ) -> Result<Option<(u32, u32, [u8; 32])>, SigError> {
+    fn recovered_state(&self, pk_root: &[u8; 32]) -> Result<Option<EpochReceipt>, SigError> {
         match &self.state {
             None => Ok(None),
             Some((root, st)) if root == pk_root => Ok(Some(*st)),
@@ -146,7 +84,7 @@ fn seed32(tag: u8, idx: u32) -> [u8; 32] {
     out[0] = tag;
     out[1..5].copy_from_slice(&idx.to_le_bytes());
     for (i, b) in out[5..].iter_mut().enumerate() {
-        *b = tag
+        *out_b(b) = tag
             .wrapping_mul(37)
             .wrapping_add((idx as u8).wrapping_mul(13))
             .wrapping_add(i as u8);
@@ -154,1480 +92,187 @@ fn seed32(tag: u8, idx: u32) -> [u8; 32] {
     out
 }
 
-fn votor_vote_payload(validator_idx: usize) -> [u8; 72] {
-    let mut msg = [0u8; 72];
-    msg[0..32].copy_from_slice(b"solana.alpenglow.votor.notarize.");
-    msg[32..40].copy_from_slice(&42_000_000u64.to_le_bytes());
-    msg[40..44].copy_from_slice(&(validator_idx as u32).to_le_bytes());
-    msg[44..72].copy_from_slice(b"blk_9f8e7d6c5b4a3210fedcba98");
-    msg
-}
-
-fn percentile_sorted(sorted: &[f64], num: usize, den: usize) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let idx = ((sorted.len() - 1) * num).div_ceil(den);
-    sorted[idx.min(sorted.len() - 1)]
-}
-
-fn peak_rss_mib() -> Option<f64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmHWM:") {
-            let kib: f64 = rest.split_whitespace().next()?.parse().ok()?;
-            return Some(kib / 1024.0);
-        }
-    }
-    None
-}
-
 #[inline]
-const fn packets_for_sig(sig_bytes: usize, payload_bytes: usize) -> usize {
-    (sig_bytes + VOTOR_HEADER_BYTES).div_ceil(payload_bytes)
+fn out_b(b: &mut u8) -> &mut u8 {
+    b
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(default)
-}
-
-/// Filesystem type of the mount holding `path` (longest `/proc/self/mounts` prefix), if known.
-fn mount_fstype(path: &Path) -> Option<String> {
-    let canon = std::fs::canonicalize(path).ok()?;
-    let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
-    let mut best: Option<(usize, String)> = None;
-    for line in mounts.lines() {
-        let mut fields = line.split_whitespace();
-        let (Some(_src), Some(mnt), Some(fstype)) = (fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        let mnt = mnt.replace("\\040", " ");
-        if canon.starts_with(&mnt) && best.as_ref().is_none_or(|(len, _)| mnt.len() > *len) {
-            best = Some((mnt.len(), fstype.to_string()));
-        }
-    }
-    best.map(|(_, t)| t)
-}
-
-fn wal_root_dir() -> PathBuf {
-    std::env::var_os("QSAG_WAL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-}
-
-#[inline]
-fn ingress_mb(num_votes: usize, sig_bytes: usize) -> f64 {
-    (num_votes * (sig_bytes + VOTOR_HEADER_BYTES)) as f64 / 1_000_000.0
-}
-
-struct VoteBenchRow {
-    name: &'static str,
-    security_note: &'static str,
-    sig_bytes: usize,
-    pk_bytes: usize,
-    warm_sign_us: f64,
-    durable_sign_us: Option<(f64, f64)>,
-    verify_1core_us: f64,
-    batch900_p50_ms: f64,
-    batch900_p99_ms: f64,
-    batch1200_p50_ms: f64,
-    batch1200_p99_ms: f64,
-}
-
-/// Wire form of one benchmarked FTS vote.
-enum FtsVoteEnvelope {
-    /// Profile signature over the 72-byte `Votor` payload.
-    Plain {
-        msg: [u8; 72],
-        sig: FrontierFtsSignature,
-    },
-    /// `RotatedEpochVote` binding the vote digest and the validator's next epoch key root.
-    Rotated {
-        vote: RotatedEpochVote,
-        expected_digest: [u8; 32],
-        next_root: [u8; 32],
-    },
-}
-
-struct FtsVote {
-    pk: FrontierFtsPublicKey,
-    env: FtsVoteEnvelope,
-}
-
-fn verify_fts_vote(v: &FtsVote, dp: &FrontierDpTable) -> bool {
-    match &v.env {
-        FtsVoteEnvelope::Plain { msg, sig } => verify_frontier_fts(&v.pk, dp, msg, sig).is_ok(),
-        FtsVoteEnvelope::Rotated {
-            vote,
-            expected_digest,
-            next_root,
-        } => vote
-            .verify(
-                &v.pk,
-                dp,
-                &ROTATION_CHAIN_ID,
-                ROTATION_EPOCH,
-                expected_digest,
-            )
-            .is_ok_and(|next| next.root.as_slice() == next_root),
-    }
-}
-
-// Independent eight-lane hash work within each CPU worker; retains every vote's context
-// and the rotated envelope's expected next-key-root comparison.
-fn verify_fts_votes_batch(votes: &[&FtsVote], dp: &FrontierDpTable) -> bool {
-    let mut plain = Vec::new();
-    let mut rotated = Vec::new();
-    let mut next_roots = Vec::new();
-    for v in votes {
-        match &v.env {
-            FtsVoteEnvelope::Plain { msg, sig } => plain.push(FrontierVerifyInput {
-                pk: &v.pk,
-                dp,
-                message: msg,
-                signature: sig,
-            }),
-            FtsVoteEnvelope::Rotated {
-                vote,
-                expected_digest,
-                next_root,
-            } => {
-                rotated.push(RotatedEpochVerifyInput {
-                    current: &v.pk,
-                    dp,
-                    vote,
-                    chain_id: &ROTATION_CHAIN_ID,
-                    expected_epoch: ROTATION_EPOCH,
-                    expected_vote_digest: expected_digest,
-                });
-                next_roots.push(next_root);
-            }
-        }
-    }
-    verify_frontier_fts_batch(&plain).iter().all(Result::is_ok)
-        && verify_rotated_epoch_votes_batch(&rotated)
-            .into_iter()
-            .zip(next_roots)
-            .all(|(result, root)| result.is_ok_and(|next| next.root.as_slice() == root))
-}
-
-/// Keys for one validator: the current signing key and, for rotated votes, its next epoch key
-/// (same public profile and `pk_seed`, independent secret seeds).
-fn fts_keygen(
-    profile: FrontierFtsProfile,
-    tag: u8,
-    idx: u32,
-    rotated: bool,
-    accel: &CpuReferenceBackend,
-) -> (FrontierFtsSigningKey, Option<[u8; 32]>) {
-    let pk_seed = seed32(tag.wrapping_add(2), idx);
-    let sk = FrontierFtsSigningKey::keygen(
-        profile,
-        seed32(tag, idx),
-        seed32(tag.wrapping_add(1), idx),
-        pk_seed,
-        true,
-        accel,
-    );
-    let next_root = rotated.then(|| {
-        let next = FrontierFtsSigningKey::keygen(
-            profile,
-            seed32(tag.wrapping_add(3), idx),
-            seed32(tag.wrapping_add(4), idx),
-            pk_seed,
-            true,
-            accel,
-        );
-        next.pk
-            .root
-            .as_slice()
-            .try_into()
-            .expect("32-byte next root")
-    });
-    (sk, next_root)
-}
-
-fn sign_fts_vote(
-    sk: &mut FrontierFtsSigningKey,
-    dp: &FrontierDpTable,
-    next_root: Option<[u8; 32]>,
-    v_idx: usize,
-    nonce: &[u8; 32],
-) -> FtsVoteEnvelope {
-    match next_root {
-        None => {
-            let msg = votor_vote_payload(v_idx);
-            let sig = sk.sign(dp, &msg, nonce).expect("FTS vote sign");
-            FtsVoteEnvelope::Plain { msg, sig }
-        }
-        Some(next_root) => {
-            // The vote digest is the 32-byte block id the validator votes for.
-            let digest = seed32(0x7D, v_idx as u32);
-            let link = EpochKeyLink {
-                epoch: ROTATION_EPOCH,
-                next_epoch_pk_root: next_root,
-            };
-            let vote = sk
-                .sign_rotated_epoch_vote(dp, &ROTATION_CHAIN_ID, link, digest, nonce)
-                .expect("rotated epoch vote sign");
-            FtsVoteEnvelope::Rotated {
-                vote,
-                expected_digest: digest,
-                next_root,
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn bench_fts_rotor_profile(
-    name: &'static str,
-    security_note: &'static str,
-    profile: FrontierFtsProfile,
-    rotated: bool,
-    full_distinct_trees: bool,
-    workers: usize,
-    batch_iters: usize,
-    durable_samples: usize,
-) -> VoteBenchRow {
+fn run_votor_fts_section(votes: usize) {
+    let profile = FrontierFtsProfile::Compact1122;
     let dp = FrontierDpTable::build(profile);
-    let max_uses = if rotated {
-        1
-    } else {
-        profile.params().max_safe_uses as usize
-    };
-    // Generate genuinely distinct cryptographic votes across `N = 1,500` validator indices while
-    // dropping secret chain caches immediately so peak RSS stays bounded.
-    let base_trees = if full_distinct_trees {
-        ALPENGLOW_VALIDATORS.div_ceil(max_uses)
-    } else {
-        256
-    };
-
-    let chunk = base_trees.div_ceil(workers);
-    let pool: Vec<Vec<FtsVote>> = std::thread::scope(|scope| {
-        let dp_ref = &dp;
-        let handles: Vec<_> = (0..workers)
-            .filter_map(|w_idx| {
-                let start = w_idx * chunk;
-                (start < base_trees).then(|| {
-                    let end = (start + chunk).min(base_trees);
-                    scope.spawn(move || {
-                        let accel = CpuReferenceBackend::new();
-                        let mut out = Vec::with_capacity(end - start);
-                        for t_idx in start..end {
-                            let u = t_idx as u32;
-                            let (sk, next_root) = fts_keygen(profile, 0xA1, u, rotated, &accel);
-                            let mut sk = sk
-                                .attach_wal(Box::new(MemFtsWal::default()))
-                                .expect("attach in-memory FTS WAL");
-                            let mut signed = Vec::with_capacity(max_uses);
-                            for use_slot in 0..max_uses {
-                                let env = sign_fts_vote(
-                                    &mut sk,
-                                    dp_ref,
-                                    next_root,
-                                    t_idx * max_uses + use_slot,
-                                    &seed32(0xD4u8.wrapping_add(use_slot as u8), u),
-                                );
-                                signed.push(FtsVote {
-                                    pk: sk.pk.clone(),
-                                    env,
-                                });
-                            }
-                            drop(sk);
-                            out.push(signed);
-                        }
-                        out
-                    })
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("FTS setup worker panicked"))
-            .collect()
-    });
-
-    let votes: Vec<&FtsVote> = (0..ALPENGLOW_VALIDATORS)
-        .map(|v_idx| {
-            let signed = &pool[v_idx % pool.len()];
-            &signed[(v_idx / pool.len()) % signed.len()]
-        })
-        .collect();
-    let sig_bytes = match &votes[0].env {
-        FtsVoteEnvelope::Plain { sig, .. } => {
-            let bytes = sig.to_bytes(profile);
-            assert_eq!(bytes.len(), profile.signature_bytes());
-            bytes.len()
-        }
-        FtsVoteEnvelope::Rotated { vote, .. } => {
-            let bytes = vote.to_bytes(profile);
-            assert_eq!(bytes.len(), 72 + profile.signature_bytes());
-            assert_eq!(
-                RotatedEpochVote::from_bytes(profile, &bytes).as_ref(),
-                Ok(vote),
-                "rotated envelope wire roundtrip"
-            );
-            bytes.len()
-        }
-    };
-    let pk_bytes = 32 + votes[0].pk.root.len();
-
-    // Warm cached-tree signing latency with an in-memory WAL (fresh key per sample).
-    let accel = CpuReferenceBackend::new();
-    let mut sign_samples_us = Vec::with_capacity(9);
-    for sample_idx in 0..9u32 {
-        let (sk, next_root) = fts_keygen(profile, 0xE1, 9_000 + sample_idx, rotated, &accel);
-        let mut sk = sk
-            .attach_wal(Box::new(MemFtsWal::default()))
-            .expect("attach warm WAL");
-        let nonce = seed32(0xE6, 9_000 + sample_idx);
-        let t0 = Instant::now();
-        let env = sign_fts_vote(&mut sk, &dp, next_root, 99_999, &nonce);
-        sign_samples_us.push(t0.elapsed().as_secs_f64() * 1_000_000.0);
-        let vote = FtsVote {
-            pk: sk.pk.clone(),
-            env,
-        };
-        assert!(verify_fts_vote(&vote, &dp), "warm FTS vote must verify");
-    }
-    sign_samples_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let warm_sign_us = sign_samples_us[sign_samples_us.len() / 2];
-
-    // Durable signing: each sample enrolls a fresh key in its own `FsWalFtsEpochLatch` journal,
-    // and the timed `sign` includes the journal append and `fsync` that precede the signature.
-    let durable_sign_us = (durable_samples > 0).then(|| {
-        let run_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock")
-            .as_nanos();
-        let wal_dir = wal_root_dir().join(format!(
-            "qsag-alpenglow-fts-{}-{run_id}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&wal_dir).expect("create FTS journal dir");
-        let mut samples = Vec::with_capacity(durable_samples);
-        for i in 0..durable_samples as u32 {
-            let (sk, next_root) = fts_keygen(profile, 0xF1, 7_000 + i, rotated, &accel);
-            let wal = FsWalFtsEpochLatch::create(
-                wal_dir.join(format!("validator-{i}.wal")),
-                sk.wal_key(),
-                seed32(0xF7, 7_000 + i),
+    let backend = CpuReferenceBackend;
+    let mut sks: Vec<FrontierFtsSigningKey> = (0..votes as u32)
+        .map(|i| {
+            FrontierFtsSigningKey::keygen(
+                profile,
+                seed32(0x11, i),
+                seed32(0x12, i),
+                seed32(0x13, i),
+                true,
+                &backend,
             )
-            .expect("create durable FTS WAL");
-            let mut sk = sk
-                .attach_wal(Box::new(wal))
-                .expect("attach durable FTS WAL");
-            let nonce = seed32(0xF8, 7_000 + i);
-            let t0 = Instant::now();
-            let env = sign_fts_vote(&mut sk, &dp, next_root, 88_888, &nonce);
-            samples.push(t0.elapsed().as_secs_f64() * 1_000_000.0);
-            let vote = FtsVote {
-                pk: sk.pk.clone(),
-                env,
-            };
-            assert!(verify_fts_vote(&vote, &dp), "durable FTS vote must verify");
-        }
-        std::fs::remove_dir_all(&wal_dir).expect("remove FTS journal dir");
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        (
-            percentile_sorted(&samples, 50, 100),
-            percentile_sorted(&samples, 99, 100),
-        )
-    });
-
-    // Single-core per-vote verification latency across 256 votes.
-    let single_count = 256.min(votes.len());
-    let t_1c = Instant::now();
-    for v in &votes[..single_count] {
-        assert!(verify_fts_vote(v, &dp), "single-core FTS vote verify");
-    }
-    let verify_1core_us = (t_1c.elapsed().as_secs_f64() * 1_000_000.0) / (single_count as f64);
-
-    // Same vote work, scalar comparison or eight-lane hashing within each CPU worker.
-    let scalar_batches = std::env::var("QSAG_ALPENGLOW_SCALAR_VERIFY")
-        .ok()
-        .as_deref()
-        == Some("1");
-    println!(
-        "    vote verification batches: {}",
-        if scalar_batches {
-            "scalar reference"
-        } else {
-            "eight-lane multibuffer"
-        }
-    );
-    let measure_batch = |count: usize| -> (f64, f64) {
-        let slice = &votes[..count];
-        let per_worker = count.div_ceil(workers);
-        let mut samples = Vec::with_capacity(batch_iters);
-        for _ in 0..batch_iters {
-            let t0 = Instant::now();
-            std::thread::scope(|scope| {
-                let dp_ref = &dp;
-                for batch in slice.chunks(per_worker) {
-                    scope.spawn(move || {
-                        let valid = if scalar_batches {
-                            batch.iter().all(|v| verify_fts_vote(v, dp_ref))
-                        } else {
-                            verify_fts_votes_batch(batch, dp_ref)
-                        };
-                        assert!(valid, "FTS notarization votes must verify");
-                    });
-                }
-            });
-            samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
-        }
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        (
-            percentile_sorted(&samples, 50, 100),
-            percentile_sorted(&samples, 99, 100),
-        )
-    };
-    let (batch900_p50_ms, batch900_p99_ms) = measure_batch(SLOW_QUORUM_60PCT);
-    let (batch1200_p50_ms, batch1200_p99_ms) = measure_batch(FAST_QUORUM_80PCT);
-
-    VoteBenchRow {
-        name,
-        security_note,
-        sig_bytes,
-        pk_bytes,
-        warm_sign_us,
-        durable_sign_us,
-        verify_1core_us,
-        batch900_p50_ms,
-        batch900_p99_ms,
-        batch1200_p50_ms,
-        batch1200_p99_ms,
-    }
-}
-
-fn build_jorts_committee_and_bench_rotor(
-    committee_keys: usize,
-    workers: usize,
-    batch_iters: usize,
-) -> (Vec<(ValidatorKeypair, MemEpochWal)>, VoteBenchRow) {
-    let master_seed = seed32(0x99, 42);
-    let chunk = committee_keys.div_ceil(workers);
-    let mut validators: Vec<(ValidatorKeypair, MemEpochWal)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .filter_map(|w_idx| {
-                let start = w_idx * chunk;
-                (start < committee_keys).then(|| {
-                    let end = (start + chunk).min(committee_keys);
-                    scope.spawn(move || {
-                        let mut out = Vec::with_capacity(end - start);
-                        for idx in start..end {
-                            let kp = ValidatorKeypair::keygen_deterministic(
-                                AggSigProfile::JortsPoseidon2,
-                                &master_seed,
-                                idx as u32,
-                            );
-                            out.push((kp, MemEpochWal::default()));
-                        }
-                        out
-                    })
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("Jorts keygen worker panicked"))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
-            .collect()
-    });
-
-    // Sign `ALPENGLOW_VALIDATORS = 1,500` distinct slot votes across distinct XMSS leaves (`0..3`).
-    type SignedJortsEntry = (ValidatorPublicKey, Vec<([u8; 72], ValidatorSignature)>);
-    let epochs_needed = ALPENGLOW_VALIDATORS.div_ceil(validators.len());
-    let signed_per_validator: Vec<SignedJortsEntry> = std::thread::scope(|scope| {
-        let per_worker = validators.len().div_ceil(workers);
-        let handles: Vec<_> = validators
-            .chunks_mut(per_worker)
-            .enumerate()
-            .map(|(c_idx, sub)| {
-                let base = c_idx * per_worker;
-                scope.spawn(move || {
-                    let mut out = Vec::with_capacity(sub.len());
-                    for (local_i, (kp, wal)) in sub.iter_mut().enumerate() {
-                        let val_i = base + local_i;
-                        let mut slot_sigs = Vec::with_capacity(epochs_needed);
-                        for ep in 0..epochs_needed {
-                            let vote_idx = ep * committee_keys + val_i;
-                            let msg = votor_vote_payload(vote_idx);
-                            let sig = kp
-                                .sign_stateful(&msg, ep as u32, wal)
-                                .expect("Jorts Votor vote sign");
-                            slot_sigs.push((msg, sig));
-                        }
-                        out.push((kp.pk, slot_sigs));
-                    }
-                    out
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("Jorts vote sign panicked"))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
-            .collect()
-    });
-
-    let mut votes: Vec<(ValidatorPublicKey, [u8; 72], ValidatorSignature)> =
-        Vec::with_capacity(ALPENGLOW_VALIDATORS);
-    for v_idx in 0..ALPENGLOW_VALIDATORS {
-        let k_idx = v_idx % signed_per_validator.len();
-        let ep_idx = v_idx / signed_per_validator.len();
-        let (pk, list) = &signed_per_validator[k_idx];
-        let (msg, sig) = &list[ep_idx];
-        votes.push((*pk, *msg, sig.clone()));
-    }
-
-    // Warm single-validator stateful sign latency at epoch `epochs_needed`.
-    let warm_epoch = epochs_needed as u32;
-    let mut sign_samples_us = Vec::with_capacity(9);
-    for (i, (kp, wal)) in validators.iter_mut().take(9).enumerate() {
-        let msg = votor_vote_payload(50_000 + i);
-        let t0 = Instant::now();
-        let sig = kp
-            .sign_stateful(&msg, warm_epoch, wal)
-            .expect("warm Jorts sign");
-        sign_samples_us.push(t0.elapsed().as_secs_f64() * 1_000_000.0);
-        assert!(verify_individual_signature(&kp.pk, &msg, &sig));
-    }
-    sign_samples_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let warm_sign_us = sign_samples_us[sign_samples_us.len() / 2];
-
-    let single_count = 256.min(votes.len());
-    let t_1c = Instant::now();
-    for (pk, msg, sig) in &votes[..single_count] {
-        assert!(verify_individual_signature(pk, msg, sig));
-    }
-    let verify_1core_us = (t_1c.elapsed().as_secs_f64() * 1_000_000.0) / (single_count as f64);
-
-    let measure_batch = |count: usize| -> (f64, f64) {
-        let slice = &votes[..count];
-        let per_worker = count.div_ceil(workers);
-        let mut samples = Vec::with_capacity(batch_iters);
-        for _ in 0..batch_iters {
-            let t0 = Instant::now();
-            std::thread::scope(|scope| {
-                for batch in slice.chunks(per_worker) {
-                    scope.spawn(move || {
-                        for (pk, msg, sig) in batch {
-                            assert!(verify_individual_signature(pk, msg, sig));
-                        }
-                    });
-                }
-            });
-            samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
-        }
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        (
-            percentile_sorted(&samples, 50, 100),
-            percentile_sorted(&samples, 99, 100),
-        )
-    };
-    let (batch900_p50_ms, batch900_p99_ms) = measure_batch(SLOW_QUORUM_60PCT);
-    let (batch1200_p50_ms, batch1200_p99_ms) = measure_batch(FAST_QUORUM_80PCT);
-
-    let sig_bytes = AggSigProfile::JortsPoseidon2.raw_signature_bytes();
-    let row = VoteBenchRow {
-        name: "JortsPoseidon2",
-        security_note: "PQ128 (32B Poseidon2, 64-ep XMSS, Hem-agg)",
-        sig_bytes,
-        pk_bytes: 64,
-        warm_sign_us,
-        durable_sign_us: None,
-        verify_1core_us,
-        batch900_p50_ms,
-        batch900_p99_ms,
-        batch1200_p50_ms,
-        batch1200_p99_ms,
-    };
-    (validators, row)
-}
-
-fn print_section1_rotor_votor_matrix(rows: &[VoteBenchRow], wal_dir: &Path, wal_fstype: &str) {
-    println!(
-        "\n[Section 1] `Rotor` / `Votor` Notarization & Finalization Vote Matrix (N = {ALPENGLOW_VALIDATORS} Validators)"
-    );
-    println!(
-        "  Budgets : 80% 1-round fast finalization = {FAST_QUORUM_80PCT} votes / {FAST_BUDGET_MS:.0} ms | 60% 2-round slow finalization = {SLOW_QUORUM_60PCT} votes / {SLOW_BUDGET_MS:.0} ms"
-    );
-    println!(
-        "  Framing : +{VOTOR_HEADER_BYTES} B Votor/QUIC header; datagrams = ceil((sig + {VOTOR_HEADER_BYTES}) / payload) at the {QUIC_PAYLOAD_MTU_BYTES} B RFC 9000 floor and the {IPV6_PAYLOAD_BYTES} B IPv6 / Agave payload"
-    );
-    println!(
-        "  {:<22} {:>7} {:>6} {:>8} {:>8} {:>9} {:>9} {:>9} {:>10} {:>10} {:>11} {:>9}",
-        "Profile",
-        "Sig(B)",
-        "PK(B)",
-        "Pkt@1200",
-        "Pkt@1232",
-        "In_900MB",
-        "In_1200MB",
-        "In_1500MB",
-        "Sign(us)",
-        "Ver1C(us)",
-        "EstCyc@4GHz",
-        "Solana_CU"
-    );
-    println!("  {}", "-".repeat(132));
-    for r in rows {
-        let est_cycles = r.verify_1core_us * 1_000.0 * NOMINAL_GHZ;
-        let est_cu = r.verify_1core_us * SOLANA_CU_PER_US;
-        println!(
-            "  {:<22} {:>7} {:>6} {:>8} {:>8} {:>9.3} {:>9.3} {:>9.3} {:>10.1} {:>10.1} {:>11.0} {:>9.0}",
-            r.name,
-            r.sig_bytes,
-            r.pk_bytes,
-            packets_for_sig(r.sig_bytes, QUIC_PAYLOAD_MTU_BYTES),
-            packets_for_sig(r.sig_bytes, IPV6_PAYLOAD_BYTES),
-            ingress_mb(SLOW_QUORUM_60PCT, r.sig_bytes),
-            ingress_mb(FAST_QUORUM_80PCT, r.sig_bytes),
-            ingress_mb(ALPENGLOW_VALIDATORS, r.sig_bytes),
-            r.warm_sign_us,
-            r.verify_1core_us,
-            est_cycles,
-            est_cu,
-        );
-    }
-    println!(
-        "  {:<22} {:>7} {:>6} {:>8} {:>8} {:>9.3} {:>9.3} {:>9.3} {:>10} {:>10} {:>11} {:>9}",
-        "ML-DSA-44 (ref)",
-        ML_DSA_44_SIG_BYTES,
-        ML_DSA_44_PK_BYTES,
-        packets_for_sig(ML_DSA_44_SIG_BYTES, QUIC_PAYLOAD_MTU_BYTES),
-        packets_for_sig(ML_DSA_44_SIG_BYTES, IPV6_PAYLOAD_BYTES),
-        ingress_mb(SLOW_QUORUM_60PCT, ML_DSA_44_SIG_BYTES),
-        ingress_mb(FAST_QUORUM_80PCT, ML_DSA_44_SIG_BYTES),
-        ingress_mb(ALPENGLOW_VALIDATORS, ML_DSA_44_SIG_BYTES),
-        "ref(FIPS)",
-        "ref(FIPS)",
-        "ref(Cat-2)",
-        "non-agg",
-    );
-
-    println!("\n  Parallel Multi-Core Batch Verification vs Alpenglow Consensus Budgets:");
-    println!(
-        "  {:<22} {:>12} {:>12} {:>14} {:>12} {:>12} {:>14}  Security / Epoch Tree Envelope",
-        "Profile",
-        "900_p50(ms)",
-        "900_p99(ms)",
-        "400ms_Headrm",
-        "1200_p50(ms)",
-        "1200_p99(ms)",
-        "150ms_Headrm",
-    );
-    println!("  {}", "-".repeat(140));
-    for r in rows {
-        let h400 = SLOW_BUDGET_MS / r.batch900_p50_ms.max(0.001);
-        let h150 = FAST_BUDGET_MS / r.batch1200_p50_ms.max(0.001);
-        println!(
-            "  {:<22} {:>12.2} {:>12.2} {:>13.1}x {:>12.2} {:>12.2} {:>13.1}x  {}",
-            r.name,
-            r.batch900_p50_ms,
-            r.batch900_p99_ms,
-            h400,
-            r.batch1200_p50_ms,
-            r.batch1200_p99_ms,
-            h150,
-            r.security_note,
-        );
-    }
-
-    println!(
-        "\n  Durable vote signing (`FsWalFtsEpochLatch`: journal append + fsync before release), WAL dir {} [{wal_fstype}]:",
-        wal_dir.display()
-    );
-    if wal_fstype == "tmpfs" || wal_fstype == "ramfs" {
-        println!(
-            "    WAL dir is memory-backed: fsync here is not a media latency; set QSAG_WAL_DIR to a disk."
-        );
-    }
-    println!(
-        "  {:<22} {:>14} {:>16} {:>16} {:>16}",
-        "Profile", "MemWAL p50(us)", "Durable p50(us)", "Durable p99(us)", "Durable cost(us)"
-    );
-    for r in rows {
-        if let Some((p50, p99)) = r.durable_sign_us {
-            println!(
-                "  {:<22} {:>14.1} {:>16.1} {:>16.1} {:>16.1}",
-                r.name,
-                r.warm_sign_us,
-                p50,
-                p99,
-                p50 - r.warm_sign_us,
-            );
-        }
-    }
-    println!(
-        "  Note: `Compact1122` + header = {} B: one datagram at the {IPV6_PAYLOAD_BYTES} B payload, two at the {QUIC_PAYLOAD_MTU_BYTES} B RFC 9000 floor.",
-        1_122 + VOTOR_HEADER_BYTES
-    );
-    println!(
-        "        The `RotatedEpochVote` envelope (1,194 B) already carries epoch, vote digest and next key root; it fits one {IPV6_PAYLOAD_BYTES} B datagram only if transport framing is <= {} B.",
-        IPV6_PAYLOAD_BYTES - 1_194
-    );
-    println!(
-        "        `ML-DSA-44` (`2,420 B`) exceeds `2 x 1,200 B` even before headers (always 3 RFC 9000 datagrams)."
-    );
-}
-
-/// `Votor` broadcasts every vote directly to all other validators (SIMD-0326); `Rotor` relays each
-/// slice as `shreds` erasure-coded shreds, any `data_shreds` of which reconstruct it.
-fn print_rotor_votor_bandwidth(rows: &[VoteBenchRow]) {
-    let shreds = env_usize("QSAG_ROTOR_SHREDS", 64);
-    let data_shreds = env_usize("QSAG_ROTOR_DATA_SHREDS", 32).min(shreds);
-    let peers = ALPENGLOW_VALIDATORS - 1;
-    let slice_wire = shreds * IPV6_PAYLOAD_BYTES;
-    println!(
-        "\n  `Votor` all-to-all vote bandwidth (N = {ALPENGLOW_VALIDATORS}: each validator, the leader included, receives {peers} votes and sends {peers} copies per round):"
-    );
-    println!(
-        "  {:<22} {:>9} {:>8} {:>13} {:>13} {:>11} {:>14} {:>13}",
-        "Profile",
-        "Wire(B)",
-        "Pkt@1232",
-        "Ingress/round",
-        "Datagrams/rd",
-        "@150ms Mbps",
-        "Slow 2rd/400ms",
-        "Rotor slices"
-    );
-    println!("  {}", "-".repeat(122));
-    let mut lines: Vec<(&str, usize)> = rows.iter().map(|r| (r.name, r.sig_bytes)).collect();
-    lines.push(("ML-DSA-44 (ref)", ML_DSA_44_SIG_BYTES));
-    for (name, sig_bytes) in lines {
-        let pkts = packets_for_sig(sig_bytes, IPV6_PAYLOAD_BYTES);
-        let wire = sig_bytes + VOTOR_HEADER_BYTES;
-        let round_bytes = (peers * wire) as f64;
-        let fast_mbps = round_bytes * 8.0 / (FAST_BUDGET_MS * 1_000.0);
-        let slow_mbps = 2.0 * round_bytes * 8.0 / (SLOW_BUDGET_MS * 1_000.0);
-        println!(
-            "  {:<22} {:>9} {:>8} {:>9.3} MiB {:>13} {:>11.1} {:>9.1} Mbps {:>13.1}",
-            name,
-            wire,
-            pkts,
-            round_bytes / (1024.0 * 1024.0),
-            peers * pkts,
-            fast_mbps,
-            slow_mbps,
-            round_bytes / slice_wire as f64,
-        );
-    }
-    println!(
-        "  `Rotor` model: a slice is {shreds} shreds ({data_shreds} reconstruct it), one {IPV6_PAYLOAD_BYTES} B datagram each = {:.1} KiB per validator per slice;",
-        slice_wire as f64 / 1024.0
-    );
-    println!(
-        "    leader egress = {shreds} datagrams per slice (one per relay); each relay egress = {peers} x {IPV6_PAYLOAD_BYTES} B = {:.2} MiB per shred.",
-        (peers * IPV6_PAYLOAD_BYTES) as f64 / (1024.0 * 1024.0)
-    );
-    println!(
-        "    `Rotor slices` = one vote round's ingress expressed in slices of block relay traffic."
-    );
-}
-
-fn bench_section2_hem_finality_compression(
-    validators: &mut [(ValidatorKeypair, MemEpochWal)],
-    checkpoint_epoch: u32,
-    workers: usize,
-    verify_iters: usize,
-) {
-    let regime = WhirSecurityRegime::BciksJohnsonQrom128;
-    let shard_cap = DEFAULT_MAX_SHARD_SIGNERS_JORTS;
-    assert_eq!(shard_cap, 128);
-    let jorts_raw_b = AggSigProfile::JortsPoseidon2.raw_signature_bytes();
-
-    println!(
-        "\n[Section 2] `Hem` Finality Certificate (distributed shards, joint batch, compact commitment) (`JortsPoseidon2`, `{regime:?}`)"
-    );
-    println!(
-        "  Security Regime: `BciksJohnsonQrom128` — unconditional BCIKS20 Johnson-radius QROM (`ceil(512/log2(B)) + 2` queries + 16-bit PoW)."
-    );
-    println!(
-        "  Soundness Note : Conjectural capacity-proximity regimes were refuted in `[CS25]`/`[KKH26]` and are completely removed."
-    );
-
-    // 2A. Single full-density shard (`K = 128`, `max_shard_signers(JortsPoseidon2) = 128`).
-    let msg_single = b"solana.alpenglow.finality.checkpoint.slot.42000000.single_shard";
-    let single_k = shard_cap;
-    let mut single_pks = Vec::with_capacity(single_k);
-    let mut single_sigs = Vec::with_capacity(single_k);
-    for (kp, wal) in validators.iter_mut().take(single_k) {
-        let sig = kp
-            .sign_stateful(msg_single, checkpoint_epoch, wal)
-            .expect("sign K=128 checkpoint");
-        single_pks.push(kp.pk);
-        single_sigs.push(sig);
-    }
-    let single_active: Vec<usize> = (0..single_k).collect();
-    let single_bm =
-        SignerBitmap::from_active_indices(single_k as u32, &single_active).expect("bitmap");
-    let mut single_cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, seed32(0xAA, 7));
-    single_cfg.regime = regime;
-
-    // One cold call, then three warm calls: the warm p50 is what a dedicated shard aggregator sees.
-    let mut single_prove_samples = Vec::with_capacity(4);
-    let mut single_proof = None;
-    for _ in 0..4 {
-        let t_prove_single = Instant::now();
-        let proof = aggregate_signatures_with_config(
-            &single_pks,
-            &single_bm,
-            &SigningMode::SharedMessage(msg_single),
-            &single_sigs,
-            &single_cfg,
-        )
-        .expect("K=128 Hem checkpoint proof");
-        single_prove_samples.push(t_prove_single.elapsed().as_secs_f64() * 1_000.0);
-        single_proof = Some(proof);
-    }
-    let single_proof = single_proof.expect("at least one K=128 proof");
-    let single_cold_ms = single_prove_samples[0];
-    let mut single_warm = single_prove_samples[1..].to_vec();
-    single_warm.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let single_prove_ms = percentile_sorted(&single_warm, 50, 100);
-    let single_wire = single_proof.to_bytes();
-
-    let measure_agg_verify = |max_w: Option<usize>| -> (f64, f64) {
-        let mut samples = Vec::with_capacity(verify_iters);
-        for _ in 0..verify_iters {
-            let t0 = Instant::now();
-            let ok = match max_w {
-                Some(w) => with_worker_limit(w, || {
-                    verify_aggregate_with_regime(
-                        &single_pks,
-                        &SigningMode::SharedMessage(msg_single),
-                        &single_proof,
-                        regime,
-                    )
-                }),
-                None => verify_aggregate_with_regime(
-                    &single_pks,
-                    &SigningMode::SharedMessage(msg_single),
-                    &single_proof,
-                    regime,
-                ),
-            };
-            assert!(ok, "K=128 Hem checkpoint must verify");
-            samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
-        }
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        (
-            percentile_sorted(&samples, 50, 100),
-            percentile_sorted(&samples, 99, 100),
-        )
-    };
-    let (single_all_p50, single_all_p99) = measure_agg_verify(None);
-    let (single_1c_p50, single_1c_p99) = measure_agg_verify(Some(1));
-
-    // 2B. Jointly witnessed, explicitly partitioned batch proofs AND the regional hierarchy.
-    // Each batch has its own full transcript/opening; the certificate retains every batch.
-    let target_signers = std::env::var("QSAG_ALPENGLOW_SHARDS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .map(|n| (n * shard_cap).min(validators.len()))
-        .unwrap_or(FAST_QUORUM_80PCT);
-    assert!(target_signers <= validators.len());
-
-    let msg_joint = b"solana.alpenglow.finality.checkpoint.slot.42000000.joint_committee";
-    let joint_epoch = checkpoint_epoch + 1;
-    let per_worker = target_signers.div_ceil(workers);
-    let joint_pairs: Vec<(ValidatorPublicKey, ValidatorSignature)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = validators[..target_signers]
-            .chunks_mut(per_worker)
-            .map(|sub| {
-                scope.spawn(move || {
-                    sub.iter_mut()
-                        .map(|(kp, wal)| {
-                            let sig = kp
-                                .sign_stateful(msg_joint, joint_epoch, wal)
-                                .expect("joint committee checkpoint sign");
-                            (kp.pk, sig)
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("joint sign worker panicked"))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
-            .collect()
-    });
-    let joint_pks: Vec<ValidatorPublicKey> = joint_pairs.iter().map(|(pk, _)| *pk).collect();
-    let joint_sigs: Vec<ValidatorSignature> = joint_pairs.into_iter().map(|(_, s)| s).collect();
-    let joint_active: Vec<usize> = (0..target_signers).collect();
-    let joint_bm =
-        SignerBitmap::from_active_indices(target_signers as u32, &joint_active).expect("bitmap");
-
-    let mut joint_cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, seed32(0xBB, 11));
-    joint_cfg.regime = regime;
-    joint_cfg.max_signers_per_shard = shard_cap;
-    // Bound a single batch's trace footprint as well as concurrent batch admission.
-    // Every signer remains covered by the existing transcript-bound batch proofs and MergeNode.
-    // More batches trade larger certificate bytes for bounded live witness memory.
-    joint_cfg.max_shards_per_batch = env_usize(
-        "QSAG_ALPENGLOW_SHARDS_PER_BATCH",
-        joint_cfg.max_shards_per_batch,
-    );
-    println!(
-        "    joint batch partition: <= {} shards/opening; QSAG_PROVER_JOBS={} (arithmetic workers remain independent)",
-        joint_cfg.max_shards_per_batch,
-        env_usize("QSAG_PROVER_JOBS", 1)
-    );
-
-    // CPU worker budget is independent of the QSAG_PROVER_JOBS active-witness limit.
-    let joint_workers = env_usize("QSAG_ALPENGLOW_JOINT_WORKERS", workers);
-    let t_prove_joint = Instant::now();
-    let joint_proof = with_worker_limit(joint_workers, || {
-        aggregate_signatures_with_config(
-            &joint_pks,
-            &joint_bm,
-            &SigningMode::SharedMessage(msg_joint),
-            &joint_sigs,
-            &joint_cfg,
-        )
-    })
-    .expect("joint multi-shard Hem proof");
-    let joint_prove_ms = t_prove_joint.elapsed().as_secs_f64() * 1_000.0;
-    let joint_wire = joint_proof.to_bytes();
-
-    let measure_joint_verify = |max_w: Option<usize>| -> (f64, f64) {
-        let mut samples = Vec::with_capacity(verify_iters);
-        for _ in 0..verify_iters {
-            let t0 = Instant::now();
-            let ok = match max_w {
-                Some(w) => with_worker_limit(w, || {
-                    verify_aggregate_with_regime(
-                        &joint_pks,
-                        &SigningMode::SharedMessage(msg_joint),
-                        &joint_proof,
-                        regime,
-                    )
-                }),
-                None => verify_aggregate_with_regime(
-                    &joint_pks,
-                    &SigningMode::SharedMessage(msg_joint),
-                    &joint_proof,
-                    regime,
-                ),
-            };
-            assert!(ok, "joint committee Hem proof must verify");
-            samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
-        }
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        (
-            percentile_sorted(&samples, 50, 100),
-            percentile_sorted(&samples, 99, 100),
-        )
-    };
-    let (joint_all_p50, joint_all_p99) = measure_joint_verify(None);
-    let (joint_1c_p50, joint_1c_p99) = measure_joint_verify(Some(1));
-
-    // 2C. Regional 2-Layer `HierarchicalHemAggregate` over disjoint validator shards.
-    let hier_epoch = (checkpoint_epoch + 2) as u64;
-    let hier_msg = b"solana.alpenglow.finality.hierarchical.slot.42000000";
-    let shard_slices: Vec<(usize, usize)> = (0..target_signers.div_ceil(shard_cap))
-        .map(|s| {
-            let lo = s * shard_cap;
-            let hi = (lo + shard_cap).min(target_signers);
-            (lo, hi)
+            .attach_wal(Box::new(MemFtsWal::default()))
+            .unwrap()
         })
         .collect();
-    let policies: Vec<ShardHemPolicy> = shard_slices
-        .iter()
+    let pks: Vec<_> = sks.iter().map(|sk| sk.pk.clone()).collect();
+    let msgs: Vec<[u8; 64]> = (0..votes)
+        .map(|i| {
+            let mut m = [0u8; 64];
+            m[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            m[8..40].copy_from_slice(b"solana.alpenglow.votor.notarize.");
+            m
+        })
+        .collect();
+
+    let t_sign = Instant::now();
+    let sigs: Vec<_> = sks
+        .iter_mut()
+        .zip(msgs.iter())
         .enumerate()
-        .map(|(s_idx, &(lo, hi))| ShardHemPolicy {
-            shard_id: (s_idx as u64 + 1) * 10,
-            custodian_cluster: seed32(0x61, s_idx as u32),
-            quorum_keys: validators[lo..hi].iter().map(|(kp, _)| kp.pk).collect(),
-            minimum_quorums: (hi - lo) * 3 / 4,
+        .map(|(i, (sk, m))| sk.sign(&dp, m, &seed32(0x14, i as u32)).unwrap())
+        .collect();
+    let sign_ms = t_sign.elapsed().as_secs_f64() * 1_000.0;
+
+    let inputs: Vec<FrontierVerifyInput<'_>> = pks
+        .iter()
+        .zip(msgs.iter())
+        .zip(sigs.iter())
+        .map(|((pk, msg), sig)| FrontierVerifyInput {
+            pk,
+            dp: &dp,
+            message: msg,
+            signature: sig,
         })
         .collect();
-    let registry_root = compute_policy_registry_root(&policies);
+    let t_ver = Instant::now();
+    let verdicts = verify_frontier_fts_batch(&inputs);
+    let ver_ms = t_ver.elapsed().as_secs_f64() * 1_000.0;
+    assert!(verdicts.iter().all(Result::is_ok));
+    let sig_bytes = 2 + sigs[0].randomizer.len() + sigs[0].chain_values.len();
+    println!(
+        "[Votor Compact1122] votes={votes} sig_bytes={sig_bytes} sign_total_ms={sign_ms:.2} batch_verify_ms={ver_ms:.2}"
+    );
+}
 
-    let mut signed_hier: Vec<(SignerBitmap, Vec<ValidatorSignature>)> =
-        Vec::with_capacity(policies.len());
-    for (policy, &(lo, hi)) in policies.iter().zip(&shard_slices) {
-        let region_msg = hierarchical_hem_message(&registry_root, policy, hier_epoch, hier_msg);
-        let len = hi - lo;
-        let active: Vec<usize> = (0..len).collect();
-        let bm = SignerBitmap::from_active_indices(len as u32, &active).expect("shard bitmap");
-        let sigs: Vec<ValidatorSignature> = validators[lo..hi]
-            .iter_mut()
-            .map(|(kp, wal)| {
-                kp.sign_stateful(&region_msg, hier_epoch as u32, wal)
-                    .expect("hierarchical shard sign")
+fn run_hem_finality_section(shards: usize, per_shard: usize) {
+    let epoch_floor = 42_000_000u64;
+    let checkpoint_msg = b"solana.alpenglow.finality.slot.42000000";
+    let mut key_groups: Vec<Vec<ValidatorKeypair>> = Vec::with_capacity(shards);
+    let mut policies = Vec::with_capacity(shards);
+    for s in 0..shards {
+        let kps: Vec<ValidatorKeypair> = (0..per_shard as u32)
+            .map(|i| {
+                ValidatorKeypair::keygen_deterministic(
+                    AggSigProfile::JortsPoseidon2,
+                    &seed32(0x50 + s as u8, i),
+                    i,
+                )
             })
             .collect();
-        signed_hier.push((bm, sigs));
+        policies.push(ShardHemPolicy {
+            shard_id: (s + 1) as u64,
+            custodian_cluster: seed32(0x88, s as u32),
+            quorum_keys: kps.iter().map(|kp| kp.pk).collect(),
+            minimum_quorums: (per_shard * 2).div_ceil(3),
+        });
+        key_groups.push(kps);
     }
-    let hier_witnesses: Vec<ShardHemWitness<'_>> = signed_hier
+
+    let prepared = PreparedPolicyRegistry::new(policies.clone()).unwrap();
+    let reg_root = prepared.policy_registry_root();
+    let mut bitmaps = Vec::with_capacity(shards);
+    let mut sig_groups: Vec<Vec<ValidatorSignature>> = Vec::with_capacity(shards);
+    for (s, kps) in key_groups.iter_mut().enumerate() {
+        let region_msg =
+            hierarchical_hem_message(&reg_root, &policies[s], epoch_floor, checkpoint_msg);
+        let active: Vec<usize> = (0..per_shard).collect();
+        bitmaps.push(SignerBitmap::from_active_indices(per_shard as u32, &active).unwrap());
+        let sigs: Vec<_> = kps
+            .iter_mut()
+            .map(|kp| {
+                let mut wal = MemEpochWal::default();
+                kp.sign_stateful(&region_msg, 0, &mut wal).unwrap()
+            })
+            .collect();
+        sig_groups.push(sigs);
+    }
+
+    let s0_msg = hierarchical_hem_message(&reg_root, &policies[0], epoch_floor, checkpoint_msg);
+    let s0_mode = SigningMode::SharedMessage(&s0_msg);
+    let t_s0 = Instant::now();
+    let s0_proof = prove_hem_quintic_128(
+        HemQuinticProfile::TurboShake400,
+        &policies[0].quorum_keys,
+        &bitmaps[0],
+        &s0_mode,
+        &sig_groups[0],
+    )
+    .unwrap();
+    let s0_prove_ms = t_s0.elapsed().as_secs_f64() * 1_000.0;
+    assert!(verify_hem_quintic_128(
+        &policies[0].quorum_keys,
+        &s0_mode,
+        &s0_proof
+    ));
+
+    let witnesses: Vec<ShardHemWitness<'_>> = bitmaps
         .iter()
+        .zip(sig_groups.iter())
         .map(|(bm, sigs)| ShardHemWitness {
             bitmap: bm,
-            signatures: sigs.as_slice(),
+            signatures: sigs,
         })
         .collect();
     let min_global: usize = policies.iter().map(|p| p.minimum_quorums).sum();
-    let mut hier_cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, seed32(0xCC, 19));
-    hier_cfg.regime = regime;
-
-    let prepared_hier =
-        PreparedPolicyRegistry::new(policies.clone()).expect("valid Alpenglow policy registry");
-    let t_prove_hier = Instant::now();
-    let hier_agg = with_worker_limit(joint_workers, || {
-        prove_hierarchical_hem_prepared(
-            &prepared_hier,
-            &hier_witnesses,
-            hier_epoch,
-            hier_msg,
-            min_global,
-            &hier_cfg,
-        )
-    })
-    .expect("Alpenglow 2-layer hierarchical Hem");
-    let hier_prove_ms = t_prove_hier.elapsed().as_secs_f64() * 1_000.0;
-    let hier_wire = hier_agg.to_bytes();
-    let hier_decoded =
-        HierarchicalHemAggregate::from_bytes_canonical(&hier_wire).expect("canonical decode");
-    assert!(verify_hierarchical_hem(
-        &policies,
-        hier_epoch,
-        hier_msg,
+    let t_joint = Instant::now();
+    let cert = prove_hierarchical_hem_prepared(
+        &prepared,
+        &witnesses,
+        epoch_floor,
+        checkpoint_msg,
         min_global,
-        regime,
-        &hier_decoded,
-    ));
-
-    let measure_hier_verify = |max_w: Option<usize>| -> (f64, f64) {
-        let mut samples = Vec::with_capacity(verify_iters);
-        for _ in 0..verify_iters {
-            let t0 = Instant::now();
-            let ok = match max_w {
-                Some(w) => with_worker_limit(w, || {
-                    verify_hierarchical_hem_prepared(
-                        &prepared_hier,
-                        hier_epoch,
-                        hier_msg,
-                        min_global,
-                        regime,
-                        &hier_decoded,
-                    )
-                }),
-                None => verify_hierarchical_hem_prepared(
-                    &prepared_hier,
-                    hier_epoch,
-                    hier_msg,
-                    min_global,
-                    regime,
-                    &hier_decoded,
-                ),
-            };
-            assert!(ok, "Alpenglow hierarchical Hem must verify");
-            samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
-        }
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        (
-            percentile_sorted(&samples, 50, 100),
-            percentile_sorted(&samples, 99, 100),
-        )
-    };
-    let (hier_all_p50, hier_all_p99) = measure_hier_verify(None);
-    let (hier_1c_p50, hier_1c_p99) = measure_hier_verify(Some(1));
-
-    // 2D. Compact hierarchy commitment (`SuccinctHierarchicalHemAggregate`). Its outer proof
-    //     certifies the summary hash chain, not the child proofs, so it is checked against
-    //     `VerifiedHierarchicalHemEvidence` produced by a full child verification.
-    let evidence_start = Instant::now();
-    let evidence = verify_hierarchical_hem_evidence_prepared(
-        &prepared_hier,
-        hier_epoch,
-        hier_msg,
-        min_global,
-        regime,
-        &hier_decoded,
+        HemQuinticProfile::TurboShake400,
     )
-    .expect("Alpenglow child proofs verify into evidence");
-    let evidence_ms = evidence_start.elapsed().as_secs_f64() * 1000.0;
-    let t_prove_succ = Instant::now();
-    let succ_agg = compress_hierarchical_hem_evidence(&evidence, hier_cfg.blinding_seed)
-        .expect("Alpenglow succinct outer Hem compression");
-    let succ_prove_ms = t_prove_succ.elapsed().as_secs_f64() * 1_000.0;
-    println!(
-        "    compact pipeline: fresh evidence {:.2} ms + reuse-only outer build {:.2} ms = {:.2} ms",
-        evidence_ms,
-        succ_prove_ms,
-        evidence_ms + succ_prove_ms
-    );
-    let succ_wire = succ_agg.to_bytes();
-    let succ_decoded = SuccinctHierarchicalHemAggregate::from_bytes_canonical(&succ_wire)
-        .expect("canonical succinct decode");
+    .unwrap();
+    let joint_ms = t_joint.elapsed().as_secs_f64() * 1_000.0;
+    let wire = cert.to_bytes();
+    let decoded = HierarchicalHemAggregate::from_bytes_canonical(&wire).unwrap();
 
-    let measure_succ_verify = |max_w: Option<usize>| -> (f64, f64) {
-        let mut samples = Vec::with_capacity(verify_iters);
-        for _ in 0..verify_iters {
-            let t0 = Instant::now();
-            let ok = match max_w {
-                Some(w) => with_worker_limit(w, || {
-                    verify_succinct_hierarchical_hem_prepared(
-                        &prepared_hier,
-                        hier_epoch,
-                        hier_msg,
-                        min_global,
-                        regime,
-                        &succ_decoded,
-                        &evidence,
-                    )
-                }),
-                None => verify_succinct_hierarchical_hem_prepared(
-                    &prepared_hier,
-                    hier_epoch,
-                    hier_msg,
-                    min_global,
-                    regime,
-                    &succ_decoded,
-                    &evidence,
-                ),
-            };
-            assert!(ok, "Alpenglow compact commitment must match the evidence");
-            samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
-        }
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        (
-            percentile_sorted(&samples, 50, 100),
-            percentile_sorted(&samples, 99, 100),
-        )
+    let ver_mc_ms = {
+        let t = Instant::now();
+        assert!(verify_hierarchical_hem_prepared(
+            &prepared,
+            epoch_floor,
+            checkpoint_msg,
+            min_global,
+            HemQuinticProfile::TurboShake400,
+            &decoded,
+        ));
+        t.elapsed().as_secs_f64() * 1_000.0
     };
-    let (succ_all_p50, succ_all_p99) = measure_succ_verify(None);
-    let (succ_1c_p50, succ_1c_p99) = measure_succ_verify(Some(1));
-    let rss_str = peak_rss_mib()
-        .map(|m| format!("{m:.1} MiB"))
-        .unwrap_or_else(|| "n/a".to_string());
+    let ver_1c_ms = with_worker_limit(1, || {
+        let t = Instant::now();
+        assert!(verify_hierarchical_hem_prepared(
+            &prepared,
+            epoch_floor,
+            checkpoint_msg,
+            min_global,
+            HemQuinticProfile::TurboShake400,
+            &decoded,
+        ));
+        t.elapsed().as_secs_f64() * 1_000.0
+    });
 
     println!(
-        "\n  Live Prover & Verifier Measurements (`BciksJohnsonQrom128`, peak_rss = {rss_str}, single-host proves on {joint_workers} workers):"
+        "[Alpenglow HemQuintic128] shards={shards}x{per_shard} wire={} B s0_prove_ms={s0_prove_ms:.1} \
+         joint_prove_ms={joint_ms:.1} verify_mc_ms={ver_mc_ms:.2} verify_1c_ms={ver_1c_ms:.2}",
+        wire.len()
     );
-    println!(
-        "  {:<32} {:>7} {:>10} {:>10} {:>10} {:>9} {:>9} {:>10} {:>11} {:>11}",
-        "Certificate Topology",
-        "Signers",
-        "RawJortsKB",
-        "RawMLDSAKB",
-        "HemWireKiB",
-        "vs_Jorts",
-        "vs_MLDSA",
-        "Prove(ms)",
-        "VerAll p50/99",
-        "Ver1C p50/99"
-    );
-    println!("  {}", "-".repeat(134));
-
-    for (label, k, wire_len, p_ms, all_50, all_99, c1_50, c1_99) in [
-        (
-            "Single Full Shard (1x128)",
-            single_k,
-            single_wire.len(),
-            single_prove_ms,
-            single_all_p50,
-            single_all_p99,
-            single_1c_p50,
-            single_1c_p99,
-        ),
-        (
-            "Jointly-Batched WHIR Cert",
-            target_signers,
-            joint_wire.len(),
-            joint_prove_ms,
-            joint_all_p50,
-            joint_all_p99,
-            joint_1c_p50,
-            joint_1c_p99,
-        ),
-        (
-            "Regional 2-Layer Hierarchical",
-            target_signers,
-            hier_wire.len(),
-            hier_prove_ms,
-            hier_all_p50,
-            hier_all_p99,
-            hier_1c_p50,
-            hier_1c_p99,
-        ),
-        (
-            "Compact Commitment (+evidence)",
-            target_signers,
-            succ_wire.len(),
-            succ_prove_ms,
-            succ_all_p50,
-            succ_all_p99,
-            succ_1c_p50,
-            succ_1c_p99,
-        ),
-    ] {
-        let raw_jorts = k * jorts_raw_b;
-        let raw_mldsa = k * ML_DSA_44_SIG_BYTES;
-        // The compact commitment is not a standalone certificate, so it has no compression ratio.
-        let ratio = |raw: usize| {
-            if label.starts_with("Compact") {
-                "-".to_string()
-            } else {
-                format!("{:.2}x", raw as f64 / wire_len as f64)
-            }
-        };
-        println!(
-            "  {:<32} {:>7} {:>10.1} {:>10.1} {:>10.1} {:>9} {:>9} {:>10.2} {:>5.2}/{:<5.2} {:>5.2}/{:<5.2}",
-            label,
-            k,
-            raw_jorts as f64 / 1024.0,
-            raw_mldsa as f64 / 1024.0,
-            wire_len as f64 / 1024.0,
-            ratio(raw_jorts),
-            ratio(raw_mldsa),
-            p_ms,
-            all_50,
-            all_99,
-            c1_50,
-            c1_99,
-        );
-    }
-
-    // Exact wire-size projection for 60% (`900` = `7x128 + 4`) and 80% (`1,200` = `9x128 + 48`)
-    // jointly-witnessed Alpenglow finality certificates derived from the measured per-extra-shard
-    // affine witness delta (`row_sumcheck_polys + col_evals + 2 Ext4 point claims` = `6,688 B/shard`).
-    let num_joint_shards = target_signers.div_ceil(shard_cap);
-    let per_extra_shard_b = if num_joint_shards > 1 {
-        (joint_wire.len() - single_wire.len()) / (num_joint_shards - 1)
-    } else {
-        6_688
-    };
-    println!(
-        "\n  Alpenglow Committee Certificate Wire Accounting (`BciksJohnsonQrom128` Jointly-Batched WHIR):"
-    );
-    for (q_label, k_signers, full_shards, tail_signers) in [
-        (
-            "60% Slow Finality (2-round)",
-            SLOW_QUORUM_60PCT,
-            7usize,
-            4usize,
-        ),
-        (
-            "80% Fast Finality (1-round)",
-            FAST_QUORUM_80PCT,
-            9usize,
-            48usize,
-        ),
-    ] {
-        // Full 128-signer shards share 1 WHIR opening; non-matching tail shard adds 1 merge leaf.
-        let full_batch_b = single_wire.len() + (full_shards - 1) * per_extra_shard_b;
-        let est_cert_b = if target_signers == FAST_QUORUM_80PCT && k_signers == FAST_QUORUM_80PCT {
-            joint_wire.len()
-        } else if tail_signers == 0 {
-            full_batch_b
-        } else {
-            // Tail shard (`nv = 20` or `22`) is strictly <= `single_wire.len()`.
-            full_batch_b + single_wire.len() - 41
-        };
-        let raw_jorts = k_signers * jorts_raw_b;
-        let raw_mldsa = k_signers * ML_DSA_44_SIG_BYTES;
-        println!(
-            "    - {q_label} (K={k_signers}, {full_shards}x128 + {tail_signers}): raw_Jorts = {:.1} KiB | raw_ML-DSA-44 = {:.1} KiB | Hem_cert <= {:.1} KiB ({:.2}x vs Jorts, {:.2}x vs ML-DSA-44)",
-            raw_jorts as f64 / 1024.0,
-            raw_mldsa as f64 / 1024.0,
-            est_cert_b as f64 / 1024.0,
-            raw_jorts as f64 / est_cert_b as f64,
-            raw_mldsa as f64 / est_cert_b as f64,
-        );
-    }
-
-    // Distributed finality certificate: each shard aggregator proves its own shard in parallel and
-    // gossips its shard batch; a verifier without evidence checks every child proof.
-    let m = policies.len();
-    let shard_gossip_b = hier_wire.len() - 76;
-    println!(
-        "\n  Distributed {target_signers}-validator finality certificate (M = {m} shards, measured on this host):"
-    );
-    println!(
-        "    shard aggregator prove (1 x 128, warm p50)  = {single_prove_ms:.1} ms (cold first call {single_cold_ms:.1} ms)"
-    );
-    println!(
-        "    hierarchy a verifier must receive           = {:.1} KiB ({:.1} KiB/shard)",
-        shard_gossip_b as f64 / 1024.0,
-        shard_gossip_b as f64 / 1024.0 / m as f64,
-    );
-    println!(
-        "    verify all {m} child proofs                  = {hier_all_p50:.2} ms multi-core p50, {hier_1c_p50:.2} ms 1-core p50"
-    );
-    println!(
-        "    compact commitment (off path)               = {:.1} KiB, built in {succ_prove_ms:.1} ms, checked against evidence in {succ_all_p50:.2} ms",
-        succ_wire.len() as f64 / 1024.0
-    );
-    println!(
-        "    single-host alternative: jointly-batched    = {:.1} KiB proof over all {target_signers} signers, {joint_prove_ms:.0} ms to prove, {joint_all_p50:.2} ms to verify",
-        joint_wire.len() as f64 / 1024.0
-    );
-    let compute_ms = single_prove_ms + hier_all_p50;
-    println!(
-        "    compute on the distributed path             = {compute_ms:.1} ms ({:.1}x the {FAST_BUDGET_MS:.0} ms fast-finality round, {:.1}x the {SLOW_BUDGET_MS:.0} ms slot)",
-        compute_ms / FAST_BUDGET_MS,
-        compute_ms / SLOW_BUDGET_MS,
-    );
-    println!(
-        "    Finality itself is reached by the individual votes above; the `Hem` aggregate is a proof of"
-    );
-    println!("    that finality for light clients and bridges, produced after the round closes.");
 }
 
 fn main() {
-    let workers = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1);
-    let batch_iters = std::env::var("QSAG_ALPENGLOW_ITERS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(15);
-    let verify_iters = std::env::var("QSAG_VERIFY_ITERS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(9);
-
-    println!(
-        "=========================================================================================="
-    );
-    println!(
-        " QSAG x Solana Alpenglow (`Rotor` + `Votor`, N={ALPENGLOW_VALIDATORS} Validators, threads={workers})"
-    );
-    println!(
-        "=========================================================================================="
-    );
-
-    let durable_samples = env_usize("QSAG_DURABLE_SAMPLES", 9);
-    let wal_dir = wal_root_dir();
-    let wal_fstype = mount_fstype(&wal_dir).unwrap_or_else(|| "unknown".to_string());
-
-    let sections = std::env::var("QSAG_ALPENGLOW_SECTIONS").unwrap_or_else(|_| "1,2".to_string());
-    let run_section = |n: &str| sections.split(',').any(|s| s.trim() == n);
-
-    // The Jorts committee is the full 80% fast-finality committee that Section 2 certifies; its
-    // per-vote row joins the Section 1 matrix.
-    let (mut jorts_validators, row_jorts) =
-        build_jorts_committee_and_bench_rotor(FAST_QUORUM_80PCT, workers, batch_iters);
-
-    if run_section("1") {
-        let row_1122 = bench_fts_rotor_profile(
-            "Frontier::Compact1122",
-            "256b nodes / 128b generic Grover (1-use h=8 w=96; 1 datagram @1232)",
-            FrontierFtsProfile::Compact1122,
-            false,
-            true,
-            workers,
-            batch_iters,
-            durable_samples,
-        );
-        let row_rotated = bench_fts_rotor_profile(
-            "RotatedEpochVote/1122",
-            "Compact1122 vote + next epoch key root (forward-secret rotation)",
-            FrontierFtsProfile::Compact1122,
-            true,
-            true,
-            workers,
-            batch_iters,
-            durable_samples,
-        );
-        let row_256 = bench_fts_rotor_profile(
-            "Frontier::Full256Bit",
-            "PQ128: 256b classical / 128b Grover (32B node, 1-use h=8, < ML-DSA-44)",
-            FrontierFtsProfile::Full256Bit,
-            false,
-            true,
-            workers,
-            batch_iters,
-            durable_samples,
-        );
-
-        let rows = [row_1122, row_rotated, row_256, row_jorts];
-        print_section1_rotor_votor_matrix(&rows, &wal_dir, &wal_fstype);
-        print_rotor_votor_bandwidth(&rows);
-    }
-
-    let next_checkpoint_epoch = (ALPENGLOW_VALIDATORS.div_ceil(jorts_validators.len()) + 1) as u32;
-    if run_section("2") {
-        bench_section2_hem_finality_compression(
-            &mut jorts_validators,
-            next_checkpoint_epoch,
-            workers,
-            verify_iters,
-        );
-    }
-
-    #[cfg(feature = "vulkan")]
-    if let Some((submissions, receipts, fallbacks)) = qsag_agg::vulkan_execution_counts() {
-        println!(
-            "\nVulkan totals: submissions={submissions} accepted_v5_receipts={receipts} cpu_fallbacks={fallbacks}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod batching_tests {
-    use super::*;
-    #[test]
-    fn multibuffer_adapter_preserves_plain_context_and_rotated_next_root() {
-        let profile = FrontierFtsProfile::Compact1122;
-        let dp = FrontierDpTable::build(profile);
-        let accel = CpuReferenceBackend::new();
-        let mut votes = Vec::new();
-        for (idx, rotated) in [(0, false), (1, true)] {
-            let (sk, next_root) = fts_keygen(profile, 0xD1, idx, rotated, &accel);
-            let mut sk = sk.attach_wal(Box::new(MemFtsWal::default())).unwrap();
-            let env = sign_fts_vote(&mut sk, &dp, next_root, idx as usize, &[33; 32]);
-            votes.push(FtsVote {
-                pk: sk.pk.clone(),
-                env,
-            });
-        }
-        assert!(verify_fts_votes_batch(
-            &votes.iter().collect::<Vec<_>>(),
-            &dp
-        ));
-        assert!(votes.iter().all(|v| verify_fts_vote(v, &dp)));
-        if let FtsVoteEnvelope::Rotated { next_root, .. } = &mut votes[1].env {
-            next_root[0] ^= 1;
-        }
-        assert!(!verify_fts_votes_batch(
-            &votes.iter().collect::<Vec<_>>(),
-            &dp
-        ));
-        assert!(!verify_fts_vote(&votes[1], &dp));
-        if let FtsVoteEnvelope::Rotated { next_root, .. } = &mut votes[1].env {
-            next_root[0] ^= 1;
-        }
-        if let FtsVoteEnvelope::Plain { msg, .. } = &mut votes[0].env {
-            msg[0] ^= 1;
-        }
-        assert!(!verify_fts_votes_batch(
-            &votes.iter().collect::<Vec<_>>(),
-            &dp
-        ));
-        assert!(!verify_fts_vote(&votes[0], &dp));
-    }
+    println!("=== Solana Alpenglow Quintic Fp5 (`QSAGHQM2` / `QSAGHEM\\x04`, DKT26 < 2^-128 QROM) ===");
+    run_votor_fts_section(64);
+    run_hem_finality_section(2, 32);
 }
