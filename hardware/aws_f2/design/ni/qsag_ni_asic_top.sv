@@ -1,4 +1,6 @@
-// QSAG-NI coprocessor top: streaming valid/ready macro for QSAGSTA1 & [CWYZ26] DuetFold verification.
+// QSAG-NI v2 coprocessor for QSAGZKH2 / QSAGHQM2. The autonomous verifier
+// combines quintic Goldilocks Fp5 (X^5 = 3), Poseidon2-12, Keccak/TurboSHAKE256
+// and GF(2^128). Opcodes 0x50/0x51 start verification and resume a proof page.
 //
 // Single-cycle commands accept back-to-back valid beats (II = 1, zero handshake bubble); multi-cycle
 // commands deassert `cmd_ready` until completion and pulse `rsp_valid` for one cycle.
@@ -21,13 +23,8 @@
 //   0x13  P2_ABSORB8        addr                          st[0][0..7] += mem[addr..addr+7]; Poseidon2
 //   0x14  P2_CANOPY4_BATCH  addr=desc, data=quads         4-way C-slowed Canopy batch -> mem[wptr..]
 //   0x15  P2_SPONGE_M       addr=base, data=blocks        multi-block rate-8 Poseidon2 sponge from SRAM
-//   0x20  EMULADD                                         E0 <- E0 * E1 + E2  (9-mul Tower Karatsuba, 1 clk)
-//   0x21  EADD / 0x22 ESUB                                E0 <- E0 +/- E2
 //   0x23  GLMUL                                           st[0][0] <- st[0][0] * st[0][1]
-//   0x24  FOLD              idx[0]=use_wptr, addr, data   in-place/wptr Ext4 multilinear fold
-//   0x25  CWYZ_DUET_BATCH   addr=base, data=count         [CWYZ26] DuetFold gate batch + hardware check
-//   0x26  EXT4_HORNER       addr=base, data=count         E0 <- (...(E0*E1 + c_0)*E1 + ... + c_{n-1})
-//   0x27  EMULBASE                                        E0 <- E0 * st[0][4] (1 clk)
+//   0x28..0x2B FP5_MULADD / HORNER / FOLD / SUMCHECK
 //   0x30  K_XOR / 0x31 K_SET / 0x32 K_RD                  Keccak lane absorb / load / read
 //   0x33  K_P12 / 0x34 K_P24                              Keccak-p[1600,12] / Keccak-f[1600]
 //   0x35  K_SAVE / 0x36 K_RESTORE                         snapshot / restore customization midstate
@@ -37,7 +34,8 @@
 `default_nettype none
 
 module qsag_ni_asic_top #(
-  parameter int AW = 16
+  parameter int AW = 16,
+  parameter bit AUTO_VERIFY = 1
 ) (
   input  wire        clk,
   input  wire        rst,
@@ -47,6 +45,7 @@ module qsag_ni_asic_top #(
   input  wire [4:0]  cmd_idx,
   input  wire [23:0] cmd_addr,
   input  wire [63:0] cmd_data,
+`ifdef QSAG_F2_NI
   input wire host_en,
   input wire [12:0] host_row,
   input wire [63:0] host_strb,
@@ -54,6 +53,10 @@ module qsag_ni_asic_top #(
   output wire [511:0] host_q,
   output wire fail,
   output wire [31:0] checks,
+  output wire page_paused,
+  output wire [15:0] page_window_base,
+  output wire [16:0] page_window_end,
+`endif
   output logic       rsp_valid,
   output logic [63:0] rsp_data
 );
@@ -65,14 +68,11 @@ module qsag_ni_asic_top #(
     T_CHK0, T_CHK1, T_CHK2,
     T_M0, T_M1, T_M2, T_M3, T_MWAIT,
     T_C4_LD, T_C4_GO, T_C4_WAIT, T_C4_WB,
-    T_F0, T_F1, T_F2, T_F3, T_F4, T_FSUB, T_FMUL, T_FW0, T_FW1,
-    T_H0, T_H1, T_H2, T_H3,
-    T_D_RD, T_D_OP,
     T_KA_RD, T_KA_GO,
     T_TS_LD, T_TS_GO, T_TS_WAIT, T_TS_WB0, T_TS_WB1,
     T_GF, T_A0, T_ABS, T_A5,
     T_CHK3, T_CHK4, T_SQUEEZE, T_DOMAIN, T_DOMAIN_GO, T_DOMAIN_WAIT,
-    T_PATH_LD, T_PATH_XOR, T_PATH_GO, T_PATH_WAIT, T_NONCE, T_FP5
+    T_PATH_LD, T_PATH_XOR, T_PATH_GO, T_PATH_WAIT, T_NONCE, T_FP5, T_AUTO, T_PAGE
   } tstate_t;
   tstate_t ts;
 
@@ -99,33 +99,55 @@ module qsag_ni_asic_top #(
 
   wire [63:0] fp_mul_a, fp_mul_b, fp_product;
 
+  wire [2047:0] auto_regs;
+  wire auto_rf_we, auto_p2_write, auto_p2_start;
+  wire [4:0] auto_rf_index;
+  wire [63:0] auto_rf_value;
+  wire autonomous = AUTO_VERIFY && ts == T_AUTO;
+  wire auto_done, auto_bad, auto_ae, auto_be, auto_aw, auto_bw, auto_sub, auto_fp_go;
+  wire [31:0] auto_checks;
+  wire [15:0] auto_aa, auto_ba;
+  wire [63:0] auto_ad, auto_bd, auto_x, auto_y;
+  wire auto_fp_latch, auto_fp_feedback;
+  wire [2:0] auto_fp_lane;
+  wire auto_kwe, auto_kxor, auto_kstart, auto_r12;
+  wire [4:0] auto_klane, auto_dlane;
+  wire [3:0] auto_domain;
+  wire [63:0] auto_kword;
+  logic auto_fp_busy;
+  wire auto_sumcheck;
+  wire [15:0] auto_coeff;
+  wire [31:0] auto_degree;
+  wire fp_done;
+  always_ff @(posedge clk) begin
+    if (rst || fp_done) auto_fp_busy <= 0;
+    else if (auto_fp_go) auto_fp_busy <= 1;
+  end
+
   // ------------------------------------------------------------ Shared field & 4-slot Poseidon2 engine
-  logic         op_perm, op_canopy, op_perm4, op_canopy4, op_emuladd, op_emulbase, op_eadd, op_esub, op_glmul;
+  logic         op_perm, op_canopy, op_perm4, op_canopy4, op_glmul;
   logic [1:0]   wr_slot, rd_slot;
   logic [11:0]  wr_en;
   logic [767:0] wr_data;
   wire  [767:0] st, st_rd;
   wire          f_busy, f_done;
-  qsag_asic_ext4_p2_shared u_field (
+  qsag_asic_p2_shared u_field (
     .clk        (clk),
     .rst        (rst),
     .op_perm    (op_perm),
     .op_canopy  (op_canopy),
     .op_perm4   (op_perm4),
     .op_canopy4 (op_canopy4),
-    .op_emuladd (op_emuladd),
-    .op_emulbase(op_emulbase),
-    .op_eadd    (op_eadd),
-    .op_esub    (op_esub),
     .op_glmul   (op_glmul),
-    .fp5_active (ts == T_FP5),
-    .fp5_a      (fp_mul_a),
-    .fp5_b      (fp_mul_b),
+    .fp5_active (ts == T_FP5 || autonomous),
+    .fp5_a      (autonomous && !auto_fp_busy ? auto_x : fp_mul_a),
+    .fp5_b      (autonomous && !auto_fp_busy ? auto_y : fp_mul_b),
     .fp5_product(fp_product),
     .wr_slot    (wr_slot),
     .wr_en      (wr_en),
     .wr_data    (wr_data),
     .rd_slot    (rd_slot),
+    .auto_regs  (auto_regs),
     .st_o       (st),
     .st_rd_o    (st_rd),
     .busy       (f_busy),
@@ -138,18 +160,19 @@ module qsag_ni_asic_top #(
   logic [63:0] a_wdata, b_wdata;
   wire  [63:0] a_rdata, b_rdata;
 
-  wire fp_done, fp_checked, fp_bad, fp_rd_a, fp_rd_b, fp_store;
+  wire fp_checked, fp_bad, fp_rd_a, fp_rd_b, fp_store;
   wire [15:0] fp_addr_a, fp_addr_b, fp_next;
   wire [63:0] fp_data;
   wire [4:0] fp_we;
   wire [319:0] fp_lanes;
   qsag_fp5_seq u_fp5 (
-    .clk(clk), .rst(rst), .start(ts == T_IDLE && cmd_valid && cmd_op[7:2] == 6'h0a),
-    .op(cmd_op[1:0]), .count(cmd_data[31:0]), .base(cmd_addr[15:0]),
+    .clk(clk), .rst(rst), .start((AUTO_VERIFY && auto_fp_go) || (ts == T_IDLE && cmd_valid && cmd_op[7:2] == 6'h0a)),
+    .op(autonomous ? {2{auto_sumcheck}} : cmd_op[1:0]), .count(autonomous ? auto_degree : cmd_data[31:0]),
+    .base(autonomous ? auto_coeff : cmd_addr[15:0]),
     .dest(cmd_idx[0] ? r_wptr : cmd_addr[15:0]), .a(st[319:0]), .r(st[639:320]),
     .mul_a(fp_mul_a), .mul_b(fp_mul_b), .product(fp_product),
     .rd_a(fp_rd_a), .rd_b(fp_rd_b), .write_a(fp_store),
-    .addr_a(fp_addr_a), .addr_b(fp_addr_b), .qa(a_rdata), .qb(b_rdata),
+    .addr_a(fp_addr_a), .addr_b(fp_addr_b), .qa(autonomous && !auto_sumcheck ? 64'd0 : a_rdata), .qb(b_rdata),
     .store_data(fp_data), .lane_we(fp_we), .lane_data(fp_lanes), .done(fp_done),
     .checked(fp_checked), .bad(fp_bad), .next_dest(fp_next)
   );
@@ -166,7 +189,7 @@ module qsag_ni_asic_top #(
   logic [4:0]   k_lane;
   logic [63:0]  k_word;
   wire [63:0] domain_word;
-  qsag_v2_domain u_domain (.domain(path_load ? 3'd6 : r_idx[2:0]), .lane(r_sub), .word_o(domain_word));
+  qsag_v2_domain u_domain (.domain(autonomous ? auto_domain : path_load ? 4'd6 : {1'b0,r_idx[2:0]}), .lane(autonomous ? auto_dlane : r_sub), .word_o(domain_word));
 
   // Rust hash.rs node and root frames, including TurboSHAKE suffix and final rate bit.
   wire [399:0] sibling = st_rd[399:0];
@@ -214,10 +237,14 @@ module qsag_ni_asic_top #(
   qsag_poly_to_tower128 u_gfr (.x(gf_poly), .y(gf_tower));
 
   // ------------------------------------------------------------ 4-Bank 512 KiB Dual-Port SRAM
+`ifdef QSAG_F2_NI
   assign fail = verify_fail;
   assign checks = verify_checks;
   qsag_f2_sram u_sram (
     .host_en, .host_row, .host_strb, .host_data, .host_q,
+`else
+  qsag_sram_512k_4bank u_sram (
+`endif
     .clk    (clk),
     .rst    (rst),
     .a_en   (a_en),
@@ -236,15 +263,46 @@ module qsag_ni_asic_top #(
   wire [63:0] ab_a0 = st[128*r_cnt +: 64];
   wire [63:0] ab_a1 = st[128*r_cnt + 64 +: 64];
   wire [63:0] ab_r0, ab_r1;
-  qsag_gl64_addsub u_ab0 (.a(ab_a0), .b(a_rdata), .sub(1'b0), .r(ab_r0));
+  qsag_gl64_addsub u_ab0 (.a(autonomous ? auto_x : ab_a0), .b(autonomous ? auto_y : a_rdata), .sub(autonomous && auto_sub), .r(ab_r0));
   qsag_gl64_addsub u_ab1 (.a(ab_a1), .b(b_rdata), .sub(1'b0), .r(ab_r1));
+
+  wire page_needed, page_write_ok;
+  wire [31:0] page_offset;
+  wire page_cont = AUTO_VERIFY && ts == T_PAGE && cmd_valid && cmd_op == 8'h51 && cmd_data == {32'd0,page_offset};
+  wire page_write = AUTO_VERIFY && ts == T_PAGE && cmd_valid && cmd_op == 8'h03 && page_write_ok;
+  wire page_abort = AUTO_VERIFY && ts == T_PAGE && cmd_valid && !(page_write || page_cont);
+  qsag_v2_auto_engine #(.AW(AW)) u_auto (
+    .clk(clk), .rst(rst), .start_i(AUTO_VERIFY && ts == T_IDLE && cmd_valid && cmd_op == 8'h50),
+    .desc_word(cmd_addr), .proof_word(cmd_data[15:0]), .window_words(cmd_data[31:16]),
+    .p2_state(st), .p2_done(f_done), .p2_write(auto_p2_write), .p2_start(auto_p2_start),
+    .rf_lanes(auto_regs), .rf_write(auto_rf_we), .rf_index(auto_rf_index), .rf_value(auto_rf_value),
+    .page_continue(page_cont), .page_abort(page_abort), .page_needed(page_needed),
+    .page_write_ok(page_write_ok), .page_offset(page_offset), .proof_size(cmd_data[63:32]),
+    .done(auto_done), .failed(auto_bad), .checks(auto_checks),
+    .ae(auto_ae), .be(auto_be), .aw(auto_aw), .bw(auto_bw), .aa(auto_aa), .ba(auto_ba),
+    .ad(auto_ad), .bd(auto_bd), .aq(a_rdata), .bq(b_rdata),
+    .field_a(auto_x), .field_b(auto_y), .field_product(fp_product), .field_sum(ab_r0), .field_sub(auto_sub),
+    .fp_sumcheck(auto_sumcheck), .fp_coeff(auto_coeff), .fp_degree(auto_degree),
+    .fp_bad(fp_bad), .fp_read(fp_rd_a), .fp_addr(fp_addr_a),
+    .fp_start(auto_fp_go), .fp_latch(auto_fp_latch), .fp_feedback(auto_fp_feedback),
+    .fp_lane(auto_fp_lane), .fp_done(fp_done),
+    .k_we(auto_kwe), .k_xor(auto_kxor), .k_start(auto_kstart), .k_r12(auto_r12),
+    .k_lane(auto_klane), .k_word(auto_kword), .k_q(k_rdata), .k_busy(k_busy),
+    .domain(auto_domain), .domain_lane(auto_dlane), .domain_word(domain_word)
+  );
 
   // Comparison targets for CHECK_EQ4
   wire chk_keccak = r_idx == 1 || r_idx == 2;
   wire [255:0] chk_vec = chk_keccak ? k_digest : st[255:0];
   wire [143:0] chk_upper = chk_keccak ? k_digest400[399:256] : st[399:256];
 
-  assign cmd_ready = (ts == T_IDLE);
+`ifdef QSAG_F2_NI
+  logic [15:0] r_page_base, r_page_win;
+  assign page_paused = AUTO_VERIFY && (ts == T_PAGE);
+  assign page_window_base = r_page_base;
+  assign page_window_end = {1'b0, r_page_base} + {1'b0, r_page_win};
+`endif
+  assign cmd_ready = (ts == T_IDLE || (AUTO_VERIFY && ts == T_PAGE));
 
   task automatic wr_pair(input logic [1:0] sl, input int lane);
     wr_slot         = sl;
@@ -264,10 +322,10 @@ module qsag_ni_asic_top #(
     b_en = 1'b1; b_we = 1'b1; b_addr = addr + 16'd1; b_wdata = w1;
   endtask
 
-  always @* begin
+  always_comb begin
     k_lane = cmd_idx; k_word = cmd_data;
     op_perm = 1'b0; op_canopy = 1'b0; op_perm4 = 1'b0; op_canopy4 = 1'b0;
-    op_emuladd = 1'b0; op_emulbase = 1'b0; op_eadd = 1'b0; op_esub = 1'b0; op_glmul = 1'b0;
+    op_glmul = 1'b0;
     wr_slot = 2'd0; rd_slot = 2'd0; wr_en = '0; wr_data = '0;
     k_start = 1'b0; k_r12 = 1'b0; k_we = 1'b0; k_xor = 1'b0; k_save = 1'b0; k_restore = 1'b0;
     k_pair_en = 1'b0; k_pair_single = 1'b0; k_pad_end = 1'b0; k_cn_go = 1'b0; k_pair_idx = '0;
@@ -283,11 +341,7 @@ module qsag_ni_asic_top #(
           8'h09: begin a_en = 1'b1; a_we = 1'b1; a_addr = r_wptr; a_wdata = cmd_data; end
           8'h10: op_perm     = 1'b1;
           8'h11: op_canopy   = 1'b1;
-          8'h20: op_emuladd  = 1'b1;
-          8'h21: op_eadd     = 1'b1;
-          8'h22: op_esub     = 1'b1;
           8'h23: op_glmul    = 1'b1;
-          8'h27: op_emulbase = 1'b1;
           8'h30: begin k_we = 1'b1; k_xor = 1'b1; end
           8'h31: k_we      = 1'b1;
           8'h33: begin k_start = 1'b1; k_r12 = 1'b1; end
@@ -296,6 +350,29 @@ module qsag_ni_asic_top #(
           8'h36: k_restore = 1'b1;
           default: ;
         endcase
+      end
+
+      T_PAGE: if (page_write) begin a_en=1; a_we=1; a_addr=cmd_addr[15:0]; a_wdata=cmd_data; end
+      T_AUTO: if(AUTO_VERIFY) begin
+        op_perm=auto_p2_start;
+        if(auto_fp_latch) begin
+          wr_en[{1'b0,auto_fp_lane}]=1;
+          wr_en[4'd5+4'(auto_fp_lane)]=1;
+          wr_data[319:0]={5{a_rdata}};
+          wr_data[639:320]={5{b_rdata}};
+        end else if(auto_fp_feedback) begin
+          wr_en[4:0]=fp_we;
+          wr_data[319:0]=fp_lanes;
+        end else if(auto_p2_write || (auto_rf_we && auto_rf_index!=0)) begin
+          if(auto_rf_index<12) begin wr_slot=auto_p2_write ? 0 : 1; wr_en[auto_rf_index[3:0]]=1; end
+          else if(auto_rf_index<24) begin wr_slot=2; wr_en[4'(auto_rf_index-12)]=1; end
+          else begin wr_slot=3; wr_en[4'(auto_rf_index-24)]=1; end
+          wr_data={12{auto_rf_value}};
+        end
+        a_en=auto_ae; b_en=auto_be; a_we=auto_aw; b_we=auto_bw;
+        a_addr=auto_aa; b_addr=auto_ba; a_wdata=auto_ad; b_wdata=auto_bd;
+        k_we=auto_kwe; k_xor=auto_kxor; k_start=auto_kstart; k_r12=auto_r12;
+        k_lane=auto_klane; k_word=auto_kword;
       end
 
       // LD4 / SV4
@@ -374,77 +451,6 @@ module qsag_ni_asic_top #(
         else                  wr_mem_pair(r_wptr + 16'd2, st_rd[191:128], st_rd[255:192]);
       end
 
-      // Multilinear Ext4 fold: lo + r * (hi - lo)
-      T_F0: rd_pair(r_base);
-      T_F1: begin rd_pair(r_base + 16'd2); wr_pair(2'd0, 8); end
-      T_F2: begin rd_pair(r_base + 16'd4); wr_pair(2'd0, 10); end
-      T_F3: begin rd_pair(r_base + 16'd6); wr_pair(2'd0, 0); end
-      T_F4: wr_pair(2'd0, 2);
-      T_FSUB: op_esub = 1'b1;
-      T_FMUL: op_emuladd = 1'b1;
-      T_FW0: wr_mem_pair(r_wbase,         st[63:0],    st[127:64]);
-      T_FW1: wr_mem_pair(r_wbase + 16'd2, st[191:128], st[255:192]);
-
-      // Ext4 Horner burst: E0 <- E0 * E1 + mem[r_base..]
-      T_H0: rd_pair(r_base);
-      T_H1: begin rd_pair(r_base + 16'd2); wr_pair(2'd0, 8); end
-      T_H2: wr_pair(2'd0, 10);
-      T_H3: op_emuladd = 1'b1;
-
-      // [CWYZ26] DuetFold gate batch: 27-word statement at r_base, scratch in st_b[1] & st_b[2]
-      //   st_b[1][0..3]=v0, [4..7]=v1, [8..11]=theta; st_b[2][0..3]=even, [4..7]=odd, [8..11]=mixed
-      T_D_RD: begin
-        // Load all 27 words: 0..11 -> st_b[1][0..11], 12..23 -> st_b[2][0..11], 24..26 -> st_b[3][0..2]
-        if (r_sub < 5'd13) rd_pair(r_base + {10'd0, r_sub, 1'b0});
-        else if (r_sub == 5'd13) begin a_en = 1'b1; a_addr = r_base + 16'd26; end
-        if (r_sub >= 5'd1 && r_sub <= 5'd6)  wr_pair(2'd1, 2 * (int'(r_sub) - 1));
-        if (r_sub >= 5'd7 && r_sub <= 5'd12) wr_pair(2'd2, 2 * (int'(r_sub) - 7));
-        if (r_sub == 5'd13) wr_pair(2'd3, 0);
-        if (r_sub == 5'd14) begin wr_slot = 2'd3; wr_en[2] = 1'b1; wr_data[191:128] = a_rdata; end
-      end
-      T_D_OP: begin
-        // Copy operands between st_b[1..3] and slot 0 to evaluate CWYZ gate & assert == claimed
-        unique case (r_sub)
-          // 0: E0<-v0, E2<-v1, st[4]<-inv_two
-          5'd0: begin
-            rd_slot = 2'd1; wr_slot = 2'd0; wr_en[3:0] = 4'hF; wr_en[11:8] = 4'hF;
-            wr_data[255:0] = st_rd[255:0]; wr_data[767:512] = st_rd[511:256];
-          end
-          5'd1: begin rd_slot = 2'd3; wr_slot = 2'd0; wr_en[4] = 1'b1; wr_data[319:256] = st_rd[63:0]; end
-          5'd2: op_eadd = 1'b1;      // E0 = v0 + v1
-          5'd3: op_emulbase = 1'b1;  // E0 = even = (v0 + v1) * inv_two
-          // 4: save even -> st_b[3][4..7]; load v0, v1 into E0, E2
-          5'd4: begin rd_slot = 2'd0; wr_slot = 2'd3; wr_en[7:4] = 4'hF; wr_data[511:256] = st[255:0]; end
-          5'd5: begin
-            rd_slot = 2'd1; wr_slot = 2'd0; wr_en[3:0] = 4'hF; wr_en[11:8] = 4'hF;
-            wr_data[255:0] = st_rd[255:0]; wr_data[767:512] = st_rd[511:256];
-          end
-          5'd6: begin rd_slot = 2'd3; wr_slot = 2'd0; wr_en[4] = 1'b1; wr_data[319:256] = st_rd[127:64]; end
-          5'd7: op_esub = 1'b1;      // E0 = v0 - v1
-          5'd8: op_emulbase = 1'b1;  // E0 = odd = (v0 - v1) * inv_two_x
-          // 9: save odd -> st_b[3][8..11]; put theta -> E1, even -> E2
-          5'd9:  begin wr_slot = 2'd3; wr_en[11:8] = 4'hF; wr_data[767:512] = st[255:0]; end
-          5'd10: begin rd_slot = 2'd1; wr_slot = 2'd0; wr_en[7:4] = 4'hF; wr_data[511:256] = st_rd[767:512]; end
-          5'd11: begin rd_slot = 2'd3; wr_slot = 2'd0; wr_en[11:8] = 4'hF; wr_data[767:512] = st_rd[511:256]; end
-          5'd12: op_emuladd = 1'b1;  // E0 = mixed = odd * theta + even
-          // 13: save mixed -> st_b[1][0..3]; load beta -> E0, alpha -> E2, x_sq -> st[4]
-          5'd13: begin wr_slot = 2'd1; wr_en[3:0] = 4'hF; wr_data[255:0] = st[255:0]; end
-          5'd14: begin
-            rd_slot = 2'd2; wr_slot = 2'd0; wr_en[3:0] = 4'hF; wr_en[11:8] = 4'hF;
-            wr_data[255:0] = st_rd[511:256]; wr_data[767:512] = st_rd[255:0];
-          end
-          5'd15: begin rd_slot = 2'd3; wr_slot = 2'd0; wr_en[4] = 1'b1; wr_data[319:256] = st_rd[191:128]; end
-          5'd16: op_emulbase = 1'b1; // E0 = beta * x_sq
-          5'd17: op_eadd = 1'b1;     // E0 = gamma = beta * x_sq + alpha
-          // 18: put mixed -> E1, odd -> E2
-          5'd18: begin rd_slot = 2'd1; wr_slot = 2'd0; wr_en[7:4] = 4'hF; wr_data[511:256] = st_rd[255:0]; end
-          5'd19: begin rd_slot = 2'd3; wr_slot = 2'd0; wr_en[11:8] = 4'hF; wr_data[767:512] = st_rd[767:512]; end
-          5'd20: op_emuladd = 1'b1;  // E0 = got = gamma * mixed + odd
-          5'd21: rd_slot = 2'd2;     // st_rd[767:512] holds claimed[0..3]!
-          default: ;
-        endcase
-      end
-
       // Dual-port SRAM Keccak absorb
       T_KA_RD: begin
         if ({27'd0, r_sub} * 32'd2 < r_pairs) rd_pair(r_base + {10'd0, r_sub, 1'b0});
@@ -503,6 +509,9 @@ module qsag_ni_asic_top #(
       rsp_data <= '0; path_child <= '0; r_node <= '0; path_stage <= '0;
       r_pairs <= '0; r_base <= '0; r_idx <= '0; r_left <= '0; r_poly <= '0;
       r_slot <= '0; r_sub <= '0; r_wbase <= '0; r_cnt <= '0; path_load <= 0;
+`ifdef QSAG_F2_NI
+      r_page_base <= '0; r_page_win <= '0;
+`endif
       nonce         <= '0;
       ts            <= T_IDLE;
       r_wptr        <= '0;
@@ -515,6 +524,17 @@ module qsag_ni_asic_top #(
           r_idx  <= cmd_idx;
           r_base <= cmd_addr[15:0];
           unique case (cmd_op)
+            8'h50: begin
+              if (AUTO_VERIFY) begin
+`ifdef QSAG_F2_NI
+                r_page_base <= cmd_data[15:0];
+                r_page_win  <= cmd_data[31:16];
+`endif
+                ts <= T_AUTO;
+              end else begin
+                verify_fail <= 1'b1; rsp_data <= 64'd0; ts <= T_RSP;
+              end
+            end
             8'h02: begin rsp_data <= st[64*cmd_idx[3:0] +: 64]; rsp_valid <= 1'b1; end
             8'h32: begin rsp_data <= k_rdata; rsp_valid <= 1'b1; end
             8'h04: ts <= T_RDMEM;
@@ -551,7 +571,7 @@ module qsag_ni_asic_top #(
               else ts <= T_DOMAIN;
             end
             8'h0B: begin rsp_data <= {31'd0, ~verify_fail, verify_checks}; rsp_valid <= 1'b1; end
-            8'h01, 8'h03, 8'h20, 8'h21, 8'h22, 8'h23, 8'h27,
+            8'h01, 8'h03, 8'h23,
             8'h30, 8'h31, 8'h35, 8'h36: rsp_valid <= 1'b1;
             8'h06: ts <= T_LD0;
             8'h07: ts <= T_SV0;
@@ -573,20 +593,6 @@ module qsag_ni_asic_top #(
               r_pairs <= cmd_data[31:0];
               ts      <= (cmd_data[31:0] == 32'd0) ? T_RSP : T_A0;
             end
-            8'h24: begin
-              r_wbase <= cmd_idx[0] ? r_wptr : cmd_addr[15:0];
-              r_pairs <= cmd_data[31:0];
-              ts      <= (cmd_data[31:0] == 32'd0) ? T_RSP : T_F0;
-            end
-            8'h25: begin
-              r_pairs <= cmd_data[31:0];
-              r_sub   <= 5'd0;
-              ts      <= (cmd_data[31:0] == 32'd0) ? T_RSP : T_D_RD;
-            end
-            8'h26: begin
-              r_pairs <= cmd_data[31:0];
-              ts      <= (cmd_data[31:0] == 32'd0) ? T_RSP : T_H0;
-            end
             8'h33, 8'h34: ts <= T_WAITK;
             8'h37: begin
               r_pairs <= cmd_data[31:0];
@@ -599,10 +605,21 @@ module qsag_ni_asic_top #(
               ts      <= (cmd_data[31:0] == 32'd0) ? T_RSP : T_TS_LD;
             end
             8'h40, 8'h41: begin r_poly <= cmd_op[0]; ts <= T_GF; end
-            default: ts <= T_RSP;
+            default: begin verify_fail <= 1'b1; rsp_data <= 64'd0; ts <= T_RSP; end
           endcase
         end
 
+        T_PAGE: if (cmd_valid) begin
+          if (page_write) rsp_valid <= 1'b1;
+          else ts <= T_AUTO;
+        end
+        T_AUTO: if (AUTO_VERIFY && page_needed) begin
+          rsp_data <= {8'h51,24'd0,page_offset}; rsp_valid <= 1'b1; ts <= T_PAGE;
+        end else if (AUTO_VERIFY && auto_done) begin
+          verify_fail <= verify_fail || auto_bad;
+          verify_checks <= verify_checks + auto_checks;
+          rsp_data <= {63'd0,!auto_bad}; rsp_valid <= 1'b1; ts <= T_IDLE;
+        end
         T_RSP:   begin rsp_valid <= 1'b1; ts <= T_IDLE; end
         T_RDMEM: begin rsp_data <= a_rdata; rsp_valid <= 1'b1; ts <= T_IDLE; end
         T_WAITF: if (f_done) begin
@@ -742,53 +759,6 @@ module qsag_ni_asic_top #(
           end
         end
 
-        // Multilinear Ext4 fold
-        T_F0: ts <= T_F1;
-        T_F1: ts <= T_F2;
-        T_F2: ts <= T_F3;
-        T_F3: ts <= T_F4;
-        T_F4: ts <= T_FSUB;
-        T_FSUB: ts <= T_FMUL;
-        T_FMUL: ts <= T_FW0;
-        T_FW0: ts <= T_FW1;
-        T_FW1: begin
-          r_base  <= r_base + 16'd8;
-          r_wbase <= r_wbase + 16'd4;
-          r_wptr  <= r_idx[0] ? (r_wbase + 16'd4) : r_wptr;
-          r_pairs <= r_pairs - 32'd1;
-          if (r_pairs == 32'd1) begin rsp_valid <= 1'b1; ts <= T_IDLE; end
-          else ts <= T_F0;
-        end
-
-        // Ext4 Horner burst
-        T_H0: ts <= T_H1;
-        T_H1: ts <= T_H2;
-        T_H2: ts <= T_H3;
-        T_H3: begin
-          r_base  <= r_base + 16'd4;
-          r_pairs <= r_pairs - 32'd1;
-          if (r_pairs == 32'd1) begin rsp_valid <= 1'b1; ts <= T_IDLE; end
-          else ts <= T_H0;
-        end
-
-        // [CWYZ26] DuetFold gate batch
-        T_D_RD: begin
-          if (r_sub == 5'd14) begin r_sub <= 5'd0; ts <= T_D_OP; end
-          else r_sub <= r_sub + 5'd1;
-        end
-        T_D_OP: begin
-          if (r_sub == 5'd21) begin
-            if (st[255:0] != st_rd[767:512]) verify_fail <= 1'b1;
-            verify_checks <= verify_checks + 32'd1;
-            r_base        <= r_base + 16'd27;
-            r_sub         <= 5'd0;
-            if (r_pairs == 32'd1) begin rsp_valid <= 1'b1; ts <= T_IDLE; end
-            else begin r_pairs <= r_pairs - 32'd1; ts <= T_D_RD; end
-          end else begin
-            r_sub <= r_sub + 5'd1;
-          end
-        end
-
         // Dual-port SRAM Keccak absorb
         T_KA_RD: begin
           if ({27'd0, r_sub} * 32'd2 >= r_pairs) ts <= T_KA_GO;
@@ -820,6 +790,6 @@ module qsag_ni_asic_top #(
     end
   end
 
-  wire unused_ok = &{1'b0, f_busy, cmd_addr[23:16], AW[0]};
+  wire unused_ok = &{1'b0, f_busy, st_rd[767:576], cmd_addr[23:16], AW[0]};
 endmodule
 `default_nettype wire

@@ -11,7 +11,9 @@ module qsag_f2_engine (
   input wire [8:0] ring_len,
   input wire [92:0] mmio_cmd,
   output wire [511:0] mem_q,
-  output wire idle, fail,
+  output wire idle, fail, page_paused,
+  output wire [15:0] page_window_base,
+  output wire [16:0] page_window_end,
   output wire [8:0] free_beats,
   output wire [31:0] checks,
   output logic [31:0] retired,
@@ -54,6 +56,6 @@ module qsag_f2_engine (
     .cmd_op(cmd[92:85]), .cmd_idx(cmd[84:80]), .cmd_addr({8'd0,cmd[79:64]}), .cmd_data(cmd[63:0]),
     .host_en(erase || dma_mem), .host_row(erase ? erase_addr[12:0] : row),
     .host_strb(erase ? '1 : strb), .host_data(erase ? '0 : wdata), .host_q(mem_q),
-    .fail, .checks, .rsp_valid(rsp), .rsp_data
+    .fail, .checks, .page_paused, .page_window_base, .page_window_end, .rsp_valid(rsp), .rsp_data
   );
 endmodule
