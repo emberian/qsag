@@ -1,62 +1,70 @@
-# hardware/fpga — QSAG-NI Accelerator Core for Lattice ECP5 & Xilinx UltraScale+
+# QSAG-NI FPGA accelerator
 
-Synthesizable, vendor-primitive-free SystemVerilog implementation of the **QSAG-NI** verification and recursion accelerator across four parameterized silicon profiles sharing one unified AXI4-Lite + 512-bit AXI4-Stream ISA (`rtl/qsag_ni_fpga_top.sv`), verified bit-exact against the Lean 4 oracle vectors, real `QSAGSTA1` Role-1/Role-2 proofs, `[CWYZ26]` DuetFold, and `zk-Hem v2` quintic $\mathbb{F}_{p^5} = \mathbb{F}_p[X]/(X^5 - 3)$ extensions.
+The accelerator shares a 32-bit AXI4-Lite command interface and a 512-bit AXI4-Stream across four silicon profiles. Field operations use five little-endian 64-bit coefficients over the Goldilocks prime `p = 2^64 - 2^32 + 1`, with `X^5 = 3`. The other engines implement Poseidon2-12, Keccak, TurboSHAKE256, cSHAKE256 and polynomial or tower-basis GF(2^128) multiplication.
 
-Raw synthesis, simulation, formal equivalence, and `nextpnr-ecp5` place-and-route outputs are recorded in `RESULTS.md`.
+## Field commands
 
-## Silicon Profiles (`rtl/qsag_ni_fpga_top.sv`)
+Each stream beat carries one Fp5 element in bits 319 through 0. Bits 63 through 0 carry coefficient zero. Advance the beat only on a valid/ready handshake.
 
-| Profile | Parameters | DSP Usage | Architecture Highlights |
-|---|---|---:|---|
-| **`VU9P_TURBO`** | `PROFILE_COMPACT=0, P2_UNROLLED=1, KECCAK_PIPE=1, CHAIN_SLOTW=8, FOLD_TAW=16` | `4,825` `DSP48E2` | 1-perm/clk unrolled Poseidon2-12 + 12-stage pipelined Keccak-p[1600,12] + 256 chain slots |
-| **`XCUP_RING`** | `PROFILE_COMPACT=0, P2_UNROLLED=0, KECCAK_PIPE=0, CHAIN_SLOTW=5, FOLD_TAW=10/16` | **`513` `DSP48E2`** (`-33%` vs 768) | 16-stage C-slow Poseidon2-12 ring (`432` DSPs) + 1-MAC/clk 9-mul Tower Karatsuba `Ext4` (`81` DSPs) |
-| **`ECP5_FULLRATE`** | `PROFILE_COMPACT=1, ECP5_FULLRATE=1, FOLD_TAW=11, KECCAK_RPC=1, AW=16, BW=16` | **`117 / 156` (`75.0%`) `MULT18X18D`** | Fits DSP budget of **one `$45` Lattice `ECP5-85F`**: 81-DSP 1-MAC/clk `Ext4` + 36-DSP 1-Sbox/clk Poseidon2 + 0-DSP 1-RAM $N^4=I$ Keccak |
-| **`ECP5_COMPACT`** | `PROFILE_COMPACT=1, ECP5_FULLRATE=0, FOLD_TAW=11, KECCAK_RPC=1, AW=16, BW=16` | **`18 / 156` (`11.5%`) `MULT18X18D`** | Ultra-compact: 9-DSP Tower Karatsuba `Ext4` butterfly + 9-DSP rotating Poseidon2 + 0-DSP 1-RAM Keccak + compact GF($2^{128}$) |
+| Command | Operands and result |
+|---|---|
+| `0x11 SC_INIT` | Set the running claim from X[0..4] and clear the sticky sumcheck failure. |
+| `0x12 SC_ROUND` | With arg0 = 0, X[0..19] hold four ascending coefficients and X[20..24] holds the challenge. With arg0 = degree (1..255), send the challenge followed by coefficients in descending order. Check g(0) + g(1) against the claim, then write g(r) to the claim and Y[0..4]. |
+| `0x13 FOLD_ROUND` | Fold the active table in place with X[0..4]. Y[0..4] receives the final butterfly of the round. |
+| `0x14 FOLD_SETLEN` | Set the current table dimension to arg0[5..0]. Stream destination 8 loads one full element per beat. |
+| `0x15 FOLD_MULTI` | Apply 1..6 challenges from consecutive groups of five X registers. An optional nonzero arg1[5..0] supplies the initial dimension. |
+| `0x16 EXT5_BATCH` | For each of arg1 entries (1..65535), send A, B, C and expected Y on four beats. Hardware checks every result and writes the last one to Y[0..4]. |
+| `0x17 EXT5_MAC` | Y[0..4] = X[0..4] × X[5..9] + X[10..14]. |
+| `0x18 EXT5_FROB` | Apply the arg0-th Frobenius power to X[0..4], scaling limb i by ζ₅ raised to i × arg0 modulo five. |
 
-## Key Microarchitectural & Audit Milestones
+STATUS bits 0..4 report busy, done, ok, noncanonical input and command error. Opcode `0x10` sets command error and clears ok. Command `0x3F` clears sticky errors and counters. The RTL header includes the complete register and opcode map. [Top-level interface](rtl/qsag_ni_fpga_top.sv)
 
-1. **9-DSP Unsigned Two-Level Karatsuba Goldilocks Multiplier (`qsag_mul33x32_dsp.sv` + `qsag_mul64_dsp.sv`):** Cuts per-multiplier DSPs from `12` (`DSP48E2`) / `16` (`MULT18X18D`) down to **9 DSPs** on *both* families (`<= 18x17u` unsigned DSP tiles). Combined with 9-multiply Tower Karatsuba `Ext4` (`9 x 9 = 81` DSPs vs `256` schoolbook) and `4 x 9 = 36`-DSP `qsag_p2_sbox7`, `ECP5_FULLRATE` fits **`117 / 156` (`75.0%`) `MULT18X18D`** on one `LFE5U-85F-6BG381C`.
-2. **Full 400-Bit `0x22 KEC_STREAM_SPONGE` Hardware Verification (`E11` Fix #1):** `flags[6]` (`chk400`) checks all 50 bytes (`[399:0]`, packing upper 16 bits in `flags[63:48]`) of `zk-Hem v2` digests so upper-144-bit (`bytes 32..49`) tampering cannot pass `STATUS.ok`.
-3. **Zero-DSP Shift-Add $N^4 = I$ Compact Keccak (`qsag_keccak_compact.sv`, `E11` Fix #2):** Replaces `5'd3 * x` and `5'd5 * y` in `n4_addr` with shift-add `(x << 1) + x` and `(y << 2) + y`, eliminating all 5 unintended combinational `MULT18X18D` DSPs (`0` DSPs, `2` `DP16KD`, post-PnR Fmax up from `28.61 MHz` -> **`32.83 MHz`**).
-4. **Canonical 72-Bit Negation Bias (`E11` Fix #3 & `ECP5_FULLRATE` `3*B66`):** `qsag_ext4_compact_bfly.sv` uses `C64_72 = 72'h00_FFFF_FFFE_0000_0003` (`2p - (2^64 - 1)`), and `qsag_ext4_mac.sv` `g_ecp5_post` uses `72'(3) * B66` on `t_y1`, proved algebraically and on RTL in `lec/lec.py`.
+## Datapaths
 
-## Verification Results (`RESULTS.md`)
+The VU9P_TURBO and XCUP_RING profiles share a seven-stage, 14-product quintic MAC. Their 320-bit even and odd fold banks issue one butterfly per clock. On ECP5, each bank has five 64-bit lanes with separate local write enables. Passive loading accepts one 320-bit element per clock. The working operand port and result writeback are 64 bits wide.
 
-- **Lint (`./lint.sh`):** **`0` warnings** across all Verilator `-Wall` configurations (`qsag_ni_fpga_top` default, `PROFILE_COMPACT`, `ECP5_FULLRATE`, `-DQSAG_ECP5_CARRY`, `qsag_poseidon2_12_pipe`, `qsag_gf128_tower_mul`, `qsag_ext5_mac`).
-- **Differential Verilator Simulation (`0` mismatches across all 4 suites):**
-  - `units` (`sim_UNITS.log`): **`2,700,221` checks, `0` mismatches** (`213,721` clocks).
-  - `top` (`XCUP_RING`, `sim_TOP.log`): **`39,509` checks, `0` mismatches** (`2,286,663` clocks; real `QSAGSTA1` Role-1 `86,810` clks, Role-2 `1,281,993` clks, `[CWYZ26]` DuetFold `30,877` clks, `zk-Hem v2` $\mathbb{F}_{p^5}$ MAC/Frobenius + 400-bit `KEC_STREAM_SPONGE` byte-35/byte-49 tamper rejection).
-  - `ecp5_fullrate` (`117/156` DSPs, `sim_ECP5_FULLRATE.log`): **`36,243` checks, `0` mismatches** (`11,570,342` clocks; real `QSAGSTA1` Role-1 `2,004,196` clks, Role-2 `7,675,194` clks, DuetFold `1,077,613` clks).
-  - `compact` (`18/156` DSPs, `sim_COMPACT.log`): **`36,240` checks, `0` mismatches** (`15,741,662` clocks; real `QSAGSTA1` Role-1 `2,321,246` clks, Role-2 `11,258,276` clks, DuetFold `1,147,685` clks).
-- **100% Formal Equivalence (`0` timeouts, `0` undecided):**
-  - **`435 / 435` Z3 + Bitwuzla checks `PASS` (`0` non-PASS)** across `gl` (`135`), `glmut` (`101`), `ext5` (`151`), `gf` (`4`), `comp` (`23`, including sliced `comp_clmul_row_split_w128`), and `tower` (`21`), plus `Bitwuzla` `unsat` equivalence of `-DQSAG_ECP5_CARRY` vs CSA.
-  - **`128 / 128` exact GF(2) ANF netlist equality** (`lec/anf_check.py`, `40,832` monomials + mutant refutation).
+ECP5_COMPACT issues 25 schoolbook products in 25 clocks using one nine-DSP Goldilocks multiplier. ECP5_FULLRATE issues five products per clock for five clocks using 45 DSPs. Wrapped terms use precomputed modular triples. The ECP5 command controller tracks which X limbs are resident in the working banks and reloads operands when another command has used them. A direct register MAC takes 37 or 17 command clocks respectively, including the five-limb result writeback. Both wide profiles take 9 command clocks.
 
-## Synthesis & `nextpnr-ecp5` Place-and-Route (`LFE5U-85F-6BG381C`, `$45` ECP5-85F, Speed 6)
+The ECP5 timing wrappers expose serial test pins and use four chain slots, a 512-element fold table and a 512-entry Canopy sibling store. ECP5 profile simulations use 32 slots and a 2,048-element fold table. The wide profile simulations cover a 65,536-element table.
 
-### Routed `nextpnr-ecp5` + `ecppack` Bitstreams (`build/synth/*.pnr.bit`)
+## Measured results
 
-| Unit Wrapper | Post-PnR Fmax | `TRELLIS_COMB` (`/ 83,640`) | `TRELLIS_FF` (`/ 83,640`) | `MULT18X18D` (`/ 156`) | `DP16KD` (`/ 208`) | Bitstream (`.bit`) |
-|---|---:|---:|---:|---:|---:|---:|
-| `fmax_gl64_dsp_mul` | **50.05 MHz** | `2,566` (`3.1%`) | `887` (`1.1%`) | **`9` (`5.8%`)** | `0` | `308.4 KiB` |
-| `fmax_p2_sbox7` | **48.59 MHz** | `9,933` (`11.9%`) | `2,852` (`3.4%`) | **`36` (`23.1%`)** | `0` | `411.1 KiB` |
-| `fmax_ext4_mac` | **46.23 MHz** | `25,365` (`30.3%`) | `8,832` (`10.6%`) | **`81` (`51.9%`)** | `0` | `634.1 KiB` |
-| `fmax_keccak_compact` | **32.83 MHz** | `5,362` (`6.4%`) | `1,461` (`1.7%`) | **`0` (`0.0%`)** | `2` (`1.0%`) | `354.1 KiB` |
-| `fmax_gf128_clmul` | **69.84 MHz** | `6,560` (`7.8%`) | `641` (`0.8%`) | `0` | `0` | `358.9 KiB` |
-| `fmax_p2_linear` | **34.41 MHz** | `25,240` (`30.2%`) | `3,217` (`3.8%`) | `0` | `0` | `582.7 KiB` |
+<!-- measured:start -->
+All frequencies below are final routed clock estimates on the LFE5U-85F-6BG381C, CABGA381, speed 6.
 
-*Full-top ECP5-85F PnR note:* Both `fmax_compact_top` (`60,419 / 83,640 = 72.2%` `TRELLIS_COMB`, `18 / 156 = 11.5%` `MULT18X18D`, `100–121 / 208` `DP16KD`, `HeAP` post-place `25.98 MHz`) and `fmax_ecp5_fullrate_top` (`79,788 / 83,640 = 95.4%` `TRELLIS_COMB`, `117 / 156 = 75.0%` `MULT18X18D`, `108–129 / 208` `DP16KD`, `HeAP` post-place `34.98 MHz`) legally place on `LFE5U-85F-6BG381C`, but hit `router2` switchbox congestion (`overused` floor `~26k` on `compact_top`) due to `x_q[31:0]` (`2,048`-FF) / `y_q[11:0]` wide muxing and soft CSA horizontal wiring; `-DQSAG_ECP5_CARRY` (`CCU2C` vertical carry trees in `qsag_add_split.sv` / `qsag_sum_csa.sv`, Bitwuzla-proved `UNSAT`) and BRAM-backed `x_q` banking are staged for the next routing pass.
+| Timing wrapper | Constraint MHz | Routed MHz | Logic LUT4 | COMB | FF | DSP | BRAM | Packed bytes | Overused |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| [fmax_gl64_dsp_mul](build/synth/fmax_gl64_dsp_mul.pnr.bit) | 50 | 59.545074 | 1460 | 2186 | 887 | 9 | 0 | 311295 | 0 |
+| [fmax_p2_sbox7](build/synth/fmax_p2_sbox7.pnr.bit) | 50 | 59.772865 | 5479 | 8115 | 2852 | 36 | 0 | 401613 | 0 |
+| [fmax_gf128_clmul](build/synth/fmax_gf128_clmul.pnr.bit) | 65 | 71.341942 | 6560 | 6560 | 641 | 0 | 0 | 367255 | 0 |
+| [fmax_keccak_compact](build/synth/fmax_keccak_compact.pnr.bit) | 30 | 35.626492 | 5147 | 5423 | 1461 | 0 | 2 | 356781 | 0 |
+| [fmax_p2_linear](build/synth/fmax_p2_linear.pnr.bit) | 45 | 46.097816 | 18392 | 21406 | 3205 | 0 | 0 | 551042 | 0 |
+| [fmax_ext5_mac](build/synth/fmax_ext5_mac.pnr.bit) | 25 | 34.724632 | 28402 | 43460 | 6466 | 126 | 0 | 895746 | 0 |
+| [fmax_compact_top](build/synth/fmax_compact_top.pnr.bit) | 20 | 33.621357 | 23576 | 29436 | 9378 | 18 | 79 | 931949 | 0 |
+| [fmax_ecp5_fullrate_top](build/synth/fmax_ecp5_fullrate_top.pnr.bit) | 20 | 29.859657 | 35153 | 45667 | 12645 | 81 | 77 | 1136914 | 0 |
 
-### Yosys Hierarchical Synthesis Summary (`synth/run_all.sh`)
+| Verilator suite | Checks | Mismatches | Simulated clocks | Connected workload TOTAL_CYCLES |
+|---|---:|---:|---:|---:|
+| [UNITS](build/verif_logs/verify_units.log) | 1,900,209 | 0 | 213,721 | — |
+| [COMPACT](build/verif_logs/verify_compact.log) | 1,467 | 0 | 766,828 | 15493 |
+| [ECP5_FULLRATE](build/verif_logs/verify_ecp5_fullrate.log) | 1,467 | 0 | 541,928 | 11693 |
+| [TOP](build/verif_logs/verify_top.log) | 1,547 | 0 | 201,648 | 3706 |
+| [PIPE](build/verif_logs/verify_pipe.log) | 1,547 | 0 | 196,268 | 3492 |
 
-| Module / Top | UltraScale+ LUT / `DSP48E2` / `RAMB36+18` | ECP5 `LUT4` / `CCU2C` / `MULT18X18D` / `DP16KD` |
-|---|---|---|
-| `qsag_gl64_dsp_mul` | `1,722` / **`9`** / `0` | `2,428` / `435` / **`9`** / `0` |
-| `qsag_p2_sbox7` | `15,616` / **`36`** / `0` | `9,712` / `1,740` / **`36`** / `0` |
-| `qsag_ext4_mac` | `46,356` / **`81`** / `0` | `23,577` / `3,789` / **`81`** / `0` |
-| `qsag_ext5_mac` | `102,420` / **`126`** / `0` | `57,302` / `8,254` / **`126`** / `0` |
-| `qsag_keccak_compact` | `3,369` / **`0`** / `1+0` | `5,069` / `77` / **`0`** / `2` |
-| `qsag_ni_fpga_top_ecp5_compact` | `52,101` / **`18`** / `23+131` | `57,576` / `2,961` / **`18`** / `177` |
-| `qsag_ni_fpga_top_ecp5_fullrate` | `102,212` / **`117`** / `27+131` | `76,116` / `7,055` / **`117`** / `185` |
-| `qsag_ni_fpga_top_taw10` (`XCUP_RING`) | `315,876` / **`513`** / `31+86` | — |
-| `qsag_ni_fpga_top_taw16` (`XCUP_RING`) | `316,985` / **`513`** / `487+86` | — |
+Verilator lint passed. All 461 formal and ANF checks returned their expected result, including deliberately faulty designs. The DSP register-packing checks passed on all three optimized wrappers. [Lint](build/verif_logs/lint.log) · [Formal](build/verif_logs/lec_all.log) · [ANF](build/verif_logs/anf_check.log) · [Packing equivalence](build/verif_logs/ecp5_opt_equiv.log)
+<!-- measured:end -->
+
+The connected differential workload checks a gate batch, commits its outputs with a 400-bit TurboSHAKE256 transcript, folds a table, chains sumcheck claims at degrees 2, 3, 4 and 9, then verifies Steiner and Poseidon2 Canopy openings. The harness generates its inputs deterministically. The isolated fixture set contains the base-field, Poseidon2, sponge and tower Lean vectors. [Per-opcode counters, placement comparison and verification logs](RESULTS.md)
+
+## Reproduce
+
+Run these commands from the isolated FPGA directory. The remote launcher sets the CAD suite path, scratch directory and six-job compilation limit.
+
+```sh
+scripts/remote_run.sh ./verify_fpga.sh all
+scripts/remote_run.sh bash lec/ecp5_opt_check.sh
+scripts/remote_run.sh bash synth/run_fmax.sh
+scripts/remote_run.sh bash scripts/collect_results.sh
+```
+
+The PnR gate requires every clock to meet its requested constraint, the final router iteration to report zero overused wires and the packed image to be nonempty. For a placement comparison, set `PLACEMENT=heap` or `PLACEMENT=plan` and pass a distinct output tag to `synth/fmax_ecp5.sh`. [Timing and packing gate](synth/fmax_ecp5.sh)
