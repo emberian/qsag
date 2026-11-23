@@ -9,7 +9,7 @@ cat >>formal/addsub.smt2 <<'QUERY'
 QUERY
 for solver in z3 bitwuzla; do
     status=0
-    answer=$("$solver" formal/addsub.smt2) || status=$?
+    answer=$(timeout 60s "$solver" formal/addsub.smt2) || status=$?
     [[ "$status" == 0 || "$status" == 20 ]]
     echo "canonical add/sub $solver $answer"
     test "$answer" = unsat

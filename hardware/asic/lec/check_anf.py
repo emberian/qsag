@@ -17,11 +17,11 @@ os.chdir(root)
 sys.path.insert(0, str(root / "gen"))
 import qsag_ref as ref  # noqa: E402
 
-os.environ["PATH"] = "/home/build/qsag-ni-asic/tools/oss-cad-suite/bin:" + os.environ["PATH"]
+os.environ["PATH"] = os.environ.get("OSS_CAD_BIN", "/opt/oss-cad-suite/bin") + ":" + os.environ["PATH"]
 w = root / "lec/work/anf"
 w.mkdir(parents=True, exist_ok=True)
 os.environ["TMPDIR"] = str(w)
-run = ["env", "SWARM_MEM_MAX=16G", "swarm-build", "timeout", "--kill-after=10s", "600s"]
+run = ["timeout", "--kill-after=10s", "600s"]
 
 
 def bits(mask):

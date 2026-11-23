@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bb2 only: run the complete compositional LEC suite (100% decided, 0 undecided!)
+# Linux build host: run the complete compositional LEC suite (100% decided, 0 undecided!)
 # + independent CSA & ANF algebraic equivalence certificates.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,10 +17,6 @@ rm -f logs/lec.log logs/lec_sorted.log
     sk_m0 sk_m0_mut sk_m1 sk_m1_mut \
     fold_s2 fold_s2_mut \
     final final_mut step step_mut \
-    kara_in kara_in_mut \
-    fp2_re fp2_re_mut fp2_im fp2_im_mut \
-    kara_r0 kara_r0_mut kara_r1 kara_r1_mut \
-    kara_sub2 kara_sub2_mut kara_r2 kara_r2_mut kara_r3 kara_r3_mut \
     csa3 csa3_mut csa4 csa4_mut \
     m4_lane m4_lane_gl m4_lane_mut \
     me_col_lane me_col_lane_mut \

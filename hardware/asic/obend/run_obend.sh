@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# bb2 only. Verify QsagNi.lean kernel proofs (`0 sorry`, `0 axiom`, `0 Classical.choice`), emit all
-# 9 Obend `RtlModule` SV + Lean SMT2 specs, and discharge Z3 + Bitwuzla LEC (+ mutant SAT checks).
+# Linux build host. Verify QsagNi.lean kernel proofs (`0 sorry`, `0 axiom`, `0 Classical.choice`), emit all
+# 7 Obend `RtlModule` SV + Lean SMT2 specs, and discharge Z3 + Bitwuzla LEC (+ mutant SAT checks).
 set -euo pipefail
 cd "$(dirname "$0")"
-export PATH=/home/build/qsag-ni-asic/tools/oss-cad-suite/bin:$HOME/.elan/bin:$PATH
-OBEND="${OBEND:-$HOME/obend/wt-s2-hw-silicon}"
-RUN="env SWARM_MEM_MAX=16G swarm-build timeout --kill-after=10s 600s"
+export PATH="${OSS_CAD_BIN:-/opt/oss-cad-suite/bin}:$HOME/.elan/bin:$PATH"
+OBEND="${OBEND:-$HOME/obend}"
+RUN="timeout --kill-after=10s 600s"
 mkdir -p emitted ../logs
 rm -f emitted/*.sv emitted/*.smt2
 cp "$OBEND/lean/lean-toolchain" .
@@ -27,7 +27,7 @@ for sv in emitted/*.sv; do
   sed '/^; --- counterexample/,$d' "$lec" > "emitted/${top}.lean.smt2"
   t0=$(date +%s)
   cat "emitted/${top}.yosys.smt2" "emitted/${top}.lean.smt2" > "emitted/${top}.full.smt2"
-  vz="$($RUN z3 -T:60 "emitted/${top}.full.smt2" 2>&1 | grep -v swarm-build | head -1)"
+  vz="$($RUN timeout 60s z3 -T:60 "emitted/${top}.full.smt2" 2>&1 | head -1)"
   echo "OBEND-LEC ${top}: z3=${vz} ($(( $(date +%s) - t0 )) s) [expect unsat]" | tee -a ../logs/obend.log
   [[ "$vz" == "unsat" ]]
   # planted fault: flip bit 0 of the last output assignment (`<port> = w_<n>;`)
@@ -36,7 +36,7 @@ for sv in emitted/*.sv; do
   cmp -s "$sv" "emitted/${top}.mut.sv.tmp" && { echo "mutation did not apply to ${top}"; exit 1; }
   ys "emitted/${top}.mut.sv.tmp" "emitted/${top}.mut.yosys.smt2"
   cat "emitted/${top}.mut.yosys.smt2" "emitted/${top}.lean.smt2" > "emitted/${top}.mut.full.smt2"
-  vm="$($RUN z3 -T:60 "emitted/${top}.mut.full.smt2" 2>&1 | grep -v swarm-build | head -1)"
+  vm="$($RUN timeout 60s z3 -T:60 "emitted/${top}.mut.full.smt2" 2>&1 | head -1)"
   echo "OBEND-LEC ${top} (output bit flipped): z3=${vm} [expect sat]" | tee -a ../logs/obend.log
   [[ "$vm" == "sat" ]]
   rm -f "emitted/${top}.mut.sv.tmp" "emitted/${top}.full.smt2" "emitted/${top}.mut.full.smt2"

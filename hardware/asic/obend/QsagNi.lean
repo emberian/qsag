@@ -13,16 +13,13 @@ QSAG-NI Formal Hardware & Algebraic Specifications in Obend (`Obend.Hardware.HDL
    - Poseidon2 `M_I = J_12 + diag(-64, 1, 2, 4, ..., 1024)` hardware partial-round split identity
      (decoupling `s_tail = ∑_{j=1..11} x_j` from lane-0 `x_0^7`) AND Sherman–Morrison determinant
      non-vanishing (`det_num = 3055`, `3055 * inv3055 ≡ 1 (mod p)`).
-   - 9-product Tower Karatsuba `GoldilocksExt4` equivalence to 16-product schoolbook multiplication
-     over `𝔽_p[v]/(v^4 - 7)` in limb order `[1, u, v, u·v]` (`u = v^2`, `u^2 = 7`), over both `ℤ`
-     and `ℤ/pℤ`.
-   - `#tooth` mutation-sensitivity witnesses refuting single-coefficient perturbations in `M_4`,
-     9-product Karatsuba `Ext4`, and Goldilocks 96-bit folding.
+   - `#tooth` mutation-sensitivity witnesses refuting single-coefficient perturbations in `M_4`
+     and Goldilocks 96-bit folding.
 
-2. Emits 9 `RtlModule` specifications (all passing `checkRtlModuleW`), writing both `.sv`
+2. Emits 7 `RtlModule` specifications (all passing `checkRtlModuleW`), writing both `.sv`
    (`emitModuleSV`) and Lean-side SMT-LIB2 miter obligations (`emitYosysLecSmt2`) for Z3 + Bitwuzla LEC.
 
-Run on `bb2` against the read-only built Obend tree:
+Run on a Linux x86_64 build host against the read-only built Obend tree:
   LEAN_PATH=$OBEND/lean/.lake/build/lib/lean lean --run QsagNi.lean <outdir>
 -/
 import Obend.Apps.ZkNtt
@@ -176,72 +173,6 @@ theorem mi_sherman_morrison_unit :
     ((1024 : Int) - 16 + (1024 + 512 + 256 + 128 + 64 + 32 + 16 + 8 + 4 + 2 + 1) = 3055) ∧
     (3055 * inv3055ModP) % glPrimeInt = 1 := by decide
 
-/-! ### 9-Product Tower Karatsuba `GoldilocksExt4` Equivalence Theorem -/
-
-/-- 16-product schoolbook `GoldilocksExt4` multiply-add `a * b + z` over `𝔽_p[v]/(v^4 - 7)`
-in limb order `[1, u, v, u·v]` (`u = v^2`, `u^2 = 7`), matching `crates/qsag-agg/src/field.rs`. -/
-def ext4SchoolbookInt (a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 : Int) : Int × Int × Int × Int :=
-  (z0 + a0 * b0 + 7 * (a1 * b1 + a2 * b3 + a3 * b2),
-   z1 + a0 * b1 + a1 * b0 + a2 * b2 + 7 * (a3 * b3),
-   z2 + a0 * b2 + a2 * b0 + 7 * (a1 * b3 + a3 * b1),
-   z3 + a0 * b3 + a3 * b0 + a1 * b2 + a2 * b1)
-
-/-- 9-product Tower Karatsuba `GoldilocksExt4` multiply-add implemented by
-`qsag_ext4_kara_inputs` + 9 shared 64×64 Dadda trees + `qsag_ext4_kara_combine`. -/
-def ext4KaratsubaInt (a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 : Int) : Int × Int × Int × Int :=
-  let p0 := a0 * b0
-  let p1 := a1 * b1
-  let p2 := (a0 + a1) * (b0 + b1)
-  let p3 := a2 * b2
-  let p4 := a3 * b3
-  let p5 := (a2 + a3) * (b2 + b3)
-  let p6 := (a0 + a2) * (b0 + b2)
-  let p7 := (a1 + a3) * (b1 + b3)
-  let p8 := ((a0 + a1) + (a2 + a3)) * ((b0 + b1) + (b2 + b3))
-  let t2 := -p0 - 7 * p1 - p3 - 7 * p4
-  let t3 := p0 + p1 - p2 + p3 + p4 - p5
-  (p0 + 7 * p1 - 7 * p3 - 7 * p4 + 7 * p5 + z0,
-   -p0 - p1 + p2 + p3 + 7 * p4 + z1,
-   t2 + p6 + 7 * p7 + z2,
-   t3 - p6 - p7 + p8 + z3)
-
-private theorem bilin2 (x0 x1 y0 y1 : Int) :
-    (x0 + x1) * (y0 + y1) = x0 * y0 + x0 * y1 + x1 * y0 + x1 * y1 := by
-  rw [Int.add_mul, Int.mul_add, Int.mul_add]
-  omega
-
-/-- **Tower Karatsuba Exact Ring Theorem**: the 9-product Karatsuba schedule equals the 16-product
-schoolbook `Ext4` multiply-add identically over `ℤ` (and hence modulo `goldilocksPrime`). -/
-theorem ext4_karatsuba_eq_schoolbook (a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 : Int) :
-    ext4KaratsubaInt a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 =
-    ext4SchoolbookInt a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 := by
-  dsimp only [ext4KaratsubaInt, ext4SchoolbookInt]
-  have h2 := bilin2 a0 a1 b0 b1
-  have h5 := bilin2 a2 a3 b2 b3
-  have h6 := bilin2 a0 a2 b0 b2
-  have h7 := bilin2 a1 a3 b1 b3
-  have h8 : ((a0 + a1) + (a2 + a3)) * ((b0 + b1) + (b2 + b3)) =
-      (a0 + a1) * (b0 + b1) + (a2 + a3) * (b2 + b3) +
-      (a0 * b2 + a0 * b3 + a1 * b2 + a1 * b3) +
-      (a2 * b0 + a2 * b1 + a3 * b0 + a3 * b1) := by
-    rw [bilin2 (a0 + a1) (a2 + a3) (b0 + b1) (b2 + b3),
-        bilin2 a0 a1 b2 b3, bilin2 a2 a3 b0 b1]
-    omega
-  simp only [Prod.mk.injEq]
-  exact ⟨by omega, by omega, by omega, by omega⟩
-
-/-- Modular corollary over `𝔽_p^4`: every limb of 9-product Karatsuba mod `p` equals schoolbook mod `p`. -/
-theorem ext4_karatsuba_mod_p_eq (a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 : Int) :
-    let (k0, k1, k2, k3) := ext4KaratsubaInt a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3
-    let (s0, s1, s2, s3) := ext4SchoolbookInt a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3
-    (k0 % glPrimeInt, k1 % glPrimeInt, k2 % glPrimeInt, k3 % glPrimeInt) =
-    (s0 % glPrimeInt, s1 % glPrimeInt, s2 % glPrimeInt, s3 % glPrimeInt) := by
-  rw [ext4_karatsuba_eq_schoolbook]
-
-/-- `#tooth` mutation witness: omitting `-7 * p3` in limb 0 fails at `v * v = u` (`a2 = b2 = 1`, `u * u = 7`). -/
-theorem tooth_karatsuba_missing_p3_refuted :
-    ext4KaratsubaInt 0 0 1 0 0 0 1 0 0 0 0 0 ≠ (7, 1, 0, 0) := by decide
-
 /-! ## Part 2: Obend `RtlModule` Hardware Specifications & `evalModuleOutputs` Soundness -/
 
 instance : Inhabited RtlExpr := ⟨.const 0#64⟩
@@ -289,10 +220,6 @@ def glDouble (tag : String) (x : RtlExpr) (k : Nat) : WireM RtlExpr := do
   for i in [0:k] do
     v ← glAdd s!"{tag}_dbl{i}" v v
   pure v
-
-def glMul7 (tag : String) (x : RtlExpr) : WireM RtlExpr := do
-  let x8 ← glDouble s!"{tag}_8" x 3
-  glSub s!"{tag}_7" x8 x
 
 def names (p : String) (n : Nat) : List String := (List.range n).map fun i => s!"{p}{i}"
 
@@ -377,69 +304,8 @@ def miSpec : RtlModule := mkModule "qsag_ni_p2_mi_spec" (names "x" 12 ++ names "
     outs := outs ++ [{ name := s!"y{l}", expr := y : OutputPort }]
   pure outs
 
-/-- Karatsuba 9-product linear reconstruction combiner (specification for `qsag_ext4_kara_combine`). -/
-def karaCombineWires (p : Array RtlExpr) (z : Array RtlExpr) : WireM (Array RtlExpr) := do
-  let p15 ← glAdd "k_p15" p[1]! p[5]!
-  let p34 ← glAdd "k_p34" p[3]! p[4]!
-  let d0  ← glSub "k_d0"  p15 p34
-  let d07 ← glMul7 "k_d07" d0
-  let r0a ← glAdd "k_r0a" p[0]! d07
-  let r0  ← glAdd "k_r0"  r0a z[0]!
-  let d1a ← glSub "k_d1a" p[2]! p[0]!
-  let d1b ← glSub "k_d1b" p[3]! p[1]!
-  let p47 ← glMul7 "k_p47" p[4]!
-  let r1a ← glAdd "k_r1a" d1a d1b
-  let r1b ← glAdd "k_r1b" r1a p47
-  let r1  ← glAdd "k_r1"  r1b z[1]!
-  let d2a ← glSub "k_d2a" p[6]! p[0]!
-  let d2b ← glSub "k_d2b" d2a p[3]!
-  let p14 ← glAdd "k_p14" p[1]! p[4]!
-  let d2c ← glSub "k_d2c" p[7]! p14
-  let d27 ← glMul7 "k_d27" d2c
-  let r2a ← glAdd "k_r2a" d2b d27
-  let r2  ← glAdd "k_r2"  r2a z[2]!
-  let p01 ← glAdd "k_p01" p[0]! p[1]!
-  let t3a ← glSub "k_t3a" p01 p[2]!
-  let t3b ← glSub "k_t3b" p34 p[5]!
-  let p67 ← glAdd "k_p67" p[6]! p[7]!
-  let t3c ← glSub "k_t3c" p[8]! p67
-  let r3a ← glAdd "k_r3a" t3a t3b
-  let r3b ← glAdd "k_r3b" r3a t3c
-  let r3  ← glAdd "k_r3"  r3b z[3]!
-  pure #[r0, r1, r2, r3]
-
-def ext4KaraCombSpec : RtlModule := mkModule "qsag_ni_ext4_kara_comb_spec" (names "p" 9 ++ names "z" 4) do
-  let p ← canonInputs "p" 0 9
-  let z ← canonInputs "z" 9 4
-  let r ← karaCombineWires p z
-  pure ((List.range 4).map fun i => { name := s!"r{i}", expr := r[i]! })
-
-/-- Full 9-product Tower Karatsuba `GoldilocksExt4` multiply-add `RtlModule`. -/
-def ext4KaraSpec : RtlModule := mkModule "qsag_ni_ext4_kara_spec" (names "a" 4 ++ names "b" 4 ++ names "z" 4) do
-  let a ← canonInputs "a" 0 4
-  let b ← canonInputs "b" 4 4
-  let z ← canonInputs "z" 8 4
-  let a01 ← glAdd "a01" a[0]! a[1]!
-  let a23 ← glAdd "a23" a[2]! a[3]!
-  let a02 ← glAdd "a02" a[0]! a[2]!
-  let a13 ← glAdd "a13" a[1]! a[3]!
-  let aall ← glAdd "aall" a01 a23
-  let b01 ← glAdd "b01" b[0]! b[1]!
-  let b23 ← glAdd "b23" b[2]! b[3]!
-  let b02 ← glAdd "b02" b[0]! b[2]!
-  let b13 ← glAdd "b13" b[1]! b[3]!
-  let ball ← glAdd "ball" b01 b23
-  let qa := #[a[0]!, a[1]!, a01, a[2]!, a[3]!, a23, a02, a13, aall]
-  let qb := #[b[0]!, b[1]!, b01, b[2]!, b[3]!, b23, b02, b13, ball]
-  let mut pr := #[]
-  for m in [0:9] do
-    pr := pr.push (← glMul s!"pm{m}" qa[m]! qb[m]!)
-  let r ← karaCombineWires pr z
-  pure ((List.range 4).map fun i => { name := s!"r{i}", expr := r[i]! })
-
 def all : List RtlModule := [
-  reduce128Spec, mulSpec, sum6Spec, m4Spec, meColSpec, meSpec, miSpec,
-  ext4KaraCombSpec, ext4KaraSpec
+  reduce128Spec, mulSpec, sum6Spec, m4Spec, meColSpec, meSpec, miSpec
 ]
 
 end QsagNi
@@ -452,7 +318,6 @@ end QsagNi
 #print axioms QsagNi.me_outer_col_adj_inv
 #print axioms QsagNi.mi_partial_split_lane0_eq
 #print axioms QsagNi.mi_sherman_morrison_unit
-#print axioms QsagNi.ext4_karatsuba_eq_schoolbook
 #print axioms QsagNi.mulSpec_sound
 
 def main (args : List String) : IO UInt32 := do

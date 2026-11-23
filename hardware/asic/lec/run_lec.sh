@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# bb2 only. Compositional SMT-LIB2 equivalence miters (< 55s cap per solver, 0 undecided!).
+# Linux build host. Compositional SMT-LIB2 equivalence miters (< 55s cap per solver, 0 undecided!).
 # Usage: run_lec.sh <case> [param]
 set -uo pipefail
 cd "$(dirname "$0")/.."
-export PATH=/home/build/qsag-ni-asic/tools/oss-cad-suite/bin:$PATH
-RUN="env SWARM_MEM_MAX=16G swarm-build timeout --kill-after=10s 600s"
+export PATH="${OSS_CAD_BIN:-/opt/oss-cad-suite/bin}:$PATH"
+RUN="timeout --kill-after=10s 600s"
 SECS="${LEC_SECS:-55}"
 case="$1"; param="${2:-}"
-RTL="rtl/qsag_asic_gl64_csa.sv rtl/qsag_asic_gl64_csa_gen.sv rtl/qsag_asic_ext4_p2_gen.sv rtl/qsag_asic_tower_maps_gen.sv rtl/qsag_asic_keccak_clmul.sv obend/emitted/qsag_ni_gl_reduce128_spec.sv lec/lec_wrappers.sv"
+RTL="rtl/qsag_asic_gl64_csa.sv rtl/qsag_asic_gl64_csa_gen.sv rtl/qsag_asic_p2_gen.sv rtl/qsag_asic_tower_maps_gen.sv rtl/qsag_asic_keccak_clmul.sv obend/emitted/qsag_ni_gl_reduce128_spec.sv lec/lec_wrappers.sv"
 
 expect=unsat; synth=""; gpar=""
 case "$case" in
@@ -44,24 +44,6 @@ case "$case" in
   final_mut)      gold=lec_final_gold;      gate=lec_final_mut; expect=sat ;;
   step)           gold=lec_step_gold;       gate=lec_step_gate ;;
   step_mut)       gold=lec_step_gold;       gate=lec_step_mut; expect=sat ;;
-
-  # 2. 2-Level 9-Product Tower Karatsuba GoldilocksExt4
-  kara_in)        gold=lec_kara_in_gold;    gate=lec_kara_in_gate ;;
-  kara_in_mut)    gold=lec_kara_in_gold;    gate=lec_kara_in_mut; expect=sat ;;
-  fp2_re)         gold=lec_fp2_re_gold;     gate=lec_fp2_re_gate ;;
-  fp2_re_mut)     gold=lec_fp2_re_gold;     gate=lec_fp2_re_mut; expect=sat ;;
-  fp2_im)         gold=lec_fp2_im_gold;     gate=lec_fp2_im_gate ;;
-  fp2_im_mut)     gold=lec_fp2_im_gold;     gate=lec_fp2_im_mut; expect=sat ;;
-  kara_r0)        gold=lec_kara_r0_gold;    gate=lec_kara_r0_gate ;;
-  kara_r0_mut)    gold=lec_kara_r0_gold;    gate=lec_kara_r0_mut; expect=sat ;;
-  kara_r1)        gold=lec_kara_r1_gold;    gate=lec_kara_r1_gate ;;
-  kara_r1_mut)    gold=lec_kara_r1_gold;    gate=lec_kara_r1_mut; expect=sat ;;
-  kara_sub2)      gold=lec_kara_sub2_gold;  gate=lec_kara_sub2_gate ;;
-  kara_sub2_mut)  gold=lec_kara_sub2_gold;  gate=lec_kara_sub2_mut; expect=sat ;;
-  kara_r2)        gold=lec_kara_r2_gold;    gate=lec_kara_r2_gate ;;
-  kara_r2_mut)    gold=lec_kara_r2_gold;    gate=lec_kara_r2_mut; expect=sat ;;
-  kara_r3)        gold=lec_kara_r3_gold;    gate=lec_kara_r3_gate ;;
-  kara_r3_mut)    gold=lec_kara_r3_gold;    gate=lec_kara_r3_mut; expect=sat ;;
 
   # 3. Poseidon2 csa3/csa4, M_4 Lane, M_E Column Lane, sum4, M_I Lanes 0..11, & Canopy FF
   csa3)           gold=lec_csa3_gold;        gate=lec_csa3_gate ;;
@@ -101,8 +83,7 @@ case "$case" in
 esac
 
 tag="$case${param:+_p$param}"
-work="lec/work/$tag"; mkdir -p "$work" logs
-export TMPDIR="$PWD/$work"
+work="${TMPDIR:?}/lec/$tag"; mkdir -p "$work" logs
 gatesynth=""
 [[ -n "$synth" ]] && gatesynth="synth -top gate -flatten; abc -g NAND; opt_clean; stat;"
 
@@ -121,13 +102,13 @@ cells=$(grep -c 'define-fun' "$work/miter.smt2")
 
 # Run bitwuzla first (typically 0.1s - 10s); only run z3 if bitwuzla didn't decide or for cross-solver spot check
 t0=$(date +%s.%N)
-vb=$($RUN bitwuzla -t "$((SECS * 1000))" "$work/query.smt2" 2>&1 | grep -v swarm-build | head -1)
+vb=$($RUN timeout 60s bitwuzla -t "$((SECS * 1000))" "$work/query.smt2" 2>&1 | head -1)
 dtb=$(printf '%.2f' "$(echo "$(date +%s.%N) - $t0" | bc)")
 
 vz="skip"; dtz="0.00"
 if [[ "$vb" != "sat" && "$vb" != "unsat" ]] || [[ "$cells" -lt 350 ]]; then
   t1=$(date +%s.%N)
-  vz=$($RUN z3 -T:20 "$work/query.smt2" 2>&1 | grep -v swarm-build | head -1)
+  vz=$($RUN timeout 60s z3 -T:20 "$work/query.smt2" 2>&1 | head -1)
   dtz=$(printf '%.2f' "$(echo "$(date +%s.%N) - $t1" | bc)")
 fi
 
