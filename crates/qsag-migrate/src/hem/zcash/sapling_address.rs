@@ -133,13 +133,13 @@
 //! two fixed-base multiplications 137,000, the BLAKE2s compression of `CRH^ivk` 21,000,
 //! and a BLAKE2b compression of about 50,000 rows for each of the 2 (spending key) or 21
 //! (seed of at most 128 bytes; 22 above) blocks of the key derivation. It contains
-//! multiplication rows only. Measured on hbox (i9-12900, 22 threads), regime 4
-//! (`BciksJohnsonQrom128`), release build:
+//! multiplication rows only, proved under `Profile::TurboShakeJohnson400` (wire tag `17`,
+//! `QSAGZKH2`, Quintic `Fp5`, `[DKT26]` / `[CWYZ26]` `< 2^{-128}` QROM):
 //!
-//! ```text
-//! HEM_ZCASH statement="sapling-address SpendingKey" regime=4 rows=976284 padded_rows=2^20 vars=963499 public_inputs=766 cells=2^21 synth_s=3.23 prove_s=5.21 verify_cold_s=2.60 verify_warm_ms=140.8 proof_bytes=882773 proof_kib=862.1 peak_rss_mib=2447
-//! HEM_ZCASH statement="sapling-address Zip32Seed { seed_len: 32, coin_type: 133, account: 0 }" regime=4 rows=1921425 padded_rows=2^21 vars=1893808 public_inputs=766 cells=2^22 synth_s=10.04 prove_s=17.96 verify_cold_s=10.45 verify_warm_ms=604.8 proof_bytes=924381 proof_kib=902.7 peak_rss_mib=10127
-//! ```
+//! | Statement | Key source | Rows | Padded rows | Variables | Public inputs | Table cells |
+//! | --- | --- | ---: | ---: | ---: | ---: | ---: |
+//! | `sapling-address` | `SpendingKey` | `976,284` | `2^20` | `963,499` | `766` | `2^21` |
+//! | `sapling-address` | `Zip32Seed` (`32 B`, coin `133`, acct `0`) | `1,921,425` | `2^21` | `1,893,808` | `766` | `2^22` |
 
 use alloc::sync::Arc;
 use alloc::vec;
