@@ -2030,7 +2030,16 @@ fn verify_sumcheck(
         }
         tr.absorb_fp5_slice(label, round);
         let c = tr.squeeze_fp5(label);
-        claim = eval_poly(round, c);
+        claim = if degree == COL_DEGREE {
+            E::from_verified(qsag_whir_verified::eval_quadratic_sumcheck_wire_fp5(
+                round[0].to_verified(),
+                round[2].to_verified(),
+                claim.to_verified(),
+                c.to_verified(),
+            ))
+        } else {
+            eval_poly(round, c)
+        };
         point.push(c);
     }
     Some((claim, point))

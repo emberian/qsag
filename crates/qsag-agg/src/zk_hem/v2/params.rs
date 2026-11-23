@@ -4,7 +4,6 @@
 
 use alloc::vec::Vec;
 
-use crate::pcs::WhirSecurityRegime;
 use crate::zk_hem::relation::{LOOKUP_CORNER_ENTRIES, Lookups};
 
 /// Bytes of a Merkle digest and of the Fiat-Shamir chaining value.
@@ -59,7 +58,7 @@ pub enum Profile {
 impl Profile {
     pub const ALL: [Self; 2] = [Self::CshakeJohnson400, Self::TurboShakeJohnson400];
 
-    /// Wire tag. Tags `0..=10` belong to public WHIR regimes (`WhirSecurityRegime`).
+    /// Canonical wire tag (`16` = `CshakeJohnson400`, `17` = `TurboShakeJohnson400`).
     pub const fn wire_tag(self) -> u8 {
         match self {
             Self::CshakeJohnson400 => 16,
@@ -77,15 +76,6 @@ impl Profile {
 
     pub const fn uses_turboshake(self) -> bool {
         matches!(self, Self::TurboShakeJohnson400)
-    }
-
-    /// Canonical v2 profile matching the sponge family of a recursion child's regime.
-    pub fn for_regime(regime: WhirSecurityRegime) -> Self {
-        if regime.uses_turboshake_canopy() {
-            Self::TurboShakeJohnson400
-        } else {
-            Self::CshakeJohnson400
-        }
     }
 }
 
@@ -121,7 +111,15 @@ pub fn schedule(log_cells: usize) -> Option<Schedule> {
     if !(MIN_LOG_CELLS..=MAX_LOG_CELLS).contains(&log_cells) {
         return None;
     }
-    schedule_with_stage0(log_cells, STAGE0_QUERIES[log_cells - MIN_LOG_CELLS])
+    let sched = schedule_with_stage0(log_cells, STAGE0_QUERIES[log_cells - MIN_LOG_CELLS])?;
+    let folded_sum: u32 = sched.stages.iter().map(|s| s.step_vars as u32).sum();
+    qsag_whir_verified::verify_quintic_schedule_envelope(
+        log_cells as u32,
+        sched.early_stop_vars as u32,
+        folded_sum,
+        sched.stages.len() as u32,
+    )
+    .then_some(sched)
 }
 
 /// [`schedule`] with a caller-chosen Stage-0 query count, for the calculator.
@@ -129,23 +127,22 @@ pub fn schedule_with_stage0(log_cells: usize, stage0_queries: usize) -> Option<S
     if !(MIN_LOG_CELLS..=crate::pcs::MAX_PCS_NUM_VARS).contains(&log_cells) {
         return None;
     }
-    let geometry = WhirSecurityRegime::BciksJohnsonQrom128.schedule(log_cells);
-    let stages = geometry
-        .stages
-        .iter()
+    let (early_stop_vars, raw_stages) = crate::pcs::stage_geometry(log_cells);
+    let stages = raw_stages
+        .into_iter()
         .enumerate()
-        .map(|(i, st)| StageSpec {
-            blowup: st.blowup,
-            step_vars: st.step_vars,
+        .map(|(i, (blowup, step_vars))| StageSpec {
+            blowup,
+            step_vars,
             num_queries: if i == 0 {
                 stage0_queries
             } else {
-                later_stage_queries(st.blowup)
+                later_stage_queries(blowup)
             },
         })
         .collect();
     Some(Schedule {
-        early_stop_vars: geometry.early_stop_vars,
+        early_stop_vars,
         stages,
     })
 }

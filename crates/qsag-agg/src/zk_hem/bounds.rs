@@ -1,39 +1,18 @@
-//! Concrete security accounting for the public Hem WHIR commitment ([`crate::pcs`]) and shared
-//! integer-logarithm / Reed-Solomon proximity helpers used by [`super::v2::bounds`].
+//! Shared integer-logarithm, Reed-Solomon Johnson / `[CWYZ26]` list-decoding, and Merkle sibling
+//! accounting primitives used by [`super::v2::bounds`] (`[DKT26]` `< 2^{-128}` QROM Quintic `Fp5`).
 //!
 //! All quantities are integers. An error `eps` is carried as a lower bound on `-log2(eps)`
 //! in thousandths of a bit ([`MilliBits`]); logarithms round against the claim.
-//!
-//! Note: the quartic `zk-Hem v1` hiding wrapper (`81`-bit QROM digest ceiling, `128`-bit leaf
-//! salts) has been retired in favor of quintic `zk-Hem v2` ([`super::v2::bounds`], `400`-bit
-//! digests, `256`-bit salts + `32`-byte per-tree nonces, and DKT26 Theorem 5.12). Only the
-//! non-hiding public WHIR opening report ([`pcs_report`]) and shared schedule bounds remain here.
-
-use alloc::vec::Vec;
-
-use super::protocol::{ROW_DEGREE, ROW_MASK_BITS};
-use crate::pcs::{MAX_PCS_NUM_VARS, WhirSecurityRegime};
 
 /// A lower bound on `-log2` of a probability, in thousandths of a bit.
 pub type MilliBits = i64;
 
-/// `floor(1000 log2 |F_{p^4} \ F_{p^2}|) - 1`: every challenge set used by public Hem WHIR
-/// over `GoldilocksExt4` has at least `2^255.998` elements.
-pub const CHALLENGE_SET_MILLIBITS: MilliBits = 255_998;
+/// `floor(1000 log2(p^5 - 1)) - 1` for `p = 2^64 - 2^32 + 1`: every nonzero Quintic `Fp5`
+/// challenge set has at least `2^319.998` elements.
+pub const CHALLENGE_SET_MILLIBITS: MilliBits = 319_998;
 
-/// Cap on `folds * (l + 2 l0 + 1) + 1` per stage, the list budget the finite witnesses of
-/// `pcs/affine_schedule.rs` certify.
-pub const STAGE_LIST_CAP: u128 = 2000;
-
-/// `log2(320)` rounded up: the constant `4 * 80` of `[CDHZ25]` Theorems A.1 and 6.9.
-const QROM_RBR_CONST: MilliBits = 8_322;
-/// `log2(6380)` rounded up. `8 * 160 * 4 + 4 * 240 = 6080` is the leading `t^3 / 2^sigma`
-/// coefficient of `8 kappa_offline(2t + 1) + 4 kappa_online(t)` in `[CDHZ25]` Theorems 11.3
-/// and 8.3; `300 >= 40 e^2` bounds collisions in the 256-bit transcript chain.
-const QROM_MERKLE_CONST: MilliBits = 12_640;
-/// Slack for `(t + k + 1)(t + k) <= t^2 (1 + 2^-7)^2` and for the verifier's own
-/// `q_V + k <= 2^15` queries inside `kappa_online`, when `t >= 2^24`.
-const QROM_ROUND_SLACK: MilliBits = 23;
+/// Default stage list cap for `[CWYZ26]` Theorem 5.1 stage witnesses.
+pub const STAGE_LIST_CAP: u128 = 16_384;
 
 /// A lower bound on `1000 log2(x)` within `0.002` of it; `x > 0`.
 pub fn log2_lo(x: u128) -> MilliBits {
@@ -169,9 +148,7 @@ fn interpolation_witness(n: u128, d: u128, a: u128, m: u128) -> Option<(u128, u1
 }
 
 /// One application of `[CWYZ26]` Theorem 5.1 with linear claims: words on `n` points, output
-/// degree `d`, agreement threshold `a`, with `B = a - 1`. Returns `l + 2 l0 + 1`, the
-/// numerator over `|F|` of the bound (5.5) with the second term of (4.13) rounded up to
-/// `1 / |F|`. `None` when no interpolation witness is found.
+/// degree `d`, agreement threshold `a`, with `B = a - 1`. Returns `l + 2 l0 + 1`.
 pub fn affine_fold_numerator(n: u128, d: u128, a: u128) -> Option<u128> {
     let b = a.checked_sub(1)?;
     let list = johnson_list(n, b, d + 1)?;
@@ -190,46 +167,6 @@ pub fn affine_fold_numerator(n: u128, d: u128, a: u128) -> Option<u128> {
         m *= 2;
     }
     None
-}
-
-/// Parameters for a single-table public WHIR opening report that are not part of
-/// [`WhirSecurityRegime`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Params {
-    /// Length of Merkle digests and of the Fiat-Shamir chaining value.
-    pub digest_bits: u32,
-    /// Length of the per-leaf Stage-0 salt.
-    pub salt_bits: u32,
-    /// Grinding bits in front of algebraic challenges.
-    pub algebraic_pow_bits: u32,
-}
-
-impl Params {
-    /// Default parameters of a public `CanopyCommitment` opening.
-    pub const PUBLIC: Self = Self {
-        digest_bits: 256,
-        salt_bits: 128,
-        algebraic_pow_bits: 0,
-    };
-}
-
-/// Size of a public relation: [`super::relation::Shape::log_rows`], `log2` of the variable
-/// subcube and the number of public inputs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ShapeSize {
-    pub log_rows: usize,
-    pub var_bits: usize,
-    pub num_public: usize,
-}
-
-/// A verifier round of public Hem WHIR.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Round {
-    Sumcheck,
-    OutOfDomain(usize),
-    KernelFold(usize),
-    AffineFold(usize),
-    Query(usize),
 }
 
 /// Bounds for one WHIR stage.
@@ -326,105 +263,6 @@ pub fn min_queries(
     Some(lo)
 }
 
-/// The largest round-by-round error of a public WHIR opening and where it occurs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RbrBound {
-    pub bits: MilliBits,
-    pub round: Round,
-    pub stage0_agreement: u128,
-}
-
-/// The security bounds of one regime for a public WHIR commitment opening.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SecurityReport {
-    pub regime: WhirSecurityRegime,
-    pub params: Params,
-    pub log_cells: usize,
-    pub stages: Vec<StageBound>,
-    pub rounds: usize,
-    pub classical: RbrBound,
-    pub ungrounded: RbrBound,
-    pub proof_bytes: usize,
-    pub digests: usize,
-    pub merkle_hashes: u128,
-    pub grinding_hashes: u128,
-}
-
-impl SecurityReport {
-    fn digest_millibits(&self) -> MilliBits {
-        1000 * i64::from(self.params.digest_bits) - i64::from(self.regime.uses_poseidon2_canopy())
-    }
-
-    fn classical_sum_bits(&self, log_t: MilliBits) -> MilliBits {
-        sum_bits(
-            self.classical.bits - log_t,
-            self.digest_millibits() - 2000 - 2 * log_t,
-        )
-    }
-
-    pub fn classical_error_bits(&self, log_queries: u32) -> MilliBits {
-        assert!(log_queries >= 2);
-        self.classical_sum_bits(1000 * i64::from(log_queries))
-    }
-
-    pub fn classical_work_bits(&self) -> MilliBits {
-        let (mut lo, mut hi) = (
-            0,
-            self.classical
-                .bits
-                .min((self.digest_millibits() - 2000) / 2),
-        );
-        assert!(self.classical_sum_bits(lo) >= 0);
-        while lo < hi {
-            let mid = lo + (hi - lo + 1) / 2;
-            if self.classical_sum_bits(mid) >= 0 {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        lo
-    }
-
-    fn qrom_sum_bits_with(&self, rbr_bits: MilliBits, log_t: MilliBits) -> MilliBits {
-        sum_bits(
-            rbr_bits - QROM_RBR_CONST - QROM_ROUND_SLACK - 2 * log_t,
-            self.digest_millibits() - QROM_MERKLE_CONST - QROM_ROUND_SLACK - 3 * log_t,
-        )
-    }
-
-    fn qrom_sum_bits(&self, log_t: MilliBits) -> MilliBits {
-        self.qrom_sum_bits_with(self.ungrounded.bits, log_t)
-    }
-
-    pub fn qrom_error_bits(&self, log_queries: u32) -> MilliBits {
-        assert!(log_queries >= 24 && self.rounds < 1 << 9);
-        self.qrom_sum_bits(1000 * i64::from(log_queries))
-    }
-
-    pub fn qrom_work_terms(&self) -> (MilliBits, MilliBits) {
-        (
-            (self.ungrounded.bits - QROM_RBR_CONST - QROM_ROUND_SLACK) / 2,
-            (self.digest_millibits() - QROM_MERKLE_CONST - QROM_ROUND_SLACK) / 3,
-        )
-    }
-
-    pub fn qrom_work_bits(&self) -> MilliBits {
-        let (rbr, digest) = self.qrom_work_terms();
-        let (mut lo, mut hi) = (24_000, rbr.min(digest));
-        assert!(self.rounds < 1 << 9 && self.qrom_sum_bits(lo) >= 0 && hi >= lo);
-        while lo < hi {
-            let mid = lo + (hi - lo + 1) / 2;
-            if self.qrom_sum_bits(mid) >= 0 {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        lo
-    }
-}
-
 /// Authentication siblings of `queries` leaves in a tree of `2^log_leaves` leaves, at most.
 pub(crate) fn siblings(queries: usize, log_leaves: usize) -> usize {
     if queries >> log_leaves != 0 {
@@ -433,273 +271,21 @@ pub(crate) fn siblings(queries: usize, log_leaves: usize) -> usize {
     queries * (log_leaves - queries.ilog2() as usize)
 }
 
-/// The report for a public opening of a `log_cells`-variable commitment.
-pub fn pcs_report(
-    regime: WhirSecurityRegime,
-    log_cells: usize,
-    params: Params,
-    size: Option<ShapeSize>,
-) -> Option<SecurityReport> {
-    if !(2..=MAX_PCS_NUM_VARS).contains(&log_cells) {
-        return None;
-    }
-    if let Some(s) = size
-        && (!(1..usize::BITS as usize).contains(&s.log_rows)
-            || !(1..=log_cells).contains(&s.var_bits)
-            || 4usize.checked_add(s.num_public).is_none())
-    {
-        return None;
-    }
-    let schedule = regime.schedule(log_cells);
-    let mut rem = log_cells;
-    let stages: Vec<StageBound> = schedule
-        .stages
-        .iter()
-        .map(|spec| {
-            rem -= spec.step_vars;
-            stage_bound(spec.blowup, spec.step_vars, spec.num_queries, rem, None)
-        })
-        .collect::<Option<_>>()?;
-
-    let evaluate = |pow: MilliBits, algebraic: MilliBits| -> RbrBound {
-        let mut worst = (MilliBits::MAX, Round::Sumcheck);
-        let mut note = |bits: MilliBits, round: Round| {
-            if bits < worst.0 {
-                worst = (bits, round);
-            }
-        };
-        if let Some(size) = size {
-            let degree = size
-                .log_rows
-                .max(ROW_DEGREE)
-                .max((1 << ROW_MASK_BITS) - 1)
-                .max(4 + size.num_public) as u128;
-            note(
-                CHALLENGE_SET_MILLIBITS - log2_hi(degree * stages[0].word_list) + algebraic,
-                Round::Sumcheck,
-            );
-        }
-        let mut rem = log_cells;
-        for (i, st) in stages.iter().enumerate() {
-            let degree = (1u128 << rem) + 2;
-            let mut ood =
-                2 * (CHALLENGE_SET_MILLIBITS - log2_hi(degree)) + 1000 - 2 * log2_hi(st.word_list);
-            if i == 0 {
-                ood = ood.min(CHALLENGE_SET_MILLIBITS - log2_hi(2 * st.word_list));
-            }
-            note(ood + algebraic, Round::OutOfDomain(i));
-            note(
-                CHALLENGE_SET_MILLIBITS - log2_hi(st.list) + algebraic,
-                Round::KernelFold(i),
-            );
-            note(st.fold_bits + pow, Round::AffineFold(i));
-            let batch = stages.get(i + 1).map_or(MilliBits::MAX, |next| {
-                CHALLENGE_SET_MILLIBITS - log2_hi((st.queries as u128 + 2) * next.word_list) - 1000
-            });
-            let query = st.query_bits.map_or(MilliBits::MAX, |bits| bits - 1000);
-            if query.min(batch) != MilliBits::MAX {
-                note(query.min(batch) + pow, Round::Query(i));
-            }
-            rem -= st.step_vars;
-        }
-        RbrBound {
-            bits: worst.0,
-            round: worst.1,
-            stage0_agreement: stages[0].agreement,
-        }
-    };
-    let pow = 1000 * i64::from(regime.pow_bits());
-    let algebraic = 1000 * i64::from(params.algebraic_pow_bits);
-    let classical = evaluate(pow, algebraic);
-    let ungrounded = evaluate(0, 0);
-
-    let fold_vars = log_cells - schedule.early_stop_vars;
-    let mut rounds = 2 * fold_vars + 2 * stages.len() + 1;
-    let mut algebraic_rounds = fold_vars + stages.len() + 1;
-    if let Some(size) = size {
-        rounds += 6 + size.log_rows + size.var_bits;
-        algebraic_rounds += 6 + size.log_rows + size.var_bits;
-    }
-    let digest_bytes = params.digest_bits.div_ceil(8) as usize;
-    let mut digests = stages.len();
-    let mut proof_bytes = digest_bytes + 1 + 64 + fold_vars * (5 * 32 + 8) + 4 + 8;
-    proof_bytes += 4 + 32 * ((1usize << schedule.early_stop_vars) + 2);
-    let mut merkle_hashes = 0u128;
-    let mut rem = log_cells;
-    for (i, st) in stages.iter().enumerate() {
-        let log_leaves = rem + st.blowup.trailing_zeros() as usize - st.step_vars;
-        let opened = st.queries.min(st.fibers as usize);
-        let sib = siblings(opened, log_leaves);
-        digests += sib;
-        merkle_hashes += 2 * st.fibers;
-        proof_bytes += 4 + 4 + digest_bytes * sib;
-        proof_bytes += if i == 0 {
-            opened * (params.salt_bits.div_ceil(8) as usize + 8 * (1usize << st.step_vars))
-        } else {
-            digest_bytes + 1 + 64 + 8 + opened * 32 * (1usize << st.step_vars)
-        };
-        rem -= st.step_vars;
-    }
-    let expected = |bits: u32| if bits == 0 { 0 } else { 1u128 << bits };
-    let grinding_hashes = (fold_vars + stages.len()) as u128 * expected(regime.pow_bits())
-        + algebraic_rounds as u128 * expected(params.algebraic_pow_bits);
-    Some(SecurityReport {
-        regime,
-        params,
-        log_cells,
-        stages,
-        rounds,
-        classical,
-        ungrounded,
-        proof_bytes,
-        digests,
-        merkle_hashes,
-        grinding_hashes,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn logarithms_bracket_the_true_value() {
-        for (x, milli) in [
-            (1u128, 0),
-            (2, 1000),
-            (3, 1584),
-            (10, 3321),
-            (1 << 100, 100_000),
-        ] {
-            assert!(log2_lo(x) <= milli + 1 && log2_lo(x) >= milli - 2, "{x}");
-            assert!(log2_hi(x) >= milli && log2_hi(x) <= milli + 3, "{x}");
+    fn integer_log2_and_query_bounds_are_conservative() {
+        for k in 0..=64u32 {
+            assert_eq!(log2_lo(1u128 << k), 1000 * i64::from(k));
+            assert_eq!(log2_hi(1u128 << k), 1000 * i64::from(k));
         }
-        assert_eq!(log2_lo(823_543) / 10, 1965);
-        assert_eq!(log2_lo(384) / 10, 858);
-        assert!(log2_lo(320) < QROM_RBR_CONST && QROM_RBR_CONST <= log2_hi(320));
-        assert!(log2_lo(6380) < QROM_MERKLE_CONST && QROM_MERKLE_CONST <= log2_hi(6380));
-        let p = u128::from(crate::field::GOLDILOCKS_PRIME);
-        assert!(p > (1u128 << 64) - (1u128 << 33));
-        assert!(p * p > (1u128 << 127));
-    }
-
-    #[test]
-    fn query_error_matches_the_hypergeometric_product() {
-        let bits = query_bits(16, 6, 3).unwrap();
-        assert!(bits <= log2_lo(28) && bits >= log2_lo(28) - 3, "{bits}");
-        assert_eq!(query_bits(16, 2, 3), None);
-        assert_eq!(query_bits(16, 16, 3), Some(0));
-    }
-
-    #[test]
-    fn finite_witnesses_of_the_schedule_are_reproduced() {
-        for (nv, stage, a, m, big_d) in [
-            (20usize, 0usize, 65_948u128, 128u128, 18_111u128),
-            (20, 1, 16_782, 32, 3_286),
-            (20, 2, 2_215, 32, 2_149),
-            (22, 0, 131_836, 128, 32_511),
-            (24, 3, 4_482, 16, 2_067),
-            (28, 0, 8_433_861, 128, 6_362),
-        ] {
-            let schedule = WhirSecurityRegime::BciksJohnsonQrom128.schedule(nv);
-            let rem: usize = nv
-                - schedule.stages[..=stage]
-                    .iter()
-                    .map(|s| s.step_vars)
-                    .sum::<usize>();
-            let spec = schedule.stages[stage];
-            let n = (spec.blowup as u128) << rem;
-            let d = n / spec.blowup as u128 + 2;
-            assert!(
-                interpolation_holds(n, d, a, m, big_d).is_some(),
-                "{nv}/{stage}"
-            );
-            let found =
-                stage_bound(spec.blowup, spec.step_vars, spec.num_queries, rem, None).unwrap();
-            assert!(
-                found.agreement <= a,
-                "{nv}/{stage}: {} > {a}",
-                found.agreement
-            );
-            assert!(found.query_bits.unwrap() >= 256_000, "{nv}/{stage}");
-            assert!(spec.step_vars as u128 * found.list + 1 < STAGE_LIST_CAP);
-        }
-        assert_eq!(johnson_list(1 << 17, 65_536, 32_770), None);
-        assert_eq!(affine_fold_numerator(1 << 17, 32_770, 65_537), None);
-        assert_eq!(interpolation_holds(1 << 17, 32_770, 65_948, 1, 2), None);
-    }
-
-    #[test]
-    fn stage_bounds_against_the_constants_asserted_by_the_regimes() {
-        for regime in WhirSecurityRegime::ALL {
-            let mut least = MilliBits::MAX;
-            for log_cells in 17..=24 {
-                let report = pcs_report(regime, log_cells, Params::PUBLIC, None).unwrap();
-                for st in &report.stages {
-                    least = least.min(st.query_bits.unwrap());
-                    assert!(st.fold_bits > 245_000);
-                }
-                assert!(report.ungrounded.bits <= report.classical.bits.min(249_000));
-            }
-            let target = 1000 * i64::from(regime.pure_query_target_bits());
-            if regime == WhirSecurityRegime::BciksJohnsonClassical128 {
-                assert_eq!(least, 124_467);
-                let mut short = 0usize;
-                for log_cells in 17..=24 {
-                    let mut rem = log_cells;
-                    for spec in &regime.schedule(log_cells).stages {
-                        rem -= spec.step_vars;
-                        let need = min_queries(spec.blowup, spec.step_vars, rem, 128_000).unwrap();
-                        short = short.max(need.saturating_sub(spec.num_queries));
-                    }
-                }
-                assert_eq!(short, 2);
-            } else {
-                assert!(least >= target, "{regime:?}: {least}");
-            }
-        }
-    }
-
-    #[test]
-    fn public_pcs_reports_are_pinned() {
-        use WhirSecurityRegime as R;
-        let small = ShapeSize {
-            log_rows: 10,
-            var_bits: 10,
-            num_public: 5,
-        };
-        let r_small = pcs_report(R::BciksJohnsonQrom128, 18, Params::PUBLIC, Some(small)).unwrap();
-        let r_deg15 = pcs_report(
-            R::BciksJohnsonQrom128,
-            18,
-            Params::PUBLIC,
-            Some(ShapeSize {
-                log_rows: 15,
-                var_bits: 10,
-                num_public: 5,
-            }),
-        )
-        .unwrap();
-        assert_eq!(r_small.classical.bits, r_deg15.classical.bits);
-        let public = pcs_report(R::BciksJohnsonQrom128, 21, Params::PUBLIC, None).unwrap();
-        assert_eq!(
-            (public.classical.bits, public.classical.round),
-            (247_505, Round::KernelFold(1))
-        );
-        assert_eq!(
-            (public.ungrounded.bits, public.ungrounded.round),
-            (240_104, Round::Query(0))
-        );
-        assert_eq!(public.qrom_work_terms(), (115_879, 81_112));
-        assert_eq!(public.qrom_work_bits(), 81_112);
-
-        let at = |regime, cap| {
-            pcs_report(regime, 21, Params::PUBLIC, None)
-                .unwrap()
-                .qrom_error_bits(cap)
-        };
-        assert_eq!(at(R::Cdhz25JohnsonQrom128, 38), 115_512);
-        assert_eq!(at(R::Cdhz25ZeroPowQrom128, 40), 122_976);
-        assert_eq!(at(R::BciksJohnsonQrom128, 40), 123_336);
+        assert!(log2_lo(3) <= 1584 && log2_hi(3) >= 1585);
+        // Exact `-1000 * log2(prod_{i=0..9} (512 - i) / (1024 - i)) = 10_064.355...`;
+        // `query_bits` rounds every division and logarithm conservatively downward to `10_062`.
+        assert_eq!(query_bits(1024, 512, 10), Some(10_062));
+        assert_eq!(query_bits(16, 3, 4), None);
+        assert!(min_queries(4, 6, 18, 256_000).is_some());
     }
 }

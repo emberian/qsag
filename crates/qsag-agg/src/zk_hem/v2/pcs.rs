@@ -238,10 +238,20 @@ pub fn eval_poly<T: Coef, const K: usize>(coeffs: &[T], xs: [Fp5; K]) -> [Fp5; K
 const EVAL_BLOCK: usize = 32;
 
 pub(crate) fn eval_at_base(coeffs: &[Fp5], y: Goldilocks) -> Fp5 {
-    coeffs
-        .iter()
-        .rev()
-        .fold(Fp5::ZERO, |acc, &c| acc.mul_base(y) + c)
+    let verified: Vec<qsag_whir_verified::Fp5> = coeffs.iter().map(|&c| c.to_verified()).collect();
+    Fp5::from_verified(qsag_whir_verified::eval_fp5_univariate_at_base(
+        &verified,
+        y.to_canonical_u64(),
+    ))
+}
+
+pub(crate) fn verify_at_base_pin(coeffs: &[Fp5], y: Goldilocks, expected: Fp5) -> bool {
+    let verified: Vec<qsag_whir_verified::Fp5> = coeffs.iter().map(|&c| c.to_verified()).collect();
+    qsag_whir_verified::verify_fp5_univariate_at_base_pin(
+        &verified,
+        y.to_canonical_u64(),
+        expected.to_verified(),
+    )
 }
 
 fn shifted_limb_ntt(
@@ -319,9 +329,16 @@ pub(crate) fn fold_fiber(mut vals: Vec<Fp5>, x0: Goldilocks, chals: &[[Fp5; 3]])
         let (mut xt, mut xt_inv) = (x, x_inv);
         for t in 0..half {
             let (a, b) = (vals[t], vals[t + half]);
-            let f = (a + b).mul_base(INV_TWO);
-            let g = (a - b).mul_base(INV_TWO.const_mul(xt_inv));
-            vals[t] = g + (alpha + beta.mul_base(xt.square())) * (f + theta * g);
+            vals[t] = Fp5::from_verified(qsag_whir_verified::cwyz_duet_fold_fp5(
+                a.to_verified(),
+                b.to_verified(),
+                INV_TWO.const_mul(xt_inv).to_canonical_u64(),
+                INV_TWO.to_canonical_u64(),
+                xt.square().to_canonical_u64(),
+                theta.to_verified(),
+                alpha.to_verified(),
+                beta.to_verified(),
+            ));
             xt = xt.const_mul(zeta);
             xt_inv = xt_inv.const_mul(zeta_inv);
         }
@@ -851,9 +868,18 @@ impl<'a> KernelTerms<'a> {
 
 pub fn next_claim(wire: &[Fp5; 5], claim: Fp5, phi: Fp5, [theta, alpha, beta]: [Fp5; 3]) -> Fp5 {
     let [sigma_even, tau_01, tau_10, c_f, c_g] = *wire;
-    let gamma_f = sigma_even + phi * tau_01;
-    let gamma_g = tau_10 + phi * (claim - sigma_even);
-    gamma_g + alpha * (gamma_f + theta * gamma_g) + beta * (c_f + theta * c_g)
+    Fp5::from_verified(qsag_whir_verified::cwyz_bridge_claim_step_fp5(
+        sigma_even.to_verified(),
+        tau_01.to_verified(),
+        tau_10.to_verified(),
+        c_f.to_verified(),
+        c_g.to_verified(),
+        claim.to_verified(),
+        phi.to_verified(),
+        theta.to_verified(),
+        alpha.to_verified(),
+        beta.to_verified(),
+    ))
 }
 
 pub(crate) fn verify_fold<C: Channel>(
@@ -1662,7 +1688,10 @@ fn verify_inner<C: Channel>(
     }
 
     ch.absorb_fp5_slice(b"FINAL_POLY", final_coeffs);
-    if kernel.apply(final_coeffs) != claim {
+    if !qsag_whir_verified::verify_ood_pin_eq_fp5(
+        kernel.apply(final_coeffs).to_verified(),
+        claim.to_verified(),
+    ) {
         return false;
     }
     let last = dims.len() - 1;
@@ -1682,7 +1711,7 @@ fn verify_inner<C: Channel>(
     };
     values
         .iter()
-        .all(|&(y, v)| eval_at_base(final_coeffs, y) == v)
+        .all(|&(y, v)| verify_at_base_pin(final_coeffs, y, v))
 }
 
 #[cfg(test)]
@@ -2014,10 +2043,11 @@ pub(super) mod tests {
         assert!(kernel[n - blind..].iter().all(|v| v.is_zero()));
         let claim = dot(&coeffs[0], &kernel);
         assert_eq!(claim, dot(&coeffs[1], &kernel));
-        for i in n - blind..n {
+        let [ref mut c0, ref mut c1] = coeffs;
+        for (a, b) in c0[n - blind..n].iter_mut().zip(&mut c1[n - blind..n]) {
             let common = rng.base();
-            coeffs[0][i] += common;
-            coeffs[1][i] += common;
+            *a += common;
+            *b += common;
         }
         let coins = || FixedCoins {
             rng: Rng(seed + 1),

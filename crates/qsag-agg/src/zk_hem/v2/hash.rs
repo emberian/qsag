@@ -171,6 +171,7 @@ impl Hasher {
 pub trait CanopyHash<const N: usize>: Copy + Sync {
     fn node(self, index: u32, left: &[u8; N], right: &[u8; N]) -> [u8; N];
     fn root(self, stage: u8, depth: u8, top: &[u8; N]) -> [u8; N];
+    fn pair_order(self, u: u64, hu: [u8; N], hs: [u8; N]) -> Option<([u8; N], [u8; N])>;
 }
 
 impl CanopyHash<DIGEST_BYTES> for Hasher {
@@ -179,6 +180,9 @@ impl CanopyHash<DIGEST_BYTES> for Hasher {
     }
     fn root(self, stage: u8, depth: u8, top: &Digest) -> Digest {
         self.root(stage, depth, top)
+    }
+    fn pair_order(self, u: u64, hu: Digest, hs: Digest) -> Option<(Digest, Digest)> {
+        qsag_whir_verified::step_merkle_pair_order_400(u, 0, hu, hs).map(|p| (p.left, p.right))
     }
 }
 
@@ -302,7 +306,9 @@ pub(crate) fn verify_canopy<const N: usize>(
                 k += 1;
                 supplied
             };
-            let (left, right) = if u & 1 == 0 { (hu, hs) } else { (hs, hu) };
+            let Some((left, right)) = hasher.pair_order(u as u64, hu, hs) else {
+                return false;
+            };
             active[write] = (u >> 1, hasher.node((u >> 1) as u32, &left, &right));
             write += 1;
         }
@@ -505,7 +511,7 @@ impl Transcript {
     ) -> Vec<usize> {
         assert!(num_groups.is_power_of_two());
         let target = count.min(num_groups);
-        let mask = (num_groups - 1) as u64;
+        let groups_u64 = num_groups as u64;
         let mut set = BTreeSet::new();
         while set.len() < target {
             let mut raw = vec![0u8; 8 * (target - set.len())];
@@ -514,7 +520,12 @@ impl Transcript {
             }
             self.counter += 1;
             for word in raw.as_chunks::<8>().0 {
-                set.insert((u64::from_le_bytes(*word) & mask) as usize);
+                let idx = qsag_whir_verified::canonical_query_group_idx(
+                    u64::from_le_bytes(*word),
+                    groups_u64,
+                )
+                .expect("power-of-two num_groups is non-zero") as usize;
+                set.insert(idx);
             }
         }
         set.into_iter().collect()
