@@ -645,6 +645,8 @@ pub enum FirmwareError {
     Mem(MemRangeError),
     /// More sibling digests than the canopy mailbox has slots.
     TooManySiblings { count: usize },
+    /// Canopy sibling count disagrees with the declared path `depth`.
+    SiblingDepthMismatch { depth: u8, count: usize },
     /// The machine stopped on something other than `HALT`: a trap, a DIT violation or the
     /// step limit.
     Exit(RunExit),
@@ -660,6 +662,9 @@ impl fmt::Display for FirmwareError {
                     abi::canopy::MAX_DEPTH
                 )
             }
+            Self::SiblingDepthMismatch { depth, count } => {
+                write!(f, "canopy depth {depth} requires {depth} siblings, got {count}")
+            }
             Self::Exit(exit) => write!(f, "firmware stopped with {exit:?} instead of HALT"),
         }
     }
@@ -671,18 +676,28 @@ impl From<MemRangeError> for FirmwareError {
     }
 }
 
-/// A reset machine with [`SRAM_BYTES`] of zeroed memory, `image` at PC 0 and the DIT
-/// auditor in trap mode.
+/// A reset machine with [`SRAM_BYTES`] of zeroed memory, `image` at PC 0 (non-empty, 32-bit
+/// word-aligned, and confined below the [`INPUT`] mailbox region) and the DIT auditor in trap mode.
 pub fn boot(image: &[u8]) -> Result<Ass2Vm, FirmwareError> {
+    if image.is_empty() || !image.len().is_multiple_of(4) || image.len() > INPUT {
+        return Err(FirmwareError::Mem(MemRangeError {
+            addr: 0,
+            len: image.len(),
+        }));
+    }
     let mut vm = Ass2Vm::new(SRAM_BYTES);
     vm.load_image(0, image)?;
     vm.dit_mode = DitMode::Trap;
     Ok(vm)
 }
 
-/// Run to `HALT` within [`STEP_LIMIT`] steps. A trap, a DIT violation or an exhausted
-/// budget is an error.
+/// Run to `HALT` within [`STEP_LIMIT`] steps in [`DitMode::Trap`]. Any pre-existing or new
+/// DIT violation, trap, or exhausted budget is an error.
 pub fn run_to_halt(vm: &mut Ass2Vm) -> Result<(), FirmwareError> {
+    vm.dit_mode = DitMode::Trap;
+    if let Some(&v) = vm.violations.first() {
+        return Err(FirmwareError::Exit(RunExit::DitViolation(v)));
+    }
     match vm.run(STEP_LIMIT) {
         RunExit::Halted => Ok(()),
         exit => Err(FirmwareError::Exit(exit)),
@@ -804,6 +819,14 @@ impl CanopyInput {
         use abi::canopy::*;
         if self.siblings.len() > MAX_DEPTH {
             return Err(FirmwareError::TooManySiblings {
+                count: self.siblings.len(),
+            });
+        }
+        if (1..=MAX_DEPTH).contains(&usize::from(self.depth))
+            && self.siblings.len() != usize::from(self.depth)
+        {
+            return Err(FirmwareError::SiblingDepthMismatch {
+                depth: self.depth,
                 count: self.siblings.len(),
             });
         }
@@ -929,4 +952,71 @@ pub fn run_cth_gf128_and_wots(input: &CthWotsInput) -> Result<CthWotsOutput, Fir
     input.install(&mut vm)?;
     run_to_halt(&mut vm)?;
     CthWotsOutput::read(&vm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::isa::encode_insn_le;
+    use crate::vm::DitViolationKind;
+
+    #[test]
+    fn tooth_firmware_boot_run_to_halt_and_canopy_enforce_invariants() {
+        // `#tooth`:
+        // 1. `boot` must reject empty, unaligned, or mailbox-overlapping (`> INPUT`) images.
+        assert!(matches!(boot(&[]), Err(FirmwareError::Mem(_))));
+        assert!(matches!(boot(&[0, 0, 0]), Err(FirmwareError::Mem(_))));
+        assert!(matches!(
+            boot(&alloc::vec![0u8; INPUT + 4]),
+            Err(FirmwareError::Mem(_))
+        ));
+
+        // 2. `run_to_halt` must enforce `DitMode::Trap` even on a caller-constructed `Ass2Vm::new`
+        //    (which defaults to `DitMode::Audit`).
+        let mut vm = Ass2Vm::new(SRAM_BYTES);
+        let prog = [
+            encode_insn_le(&I::Br {
+                op: BrOp::Beqz,
+                cond: 1,
+                off20: 1,
+            })
+            .unwrap(),
+            encode_insn_le(&I::Halt).unwrap(),
+        ];
+        vm.load_image(0, prog.as_flattened()).unwrap();
+        vm.reg_taint[1] = Taint::Secret;
+        let err = run_to_halt(&mut vm).unwrap_err();
+        assert!(matches!(
+            err,
+            FirmwareError::Exit(RunExit::DitViolation(v))
+                if v.kind == DitViolationKind::SecretBranchCond && v.reg == 1
+        ));
+
+        // 3. `CanopyInput::install` must reject `siblings.len() != depth` when `depth` is in `1..=16`.
+        let mut vm = boot(&fw_zkhem_v2_canopy50_verify()).unwrap();
+        let bad_canopy = CanopyInput {
+            depth: 3,
+            stage: 0,
+            index: 0,
+            leaf: [0x11; DIGEST_BYTES],
+            expected_root: [0x22; DIGEST_BYTES],
+            siblings: alloc::vec![[0x33; DIGEST_BYTES]; 2],
+        };
+        assert_eq!(
+            bad_canopy.install(&mut vm),
+            Err(FirmwareError::SiblingDepthMismatch { depth: 3, count: 2 })
+        );
+
+        // 4. `run_to_halt` must preserve latched unhandled traps on repeated invocation.
+        let mut trap_vm = Ass2Vm::new(SRAM_BYTES);
+        trap_vm.load_image(0, &0xFFFF_FFFFu32.to_le_bytes()).unwrap();
+        assert_eq!(
+            run_to_halt(&mut trap_vm),
+            Err(FirmwareError::Exit(RunExit::Trap(crate::vm::VmTrap::IllegalInsn)))
+        );
+        assert_eq!(
+            run_to_halt(&mut trap_vm),
+            Err(FirmwareError::Exit(RunExit::Trap(crate::vm::VmTrap::IllegalInsn)))
+        );
+    }
 }

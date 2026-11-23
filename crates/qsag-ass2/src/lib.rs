@@ -23,7 +23,7 @@ pub mod firmware;
 pub mod isa;
 pub mod vm;
 
-pub use asm::{AsmError, AsmErrorKind, Assembly, assemble, assemble_at};
+pub use asm::{AsmError, AsmErrorKind, Assembly, MAX_ASM_IMAGE_BYTES, assemble, assemble_at};
 pub use firmware::{
     CanopyInput, CanopyOutput, CthWotsInput, CthWotsOutput, FirmwareError, JiveInput,
     SumcheckInput, SumcheckOutput, fw_cth_gf128_and_wots, fw_poseidon2_gl24_jive,
@@ -36,7 +36,7 @@ pub use isa::{
     mem_map,
 };
 pub use vm::{
-    Ass2Vm, Csrs, DitMode, DitViolation, DitViolationKind, MemAccess, MemRangeError, Observation,
-    RunExit, StepOutcome, Taint, Trace, VmTrap,
+    Ass2Vm, Cause, Csrs, DitMode, DitViolation, DitViolationKind, EnclaveError, EnclaveMmio,
+    LcState, MemAccess, MemRangeError, Observation, RunExit, StepOutcome, Taint, Trace, VmTrap,
 };
 pub mod wire;

@@ -92,34 +92,55 @@ pub mod csr {
     }
 }
 
-/// Physical `ASS2-0P5` (`SLOT_0P5X0P5`) memory map, `SYS_MMIO` privilege fence, and host link constants.
+/// Physical `ASS2-0P5` (`SLOT_0P5X0P5`) Two-Ring Hardware W^X memory map, `SYS_MMIO` privilege fence, and host link constants.
+///
+/// * **Ring 0 (`applet_exec = false`)**:
+///   - `0x0000..=0x0FFF` (`4 KiB` `I-ROM`): `R+X, !W`
+///   - `0x10000..=0x101FF` (`512 B` `SRAM`): `R+W, !X`
+///   - `0xFFFF_0000..=0xFFFF_007F` (`128 B` `SYS_MMIO`: `FRAM`, `VAULT_KEY`, `PUF_SYNDROME`, `LC_STATE`): Ring-0 accessible (`!X`)
+/// * **Ring 3 (`applet_exec = true`)**:
+///   - `0x10000..=0x100FF` (lower `256 B`, `64` 32-bit `ASS-2` instructions): `R+X, !W`
+///   - `0x10100..=0x101FF` (upper `256 B` data/mailboxes): `R+W, !X`
+///   - `0xFFFF_0000..` (`SYS_MMIO`) and `0x0000..=0x0FFF` (`I-ROM`): fault with `Cause::MemFault` (`ecause = 5`)!
 pub mod mem_map {
-    /// Resident Boot, Lifecycle & Crypto `I-ROM` base (`4 KiB`, `X R`).
+    /// Resident Boot, Lifecycle & Crypto `I-ROM` base (`4 KiB`, Ring-0 `R+X, !W`).
     pub const IROM_BASE: u64 = 0x0000_0000;
     /// Resident `I-ROM` byte length (`1,024 × 32b`).
     pub const IROM_BYTES: usize = 0x0000_1000;
-    /// Authenticated loadable `I-SRAM` (`SRAM1`) base (`512 B`, `X R` during `CMD_EXEC`).
-    pub const ISRAM_BASE: u64 = 0x0000_1000;
-    /// Authenticated loadable `I-SRAM` byte length (`128 × 32b`).
-    pub const ISRAM_BYTES: usize = 0x0000_0200;
-    /// Enclave `D-SRAM` (`SRAM0`) base (`512 B`, wiped by 64-cycle hardware scrub FSM).
-    pub const DSRAM_BASE: u64 = 0x0001_0000;
-    /// Enclave `D-SRAM` byte length (`64 × 64b`).
-    pub const DSRAM_BYTES: usize = 0x0000_0200;
-    /// Host -> enclave request mailbox base inside `D-SRAM` (`128 B`).
+    /// Unified `512 B` enclave SRAM base (`0x10000..=0x101FF`; Ring-0 `R+W, !X`).
+    pub const SRAM_BASE: u64 = 0x0001_0000;
+    /// Unified enclave SRAM byte length (`512 B`).
+    pub const SRAM_BYTES: usize = 0x0000_0200;
+    /// Enclave `D-SRAM` base alias (`0x10000`, Ring-0 `R+W, !X`).
+    pub const DSRAM_BASE: u64 = SRAM_BASE;
+    /// Enclave `D-SRAM` byte length (`512 B`).
+    pub const DSRAM_BYTES: usize = SRAM_BYTES;
+    /// Ring-3 applet code window base (`0x10000..=0x100FF`, lower `256 B`, `R+X, !W`).
+    pub const APPLET_CODE_BASE: u64 = 0x0001_0000;
+    /// Ring-3 applet code window byte length (`256 B` = `64 × 32b` instructions).
+    pub const APPLET_CODE_BYTES: usize = 0x0000_0100;
+    /// Maximum Ring-3 applet length in 32-bit `ASS-2` instruction words (`64` insns = `256 B`).
+    pub const MAX_APPLET_WORDS: usize = 64;
+    /// Ring-3 applet data window base (`0x10100..=0x101FF`, upper `256 B`, `R+W, !X`).
+    pub const APPLET_DATA_BASE: u64 = 0x0001_0100;
+    /// Ring-3 applet data window byte length (`256 B`).
+    pub const APPLET_DATA_BYTES: usize = 0x0000_0100;
+    /// Host -> enclave request mailbox base inside upper `256 B` (`128 B`).
     pub const RX_MBOX_BASE: u64 = 0x0001_0100;
-    /// Enclave -> host response mailbox base inside `D-SRAM` (`128 B`).
+    /// Enclave -> host response mailbox base inside upper `256 B` (`128 B`).
     pub const TX_MBOX_BASE: u64 = 0x0001_0180;
-    /// Privileged `SYS_MMIO` window (`PC >= 0x1000` traps `MemFault` `ecause = 5`).
+    /// Privileged Ring-0 `SYS_MMIO` window (`Ring 3` access traps `Cause::MemFault` `ecause = 5`).
     pub const SYS_MMIO_BASE: u64 = 0xFFFF_0000;
     /// Privileged `SYS_MMIO` byte span (`128 B`).
     pub const SYS_MMIO_BYTES: usize = 0x0000_0080;
-    /// `SYS_MMIO` register byte offsets.
+    /// `SYS_MMIO` register byte offsets (`0x00..0x80`).
     pub const MMIO_FRAM_XFER: u64 = 0x00;
     pub const MMIO_FRAM_STATUS: u64 = 0x08;
-    pub const MMIO_PUF_SYNDROME: u64 = 0x20;
+    pub const MMIO_VAULT_KEY: u64 = 0x10;
+    pub const MMIO_PUF_SYNDROME: u64 = 0x30;
     pub const MMIO_TRNG_DATA: u64 = 0x40;
     pub const MMIO_TRNG_HEALTH: u64 = 0x48;
+    pub const MMIO_LC_STATE: u64 = 0x50;
     pub const MMIO_VERDICT_CTRL: u64 = 0x60;
     pub const MMIO_GPIO_IO: u64 = 0x68;
     pub const MMIO_DBG_UART_DIV: u64 = 0x70;

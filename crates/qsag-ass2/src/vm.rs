@@ -13,6 +13,10 @@
 //! Values the program releases on purpose (registers at `HALT`, `DBG_OUT` bytes, stored
 //! results) are outside the audit.
 use crate::isa::*;
+use crate::wire::{
+    Ass2WireError, OwnerOp, WOTSC_PROOF_BYTES, compute_code_hash, derive_applet_key,
+    parse_and_verify_load_code_wotsc_frame, parse_load_code_open_frame, verify_wotsc_proof,
+};
 use alloc::{vec, vec::Vec};
 use core::{
     fmt,
@@ -85,6 +89,112 @@ pub enum VmTrap {
     MisalignedMem = 4,
     MemFault = 5,
 }
+
+/// Hardware trap / fault cause alias matching the RTL `Cause` nomenclature (`Cause::MemFault = 5`).
+pub type Cause = VmTrap;
+
+/// Locked `ASS2-0P5` hardware lifecycle state governing `CMD_LOAD_CODE` (`0x30`) and Ring-3 applets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LcState {
+    /// Factory/unprovisioned state: allows open `<= 64`-insn Ring-3 applets (`flags = 0`).
+    #[default]
+    Blank,
+    /// Owner-provisioned state:
+    /// * `rom_lock == true`: rejects `CMD_LOAD_CODE` (`0x30`) unconditionally;
+    /// * `rom_lock == false && allow_signed_applets`: requires owner `WOTS+C` signature over
+    ///   `code_hash` (`<= 64` insns) and injects `cSHAKE256(K_root, "ASS2.APPLET" || code_hash)`
+    ///   into `r1..r2` after scrubbing `r3..r15` and `spg`.
+    Provisioned {
+        allow_signed_applets: bool,
+        rom_lock: bool,
+    },
+}
+
+impl LcState {
+    pub const PROVISIONED_SIGNED_APPLETS: Self = Self::Provisioned {
+        allow_signed_applets: true,
+        rom_lock: false,
+    };
+    pub const PROVISIONED_ROM_LOCKED: Self = Self::Provisioned {
+        allow_signed_applets: false,
+        rom_lock: true,
+    };
+
+    /// Canonical 64-bit `MMIO_LC_STATE` (`0xFFFF_0050`) register encoding.
+    pub const fn to_mmio_u64(self) -> u64 {
+        match self {
+            Self::Blank => 0,
+            Self::Provisioned {
+                allow_signed_applets,
+                rom_lock,
+            } => 1 | ((allow_signed_applets as u64) << 1) | ((rom_lock as u64) << 2),
+        }
+    }
+}
+
+/// Ring-0 privileged `SYS_MMIO` (`0xFFFF_0000..=0xFFFF_007F`) backing state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnclaveMmio {
+    pub k_root: [u8; 32],
+    pub puf_syndrome: [u64; 2],
+    pub fram_xfer: u64,
+    pub fram_status: u64,
+    pub trng_data: u64,
+    pub trng_health: u64,
+    pub verdict_ctrl: u64,
+    pub gpio_io: u64,
+    pub dbg_uart_div: u64,
+}
+
+impl Default for EnclaveMmio {
+    fn default() -> Self {
+        Self {
+            k_root: [0; 32],
+            puf_syndrome: [0; 2],
+            fram_xfer: 0,
+            fram_status: 1,
+            trng_data: 0,
+            trng_health: 1,
+            verdict_ctrl: 0,
+            gpio_io: 0,
+            dbg_uart_div: 0,
+        }
+    }
+}
+
+/// Errors returned by the enclave `CMD_LOAD_CODE` (`0x30`) loader.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnclaveError {
+    NotEnclaveMode,
+    RomLocked,
+    AppletsDisabled,
+    SignatureRequired,
+    OpenAppletNotAllowed,
+    AppletWordCountOutOfRange,
+    Wire(Ass2WireError),
+}
+
+impl fmt::Display for EnclaveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotEnclaveMode => f.write_str("VM is not configured in Two-Ring enclave mode"),
+            Self::RomLocked => f.write_str("CMD_LOAD_CODE (0x30) rejected: rom_lock is active"),
+            Self::AppletsDisabled => f.write_str("CMD_LOAD_CODE (0x30) rejected: applets disabled"),
+            Self::SignatureRequired => {
+                f.write_str("Provisioned enclave requires Owner WOTS+C signed applet")
+            }
+            Self::OpenAppletNotAllowed => {
+                f.write_str("open unsigned applet rejected outside LcState::Blank")
+            }
+            Self::AppletWordCountOutOfRange => {
+                f.write_str("Ring-3 applet word count outside 1..=64")
+            }
+            Self::Wire(e) => fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl core::error::Error for EnclaveError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemAccess {
     pub addr: u64,
@@ -166,7 +276,19 @@ pub struct Ass2Vm {
     pub dit_mode: DitMode,
     pub violations: Vec<DitViolation>,
     pub trace: Trace,
+    /// Two-Ring W^X privilege bit (`false` = Ring 0 `I-ROM`, `true` = Ring 3 SRAM applet).
+    pub applet_exec: bool,
+    /// Hardware enclave lifecycle mode (`Blank` vs `Provisioned { allow_signed_applets, rom_lock }`).
+    pub lc_state: LcState,
+    /// Ring-0 privileged `SYS_MMIO` (`0xFFFF_0000`) state when `mpu_enabled` is active.
+    pub mmio: EnclaveMmio,
+    mpu_enabled: bool,
+    irom: Vec<u8>,
+    irom_taint: Vec<Taint>,
+    sram: Vec<u8>,
+    sram_taint: Vec<Taint>,
     csr_taint: [Taint; 256],
+    unhandled_trap: Option<VmTrap>,
 }
 
 impl Ass2Vm {
@@ -189,9 +311,248 @@ impl Ass2Vm {
             dit_mode: DitMode::Audit,
             violations: Vec::new(),
             trace: Trace::default(),
+            applet_exec: false,
+            lc_state: LcState::Blank,
+            mmio: EnclaveMmio::default(),
+            mpu_enabled: false,
+            irom: Vec::new(),
+            irom_taint: Vec::new(),
+            sram: Vec::new(),
+            sram_taint: Vec::new(),
             csr_taint: [Taint::Public; 256],
+            unhandled_trap: None,
         }
     }
+
+    /// Construct a hardware-faithful `ASS2-0P5` Two-Ring W^X enclave VM starting in Ring 0
+    /// (`applet_exec = false`, `pc = 0x0000` in `4 KiB` `I-ROM`, `512 B` SRAM at `0x10000..=0x101FF`,
+    /// and `128 B` Ring-0 `SYS_MMIO` at `0xFFFF_0000..=0xFFFF_007F`).
+    pub fn new_enclave(k_root: [u8; 32], lc_state: LcState) -> Self {
+        let mmio = EnclaveMmio {
+            k_root,
+            ..EnclaveMmio::default()
+        };
+        Self {
+            pc: mem_map::IROM_BASE,
+            regs: [0; 16],
+            spg: [0; 25],
+            mem: Vec::new(),
+            csrs: Csrs::default(),
+            halted: false,
+            debug_out: Vec::new(),
+            #[cfg(feature = "vm-debug-rx")]
+            debug_in: Vec::new(),
+            #[cfg(feature = "vm-debug-rx")]
+            debug_in_pos: 0,
+            reg_taint: [Taint::Public; 16],
+            spg_taint: [Taint::Public; 25],
+            mem_taint: Vec::new(),
+            dit_mode: DitMode::Audit,
+            violations: Vec::new(),
+            trace: Trace::default(),
+            applet_exec: false,
+            lc_state,
+            mmio,
+            mpu_enabled: true,
+            irom: vec![0; mem_map::IROM_BYTES],
+            irom_taint: vec![Taint::Public; mem_map::IROM_BYTES],
+            sram: vec![0; mem_map::SRAM_BYTES],
+            sram_taint: vec![Taint::Public; mem_map::SRAM_BYTES],
+            csr_taint: [Taint::Public; 256],
+            unhandled_trap: None,
+        }
+    }
+
+    fn install_ring3_applet_words(&mut self, words: &[u32]) {
+        self.sram[..mem_map::APPLET_CODE_BYTES].fill(0);
+        self.sram_taint[..mem_map::APPLET_CODE_BYTES].fill(Taint::Public);
+        for (i, &w) in words.iter().enumerate() {
+            let off = 4 * i;
+            self.sram[off..off + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        self.csrs.evec = 0;
+        self.csrs.epc = 0;
+        self.csrs.ecause = 0;
+        self.csrs.exc_en = false;
+        self.csr_taint[csr::EVEC as usize] = Taint::Public;
+        self.csr_taint[csr::EPC as usize] = Taint::Public;
+        self.csr_taint[csr::ECAUSE as usize] = Taint::Public;
+        self.csr_taint[csr::EXC_EN as usize] = Taint::Public;
+        self.pc = mem_map::APPLET_CODE_BASE;
+        self.applet_exec = true;
+        self.halted = false;
+        self.unhandled_trap = None;
+    }
+
+    fn check_cmd_load_code_allowed(&self) -> Result<(), EnclaveError> {
+        if !self.mpu_enabled {
+            return Err(EnclaveError::NotEnclaveMode);
+        }
+        match self.lc_state {
+            LcState::Blank => Ok(()),
+            LcState::Provisioned { rom_lock: true, .. } => Err(EnclaveError::RomLocked),
+            LcState::Provisioned {
+                allow_signed_applets: false,
+                rom_lock: false,
+            } => Err(EnclaveError::AppletsDisabled),
+            LcState::Provisioned {
+                allow_signed_applets: true,
+                rom_lock: false,
+            } => Ok(()),
+        }
+    }
+
+    /// Load an open (unsigned) `1..=64`-instruction Ring-3 applet into `0x10000..=0x100FF`.
+    /// Permitted **strictly** in `LcState::Blank`; rejected in all `LcState::Provisioned` modes.
+    pub fn load_open_applet(&mut self, words: &[u32]) -> Result<[u8; 32], EnclaveError> {
+        self.check_cmd_load_code_allowed()?;
+        if self.lc_state != LcState::Blank {
+            return Err(EnclaveError::SignatureRequired);
+        }
+        if !(1..=mem_map::MAX_APPLET_WORDS).contains(&words.len()) {
+            return Err(EnclaveError::AppletWordCountOutOfRange);
+        }
+        let code_hash = compute_code_hash(words);
+        self.zeroize();
+        self.install_ring3_applet_words(words);
+        Ok(code_hash)
+    }
+
+    /// Verify an Owner `WOTS+C` signature over `code_hash = compute_code_hash(words)` (`1..=64` insns)
+    /// in `LcState::Provisioned { allow_signed_applets: true, rom_lock: false }`, advance `(owner_pk, record)`,
+    /// scrub `r3..r15` and `spg`, and inject `cSHAKE256(K_root, "ASS2.APPLET" || code_hash)` into `r1..r2`.
+    pub fn load_signed_applet(
+        &mut self,
+        words: &[u32],
+        owner_pk: &mut [u8; 32],
+        enclave_id: &[u8; 32],
+        nonce: &[u8; 16],
+        record: &mut u64,
+        proof: &[u8; WOTSC_PROOF_BYTES],
+    ) -> Result<[u8; 32], EnclaveError> {
+        self.check_cmd_load_code_allowed()?;
+        match self.lc_state {
+            LcState::Blank => return Err(EnclaveError::OpenAppletNotAllowed),
+            LcState::Provisioned { rom_lock: true, .. } => return Err(EnclaveError::RomLocked),
+            LcState::Provisioned {
+                allow_signed_applets: false,
+                ..
+            } => return Err(EnclaveError::AppletsDisabled),
+            LcState::Provisioned {
+                allow_signed_applets: true,
+                rom_lock: false,
+            } => {}
+        }
+        if !(1..=mem_map::MAX_APPLET_WORDS).contains(&words.len()) {
+            return Err(EnclaveError::AppletWordCountOutOfRange);
+        }
+        let code_hash = compute_code_hash(words);
+        let mut cap_prefix = [0u8; 16];
+        cap_prefix.copy_from_slice(&code_hash[..16]);
+        let next_root = verify_wotsc_proof(
+            owner_pk,
+            enclave_id,
+            OwnerOp::LoadCode {
+                word_count: words.len() as u32,
+                code_hash,
+            },
+            nonce,
+            *record,
+            &cap_prefix,
+            proof,
+        )
+        .map_err(EnclaveError::Wire)?;
+        *owner_pk = next_root;
+        *record += 1u64 << 32;
+
+        // Scrub r0, r3..r15, and all 25 sponge lanes before injecting derived applet key into r1..r2.
+        self.regs[0] = 0;
+        self.reg_taint[0] = Taint::Public;
+        self.regs[3..16].fill(0);
+        self.reg_taint[3..16].fill(Taint::Public);
+        self.spg.fill(0);
+        self.spg_taint.fill(Taint::Public);
+
+        let applet_key = derive_applet_key(&self.mmio.k_root, &code_hash);
+        self.regs[1] = u64::from_le_bytes(applet_key[0..8].try_into().unwrap());
+        self.regs[2] = u64::from_le_bytes(applet_key[8..16].try_into().unwrap());
+        self.reg_taint[1] = Taint::Secret;
+        self.reg_taint[2] = Taint::Secret;
+
+        self.install_ring3_applet_words(words);
+        Ok(code_hash)
+    }
+
+    /// Process a raw `CMD_LOAD_CODE` (`0x30`) wire frame (`flags = 0` open in `LcState::Blank`,
+    /// `flags = 2` `WOTS+C`-signed in `LcState::Provisioned { allow_signed_applets: true, rom_lock: false }`,
+    /// and unconditionally rejected under `rom_lock`).
+    pub fn execute_cmd_load_code(
+        &mut self,
+        frame: &[u8],
+        owner_pk: &mut [u8; 32],
+        enclave_id: &[u8; 32],
+        nonce: &[u8; 16],
+        record: &mut u64,
+    ) -> Result<[u8; 32], EnclaveError> {
+        self.check_cmd_load_code_allowed()?;
+        if frame.len() < 9 {
+            return Err(EnclaveError::Wire(Ass2WireError::LengthMismatch));
+        }
+        let header = u64::from_le_bytes(frame[1..9].try_into().unwrap());
+        let magic = (header & 0xFF) as u8;
+        let opcode = ((header >> 8) & 0xFF) as u8;
+        let flags = ((header >> 16) & 0xFF) as u8;
+        if magic != mem_map::WIRE_MAGIC || opcode != mem_map::CMD_LOAD_CODE {
+            return Err(EnclaveError::Wire(Ass2WireError::InvalidHeader));
+        }
+        match self.lc_state {
+            LcState::Blank => {
+                if flags != 0 {
+                    return Err(EnclaveError::OpenAppletNotAllowed);
+                }
+                let (_prefix, words) =
+                    parse_load_code_open_frame(frame).map_err(EnclaveError::Wire)?;
+                self.load_open_applet(&words)
+            }
+            LcState::Provisioned { rom_lock: true, .. } => Err(EnclaveError::RomLocked),
+            LcState::Provisioned {
+                allow_signed_applets: false,
+                ..
+            } => Err(EnclaveError::AppletsDisabled),
+            LcState::Provisioned {
+                allow_signed_applets: true,
+                rom_lock: false,
+            } => {
+                if flags != 2 {
+                    return Err(EnclaveError::SignatureRequired);
+                }
+                let (_prefix, words, code_hash, next_root) =
+                    parse_and_verify_load_code_wotsc_frame(
+                        frame, owner_pk, enclave_id, nonce, *record,
+                    )
+                    .map_err(EnclaveError::Wire)?;
+                *owner_pk = next_root;
+                *record += 1u64 << 32;
+
+                self.regs[0] = 0;
+                self.reg_taint[0] = Taint::Public;
+                self.regs[3..16].fill(0);
+                self.reg_taint[3..16].fill(Taint::Public);
+                self.spg.fill(0);
+                self.spg_taint.fill(Taint::Public);
+
+                let applet_key = derive_applet_key(&self.mmio.k_root, &code_hash);
+                self.regs[1] = u64::from_le_bytes(applet_key[0..8].try_into().unwrap());
+                self.regs[2] = u64::from_le_bytes(applet_key[8..16].try_into().unwrap());
+                self.reg_taint[1] = Taint::Secret;
+                self.reg_taint[2] = Taint::Secret;
+
+                self.install_ring3_applet_words(&words);
+                Ok(code_hash)
+            }
+        }
+    }
+
     fn range(&self, addr: u64, len: usize) -> Result<Range<usize>, MemRangeError> {
         let err = MemRangeError { addr, len };
         let start = usize::try_from(addr).map_err(|_| err)?;
@@ -201,6 +562,29 @@ impl Ass2Vm {
             .ok_or(err)?;
         Ok(start..end)
     }
+
+    fn enclave_host_slice_mut(
+        &mut self,
+        addr: u64,
+        len: usize,
+    ) -> Result<(&mut [u8], &mut [Taint]), MemRangeError> {
+        let err = MemRangeError { addr, len };
+        let end_addr = addr.checked_add(len as u64).ok_or(err)?;
+        if end_addr <= mem_map::IROM_BASE + mem_map::IROM_BYTES as u64 {
+            let s = addr as usize;
+            let e = end_addr as usize;
+            Ok((&mut self.irom[s..e], &mut self.irom_taint[s..e]))
+        } else if addr >= mem_map::SRAM_BASE
+            && end_addr <= mem_map::SRAM_BASE + mem_map::SRAM_BYTES as u64
+        {
+            let s = (addr - mem_map::SRAM_BASE) as usize;
+            let e = (end_addr - mem_map::SRAM_BASE) as usize;
+            Ok((&mut self.sram[s..e], &mut self.sram_taint[s..e]))
+        } else {
+            Err(err)
+        }
+    }
+
     /// Install public code or data. All bytes are range-checked before writing.
     pub fn load_image(&mut self, addr: u64, image: &[u8]) -> Result<(), MemRangeError> {
         self.load_tainted(addr, image, Taint::Public)
@@ -212,6 +596,12 @@ impl Ass2Vm {
         data: &[u8],
         tag: Taint,
     ) -> Result<(), MemRangeError> {
+        if self.mpu_enabled {
+            let (buf, tags) = self.enclave_host_slice_mut(addr, data.len())?;
+            buf.copy_from_slice(data);
+            tags.fill(tag);
+            return Ok(());
+        }
         let range = self.range(addr, data.len())?;
         self.mem_taint.resize(self.mem.len(), Taint::Public);
         self.mem[range.clone()].copy_from_slice(data);
@@ -220,6 +610,21 @@ impl Ass2Vm {
     }
     /// Read `len` bytes at `addr`.
     pub fn read_bytes(&self, addr: u64, len: usize) -> Result<&[u8], MemRangeError> {
+        if self.mpu_enabled {
+            let err = MemRangeError { addr, len };
+            let end_addr = addr.checked_add(len as u64).ok_or(err)?;
+            if end_addr <= mem_map::IROM_BASE + mem_map::IROM_BYTES as u64 {
+                return Ok(&self.irom[addr as usize..end_addr as usize]);
+            }
+            if addr >= mem_map::SRAM_BASE
+                && end_addr <= mem_map::SRAM_BASE + mem_map::SRAM_BYTES as u64
+            {
+                let s = (addr - mem_map::SRAM_BASE) as usize;
+                let e = (end_addr - mem_map::SRAM_BASE) as usize;
+                return Ok(&self.sram[s..e]);
+            }
+            return Err(err);
+        }
         Ok(&self.mem[self.range(addr, len)?])
     }
     /// Read the little-endian 64-bit word at `addr`.
@@ -269,6 +674,12 @@ impl Ass2Vm {
         })
     }
     fn csr_write(&mut self, addr: u8, v: u64, tag: Taint) -> Result<(), VmTrap> {
+        if self.mpu_enabled
+            && self.applet_exec
+            && matches!(addr, csr::EVEC | csr::EXC_EN)
+        {
+            return Err(VmTrap::IllegalInsn);
+        }
         match addr {
             csr::EVEC => self.csrs.evec = v & !3,
             csr::EPC => self.csrs.epc = v,
@@ -276,7 +687,10 @@ impl Ass2Vm {
             csr::EXC_EN => self.csrs.exc_en = v & 1 != 0,
             csr::CYCLES => self.csrs.cycles = v,
             csr::INSTRET => self.csrs.instret = v,
-            csr::POWER => self.halted = v & 1 != 0,
+            csr::POWER => {
+                self.halted = v & 1 != 0;
+                self.unhandled_trap = None;
+            }
             csr::DBG_OUT => self.debug_out.push(v as u8),
             csr::ZEROIZE => {
                 if v & 1 != 0 {
@@ -303,8 +717,10 @@ impl Ass2Vm {
             self.csr_taint[csr::EPC as usize] = Taint::Public;
             self.csr_taint[csr::EXC_EN as usize] = Taint::Public;
             self.pc = self.csrs.evec & !3;
+            self.unhandled_trap = None;
         } else {
             self.halted = true;
+            self.unhandled_trap = Some(cause);
         }
         StepOutcome::Trap(cause)
     }
@@ -343,14 +759,52 @@ impl Ass2Vm {
         (self.dit_mode == DitMode::Trap).then_some(violation)
     }
 
+    fn fetch_insn(&self, pc: u64) -> Result<(u32, Taint), VmTrap> {
+        if !self.mpu_enabled {
+            let range = self.range(pc, 4).map_err(|_| VmTrap::MemFault)?;
+            let raw = u32::from_le_bytes(self.mem[range.clone()].try_into().unwrap());
+            return Ok((raw, combined(&self.mem_taint[range])));
+        }
+        let end = pc.checked_add(4).ok_or(VmTrap::MemFault)?;
+        if !self.applet_exec {
+            // Ring 0 (`applet_exec = false`): ONLY 0x0000..=0x0FFF (`I-ROM`) is executable (`R+X, !W`);
+            // SRAM (`0x10000..=0x101FF`) and `SYS_MMIO` (`0xFFFF_0000`) are strictly `!X`.
+            if end <= mem_map::IROM_BASE + mem_map::IROM_BYTES as u64 {
+                let s = pc as usize;
+                let raw = u32::from_le_bytes(self.irom[s..s + 4].try_into().unwrap());
+                Ok((raw, combined(&self.irom_taint[s..s + 4])))
+            } else {
+                Err(VmTrap::MemFault)
+            }
+        } else {
+            // Ring 3 (`applet_exec = true`): ONLY lower 256 B (`0x10000..=0x100FF`, 64 insns) is `R+X, !W`;
+            // upper 256 B (`0x10100..=0x101FF`), `I-ROM`, and `SYS_MMIO` fault with `Cause::MemFault`.
+            if pc >= mem_map::APPLET_CODE_BASE
+                && end <= mem_map::APPLET_CODE_BASE + mem_map::APPLET_CODE_BYTES as u64
+            {
+                let s = (pc - mem_map::SRAM_BASE) as usize;
+                let raw = u32::from_le_bytes(self.sram[s..s + 4].try_into().unwrap());
+                Ok((raw, combined(&self.sram_taint[s..s + 4])))
+            } else {
+                Err(VmTrap::MemFault)
+            }
+        }
+    }
+
     pub fn step(&mut self) -> StepOutcome {
         // The public machine state can be seeded by a debugger between steps.
         self.regs[0] = 0;
         self.reg_taint[0] = Taint::Public;
         if self.halted {
+            if let Some(cause) = self.unhandled_trap {
+                return StepOutcome::Trap(cause);
+            }
             return StepOutcome::Halted;
         }
-        self.mem_taint.resize(self.mem.len(), Taint::Public);
+        self.unhandled_trap = None;
+        if !self.mpu_enabled {
+            self.mem_taint.resize(self.mem.len(), Taint::Public);
+        }
         let pc = self.pc;
         let mut word = None;
         let mut access = None;
@@ -358,10 +812,9 @@ impl Ass2Vm {
             if pc & 3 != 0 {
                 return Err(VmTrap::MisalignedPc);
             }
-            let range = self.range(pc, 4).map_err(|_| VmTrap::MemFault)?;
-            let raw = u32::from_le_bytes(self.mem[range.clone()].try_into().unwrap());
+            let (raw, fetch_taint) = self.fetch_insn(pc)?;
             word = Some(raw);
-            if combined(&self.mem_taint[range]) == Taint::Secret
+            if fetch_taint == Taint::Secret
                 && let Some(v) = self.violation(0, DitViolationKind::SecretInsnFetch)
             {
                 return Ok(StepOutcome::DitViolation(v));
@@ -410,6 +863,9 @@ impl Ass2Vm {
     /// so repeated faults and guest writes to the counters cannot evade it.
     pub fn run(&mut self, max_steps: u64) -> RunExit {
         if self.halted {
+            if let Some(cause) = self.unhandled_trap {
+                return RunExit::Trap(cause);
+            }
             return RunExit::Halted;
         }
         for _ in 0..max_steps {
@@ -436,7 +892,10 @@ impl Ass2Vm {
                 self.csrs.exc_en = true;
                 self.csr_taint[csr::EXC_EN as usize] = Taint::Public;
             }
-            Halt => self.halted = true,
+            Halt => {
+                self.halted = true;
+                self.unhandled_trap = None;
+            }
             Zeroize => self.zeroize(),
             Csrr { rd, csr } => {
                 let v = self.csr_read(csr)?;
@@ -692,6 +1151,250 @@ impl Ass2Vm {
         Ok(())
     }
 
+    fn mmio_image(&self) -> ([u8; mem_map::SYS_MMIO_BYTES], [Taint; mem_map::SYS_MMIO_BYTES]) {
+        let mut buf = [0u8; mem_map::SYS_MMIO_BYTES];
+        let mut tags = [Taint::Public; mem_map::SYS_MMIO_BYTES];
+        let put_u64 =
+            |buf: &mut [u8; mem_map::SYS_MMIO_BYTES],
+             tags: &mut [Taint; mem_map::SYS_MMIO_BYTES],
+             off: u64,
+             val: u64,
+             taint: Taint| {
+                let s = off as usize;
+                buf[s..s + 8].copy_from_slice(&val.to_le_bytes());
+                tags[s..s + 8].fill(taint);
+            };
+        put_u64(&mut buf, &mut tags, mem_map::MMIO_FRAM_XFER, self.mmio.fram_xfer, Taint::Public);
+        put_u64(
+            &mut buf,
+            &mut tags,
+            mem_map::MMIO_FRAM_STATUS,
+            self.mmio.fram_status,
+            Taint::Public,
+        );
+        let vk = mem_map::MMIO_VAULT_KEY as usize;
+        buf[vk..vk + 32].copy_from_slice(&self.mmio.k_root);
+        tags[vk..vk + 32].fill(Taint::Secret);
+        put_u64(
+            &mut buf,
+            &mut tags,
+            mem_map::MMIO_PUF_SYNDROME,
+            self.mmio.puf_syndrome[0],
+            Taint::Secret,
+        );
+        put_u64(
+            &mut buf,
+            &mut tags,
+            mem_map::MMIO_PUF_SYNDROME + 8,
+            self.mmio.puf_syndrome[1],
+            Taint::Secret,
+        );
+        put_u64(
+            &mut buf,
+            &mut tags,
+            mem_map::MMIO_TRNG_DATA,
+            self.mmio.trng_data,
+            Taint::Secret,
+        );
+        put_u64(
+            &mut buf,
+            &mut tags,
+            mem_map::MMIO_TRNG_HEALTH,
+            self.mmio.trng_health,
+            Taint::Public,
+        );
+        put_u64(
+            &mut buf,
+            &mut tags,
+            mem_map::MMIO_LC_STATE,
+            self.lc_state.to_mmio_u64(),
+            Taint::Public,
+        );
+        put_u64(
+            &mut buf,
+            &mut tags,
+            mem_map::MMIO_VERDICT_CTRL,
+            self.mmio.verdict_ctrl,
+            Taint::Public,
+        );
+        put_u64(
+            &mut buf,
+            &mut tags,
+            mem_map::MMIO_GPIO_IO,
+            self.mmio.gpio_io,
+            Taint::Public,
+        );
+        put_u64(
+            &mut buf,
+            &mut tags,
+            mem_map::MMIO_DBG_UART_DIV,
+            self.mmio.dbg_uart_div,
+            Taint::Public,
+        );
+        (buf, tags)
+    }
+
+    fn mmio_write(&mut self, off: u64, size: u8, value: u64) -> Result<(), VmTrap> {
+        let aligned = off & !7;
+        let reg = match aligned {
+            mem_map::MMIO_FRAM_XFER => &mut self.mmio.fram_xfer,
+            mem_map::MMIO_FRAM_STATUS => &mut self.mmio.fram_status,
+            mem_map::MMIO_VERDICT_CTRL => &mut self.mmio.verdict_ctrl,
+            mem_map::MMIO_GPIO_IO => &mut self.mmio.gpio_io,
+            mem_map::MMIO_DBG_UART_DIV => &mut self.mmio.dbg_uart_div,
+            // Read-only hardware roots/fuses (`VAULT_KEY`, `PUF_SYNDROME`, `TRNG`, `LC_STATE`) fault on write.
+            _ => return Err(VmTrap::MemFault),
+        };
+        if size == 8 {
+            *reg = value;
+        } else {
+            let mut bytes = reg.to_le_bytes();
+            bytes[(off & 7) as usize] = value as u8;
+            *reg = u64::from_le_bytes(bytes);
+        }
+        Ok(())
+    }
+
+    fn transfer_mpu(
+        &mut self,
+        ra: u8,
+        addr: u64,
+        size: u8,
+        slot: Slot,
+        write: bool,
+    ) -> Result<(), VmTrap> {
+        let len = usize::from(size);
+        let end = addr.checked_add(u64::from(size)).ok_or(VmTrap::MemFault)?;
+        let addr_taint = self.reg_taint[ra as usize];
+
+        if self.applet_exec {
+            // Ring 3 (`applet_exec = true`):
+            // * 0x10000..=0x100FF: R+X, !W
+            // * 0x10100..=0x101FF: R+W, !X
+            // * 0xFFFF_0000 MMIO, 0x0000..=0x0FFF I-ROM, and all other ranges: Cause::MemFault!
+            let in_code = addr >= mem_map::APPLET_CODE_BASE
+                && end <= mem_map::APPLET_CODE_BASE + mem_map::APPLET_CODE_BYTES as u64;
+            let in_data = addr >= mem_map::APPLET_DATA_BASE
+                && end <= mem_map::APPLET_DATA_BASE + mem_map::APPLET_DATA_BYTES as u64;
+            if write {
+                if !in_data {
+                    return Err(VmTrap::MemFault);
+                }
+            } else if !(in_code || in_data) {
+                return Err(VmTrap::MemFault);
+            }
+            if addr % u64::from(size) != 0 {
+                return Err(VmTrap::MisalignedMem);
+            }
+            let s = (addr - mem_map::SRAM_BASE) as usize;
+            if write {
+                let (value, tag) = match slot {
+                    Slot::Reg(i) => (self.regs[i as usize], self.reg_taint[i as usize]),
+                    Slot::Lane(i) => (self.spg[i as usize], self.spg_taint[i as usize]),
+                };
+                self.sram[s..s + len].copy_from_slice(&value.to_le_bytes()[..len]);
+                self.sram_taint[s..s + len].fill(tag | addr_taint);
+            } else {
+                let mut bytes = [0u8; 8];
+                bytes[..len].copy_from_slice(&self.sram[s..s + len]);
+                let value = u64::from_le_bytes(bytes);
+                let tag = combined(&self.sram_taint[s..s + len]) | addr_taint;
+                match slot {
+                    Slot::Reg(i) => self.set_reg(i, value, tag),
+                    Slot::Lane(i) => {
+                        self.spg[i as usize] = value;
+                        self.spg_taint[i as usize] = tag;
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // Ring 0 (`applet_exec = false`):
+        // * 0x0000..=0x0FFF (`I-ROM`): R+X, !W
+        // * 0x10000..=0x101FF (`SRAM`): R+W, !X
+        // * 0xFFFF_0000..=0xFFFF_007F (`SYS_MMIO`): accessible (R+W on control regs, R-only on Vault/PUF/LC_STATE)
+        if end <= mem_map::IROM_BASE + mem_map::IROM_BYTES as u64 {
+            if write {
+                return Err(VmTrap::MemFault);
+            }
+            if addr % u64::from(size) != 0 {
+                return Err(VmTrap::MisalignedMem);
+            }
+            let s = addr as usize;
+            let mut bytes = [0u8; 8];
+            bytes[..len].copy_from_slice(&self.irom[s..s + len]);
+            let value = u64::from_le_bytes(bytes);
+            let tag = combined(&self.irom_taint[s..s + len]) | addr_taint;
+            match slot {
+                Slot::Reg(i) => self.set_reg(i, value, tag),
+                Slot::Lane(i) => {
+                    self.spg[i as usize] = value;
+                    self.spg_taint[i as usize] = tag;
+                }
+            }
+            return Ok(());
+        }
+        if addr >= mem_map::SRAM_BASE && end <= mem_map::SRAM_BASE + mem_map::SRAM_BYTES as u64 {
+            if addr % u64::from(size) != 0 {
+                return Err(VmTrap::MisalignedMem);
+            }
+            let s = (addr - mem_map::SRAM_BASE) as usize;
+            if write {
+                let (value, tag) = match slot {
+                    Slot::Reg(i) => (self.regs[i as usize], self.reg_taint[i as usize]),
+                    Slot::Lane(i) => (self.spg[i as usize], self.spg_taint[i as usize]),
+                };
+                self.sram[s..s + len].copy_from_slice(&value.to_le_bytes()[..len]);
+                self.sram_taint[s..s + len].fill(tag | addr_taint);
+            } else {
+                let mut bytes = [0u8; 8];
+                bytes[..len].copy_from_slice(&self.sram[s..s + len]);
+                let value = u64::from_le_bytes(bytes);
+                let tag = combined(&self.sram_taint[s..s + len]) | addr_taint;
+                match slot {
+                    Slot::Reg(i) => self.set_reg(i, value, tag),
+                    Slot::Lane(i) => {
+                        self.spg[i as usize] = value;
+                        self.spg_taint[i as usize] = tag;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if addr >= mem_map::SYS_MMIO_BASE
+            && end <= mem_map::SYS_MMIO_BASE + mem_map::SYS_MMIO_BYTES as u64
+        {
+            if addr % u64::from(size) != 0 {
+                return Err(VmTrap::MisalignedMem);
+            }
+            let off = addr - mem_map::SYS_MMIO_BASE;
+            if write {
+                let value = match slot {
+                    Slot::Reg(i) => self.regs[i as usize],
+                    Slot::Lane(i) => self.spg[i as usize],
+                };
+                self.mmio_write(off, size, value)?;
+            } else {
+                let (img, tags) = self.mmio_image();
+                let s = off as usize;
+                let mut bytes = [0u8; 8];
+                bytes[..len].copy_from_slice(&img[s..s + len]);
+                let value = u64::from_le_bytes(bytes);
+                let tag = combined(&tags[s..s + len]) | addr_taint;
+                match slot {
+                    Slot::Reg(i) => self.set_reg(i, value, tag),
+                    Slot::Lane(i) => {
+                        self.spg[i as usize] = value;
+                        self.spg_taint[i as usize] = tag;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        Err(VmTrap::MemFault)
+    }
+
     fn transfer(
         &mut self,
         ra: u8,
@@ -703,6 +1406,9 @@ impl Ass2Vm {
     ) -> Result<(), VmTrap> {
         let addr = self.regs[ra as usize].wrapping_add_signed(offset * i64::from(size));
         *access = Some(MemAccess { addr, size, write });
+        if self.mpu_enabled {
+            return self.transfer_mpu(ra, addr, size, slot, write);
+        }
         if addr % u64::from(size) != 0 {
             return Err(VmTrap::MisalignedMem);
         }
@@ -755,5 +1461,21 @@ fn keccak(state: &mut [u64; 25], rounds: u8) {
             }
         }
         state[0] ^= rc;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooth_vm_unhandled_trap_stays_latched_across_subsequent_step_and_run() {
+        // `#tooth`: Previously an unhandled trap set `self.halted = true` without latching
+        // the trap cause, so a second `vm.step()` or `vm.run(...)` returned `Halted` instead of `Trap`.
+        let mut vm = Ass2Vm::new(64);
+        vm.load_image(0, &0xFFFF_FFFFu32.to_le_bytes()).unwrap();
+        assert_eq!(vm.run(8), RunExit::Trap(VmTrap::IllegalInsn));
+        assert_eq!(vm.step(), StepOutcome::Trap(VmTrap::IllegalInsn));
+        assert_eq!(vm.run(8), RunExit::Trap(VmTrap::IllegalInsn));
     }
 }

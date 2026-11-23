@@ -509,6 +509,10 @@ impl Statement<'_> {
     }
 }
 
+/// Hard ceiling (16 MiB) on assembled contiguous image span (`pc - origin`), preventing
+/// untrusted `.org` directives from triggering multi-gigabyte padding allocations.
+pub const MAX_ASM_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Assemble an image based at byte address zero.
 pub fn assemble(source: &str) -> Result<Vec<u8>, AsmError> {
     Ok(assemble_at(source, 0)?.bytes)
@@ -560,6 +564,7 @@ pub fn assemble_at(source: &str, origin: u64) -> Result<Assembly, AsmError> {
         stmt.size = stmt.size().map_err(error)?;
         pc = pc
             .checked_add(stmt.size)
+            .filter(|&next_pc| next_pc - origin <= MAX_ASM_IMAGE_BYTES)
             .ok_or_else(|| error(AsmErrorKind::Range))?;
         statements.push(stmt);
     }
@@ -583,4 +588,18 @@ pub fn assemble_at(source: &str, origin: u64) -> Result<Assembly, AsmError> {
         bytes,
         labels,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooth_asm_org_beyond_16_mib_fails_pass1_without_oom() {
+        // `#tooth`: `.org 0xffffffff` previously passed pass 1 and attempted a 4 GiB
+        // `try_reserve_exact` + byte-by-byte NOP loop in pass 2.
+        let err = assemble("nop\n.org 0xffffffff\nhalt\n").unwrap_err();
+        assert_eq!(err.line, 2);
+        assert_eq!(err.kind, AsmErrorKind::Range);
+    }
 }
