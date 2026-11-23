@@ -100,7 +100,7 @@ cargo run --release -p qsag-cli --example threshold_slh_dsa_quickstart
 | Component | What it provides |
 | --- | --- |
 | `qsag-hd`, `qsag-addr` | Dealerless module-lattice key hierarchies, committed watch-only inventories, Bech32m PQ addresses, and hybrid keys |
-| `qsag-migrate` | Local and hardware-anchored collaborative MPC proofs (`zk-Hem v2` Toom-3 $\mathbb{F}_{p^5}$ and 4-curve `CoZK`) across 19 CLI kinds: Bitcoin/Ethereum `secp256k1`, Solana `Ed25519`, Zcash NU7 (`Sapling`, `Orchard`, `Ironwood` ZIP-2005, `Transparent` ZIP-2007), and `BLS12-381` withdrawal keys |
+| `qsag-migrate` | Local and hardware-anchored collaborative MPC proofs (`zk-Hem v2` Toom-3 $\mathbb{F}_{p^5}$) across 19 CLI kinds: Bitcoin/Ethereum `secp256k1`, Solana `Ed25519`, Zcash NU7 (`Sapling`, `Orchard`, `Ironwood` ZIP-2005, `Transparent` ZIP-2007), and `BLS12-381` withdrawal keys |
 | `qsag-policy` | Stateful velocity, allowlist, and window rules checked before custodians release shares |
 | `SpongeMacaroon`, `PqBiscuit`, `QSAGCAU1` | Keyed-sponge macaroons, offline one-time-signature biscuits, and unlinkable zero-knowledge capability presentations |
 | `qsag-cred` | Threshold ML-DSA, threshold Poseidon2 OPRFs, one-time verifier-ledger `BlindVC` credentials, and private multisignatures |
@@ -108,11 +108,10 @@ cargo run --release -p qsag-cli --example threshold_slh_dsa_quickstart
 ## Verification and hardware
 
 - **Constructive Lean 4.35 Cathedral (`lean/Qsag/`, `aeneas/`):** `331` `Qsag` modules (`496,915` lines, `136,585` audited declarations, `73,117` theorems, `0` rejected, axioms strictly `⊆ {propext, Quot.sound}`, `0` `Classical.choice`, `0` `sorry`, `0` `import all`), welded to `aeneas/lean` (`6,890` decls) and `aeneas/lean-whir` (`1,911` decls, `37/37` WHIR functions), `28` `.rlib` assembly kernels (`ELF ≃ Math ≃ MIR`), and universal `poseidon2_perm12.spv` equivalence. **`312` challenge theorems and `32` definitions pass all 6 independent replay kernels** (`lean`, `leanchecker-paranoid`, `lean4lean`, `nanoda_bin`, `con-leche`, `con-ron`).
-- **Four hardware targets (`hardware/`):**
-  - **QSAG-NI v2 (`hardware/asic/`, `hardware/fpga/`):** Stateful `zk-Hem v2` + `QSAGSTA1` verifier coprocessor (`258,104`-byte live proof verified over streaming hardware port, `194/194` faults caught, `105+` Z3/Bitwuzla miters, `Obend` Lean 4, `Nangate45` 0-DRC full route, `ECP5-85F` bitstreams).
-  - **ASS2-0P5 / Dregg-64 (`hardware/ass2/`, `crates/qsag-ass2/`):** 64-bit `GF180MCU` 5 V capability enclave (`512`-RO `252`-pair `144`-bit `BCH(63,36,5)` PUF, PQ owner `I-ROM` bootstrap, `0.60 ns` async latch wipe, `37.75 MHz` worst-case `SS` / `54.44 MHz` `TT` core, KiCad 8 carrier PCB).
-  - **Dregg-180 (`hardware/gf180mcu/`):** 5-organ 180 nm 5 V physical custody enclave (`CapTP` vat, `RO-PUF`, `13.56 MHz` NFC + NCO, sub-5 ns `Brands–Chaum` Vernier TDC, staggered `WOTS+C` self-check).
-  - **CL_QSAG_F2 (`hardware/aws_f2/`, `qsag_accel::aws_f2`):** Turnkey AWS EC2 F2 (`VU47P`, HDK 2.3.5) custom logic shell integrating 2 `QSAG-NI v2` engines and 3 isolated `ASS2` enclaves (`2.52%` `LUT6`, `3.21%` `DSP48E2`, `14.83%` `RAMB36E2`).
+- **Three live hardware targets (`hardware/`, historical prototypes archived in [`history/`](history/README.md)):**
+  - **QSAG-NI v2 (`hardware/asic/`, `hardware/fpga/`):** Stateful `zk-Hem v2` + `QSAGSTA1` verifier coprocessor (`258,104`-byte live proof verified over streaming hardware port, `194/194` faults caught, `105+` Z3/Bitwuzla miters, `Obend` Lean 4, manufacturable `IHP SG13G2` / `Sky130` characterization, Lattice `ECP5-85F` bitstreams).
+  - **ASS2-0P5 / Dregg-64 (`hardware/ass2/`, `crates/qsag-ass2/`):** 64-bit `GF180MCU-D` 5 V capability enclave targeting the `SLOT_0P5X0P5` (`56`-pad) shuttle slot (`512`-RO disjoint-pair `144`-bit `BCH(63,36,5)` PUF, PQ owner `I-ROM` bootstrap, `0.60 ns` async latch wipe, KiCad 8 carrier PCB).
+  - **CL_QSAG_F2 (`hardware/aws_f2/`, `qsag_accel::aws_f2`):** AWS EC2 F2 (`VU47P`, HDK 2.3.5) custom logic shell integrating 2 `QSAG-NI v2` engines and 3 isolated `ASS2` enclaves (`2.52%` `LUT6`, `3.21%` `DSP48E2`, `14.83%` `RAMB36E2`).
 
 ## Repository map
 
@@ -123,7 +122,7 @@ cargo run --release -p qsag-cli --example threshold_slh_dsa_quickstart
 | `qsag-hd`, `qsag-addr`, `qsag-policy`, `qsag-cred`, `qsag-migrate`, `qsag-ass2` | Wallet, capability, credential, 19-kind migration, and `ASS2-0P5` enclave host SDK |
 | `qsag-cli` | CLI (`qsag`, synced bijectively to `dregg-sig`) and runnable examples |
 | `lean/`, `aeneas/`, `validation/` | 331-module Lean 4.35 proofs, MIR extractions, 6-kernel comparator, 86 differential suites |
-| `hardware/` | `asic/` (`QSAG-NI v2`), `fpga/`, `ass2/` (`ASS2-0P5` + PCB), `gf180mcu/` (`Dregg-180`), `aws_f2/` (`VU47P`) |
+| `hardware/`, `history/` | `asic/` (`QSAG-NI v2`), `fpga/` (`ECP5-85F`), `ass2/` (`ASS2-0P5` + PCB), `aws_f2/` (`VU47P`); retired `Dregg-180` & academic PDK runs in `history/` |
 
 [Paper](paper/qsag.typ) · [Assurance boundaries](ASSURANCE.md) · [Measured performance](docs/PERFORMANCE.md) · [Scaling model](docs/QUORUM_AND_CONSENSUS_SCALING.md) · [Security and constant-time proofs](docs/SECURITY_AND_CT_PROOFS.md)
 
