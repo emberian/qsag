@@ -1,6 +1,5 @@
-// Test traffic uses only the two shell buses. Golden NI vectors came from
-// the Rust verifier, golden enclave authorization tags from OpenSSL SHAKE256.
-#ifdef HDK_BRINGUP
+// Test traffic uses only the two shell buses. Golden NI vectors came from the Rust verifier.
+#ifdef HDK_WRAPPER
 #include "Vcl_qsag_f2.h"
 using Dut = Vcl_qsag_f2;
 constexpr uint32_t id0 = 0xf0211d0f;
@@ -15,12 +14,13 @@ constexpr uint32_t id0 = 0x1d0ff201;
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
-#include <openssl/evp.h>
+
 #include <stdexcept>
 #include <string>
 #include <vector>
 using u64 = uint64_t;
 using Words = std::vector<u64>;
+#include "owner_fixture.hpp"
 using Beat = std::array<uint32_t, 16>;
 using Beats = std::vector<Beat>;
 void expect(u64 got, u64 want, const char *where) {
@@ -35,9 +35,8 @@ struct Bus {
     unsigned transactions = 0;
     u64 clocks = 0;
     void tick(unsigned n = 1) {
+        d.eval();
         for (unsigned i = 0; i < n; i++) {
-            d.clk_main_a0 = 0;
-            d.eval();
             d.clk_main_a0 = 1;
             d.eval();
             d.clk_main_a0 = 0;
@@ -231,28 +230,28 @@ struct Bus {
         wr(vbase(), 0);
         return out;
     }
-    Words cmd(unsigned op, const Words &payload = {}, unsigned flags = 0,
-              unsigned expected_error = 0, unsigned mode = 2, unsigned bytes = ~0u) {
+    u64 transfer_word(u64 w, unsigned mode) {
+        u64 result = 0;
+        for (unsigned i=0; i<8; i++)
+            result |= u64(shift(uint8_t(w >> (i*8)), mode)) << (i*8);
+        return result;
+    }
+    void submit(unsigned op, const Words &payload, unsigned flags, unsigned mode, unsigned bytes) {
         if (std::getenv("QSAG_TRACE_ASS2"))
             std::cout << "cycle " << clocks << " vat " << vat << " op " << op << "\n";
-        if (bytes == ~0u)
-            bytes = payload.size() * 8;
+        if (bytes == ~0u) bytes = payload.size()*8;
         auto header = u64(0x51) | (u64(op) << 8) | (u64(flags) << 16) | (u64(bytes) << 24);
-        auto word = [&](u64 w) {
-            u64 v = 0;
-            for (unsigned i = 0; i < 8; i++)
-                v |= u64(shift(uint8_t(w >> (i * 8)), mode)) << (8 * i);
-            return v;
-        };
         wr(vbase(), 1);
         shift(mode << 6, 0);
-        word(header);
+        transfer_word(header, mode);
         for (auto w : payload)
-            word(w);
+            transfer_word(w, mode);
         wr(vbase(), 0);
+    }
+    Words collect(unsigned op, unsigned expected_error, unsigned mode) {
         // Poll at coarse intervals during long resident microprograms.
         for (unsigned poll = 0; (rd(vbase() + 8) & 6) != 6; poll++) {
-            if (poll == 40000)
+            if (poll == 140000)
                 throw std::runtime_error("resident timeout at vat " + std::to_string(vat) +
                                          " opcode " + std::to_string(op));
             tick(512);
@@ -260,77 +259,21 @@ struct Bus {
         wr(vbase(), 1);
         shift((mode << 6) | 2, 0);
         shift(0, 0);
-        u64 h = word(0);
+        u64 h = transfer_word(0, mode);
         expect(h & 65535, 0x8051 | (op << 8), "response opcode");
         expect(h >> 48, expected_error, "resident error");
         Words out;
         for (unsigned i = 0; i < ((h >> 24) & 255); i += 8)
-            out.push_back(word(0));
+            out.push_back(transfer_word(0, mode));
         wr(vbase(), 0);
         return out;
     }
+    Words cmd(unsigned op, const Words &payload = {}, unsigned flags = 0,
+              unsigned expected_error = 0, unsigned mode = 2, unsigned bytes = ~0u) {
+        submit(op, payload, flags, mode, bytes);
+        return collect(op, expected_error, mode);
+    }
 };
-static Words shake(const Words &input, size_t n) {
-    Words out(n);
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    if (!ctx || !EVP_DigestInit_ex(ctx, EVP_shake256(), nullptr) ||
-        !EVP_DigestUpdate(ctx, input.data(), input.size() * 8) ||
-        !EVP_DigestFinalXOF(ctx, reinterpret_cast<uint8_t *>(out.data()), n * 8))
-        throw std::runtime_error("OpenSSL SHAKE256");
-    EVP_MD_CTX_free(ctx);
-    return out;
-}
-static Words fixture_root(unsigned vat) {
-    Words raw;
-    for (unsigned b = 0; b < 8; ++b) {
-        u64 word = 0;
-        unsigned count = 0;
-        for (unsigned i = 0; i < 64 && count < 60; ++i) {
-            int a = 520 - 7 * int(i & 31);
-            int j = (i + b + ((i >> 5) * 8 + 1)) & 31;
-            int v = 514 - 7 * j - (j & 3);
-            if (std::abs(a - v) < 1)
-                continue;
-            word = (word << 1) | ((a >= v) ^ bool(i & vat));
-            ++count;
-        }
-        if (count != 60)
-            throw std::runtime_error("fixture has insufficient RO margins");
-        raw.push_back(word);
-    }
-    raw.push_back(0x31544f4f52325341ULL);
-    return shake(raw, 2);
-}
-static __uint128_t mul(__uint128_t a, __uint128_t b) {
-    __uint128_t x = 0;
-    for (unsigned i = 0; i < 128; i++) {
-        if (b & 1)
-            x ^= a;
-        a = (a << 1) ^ ((a >> 127) ? 0x87 : 0);
-        b >>= 1;
-    }
-    return x;
-}
-static Words frame(unsigned vat, const std::vector<uint32_t> &code) {
-    auto root = fixture_root(vat);
-    auto h = shake({root[0], root[1], 72, 0}, 2);
-    __uint128_t key = (__uint128_t(h[1]) << 64) | h[0];
-    __uint128_t d = code.size();
-    std::vector<uint32_t> parts{uint32_t(code.size())};
-    for (auto w : code) {
-        d = mul(d, key) ^ w;
-        parts.push_back(w);
-    }
-    auto tag = shake({root[0], root[1], 0x30, u64(d), u64(d >> 64)}, 2);
-    for (auto w : tag) {
-        parts.push_back(uint32_t(w));
-        parts.push_back(w >> 32);
-    }
-    Words wire((parts.size() + 1) / 2);
-    for (size_t i = 0; i < parts.size(); i++)
-        wire[i / 2] |= u64(parts[i]) << (32 * (i % 2));
-    return wire;
-}
 // Line protocol for the qsag-accel integration test. Each operation goes
 // through the same ready/valid drivers used by the standalone test.
 static void serve_sdk(Bus &tb) {
@@ -338,7 +281,21 @@ static void serve_sdk(Bus &tb) {
     u64 addr;
     while (std::cin >> op >> std::hex >> addr) {
         if (op == 'r') {
-            std::cout << std::hex << tb.rd(addr);
+            auto v = tb.rd(addr);
+            if ((addr & 0xffff) == 8 && addr >= 0x10000 && (v & 7) == 0)
+                tb.tick(512);
+            if ((addr & 0xfff) == 16 && addr >= 0x1000 && addr < 0x5000 && (v & 1) == 0)
+                tb.tick(16384);
+            if (addr == 0x28 && (v & 1)) tb.tick(128);
+            std::cout << std::hex << v;
+        } else if (op == 'f') {
+            tb.d.sh_cl_flr_assert = 1;
+            tb.tick(2);
+            expect(tb.d.cl_sh_flr_done, 0, "FLR early acknowledge");
+            tb.wait([&]() { return tb.d.cl_sh_flr_done; });
+            tb.d.sh_cl_flr_assert = 0;
+            tb.tick(1400);
+            std::cout << "ok";
         } else if (op == 'w') {
             uint32_t value;
             std::cin >> value;
@@ -368,8 +325,96 @@ static void serve_sdk(Bus &tb) {
         std::cout << std::endl;
     }
 }
+struct EpochResult {
+    std::array<Key32, 3> identities, elements, endpoints;
+};
+static Key32 four_words(const Words &words, unsigned offset) {
+    return {words.at(offset), words.at(offset+1), words.at(offset+2), words.at(offset+3)};
+}
+static EpochResult custody(Bus &tb, unsigned epoch) {
+    EpochResult result{};
+    std::array<Owner,3> owners{Owner(epoch,0), Owner(epoch,1), Owner(epoch,2)};
+    using Batch = std::array<Words,3>;
+    // Each vat has its own SPI link, ROM execution and response latch.
+    // Submit all frames, then collect replies in the same vat order.
+    auto batch = [&](unsigned op, const Batch &payloads, unsigned flags=0, unsigned error=0) {
+        Batch replies;
+        for (tb.vat=0; tb.vat<3; ++tb.vat) tb.submit(op, payloads[tb.vat], flags, 2, ~0u);
+        for (tb.vat=0; tb.vat<3; ++tb.vat) replies[tb.vat] = tb.collect(op, error, 2);
+        return replies;
+    };
+    batch(0x10, {});
+    Batch pk;
+    for (tb.vat=0; tb.vat<3; ++tb.vat) {
+        expect((tb.diag() >> 24) & 7, 1, "blank vat");
+        pk[tb.vat] = owners[tb.vat].payload(0x11);
+    }
+    auto enrol = batch(0x11, pk);
+    Batch proofs;
+    for (unsigned i=0; i<3; ++i) {
+        expect(enrol[i].size(), 20, "ENROL length");
+        auto &owner = owners[i];
+        owner.id = four_words(enrol[i], 2);
+        result.identities[i] = owner.id;
+        expect(owner.id != Key32{}, 1, "nonzero identity");
+        for (unsigned j=0; j<i; ++j) expect(owner.id != owners[j].id, 1, "distinct vat identity");
+        proofs[i] = owner.payload(0x12, {enrol[i][0], enrol[i][1]});
+    }
+    batch(0x12, proofs);
+    for (tb.vat=0; tb.vat<3; ++tb.vat) tb.wr(tb.vbase(), 2);
+    tb.tick(10);
+    for (tb.vat=0; tb.vat<3; ++tb.vat) tb.wr(tb.vbase(), 0);
+    tb.tick(1100);
+    auto boot = batch(0x10, {});
+    auto authorize = [&](unsigned op, const Batch &replies) {
+        Batch frames;
+        for (unsigned i=0; i<3; ++i) {
+            auto &r = replies[i];
+            frames[i] = owners[i].payload(op, {r.at(0), r.at(1)}, r.at(2));
+        }
+        return frames;
+    };
+    for (unsigned i=0; i<3; ++i) {
+        expect(boot[i].at(2), 1ULL << 32, "recovered generation");
+        expect(four_words(boot[i],4) == owners[i].id, 1, "reconstructed identity");
+    }
+    auto lease = batch(0x15, authorize(0x15, boot));
+    for (auto &r : lease) expect(r.at(2), 2ULL << 32, "lease generation");
+    Batch images;
+    images.fill(Owner::cap_load());
+    batch(0x30, images, 1);
+    auto gate = batch(0x16, authorize(0x16, lease));
+    Batch requests;
+    for (unsigned i=0; i<3; ++i) {
+        expect(gate[i].at(2), owners[i].gate_record(), "gated generation and state");
+        requests[i] = owners[i].payload(0x20);
+    }
+    batch(0x30, authorize(0x30, gate), 2);
+    auto sigs = batch(0x20, requests);
+    for (unsigned i=0; i<3; ++i) {
+        expect(sigs[i].size(), 20, "CTH response length");
+        expect(sigs[i][2], owners[i].gate_record() + (2ULL << 32), "CTH journal advance");
+        auto elem = four_words(sigs[i],4), endpoint = four_words(sigs[i],8);
+        expect(public_endpoint(elem) == endpoint, 1, "public CTH chain verification");
+        result.elements[i] = elem;
+        result.endpoints[i] = endpoint;
+    }
+    batch(0x20, requests, 0, 5);
+    std::cout << "PASS epoch " << epoch
+              << " all three vats ENROL COMMIT BOOT LEASE GATE capability/inline LOAD_CODE public CTH and replay rejection\n";
+    return result;
+}
 int main(int argc, char **argv) {
     std::cout.setf(std::ios::unitbuf);
+    // Separate owner process for the SDK test. No DUT is constructed on this path.
+    if (argc == 12 && std::string(argv[1]) == "--owner") {
+        auto arg = [&](unsigned i) { return std::stoull(argv[i], nullptr, 16); };
+        Owner owner(arg(2), arg(3));
+        owner.id = {arg(5),arg(6),arg(7),arg(8)};
+        for (u64 w : owner.payload(arg(4), {arg(9),arg(10)}, arg(11)))
+            std::cout << std::hex << w << ' ';
+        return 0;
+    }
     Bus tb;
     tb.start();
     if (argc == 2 && std::string(argv[1]) == "--sdk") {
@@ -381,6 +426,7 @@ int main(int argc, char **argv) {
     expect(tb.rd(0), 0x51534147, "magic");
     expect(tb.rd(4), 0x20000, "ABI");
     expect(tb.rd(8), 2, "engines");
+    expect(tb.rd(0x54), 9, "full entropy startup window");
     tb.rd(0x5000, 2);
     tb.wr(0x10, 1, 2, 1);
     Beats preload(64);
@@ -429,56 +475,23 @@ int main(int argc, char **argv) {
         expect(id.at(1), 0x4153533200000001ULL, "IDENT");
     }
     std::cout << "PASS all three pad links, x1/x4/x8 IDENT\n";
-    for (tb.vat = 0; tb.vat < 3; tb.vat++) {
-#ifdef HDK_BRINGUP
-        expect(tb.rd(12) >> 31, 1, "custody unavailable capability");
-        tb.cmd(0x11, {}, 0, 17);
-#else
-        auto root = fixture_root(tb.vat);
-        auto auth = [&](u64 op, u64 val, const Words &nonce, u64 record) {
-            return shake({root[0], root[1], op, val, nonce[0], nonce[1], record}, 2);
-        };
-        tb.cmd(0x10);
-        expect((tb.diag() >> 24) & 7, 1, "independently blank anchor");
-        auto enrol = tb.cmd(0x11);
-        auto other = fixture_root((tb.vat + 1) % 3);
-        tb.cmd(0x12, shake({other[0], other[1], 0x12, 0, enrol[0], enrol[1], 0}, 2), 0, 5);
-        tb.cmd(0x12, auth(0x12, 0, enrol, 0));
-        tb.wr(tb.vbase(), 2);
-        tb.tick(10);
-        tb.wr(tb.vbase(), 0);
-        tb.tick(1100);
-        auto boot = tb.cmd(0x10);
-        expect(boot.at(2), 1ULL << 32, "persistent commit");
-        auto lease = tb.cmd(0x15, auth(0x15, boot[2], boot, boot[2]));
-        u64 value = 7 + tb.vat;
-        auto gate = auth(0x16, value, lease, boot[2]);
-        gate.insert(gate.begin(), value);
-        auto next = tb.cmd(0x16, gate);
-        expect(next.at(2), (2ULL << 32) | value, "vat-specific journal");
-        auto image = frame(tb.vat, {0x50000});
-        tb.cmd(0x30, image, 1, 0, 2, 24);
-        u64 address = 0x100000000012ULL;
-        auto secret = shake(
-            {root[0], root[1], 32, next[0], next[1], next[2], address, 45, 9, 10, 11, 12, 1234}, 8);
-        auto dual = mul((__uint128_t(secret[3]) << 64) | secret[2], 3);
-        Words request{1, 0, 3, 0, u64(dual), u64(dual >> 64), address, 45, 9, 10, 11, 12, 1234};
-        auto approval = shake({secret[0], secret[1], 1, 0, 3, 0, request[4], request[5]}, 2);
-        request.insert(request.end(), approval.begin(), approval.end());
-        auto sig = tb.cmd(0x20, request);
-        // Independent Python reference: SHAKE256 seed plus two Poseidon2 WOTS steps.
-        static constexpr u64 chain[3][4] = {{0xb03006b996914382ULL, 0x1fc1b55a3de52867ULL,
-                                             0x1212f11af35769e3ULL, 0x664b83562776c311ULL},
-                                            {0x1f3a6be20539d603ULL, 0x1e5ac06542c1bc4fULL,
-                                             0xa7a7e798e1c20c29ULL, 0xa16e7370c3b6a5fdULL},
-                                            {0xb8907d600b4e91f4ULL, 0xcc8efe9eabbe5da3ULL,
-                                             0x4b2d2f1ba2195f01ULL, 0xd615465c3d34bbeULL}};
-        for (unsigned i = 0; i < 4; i++)
-            expect(sig.at(4 + i), chain[tb.vat][i], "CTH chain element");
-        tb.cmd(0x20, request, 0, 5);
-        std::cout << "PASS vat " << tb.vat
-                  << " ENROL COMMIT BOOT LEASE GATE LOAD_CODE CTH_SIGN and replay rejection\n";
-#endif
+    auto initial = custody(tb, 0);
+    tb.wr(0x28, 1);
+    tb.tick(33000);
+    tb.wr(0x50, 1, 2); // partial mailbox
+    for (unsigned i = 0; i < 8; ++i) {
+        tb.wr(0x30 + 4*i, 0x03020100u + 0x04040404u*i);
+        expect(tb.rd(0x30 + 4*i, 2), 0, "seed readback denied");
+    }
+    tb.wr(0x50, 1);
+    tb.tick(1300);
+    expect(tb.rd(0x54), 0x10019, "seed commit and health");
+    tb.wr(0x50, 1, 2); // immutable until global wipe
+    auto seeded = custody(tb, 1);
+    for (unsigned i=0; i<3; ++i) {
+        expect(seeded.identities[i] != initial.identities[i], 1, "epoch identity rotation");
+        expect(seeded.elements[i] != initial.elements[i], 1, "epoch chain rotation");
+        expect(seeded.endpoints[i] != initial.endpoints[i], 1, "epoch endpoint rotation");
     }
     // Interrupt a long NI command and an incomplete OCL write.
     tb.direct(0, 8, 1);
@@ -498,7 +511,8 @@ int main(int argc, char **argv) {
     expect(tb.d.cl_sh_flr_done, 0, "FLR early ACK");
     tb.wait([&]() { return tb.d.cl_sh_flr_done; });
     tb.d.sh_cl_flr_assert = 0;
-    tb.tick(1100);
+    tb.tick(1400);
+    expect(tb.rd(0x54), 9, "FLR clears seed and epoch");
     for (int e = 0; e < 2; e++) {
         expect(tb.direct(e, 11), 1ULL << 32, "FLR status");
         expect(tb.direct(e, 2, 3), 0, "FLR state");
@@ -507,14 +521,12 @@ int main(int argc, char **argv) {
     }
     for (tb.vat = 0; tb.vat < 3; tb.vat++) {
         expect(tb.diag(), 0x5a0300000000a552ULL, "FLR DIAG");
-#ifndef HDK_BRINGUP
         tb.cmd(0x10);
         expect((tb.diag() >> 24) & 7, 1, "FLR anchor erased");
-#endif
     }
     tb.vat = 1;
     tb.wr(tb.vbase(), 4);
-    expect((tb.rd(tb.vbase() + 8) >> 4) & 3, 3, "tamper+fault");
+    tb.wait([&]() { return ((tb.rd(tb.vbase() + 8) >> 4) & 3) == 3; }, 8);
     tb.vat = 0;
     expect((tb.rd(tb.vbase() + 8) >> 4) & 3, 0, "tamper isolation");
     tb.direct(0, 1, 0, 0, 0xa55a);
@@ -522,7 +534,27 @@ int main(int argc, char **argv) {
     expect(tb.rd(0x28), 1, "software zeroize");
     tb.write(0, {Beat{}}, ~0ULL, 2);
     tb.read(0, 1, 2);
+    // W arrives under lock and AW only after unlock. The old WDATA must
+    // neither be retained nor qualify as a word of the next seed mailbox.
+    tb.d.ocl_cl_wdata = 0x11223344;
+    tb.d.ocl_cl_wstrb = 15;
+    tb.d.ocl_cl_wvalid = 1;
+    tb.wait([&]() { return tb.d.cl_ocl_wready; });
+    tb.tick();
+    tb.d.ocl_cl_wvalid = 0;
     tb.tick(33000);
+    tb.d.ocl_cl_awaddr = 0x30;
+    tb.d.ocl_cl_awvalid = 1;
+    tb.wait([&]() { return tb.d.cl_ocl_awready; });
+    tb.tick();
+    tb.d.ocl_cl_awvalid = 0;
+    tb.wait([&]() { return tb.d.cl_ocl_bvalid; });
+    expect(tb.d.cl_ocl_bresp, 2, "split seed write rejected across scrub");
+    tb.d.ocl_cl_bready = 1;
+    tb.tick();
+    tb.d.ocl_cl_bready = 0;
+    for (unsigned i = 1; i < 8; ++i) tb.wr(0x30 + 4*i, i);
+    tb.wr(0x50, 1, 2);
     expect(tb.direct(0, 2), 0, "software wipe clears state");
     std::cout << "PASS FLR all five engines and anchor vaults in " << tb.clocks << " clocks\n";
 }
