@@ -546,6 +546,13 @@ impl PartyOtEndpoint {
                     self.poisoned = true;
                     PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(e))
                 })?;
+            if my_choices.len().checked_mul(64) != Some(pad_pairs.len()) {
+                self.poisoned = true;
+                return Err(PersonalReleaseError::MalformedWireMessage {
+                    from: self.roster[receiver],
+                    round: ROUND_PREL_KOS_PROOF,
+                });
+            }
             let proof_bytes = proof.to_bytes();
             self.transcript = h32(
                 b"personal-release/kos-step",
@@ -2564,6 +2571,9 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
         if transport.parties() != m || transport.party() != me {
             return Err(PersonalReleaseError::LaneRosterMismatch);
         }
+        if ot_override.as_ref().is_some_and(|ot| ot.poisoned) {
+            return Err(PersonalReleaseError::SessionPoisoned);
+        }
         let mpc_sid = ctx.mpc_session_id();
         if journal.is_poisoned(&mpc_sid) || journal.reserve_session(&mpc_sid).is_err() {
             return Err(PersonalReleaseError::SessionPoisoned);
@@ -2642,6 +2652,9 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
             || ot.me != me
         {
             return Err(PersonalReleaseError::LaneRosterMismatch);
+        }
+        if ot.poisoned {
+            return Err(PersonalReleaseError::SessionPoisoned);
         }
         let mpc_sid = ctx.mpc_session_id();
         if journal.is_poisoned(&mpc_sid) || journal.reserve_session(&mpc_sid).is_err() {
@@ -4010,5 +4023,63 @@ mod tests {
             }
         }
         assert_eq!(sum, secret);
+    }
+
+    #[test]
+    fn tooth_poisoned_ot_endpoint_preserves_unreleased_msp_input_and_journal() {
+        // `#tooth`: Passing an already-poisoned `PartyOtEndpoint` to
+        // `ceremony_with_established_ot` previously reserved the `mpc_sid` in the journal,
+        // broadcast `ROUND_PREL_ACK` frames, and permanently burned `self.has_input()` before
+        // discovering `ot.poisoned` inside the first OT step.
+        let mut fx = deal(92);
+        let ctx = context(&fx, 0x33, 0, &[0, 1, 2]);
+        let mpc_sid = ctx.mpc_session_id();
+        let mut party0 = fx.parties.remove(0);
+        let (mut endpoints, _) = InMemoryWireMesh::connect(3, mpc_sid);
+        let endpoint0 = endpoints.remove(0);
+        let mut wire_keys = party0.derive_wire_keys(&ctx).unwrap();
+        let raw_keys = core::mem::take(&mut wire_keys.0);
+        let mut wire0 = MacSealedWireChannel::new_encrypted(
+            endpoint0,
+            party0.deployment_id,
+            mpc_sid,
+            raw_keys,
+        )
+        .unwrap();
+        let mut poisoned_ot = PartyOtEndpoint {
+            me: 0,
+            parties: 3,
+            roster: alloc::vec![0, 1, 2],
+            session_id: mpc_sid,
+            senders: alloc::vec![None, None, None],
+            receivers: alloc::vec![None, None, None],
+            transcript: [0; 32],
+            ext2_blind_pool: Vec::new(),
+            ext2_blind_cursor: 0,
+            ext2_blind_serial: 0,
+            poisoned: true,
+            tamper_next_ext2_c: None,
+        };
+        let mut rng0 = PartyPrivateRng::from_seed([0x55; 32], b"poisoned-ot-preflight");
+        let mut journal = MemoryPoisonJournal::new();
+
+        assert_eq!(
+            party0.ceremony_over_wire_with_ot(
+                &ctx,
+                &mut wire0,
+                &mut poisoned_ot,
+                &mut rng0,
+                &mut journal,
+            ),
+            Err(PersonalReleaseError::SessionPoisoned)
+        );
+        assert!(
+            party0.has_input(),
+            "poisoned OT preflight must not burn the custodian's one-time MSP input"
+        );
+        assert!(
+            !journal.is_poisoned(&mpc_sid),
+            "poisoned OT preflight must fail before mutating the session journal"
+        );
     }
 }

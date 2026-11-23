@@ -4353,7 +4353,7 @@ mod tests {
         let params = compact_slh_params();
         // 400-byte message forces 4 full SHAKE256 sponge blocks inside `eval_prf_msg_verified`.
         let msg = vec![0x5Au8; 400];
-        let ctx = b"qsag-subcarbon-q1-isolated-slh";
+        let ctx = b"qsag-isolated-cnf-slh-ctx";
 
         for (t, n) in [(2usize, 3usize), (3, 5)] {
             let mut keys = custody_keys(t, n, 16, 0x68 + n as u8);
@@ -4580,6 +4580,72 @@ mod tests {
             assert!(res.is_err());
             assert!(poisoned);
         }
+    }
+
+    #[test]
+    fn tooth_frontier_sign_poisoned_or_mismatched_pk_preserves_epoch_wal_and_identity() {
+        // `#tooth`: `frontier_sign` previously locked `scheme_identity` and called
+        // `wal.reserve_use(&key, 1)` BEFORE checking `self.is_poisoned()` or `pk.pk_seed == self.pk_seed`,
+        // permanently burning the one-time `FrontierFtsPublicKey` epoch WAL slot on a poisoned party!
+        use qsag_fts::{
+            FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey, FtsEpochWal,
+        };
+
+        #[derive(Default)]
+        struct TestEpochWal(alloc::collections::BTreeMap<[u8; 32], u8>);
+        impl FtsEpochWal for TestEpochWal {
+            fn uses_completed(&self, key: &[u8; 32]) -> Result<u8, FrontierFtsError> {
+                Ok(*self.0.get(key).unwrap_or(&0))
+            }
+            fn reserve_use(&mut self, key: &[u8; 32], next: u8) -> Result<(), FrontierFtsError> {
+                let prev = *self.0.get(key).unwrap_or(&0);
+                if next <= prev {
+                    return Err(FrontierFtsError::PersistenceFailed);
+                }
+                self.0.insert(*key, next);
+                Ok(())
+            }
+        }
+
+        let keys = custody_keys(2, 3, 32, 0x9D);
+        let (mut parties, _) = parties_with_timeout(&keys, [0x9E; 32], &[], Duration::from_secs(5));
+        let mut p0 = parties.remove(0);
+
+        let bad_seed_pk = FrontierFtsPublicKey {
+            profile: FrontierFtsProfile::Compact1122,
+            pk_seed: [0xFF; 32],
+            root: vec![0xAA; 32],
+        };
+        let mut wal = TestEpochWal::default();
+        assert_eq!(
+            p0.frontier_sign(&bad_seed_pk, b"msg", &[0x11; 32], &mut wal),
+            Err(CnfPartyError::InvalidParameters)
+        );
+        assert_eq!(
+            p0.scheme_identity(),
+            None,
+            "mismatched pk_seed must not lock scheme_identity"
+        );
+
+        let good_pk = FrontierFtsPublicKey {
+            profile: FrontierFtsProfile::Compact1122,
+            pk_seed: keys[0].pk_seed,
+            root: vec![0xBB; 32],
+        };
+        p0.poisoned = true;
+        assert_eq!(
+            p0.frontier_sign(&good_pk, b"msg", &[0x11; 32], &mut wal),
+            Err(CnfPartyError::Poisoned)
+        );
+        assert_eq!(
+            p0.scheme_identity(),
+            None,
+            "poisoned party must not mutate scheme_identity"
+        );
+        let key = good_pk.wal_key();
+        // Because `wal.reserve_use` was NOT burned on the poisoned party, an intact session can still reserve use 1!
+        wal.reserve_use(&key, 1)
+            .expect("single-use epoch WAL slot must remain unreserved after poisoned preflight");
     }
 
     #[test]

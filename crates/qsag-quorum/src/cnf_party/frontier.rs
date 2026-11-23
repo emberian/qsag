@@ -266,10 +266,13 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
         wal: &mut impl FtsEpochWal,
     ) -> Result<FrontierFtsSignature, CnfPartyError> {
         use Field::{Prf, Public};
-        self.lock_frontier(pk.profile)?;
+        if self.is_poisoned() {
+            return Err(CnfPartyError::Poisoned);
+        }
         if pk.pk_seed != self.pk_seed || pk.root.len() != 32 {
             return Err(CnfPartyError::InvalidParameters);
         }
+        self.lock_frontier(pk.profile)?;
         let key = pk.wal_key();
         if wal
             .uses_completed(&key)

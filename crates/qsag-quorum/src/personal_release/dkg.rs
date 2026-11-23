@@ -201,6 +201,7 @@ fn enroll<T: WireTransport>(
         rng,
     )?;
     let mut rows = SecretBuffer(Vec::with_capacity(received.len()));
+    let mut rows_ok = 1u8;
     for (matrix, values) in program
         .matrix_rows()
         .iter()
@@ -217,12 +218,14 @@ fn enroll<T: WireTransport>(
                     .fold(Goldilocks::ZERO, |s, (col, _)| {
                         s + opened[j * width + 4 * col + lane]
                     });
-                if expected != values[lane] * challenge + values[4 * (j + 1) + lane] {
-                    return Err(PersonalReleaseError::CommitmentMismatch);
-                }
+                let rhs = values[lane] * challenge + values[4 * (j + 1) + lane];
+                rows_ok &= u8::from(core::hint::black_box(expected.ct_eq(rhs)));
             }
         }
         rows.push([values[0], values[1], values[2], values[3]]);
+    }
+    if rows_ok == 0 {
+        return Err(PersonalReleaseError::CommitmentMismatch);
     }
     let root = SecretBuffer(core::array::from_fn(input));
     let digest = authenticated_prf_check(
