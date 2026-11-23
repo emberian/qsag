@@ -1046,13 +1046,16 @@ end Headline
 
 /-! ## 7. Rejected behaviours -/
 
-/-- Scheme with two secret keys and one public key: every key signs every message with `()`,
-    and the verifier accepts everything. -/
-def corruptToyTwoKeyScheme : SigScheme Unit Bool Unit where
-  derivePk _ := ()
-  sign _ _ _ := some ()
-  verify _ _ _ := true
-  correct _ _ _ _ _ := rfl
+/-- Scheme with two distinct secret keys (`false`, `true`) mapping to one public key `0xA5`
+    and signing with key-and-message-bound tag `0xA5 ^^^ m.headD 0`. -/
+def corruptToyTwoKeyScheme : SigScheme UInt8 Bool UInt8 where
+  derivePk _ := 0xA5
+  sign _ _ m := some (0xA5 ^^^ m.headD 0)
+  verify pk m sig := decide (sig = pk ^^^ m.headD 0)
+  correct _ _ _ _ h := by
+    injection h with hEq
+    subst hEq
+    exact decide_eq_true rfl
 
 /-- **A simulator holding another key is told apart in one round.** If `skSim ≠ sk₀`, the
     environment that asks for the key sees `sk₀` from the real machine and `skSim` from the
@@ -1097,15 +1100,15 @@ theorem corruptToyTwoKey_same_pk_wrong_key_view_differs :
         (CorruptibleSignState.empty (corruptToyTwoKeyScheme.derivePk true) true) [] :=
   corruptibleSignSimulator_wrong_key_view_differs corruptToyTwoKeyScheme (by decide) true 8
 
-/-- The run `sign` at epoch `0`, `exposeKey`, `offlineSign` at epoch `0` of the stateful toy
+/-- The run `sign` at epoch `0`, `exposeKey`, `offlineSign` at epoch `0` of the stateful keyed-tag
     signer: an initialized trace that ends exposed. -/
 theorem witness_latchedCorruptibleSigner_exposed_run :
-    ∃ tr : List (CorruptibleSignerCommand Unit × CorruptibleSignerReply Bool Unit),
+    ∃ tr : List (CorruptibleSignerCommand UInt8 × CorruptibleSignerReply Bool UInt8),
       (latchedCorruptibleSignerMachine corruptToyTwoKeyScheme false true 8).AdmitsTrace tr ∧
       corruptibleSignerEmitted tr =
-        [((⟨0, []⟩ : SignRequest), ()), ((⟨0, [1]⟩ : SignRequest), ())] :=
-  ⟨[(.sign ⟨0, []⟩, .signature ()), (.exposeKey, .key false),
-      (.offlineSign ⟨0, [1]⟩, .signature ())],
+        [((⟨0, []⟩ : SignRequest), 0xA5), ((⟨0, [1]⟩ : SignRequest), 0xA4)] :=
+  ⟨[(.sign ⟨0, []⟩, .signature 0xA5), (.exposeKey, .key false),
+      (.offlineSign ⟨0, [1]⟩, .signature 0xA4)],
     ⟨⟨false, 0, false⟩, ⟨false, 1, true⟩, rfl,
       .accept (s' := ⟨false, 1, false⟩) rfl
         (.accept (s' := ⟨false, 1, true⟩) rfl
@@ -1116,7 +1119,7 @@ theorem witness_latchedCorruptibleSigner_exposed_run :
     is false: after `sign` at epoch `0` and `exposeKey`, an `offlineSign` at epoch `0` is
     accepted, so two emitted signatures share an epoch. -/
 theorem latchedCorruptibleSigner_exposed_run_reuses_epoch :
-    ¬ (∀ (tr : List (CorruptibleSignerCommand Unit × CorruptibleSignerReply Bool Unit))
+    ¬ (∀ (tr : List (CorruptibleSignerCommand UInt8 × CorruptibleSignerReply Bool UInt8))
         (c_final : CorruptibleSignerState Bool),
         (latchedCorruptibleSignerMachine corruptToyTwoKeyScheme false true 8).ValidTrace
           ⟨false, 0, false⟩ tr c_final →
@@ -1124,21 +1127,26 @@ theorem latchedCorruptibleSigner_exposed_run_reuses_epoch :
   intro h
   have hTr : (latchedCorruptibleSignerMachine corruptToyTwoKeyScheme false true 8).ValidTrace
       ⟨false, 0, false⟩
-      [(.sign ⟨0, []⟩, .signature ()), (.exposeKey, .key false),
-        (.offlineSign ⟨0, [1]⟩, .signature ())] ⟨false, 1, true⟩ :=
+      [(.sign ⟨0, []⟩, .signature 0xA5), (.exposeKey, .key false),
+        (.offlineSign ⟨0, [1]⟩, .signature 0xA4)] ⟨false, 1, true⟩ :=
     .accept (s' := ⟨false, 1, false⟩) rfl
       (.accept (s' := ⟨false, 1, true⟩) rfl
         (.accept (s' := ⟨false, 1, true⟩) rfl (.nil _)))
-  have hPw : List.Pairwise (fun a b : SignRequest × Unit => a.1.epoch < b.1.epoch)
-      [((⟨0, []⟩ : SignRequest), ()), ((⟨0, [1]⟩ : SignRequest), ())] := h _ _ hTr
+  have hPw : List.Pairwise (fun a b : SignRequest × UInt8 => a.1.epoch < b.1.epoch)
+      [((⟨0, []⟩ : SignRequest), 0xA5), ((⟨0, [1]⟩ : SignRequest), 0xA4)] := h _ _ hTr
   exact Nat.lt_irrefl 0 ((List.pairwise_cons.mp hPw).1 _ (List.mem_cons.mpr (.inl rfl)))
 
-/-- Scheme whose signer fails exactly at epoch `0`; the verifier accepts everything. -/
-def corruptToyBurnScheme : SigScheme Unit Unit Unit where
-  derivePk _ := ()
-  sign _ ep _ := if ep = 0 then none else some ()
-  verify _ _ _ := true
-  correct _ _ _ _ _ := rfl
+/-- Key-and-message-bound scheme whose signer fails at epoch `0` and emits verified tags for `ep > 0`. -/
+def corruptToyBurnScheme : SigScheme UInt8 UInt8 UInt8 where
+  derivePk sk := sk ^^^ 0x5A
+  sign sk ep m := if ep = 0 then none else some ((sk ^^^ 0x5A) ^^^ m.headD 0)
+  verify pk m sig := decide (sig = pk ^^^ m.headD 0)
+  correct sk ep m sig h := by
+    split at h
+    · cases h
+    · injection h with hEq
+      subst hEq
+      exact decide_eq_true rfl
 
 /-- **The projection to the functionality is not a `DataRefines`.** For the stateful signer of
     `corruptToyBurnScheme` with window `0`, no `DataRefines` witness relates the real machine
@@ -1147,20 +1155,20 @@ def corruptToyBurnScheme : SigScheme Unit Unit Unit where
     functionality's state fixed, and the request for epoch `1` that the real machine then
     accepts is outside the functionality's window. -/
 theorem latchedCorruptibleSigner_no_dataRefines_to_ideal :
-    ¬ Nonempty (DataRefines (latchedCorruptibleSignerMachine corruptToyBurnScheme () true 0)
-      (idealSignCorruptibleMachine corruptToyBurnScheme () true 0
-        (fun req => corruptToyBurnScheme.sign () req.epoch req.message))
-      (corruptibleSignSimIn corruptToyBurnScheme ()) corruptibleSignVisOut) := by
+    ¬ Nonempty (DataRefines (latchedCorruptibleSignerMachine corruptToyBurnScheme 0 true 0)
+      (idealSignCorruptibleMachine corruptToyBurnScheme 0x5A true 0
+        (fun req => corruptToyBurnScheme.sign 0 req.epoch req.message))
+      (corruptibleSignSimIn corruptToyBurnScheme 0) corruptibleSignVisOut) := by
   rintro ⟨D⟩
-  obtain ⟨hInitA, hRel₀⟩ := D.init_ok (c₀ := ⟨(), 0, false⟩) rfl
-  have hA₀ : D.absInit ⟨(), 0, false⟩ = CorruptibleSignState.empty () true := hInitA
+  obtain ⟨hInitA, hRel₀⟩ := D.init_ok (c₀ := ⟨0, 0, false⟩) rfl
+  have hA₀ : D.absInit ⟨0, 0, false⟩ = CorruptibleSignState.empty 0x5A true := hInitA
   rw [hA₀] at hRel₀
   have hRel₁ := D.sim_reject (inp := .sign ⟨0, []⟩) hRel₀ rfl
-  obtain ⟨a', hStepA, _⟩ := D.sim_visible (inp := .sign ⟨1, []⟩) (out := .signature ())
-    (j := .sign ⟨1, []⟩) (c' := ⟨(), 2, false⟩) hRel₁ rfl rfl
-  have hNone : (idealSignCorruptibleMachine corruptToyBurnScheme () true 0
-      (fun req => corruptToyBurnScheme.sign () req.epoch req.message)).step
-      (CorruptibleSignState.empty () true) (.sign ⟨1, []⟩) = none := rfl
+  obtain ⟨a', hStepA, _⟩ := D.sim_visible (inp := .sign ⟨1, []⟩) (out := .signature 0x5A)
+    (j := .sign ⟨1, []⟩) (c' := ⟨0, 2, false⟩) hRel₁ rfl rfl
+  have hNone : (idealSignCorruptibleMachine corruptToyBurnScheme 0x5A true 0
+      (fun req => corruptToyBurnScheme.sign 0 req.epoch req.message)).step
+      (CorruptibleSignState.empty 0x5A true) (.sign ⟨1, []⟩) = none := rfl
   rw [hNone] at hStepA
   cases hStepA
 

@@ -779,7 +779,7 @@ theorem CredentialProfile.WellFormed.attrs_and_parties {p : CredentialProfile} (
   obtain ⟨hA, _, _, hC, hT, hO, _, _, _, _, _, hN, _⟩ := h
   exact ⟨hA, hN, hC, Nat.le_trans hT hO⟩
 
-/-- Tooth (audit #10): a 3-server committee fails the honest-majority equation, an issuance proof
+/-- Tooth: a 3-server committee fails the honest-majority equation, an issuance proof
     with presentation-sized repetition counts fails the ZKBoo budget, and `maxAttrs = 0` is rejected. -/
 theorem CredentialProfile.wellFormed_rejects_stale_committee_and_reps :
     ¬ (({ pqCredentialProfile with toprfServers := 3 } : CredentialProfile).WellFormed ∨
@@ -789,7 +789,7 @@ theorem CredentialProfile.wellFormed_rejects_stale_committee_and_reps :
   unfold CredentialProfile.WellFormed pqCredentialProfile
   decide
 
-/-- Tooth (rust-spec-parity #6): the retired 4-tree geometry with the current ambient dimension,
+/-- Tooth: the 4-tree geometry with the current ambient dimension,
     and an advertised seed bound below the real wire length, are both rejected. -/
 theorem DensePcgProfile.wellFormed_rejects_stale_geometry :
     ¬ (({ densePcgV3Profile with treesPerBundle := 4 } : DensePcgProfile).WellFormed ∨

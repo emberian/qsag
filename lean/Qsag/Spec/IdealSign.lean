@@ -652,48 +652,47 @@ theorem latchedSigner_trace_safe {PK SK Sig : Type} (S : SigScheme PK SK Sig) (s
 
 /-! ## Rejected behaviours -/
 
-/-- Scheme over `Unit` whose signer always signs and whose verifier accepts everything. -/
-def acceptAllSigScheme : SigScheme Unit Unit Unit where
-  derivePk _ := ()
-  sign _ _ _ := some ()
-  verify _ _ _ := true
-  correct _ _ _ _ _ := rfl
+/-- Key- and message-head-bound tag `SigScheme` (`derivePk sk = sk ^^^ 0xA5`,
+    `verify pk m sig := decide (sig = pk ^^^ m.headD 0)`): rejects wrong keys and wrong tags. -/
+def keyedHeadTagSigScheme : SigScheme UInt8 UInt8 UInt8 where
+  derivePk sk := sk ^^^ 0xA5
+  sign sk _ m := some ((sk ^^^ 0xA5) ^^^ m.headD 0)
+  verify pk m sig := decide (sig = pk ^^^ m.headD 0)
+  correct _ _ _ _ h := by
+    injection h with hEq
+    subst hEq
+    exact decide_eq_true rfl
 
-/-- Scheme over `Unit` whose signer never signs and whose verifier rejects everything. -/
-def rejectAllSigScheme : SigScheme Unit Unit Unit where
-  derivePk _ := ()
-  sign _ _ _ := none
-  verify _ _ _ := false
-  correct _ _ _ _ h := nomatch h
-
-/-- Epochs `2, 1`: after epoch `2` signs, a request for epoch `1` is rejected. -/
+/-- Epochs `2, 1`: after epoch `2` signs a valid keyed tag, a request for epoch `1` is rejected. -/
 theorem idealSign_rejects_epoch_one_after_two :
-    ¬ (((idealSignMachine acceptAllSigScheme () true 8 (fun _ => some ())).step
-      ((idealSignMachine acceptAllSigScheme () true 8 (fun _ => some ())).runStep
-        (IdealSignState.empty () true) ⟨2, []⟩).1 ⟨1, []⟩).isSome = true) := by
+    ¬ (((idealSignMachine keyedHeadTagSigScheme 0xA5 true 8
+        (fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)).step
+      ((idealSignMachine keyedHeadTagSigScheme 0xA5 true 8
+        (fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)).runStep
+        (IdealSignState.empty 0xA5 true) ⟨2, []⟩).1 ⟨1, []⟩).isSome = true) := by
   decide
 
-/-- A candidate oracle unrelated to the scheme does not sign: against a verifier that rejects
-    everything, the oracle's candidate is never emitted. -/
+/-- A candidate oracle returning a wrong tag (`0x00 ≠ 0xA5`) is rejected by `keyedHeadTagSigScheme.verify`. -/
 theorem idealSign_rejects_unverified_candidate :
-    ¬ (((idealSignMachine rejectAllSigScheme () false 0 (fun _ => some ())).step
-      (IdealSignState.empty () false) ⟨0, []⟩).isSome = true) := by
+    ¬ (((idealSignMachine keyedHeadTagSigScheme 0xA5 false 0 (fun _ => some 0x00)).step
+      (IdealSignState.empty 0xA5 false) ⟨0, []⟩).isSome = true) := by
   decide
 
 /-- A failed signing burns its epoch: after the oracle fails at epoch `3`, another request for
-    epoch `3` is rejected although the oracle has a candidate for it. -/
+    epoch `3` is rejected although the oracle has a valid keyed tag for it. -/
 theorem idealSign_failed_epoch_not_reusable :
-    ¬ (((idealSignMachine acceptAllSigScheme () true 8
-        (fun req => if req.message = [] then none else some ())).step
-      ((idealSignMachine acceptAllSigScheme () true 8
-        (fun req => if req.message = [] then none else some ())).runStep
-        (IdealSignState.empty () true) ⟨3, []⟩).1 ⟨3, [1]⟩).isSome = true) := by
+    ¬ (((idealSignMachine keyedHeadTagSigScheme 0xA5 true 8
+        (fun req => if req.message = [] then none else keyedHeadTagSigScheme.sign 0 req.epoch req.message)).step
+      ((idealSignMachine keyedHeadTagSigScheme 0xA5 true 8
+        (fun req => if req.message = [] then none else keyedHeadTagSigScheme.sign 0 req.epoch req.message)).runStep
+        (IdealSignState.empty 0xA5 true) ⟨3, []⟩).1 ⟨3, [1]⟩).isSome = true) := by
   decide
 
-/-- An epoch beyond the jump window is rejected. -/
+/-- An epoch beyond the jump window is rejected even when the oracle supplies a valid keyed tag. -/
 theorem idealSign_rejects_epoch_beyond_window :
-    ¬ (((idealSignMachine acceptAllSigScheme () true 8 (fun _ => some ())).step
-      (IdealSignState.empty () true) ⟨9, []⟩).isSome = true) := by
+    ¬ (((idealSignMachine keyedHeadTagSigScheme 0xA5 true 8
+        (fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)).step
+      (IdealSignState.empty 0xA5 true) ⟨9, []⟩).isSome = true) := by
   decide
 
 #tooth_pair idealSignMachine_trace_epochs_increasing vs idealSign_rejects_epoch_one_after_two
@@ -855,14 +854,14 @@ theorem latchedSigner_output_is_sign {PK SK Sig : Type} (S : SigScheme PK SK Sig
   have hs : s = sig := congrArg Prod.snd hPair
   exact hs ▸ hS
 
-/-- A pair the signer never emitted and that verifies is a forgery: with the accept-all scheme,
-    after one signature on `[]`, the message `[1]` with the same signature is an `EufCmaForgery`
-    against the reached state. The ideal machine records what was signed; it does not make
-    forgeries impossible. -/
+/-- A pair the signer never emitted and that verifies is a forgery: under `keyedHeadTagSigScheme`,
+    after signing `[]` at `pk = 0xA5`, the unsigned message `[1]` paired with its valid tag
+    `0xA5 ^^^ 1 = 0xA4` is an `EufCmaForgery` against the reached state. -/
 theorem idealSign_unsigned_message_is_forgery :
-    EufCmaForgery acceptAllSigScheme
-      ((idealSignMachine acceptAllSigScheme () true 8 (fun _ => some ())).runStep
-        (IdealSignState.empty () true) ⟨0, []⟩).1 [1] () := by
+    EufCmaForgery keyedHeadTagSigScheme
+      ((idealSignMachine keyedHeadTagSigScheme 0xA5 true 8
+        (fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)).runStep
+        (IdealSignState.empty 0xA5 true) ⟨0, []⟩).1 [1] 0xA4 := by
   refine ⟨?_, rfl⟩
   decide
 
@@ -1659,34 +1658,38 @@ end CorruptibleForgery
 
 /-! ## Rejected behaviours of the corruptible machine -/
 
-/-- `.inject` before `.corrupt` is rejected, although the verifier accepts the signature. -/
+/-- `.inject` before `.corrupt` is rejected, although `keyedHeadTagSigScheme.verify` accepts `0xA5`. -/
 theorem idealSignCorruptible_rejects_inject_before_corrupt :
-    ¬ (((idealSignCorruptibleMachine acceptAllSigScheme () true 8 (fun _ => some ())).step
-      (CorruptibleSignState.empty () true) (.inject ⟨0, []⟩ ())).isSome = true) := by
+    ¬ (((idealSignCorruptibleMachine keyedHeadTagSigScheme 0xA5 true 8
+        (fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)).step
+      (CorruptibleSignState.empty 0xA5 true) (.inject ⟨0, []⟩ 0xA5)).isSome = true) := by
   decide
 
-/-- After `.corrupt`, a signature the verifier rejects is still not injected. -/
+/-- After `.corrupt`, a wrong signature tag (`0x00 ≠ 0xA5`) rejected by `keyedHeadTagSigScheme.verify`
+    is still not injected. -/
 theorem idealSignCorruptible_rejects_unverified_inject_after_corrupt :
-    ¬ (((idealSignCorruptibleMachine rejectAllSigScheme () false 0 (fun _ => some ())).step
-      ((idealSignCorruptibleMachine rejectAllSigScheme () false 0 (fun _ => some ())).runStep
-        (CorruptibleSignState.empty () false) .corrupt).1 (.inject ⟨0, []⟩ ())).isSome =
+    ¬ (((idealSignCorruptibleMachine keyedHeadTagSigScheme 0xA5 false 0
+        (fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)).step
+      ((idealSignCorruptibleMachine keyedHeadTagSigScheme 0xA5 false 0
+        (fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)).runStep
+        (CorruptibleSignState.empty 0xA5 false) .corrupt).1 (.inject ⟨0, []⟩ 0x00)).isSome =
           true) := by
   decide
 
-/-- The run `sign` at epoch `0`, `corrupt`, `inject` at epoch `0` of the stateful accept-all
-    machine. -/
+/-- The run `sign` at epoch `0`, `corrupt`, `inject` at epoch `0` of the stateful keyed-tag machine. -/
 theorem idealSignCorruptible_epoch_reuse_run :
-    ∃ s_final : CorruptibleSignState Unit Unit,
-      (idealSignCorruptibleMachine acceptAllSigScheme () true 8 (fun _ => some ())).ValidTrace
-        (CorruptibleSignState.empty () true)
-        [(SignCommand.sign ⟨0, []⟩, SignReply.signature ()),
+    ∃ s_final : CorruptibleSignState UInt8 UInt8,
+      (idealSignCorruptibleMachine keyedHeadTagSigScheme 0xA5 true 8
+        (fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)).ValidTrace
+        (CorruptibleSignState.empty 0xA5 true)
+        [(SignCommand.sign ⟨0, []⟩, SignReply.signature 0xA5),
          (SignCommand.corrupt, SignReply.corrupted),
-         (SignCommand.inject ⟨0, [1]⟩ (), SignReply.signature ())] s_final ∧
+         (SignCommand.inject ⟨0, [1]⟩ 0xA4, SignReply.signature 0xA4)] s_final ∧
       s_final.corrupted = true :=
   ⟨_, .accept (idealSignCorruptibleMachine_sign_step_of_ideal
-      (idealSignMachine_step_of_valid (by decide) rfl rfl))
+      (idealSignMachine_step_of_valid (by decide) rfl (by decide)))
     (.accept (idealSignCorruptibleMachine_corrupt_step _)
-      (.accept (idealSignCorruptibleMachine_inject_step_of_corrupted rfl rfl) (.nil _))), rfl⟩
+      (.accept (idealSignCorruptibleMachine_inject_step_of_corrupted rfl (by decide)) (.nil _))), rfl⟩
 
 /-- **The one-time-epoch property fails for corrupted runs.** Without the hypothesis that the
     run ends uncorrupted, the epoch clause of
@@ -1694,33 +1697,35 @@ theorem idealSignCorruptible_epoch_reuse_run :
     and `corrupt`, an `inject` at epoch `0` is accepted, so two emitted signatures share an
     epoch. -/
 theorem idealSignCorruptible_corrupted_run_reuses_epoch :
-    ¬ (∀ (tr : List (SignCommand Unit × SignReply Unit))
-        (s_final : CorruptibleSignState Unit Unit),
-        (idealSignCorruptibleMachine acceptAllSigScheme () true 8
-          (fun _ => some ())).ValidTrace (CorruptibleSignState.empty () true) tr s_final →
+    ¬ (∀ (tr : List (SignCommand UInt8 × SignReply UInt8))
+        (s_final : CorruptibleSignState UInt8 UInt8),
+        (idealSignCorruptibleMachine keyedHeadTagSigScheme 0xA5 true 8
+          (fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)).ValidTrace
+          (CorruptibleSignState.empty 0xA5 true) tr s_final →
         (emittedEvents tr).Pairwise (fun a b => a.1.epoch < b.1.epoch)) := by
   intro h
   obtain ⟨s_final, hTr, _⟩ := idealSignCorruptible_epoch_reuse_run
-  have hPw : List.Pairwise (fun a b : SignRequest × Unit => a.1.epoch < b.1.epoch)
-      [((⟨0, []⟩ : SignRequest), ()), ((⟨0, [1]⟩ : SignRequest), ())] := h _ _ hTr
+  have hPw : List.Pairwise (fun a b : SignRequest × UInt8 => a.1.epoch < b.1.epoch)
+      [((⟨0, []⟩ : SignRequest), 0xA5), ((⟨0, [1]⟩ : SignRequest), 0xA4)] := h _ _ hTr
   exact Nat.lt_irrefl 0 ((List.pairwise_cons.mp hPw).1 _ (List.mem_cons.mpr (.inl rfl)))
 
-/-- An honest two-signature run of the stateful accept-all machine ends uncorrupted, so
+/-- An honest two-signature run of the stateful keyed-tag machine ends uncorrupted, so
     `idealSignCorruptibleMachine_uncorrupted_trace_safe` applies to it: its hypotheses are
     jointly satisfiable. -/
 theorem idealSignCorruptible_honest_run_epochs_increase :
     (emittedEvents
-      [(SignCommand.sign ⟨0, []⟩, SignReply.signature ()),
-       (SignCommand.sign ⟨2, [1]⟩, SignReply.signature ())]).Pairwise
-      (fun a b : SignRequest × Unit => a.1.epoch < b.1.epoch) :=
-  (idealSignCorruptibleMachine_uncorrupted_trace_safe (S := acceptAllSigScheme) (pk₀ := ())
-    (stateful₀ := true) (maxWindow := 8) (oracleSign := fun _ => some ())
-    (s_final := ⟨((IdealSignState.empty () true).record ⟨0, []⟩ ()).record ⟨2, [1]⟩ (),
+      [(SignCommand.sign ⟨0, []⟩, SignReply.signature 0xA5),
+       (SignCommand.sign ⟨2, [1]⟩, SignReply.signature 0xA4)]).Pairwise
+      (fun a b : SignRequest × UInt8 => a.1.epoch < b.1.epoch) :=
+  (idealSignCorruptibleMachine_uncorrupted_trace_safe (S := keyedHeadTagSigScheme) (pk₀ := 0xA5)
+    (stateful₀ := true) (maxWindow := 8)
+    (oracleSign := fun req => keyedHeadTagSigScheme.sign 0 req.epoch req.message)
+    (s_final := ⟨((IdealSignState.empty 0xA5 true).record ⟨0, []⟩ 0xA5).record ⟨2, [1]⟩ 0xA4,
       false, []⟩)
     (.accept (idealSignCorruptibleMachine_sign_step_of_ideal
-        (idealSignMachine_step_of_valid (by decide) rfl rfl))
+        (idealSignMachine_step_of_valid (by decide) rfl (by decide)))
       (.accept (idealSignCorruptibleMachine_sign_step_of_ideal
-        (idealSignMachine_step_of_valid (by decide) rfl rfl)) (.nil _))) rfl).2.2.1 rfl
+        (idealSignMachine_step_of_valid (by decide) rfl (by decide))) (.nil _))) rfl).2.2.1 rfl
 
 #tooth_pair idealSignCorruptibleMachine_inject_step_some vs
   idealSignCorruptible_rejects_inject_before_corrupt
@@ -2053,30 +2058,30 @@ theorem latchedRandomizedSigner_trace_safe {PK SK Sig : Type}
   exact ⟨idealRandomizedSignMachine_trace_outputs_verified hTrace,
     (idealRandomizedSignMachine_trace_epochs_increasing rfl hTrace).2⟩
 
-def acceptAllRandomizedSigScheme : RandomizedSigScheme Unit Unit Unit where
-  derivePk _ := ()
-  sign _ _ _ _ := some ()
-  verify _ _ _ := true
-  correct _ _ _ _ _ _ := rfl
-
-def rejectAllRandomizedSigScheme : RandomizedSigScheme Unit Unit Unit where
-  derivePk _ := ()
-  sign _ _ _ _ := none
-  verify _ _ _ := false
-  correct _ _ _ _ _ h := nomatch h
+def keyedRandomizedTagSigScheme : RandomizedSigScheme UInt8 UInt8 (UInt8 × UInt8) where
+  derivePk sk := sk ^^^ 0x3C
+  sign sk _ r m :=
+    let salt := r.headD 0
+    some (salt, (sk ^^^ 0x3C) ^^^ salt ^^^ m.headD 0)
+  verify pk m sig := decide (sig.2 = pk ^^^ sig.1 ^^^ m.headD 0)
+  correct _ _ _ _ _ h := by
+    injection h with hEq
+    subst hEq
+    exact decide_eq_true rfl
 
 theorem idealRandomizedSign_rejects_epoch_one_after_two :
-    ¬ (((idealRandomizedSignMachine acceptAllRandomizedSigScheme () true 8 (fun _ => some ())).step
-      ((idealRandomizedSignMachine acceptAllRandomizedSigScheme () true 8
-        (fun _ => some ())).runStep
-        (RandomizedIdealSignState.empty () true) ⟨2, [0xAA], []⟩).1 ⟨1, [0xBB], []⟩).isSome =
+    ¬ (((idealRandomizedSignMachine keyedRandomizedTagSigScheme 0x3C true 8
+        (fun req => keyedRandomizedTagSigScheme.sign 0 req.epoch req.optRand req.message)).step
+      ((idealRandomizedSignMachine keyedRandomizedTagSigScheme 0x3C true 8
+        (fun req => keyedRandomizedTagSigScheme.sign 0 req.epoch req.optRand req.message)).runStep
+        (RandomizedIdealSignState.empty 0x3C true) ⟨2, [0xAA], []⟩).1 ⟨1, [0xBB], []⟩).isSome =
         true) := by
   decide
 
 theorem idealRandomizedSign_rejects_unverified_candidate :
-    ¬ (((idealRandomizedSignMachine rejectAllRandomizedSigScheme () false 0
-        (fun _ => some ())).step
-      (RandomizedIdealSignState.empty () false) ⟨0, [0xAA], []⟩).isSome = true) := by
+    ¬ (((idealRandomizedSignMachine keyedRandomizedTagSigScheme 0x3C false 0
+        (fun _ => some (0xAA, 0x00))).step
+      (RandomizedIdealSignState.empty 0x3C false) ⟨0, [0xAA], []⟩).isSome = true) := by
   decide
 
 #tooth_pair idealRandomizedSignMachine_trace_epochs_increasing vs

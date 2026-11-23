@@ -758,33 +758,33 @@ theorem uc_composition_theorem {HighIn HighOut PK SK Msg Sig : Type} [DecidableE
       (sigOracleGameHop_distinguisher_iff_forgery S pk sk simSign hOracle).1 Z hEq
     exact .inr ⟨mStar, sigStar, hFresh, hVer⟩
 
-/-- Two-message scheme used by the teeth below: every signature is `true` and verification
-    returns the signature bit. -/
-def toothConstSigScheme : AbstractSigScheme Unit Unit Bool Bool where
-  sign := fun _ _ => true
-  verify := fun _ _ sig => sig
-  complete := fun _ _ => True
-  completeness := fun _ _ => rfl
+/-- Key- and message-tagged `AbstractSigScheme` over `UInt8`: `sign sk m = (sk ^^^ 0xA5, (sk ^^^ 0xA5) ^^^ m)`
+    and `verify pk m sig` checks both `sig.1 = pk` and `sig.2 = pk ^^^ m`. -/
+def keyedTagSigScheme : AbstractSigScheme UInt8 UInt8 UInt8 (UInt8 × UInt8) where
+  sign := fun sk m => (sk ^^^ 0xA5, (sk ^^^ 0xA5) ^^^ m)
+  verify := fun pk m sig => decide (sig.1 = pk ∧ sig.2 = pk ^^^ m)
+  complete := fun pk sk => pk = sk ^^^ 0xA5
+  completeness := fun h _ => by subst h; exact decide_eq_true ⟨rfl, rfl⟩
 
-/-- Environment used by the teeth below: request one signature and output it as the verdict. -/
-def toothSignThenEchoEnv : UcSigEnv Unit Bool Bool := .stepSign false (fun sig => .halt sig)
+/-- Environment requesting a signature on `m = 0x42` and checking that its message-tag byte matches `0xA5 ^^^ 0x42`. -/
+def keyedSignCheckTagEnv : UcSigEnv UInt8 UInt8 (UInt8 × UInt8) :=
+  .stepSign 0x42 (fun sig => .halt (decide (sig.2 = (0xA5 ^^^ 0x42))))
 
 /-- **`#tooth` Signing-Oracle Hypothesis (`tooth_sigOracleGameHop_needs_real_signing_oracle`)**:
-    with a callback that does not answer as the real signer (`simSign = fun _ => false` against a
-    signer that always outputs `true`), the environment that requests one signature and outputs it
-    tells the real execution from the ideal one although it makes no verification query, so
-    `findEnvForgery` returns `none`. The conclusion of
-    `sigOracleGameHop_distinguisher_iff_forgery` fails without `hOracle`. -/
+    when `simSign` drops key-masking on the tag (`simSign m := (0xA5, m)` instead of `(0xA5, 0xA5 ^^^ m)`),
+    `keyedSignCheckTagEnv` distinguishes real from ideal (`true ≠ false`) with zero verification
+    queries (`findEnvForgery = none`), showing `hOracle` is load-bearing in
+    `sigOracleGameHop_distinguisher_iff_forgery`. -/
 theorem tooth_sigOracleGameHop_needs_real_signing_oracle :
-    ¬ UcIndistinguishableOn toothConstSigScheme () () (fun _ => false) toothSignThenEchoEnv ∧
-    findEnvForgery toothConstSigScheme () (fun _ => false) [] toothSignThenEchoEnv = none := by
+    ¬ UcIndistinguishableOn keyedTagSigScheme 0xA5 0 (fun m => (0xA5, m)) keyedSignCheckTagEnv ∧
+    findEnvForgery keyedTagSigScheme 0xA5 (fun m => (0xA5, m)) [] keyedSignCheckTagEnv = none := by
   refine ⟨?_, ?_⟩
   · intro h
-    have h' : execRealSig toothConstSigScheme () () toothSignThenEchoEnv =
-        execIdealSig toothConstSigScheme () (fun _ => false) [] toothSignThenEchoEnv := h
-    simp [execRealSig, execIdealSig, execIdealTsigOracle, idealTsigSimulator, evalOracleComp,
-      toothConstSigScheme, toothSignThenEchoEnv] at h'
-  · simp [findEnvForgery, toothSignThenEchoEnv]
+    have h' : execRealSig keyedTagSigScheme 0xA5 0 keyedSignCheckTagEnv =
+        execIdealSig keyedTagSigScheme 0xA5 (fun m => (0xA5, m)) [] keyedSignCheckTagEnv := h
+    revert h'
+    decide
+  · rfl
 
 /-- **`#tooth` Recorded-Message Gate (`tooth_idealSig_accepts_valid_unsigned_only_in_real`)**:
     a signature that verifies in the real world on a message never sent to the signer is refused
