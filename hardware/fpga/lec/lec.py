@@ -21,8 +21,8 @@ OUT = os.path.join(ROOT, "build", "lec")
 P = 2**64 - 2**32 + 1
 Z3_SECS = int(os.environ.get("LEC_SECS", "150"))
 BITWUZLA = shutil.which("bitwuzla") or (
-    "/home/build/qsag-ni-asic/tools/oss-cad-suite/bin/bitwuzla"
-    if os.path.exists("/home/build/qsag-ni-asic/tools/oss-cad-suite/bin/bitwuzla") else None
+    os.path.join(os.environ.get("OSS_CAD_BIN", "/opt/oss-cad-suite/bin"), "bitwuzla")
+    if os.path.exists(os.path.join(os.environ.get("OSS_CAD_BIN", "/opt/oss-cad-suite/bin"), "bitwuzla")) else None
 )
 results = []
 CONTRACTS_READY = False
@@ -41,7 +41,7 @@ def yosys_smt2(name, top, files, chparam="", use_contracts=True):
         "qsag_add_split.sv", "qsag_csa_reduce2.sv", "qsag_sum_csa.sv")]
     if use_contracts and CONTRACTS_READY and top in (
         "qsag_mul64_dsp", "qsag_gl64_dsp_mul", "qsag_gl64_reduce",
-        "qsag_ext4_mac", "qsag_ext5_stage0", "qsag_ext5_stage4",
+        "qsag_ext5_stage0", "qsag_ext5_stage4",
     ):
         helpers = [os.path.join(OUT, "proved_adder_contracts.sv")]
     srcs = " ".join(helpers + files)
@@ -135,7 +135,7 @@ def solve(name, text, secs, prefer_bitwuzla=True):
         open(path, "w").write(bw_text)
         t0 = time.time()
         try:
-            r = subprocess.run([BITWUZLA, "--time-limit", str(secs * 1000), path],
+            r = subprocess.run(["timeout", "60s", BITWUZLA, "--time-limit", str(secs * 1000), path],
                                capture_output=True, text=True, timeout=secs + 15)
             ans = (r.stdout.strip().splitlines() or ["?"])[0]
             if ans in ("unsat", "sat"):
@@ -145,7 +145,7 @@ def solve(name, text, secs, prefer_bitwuzla=True):
     open(path, "w").write(text)
     t0 = time.time()
     try:
-        r = subprocess.run(["z3", f"-T:{secs}", path], capture_output=True, text=True, timeout=secs + 30)
+        r = subprocess.run(["timeout", "60s", "z3", f"-T:{secs}", path], capture_output=True, text=True, timeout=secs + 30)
         ans = (r.stdout.strip().splitlines() or ["?"])[0]
     except subprocess.TimeoutExpired:
         ans = "timeout"
@@ -190,77 +190,6 @@ def check_reduce_algebra():
     record("reduce_range", "integers: limbs in range imply 0 < V < 3p",
            "unsat", decl + rng + f"(assert (not (and (> {V} 0) (< {V} {3 * P}))))\n(check-sat)\n")
 
-def check_ext4_karatsuba_algebra():
-    """Prove 9-multiply Tower Karatsuba recombination over F_p[v]/(v^4 - 7) is exact mod p
-    and strictly fits in (0, 2^136) without overflow or negative wraparound."""
-    M128 = 2**128 - 1
-    C1 = 2**32 + 1
-    KP = 2**64 + 2**32  # M128 + C1 = P * (2^64 + 2^32)
-
-    r_vars = [f"c{i}" for i in range(4)] + [f"m{i}" for i in range(9)]
-    r_decl = "".join(f"(declare-const {v} Int)\n" for v in r_vars)
-    r_rng = ("(assert (and "
-             + " ".join(f"(>= c{i} 0) (< c{i} {2**64})" for i in range(4)) + " "
-             + " ".join(f"(>= m{i} 0) (< m{i} {2**128})" for i in range(9)) + "))\n")
-    nm = [f"(- {M128} m{i})" for i in range(8)]
-    accs_r = [
-        f"(+ (* 14 {C1}) c0 m0 (* 7 m1) (* 7 m5) (* 7 {nm[3]}) (* 7 {nm[4]}))",
-        f"(+ (* 2 {C1}) c1 m2 m3 (* 7 m4) {nm[0]} {nm[1]})",
-        f"(+ (* 16 {C1}) c2 m6 (* 7 m7) {nm[0]} (* 7 {nm[1]}) {nm[3]} (* 7 {nm[4]}))",
-        f"(+ (* 4 {C1}) c3 m8 m0 m1 m3 m4 {nm[6]} {nm[7]} {nm[2]} {nm[5]})",
-    ]
-    for k, acc_e in enumerate(accs_r):
-        if not record(f"ext4_karatsuba_range_limb{k}",
-                      f"9-mul Tower Karatsuba limb {k}: 0 < acc < 2^136 for all 2^128 products and 64-bit c",
-                      "unsat", r_decl + r_rng + f"(assert (not (and (> {acc_e} 0) (< {acc_e} {2**136}))))\n(check-sat)\n"):
-            raise SystemExit("failed Ext4 Karatsuba range proof")
-
-    k_names = ["ka01", "ka23", "ka02", "ka13", "kaa", "kb01", "kb23", "kb02", "kb13", "kbb"]
-    all_v = [f"a{i}" for i in range(4)] + [f"b{i}" for i in range(4)] + [f"c{i}" for i in range(4)] + k_names
-    decl = "".join(f"(declare-const {v} Int)\n" for v in all_v)
-    def subp(s, kv): return f"(- {s} (* {P} {kv}))"
-    def qmul(sa, sb, ka, kb): return f"(- (+ (* {ka} {sb}) (* {kb} {sa})) (* {P} (* {ka} {kb})))"
-    S = {
-        "a01": "(+ a0 a1)", "a23": "(+ a2 a3)", "a02": "(+ a0 a2)", "a13": "(+ a1 a3)", "aa": "(+ a0 a1 a2 a3)",
-        "b01": "(+ b0 b1)", "b23": "(+ b2 b3)", "b02": "(+ b0 b2)", "b13": "(+ b1 b3)", "bb": "(+ b0 b1 b2 b3)",
-    }
-    ms = [
-        "(* a0 b0)", "(* a1 b1)", f"(* {subp(S['a01'],'ka01')} {subp(S['b01'],'kb01')})",
-        "(* a2 b2)", "(* a3 b3)", f"(* {subp(S['a23'],'ka23')} {subp(S['b23'],'kb23')})",
-        f"(* {subp(S['a02'],'ka02')} {subp(S['b02'],'kb02')})",
-        f"(* {subp(S['a13'],'ka13')} {subp(S['b13'],'kb13')})",
-        f"(* {subp(S['aa'],'kaa')} {subp(S['bb'],'kbb')})",
-    ]
-    qm2 = qmul(S["a01"], S["b01"], "ka01", "kb01")
-    qm5 = qmul(S["a23"], S["b23"], "ka23", "kb23")
-    qm6 = qmul(S["a02"], S["b02"], "ka02", "kb02")
-    qm7 = qmul(S["a13"], S["b13"], "ka13", "kb13")
-    qm8 = qmul(S["aa"],  S["bb"],  "kaa",  "kbb")
-    nmi = [f"(- {M128} {ms[i]})" for i in range(8)]
-    accs = [
-        f"(+ (* 14 {C1}) c0 {ms[0]} (* 7 {ms[1]}) (* 7 {ms[5]}) (* 7 {nmi[3]}) (* 7 {nmi[4]}))",
-        f"(+ (* 2 {C1}) c1 {ms[2]} {ms[3]} (* 7 {ms[4]}) {nmi[0]} {nmi[1]})",
-        f"(+ (* 16 {C1}) c2 {ms[6]} (* 7 {ms[7]}) {nmi[0]} (* 7 {nmi[1]}) {nmi[3]} (* 7 {nmi[4]}))",
-        f"(+ (* 4 {C1}) c3 {ms[8]} {ms[0]} {ms[1]} {ms[3]} {ms[4]} {nmi[6]} {nmi[7]} {nmi[2]} {nmi[5]})",
-    ]
-    sbs = [
-        "(+ c0 (* a0 b0) (* 7 (+ (* a2 b3) (* a1 b1) (* a3 b2))))",
-        "(+ c1 (* a0 b1) (* a2 b2) (* a1 b0) (* 7 (* a3 b3)))",
-        "(+ c2 (* a0 b2) (* a2 b0) (* 7 (+ (* a1 b3) (* a3 b1))))",
-        "(+ c3 (* a0 b3) (* a2 b1) (* a1 b2) (* a3 b0))",
-    ]
-    qs = [
-        f"(- (* 14 {KP}) (* 7 {qm5}))",
-        f"(- (* 2 {KP}) {qm2})",
-        f"(- (* 16 {KP}) {qm6} (* 7 {qm7}))",
-        f"(+ (- (* 4 {KP}) {qm8}) {qm6} {qm7} {qm2} {qm5})",
-    ]
-    for k in range(4):
-        if not record(f"ext4_karatsuba_modp_limb{k}",
-                      f"9-mul Tower Karatsuba limb {k}: exact congruence acc - schoolbook == p * Q_k over F_p[v]/(v^4 - 7)",
-                      "unsat", decl + f"(assert (not (= (- {accs[k]} {sbs[k]}) (* {P} {qs[k]}))))\n(check-sat)\n"):
-            raise SystemExit("failed Ext4 Karatsuba congruence proof")
-
 def mutate(src, old, new, name):
     text = open(src).read()
     assert text.count(old) >= 1, (src, old, text.count(old))
@@ -277,7 +206,6 @@ MUL33 = os.path.join(ROOT, "rtl/qsag_mul33x32_dsp.sv")
 MUL   = os.path.join(ROOT, "rtl/qsag_mul64_dsp.sv")
 GLM   = os.path.join(ROOT, "rtl/qsag_gl64_dsp_mul.sv")
 SBOX  = os.path.join(ROOT, "rtl/qsag_p2_sbox7.sv")
-EXT4  = os.path.join(ROOT, "rtl/qsag_ext4_mac.sv")
 EXT5  = os.path.join(ROOT, "rtl/qsag_ext5_mac.sv")
 KARA  = os.path.join(ROOT, "rtl/qsag_clmul_kara.sv")
 GFRED = os.path.join(ROOT, "rtl/qsag_gf128_reduce.sv")
@@ -402,7 +330,7 @@ endmodule
 
 def check_adder_contracts():
     """Discharge every CSA compressor and split-carry helper instance used across the 9-DSP
-    multiplier, Goldilocks reducer, Ext4 MAC, and Ext5 MAC BEFORE replacing their bodies."""
+    multiplier, Goldilocks reducer, and Ext5 MAC BEFORE replacing their bodies."""
     global CONTRACTS_READY
     CONTRACTS_READY = False
 
@@ -678,10 +606,25 @@ endmodule
             f"(assert (= (bvadd {zext(flat_acc('p2_s', 2), 66, 68)} {zext(flat_acc('p2_c', 2), 66, 68)}) (bvadd {zext(flat_acc('pr2', 2), 67, 68)} {bv(B33, 68)})))\n"
             f"(assert (= (bvadd {zext(flat_acc('ps_s', 2), 66, 68)} {zext(flat_acc('ps_c', 2), 66, 68)}) (bvadd {zext(flat_acc('prs', 2), 67, 68)} {bv(B33, 68)})))\n"
         )
-        p0w, p2w, psw = zext(p0_67, 67, 128), zext(p2_67, 67, 128), zext(ps_67, 67, 128)
-        cbt = f"(ite (= {cb_1} #b1) (bvshl {zext(sa_33, 33, 128)} {bv(64, 128)}) {bv(0, 128)})"
-        k64 = f"(bvadd {p0w} (bvadd (bvshl {p2w} {bv(64, 128)}) (bvadd {cbt} (bvshl (bvsub (bvsub {psw} {p0w}) {p2w}) {bv(32, 128)}))))"
-        return flatten_ys_smt2(ys_abs, "lec_top", 3) + hyps + f"(assert (not (= {flat_acc('p', 3)} {k64})))\n(check-sat)\n"
+        # Prove the cutpoints at the recovered subproducts, the five high rows
+        # and the output register separately. The integer join below handles carries.
+        get = lambda name: flat_acc(name, 2)
+        r0 = f"((_ extract 63 0) {get('r0_66')})"
+        r2 = f"((_ extract 63 0) {get('r2_66')})"
+        rs = f"((_ extract 64 0) {get('rs_66')})"
+        correction = f"(ite (= {cb_1} #b1) {sa_33} {bv(0,33)})"
+        rows = [f"(concat {r2} ((_ extract 63 32) {r0}))", zext(rs,65,96),
+                f"(bvnot {zext(r0,64,96)})", f"(bvnot {zext(r2,64,96)})",
+                f"(concat {zext(correction,33,64)} {bv(2,32)})"]
+        actual = get("g_ecp5.hi_rows")
+        parts = [f"((_ extract {n*96+95} {n*96}) {actual})" for n in range(5)]
+        eqs = [f"(= {a} {b})" for a,b in zip(rows,parts)]
+        for name,prod in [("r0_66",p0_67),("r2_66",p2_67),("rs_66",ps_67)]:
+            eqs.append(f"(= {get(name)} ((_ extract 65 0) {prod}))")
+        hi = parts[0]
+        for part in parts[1:]: hi = f"(bvadd {hi} {part})"
+        eqs.append(f"(= {flat_acc('p',3)} (concat {hi} ((_ extract 31 0) {r0})))")
+        return flatten_ys_smt2(ys_abs,"lec_top",3) + hyps + "(assert (not (and " + " ".join(eqs) + ")))\n(check-sat)\n"
 
     ys64_26 = yosys_smt2("mul64_rel_26x17", "qsag_mul64_dsp", [m64_sv], "-chparam AW 26 -chparam BW 17")
     if not record("mul64_dsp_wiring_rtl_26x17",
@@ -694,6 +637,19 @@ endmodule
                   "9-DSP qsag_mul64_dsp AW=16 BW=16 RTL 3-cycle outer Karatsuba equivalence p@s3 == K64 over all 2^128 inputs",
                   "unsat", mul64_direct_k64_query(ys64_16), prefer_bitwuzla=True):
         raise SystemExit("failed mul64_dsp RTL K64 proof 16x16")
+
+    base = 1 << 32
+    join = f"""(set-logic QF_LIA)
+(declare-const lo Int) (declare-const hi Int) (declare-const p2 Int)
+(declare-const ps Int) (declare-const carry Int)
+(define-fun p0 () Int (+ lo (* {base} hi)))
+(define-fun rows () Int (+ (* {base} p2) hi ps (- {2**96-1} p0) (- {2**96-1} p2) (* {base} carry) 2))
+(define-fun result () Int (+ lo (* {base} rows)))
+(define-fun spec () Int (+ p0 (* {base*base} (+ p2 carry)) (* {base} (- ps p0 p2))))
+(assert (distinct (mod result {2**128}) (mod spec {2**128})))
+(check-sat)"""
+    if not record("mul64_ecp5_high_join","five 96-bit high rows and low word equal K64 modulo 2^128","unsat",join):
+        raise SystemExit("failed ECP5 recombination join")
 
     # Modus Ponens QF_BV join from the 8 proved row invariants to `p@s3 == K64(P0,P2,PS,sa,cb)`:
     rtot_j = bv(0, 128)
@@ -820,9 +776,8 @@ def check_remainder_glue():
                   "unsat", body):
         raise SystemExit("failed integer remainder join")
 
-def check_sbox7_and_ext4_rtl():
-    """Universal compositional RTL miters for `qsag_p2_sbox7` (13-cycle x^7 S-box) and
-    `qsag_ext4_mac` (7-cycle 9-mul Tower Karatsuba F_{p^4} MAC) across BOTH AW=26/BW=17 and AW=16/BW=16."""
+def check_sbox7_rtl():
+    """Check the 13-cycle Poseidon2 S-box on both DSP tilings."""
     # 1. `qsag_p2_sbox7`: 13-cycle wrapper over 4 proved `qsag_gl64_dsp_mul` instances
     sb_stub = os.path.join(OUT, "glmul_stub_sbox.sv")
     open(sb_stub, "w").write("""
@@ -877,202 +832,14 @@ endmodule
                   "unsat", sb_alg):
         raise SystemExit("failed p2_sbox7 ring identity")
 
-    # 2. `qsag_ext4_mac`: 7-cycle RTL wrapper over 9 proved `qsag_mul64_dsp` + `qsag_gl64_reduce` (AW=26 & AW=16)
-    e4_stubs = os.path.join(OUT, "ext4_stubs.sv")
-    open(e4_stubs, "w").write("""
-module qsag_mul64_dsp #(parameter int AW=26, parameter int BW=17) (
-    input logic clk, input logic [63:0] a, input logic [63:0] b, output logic [127:0] p
-);
-    logic [63:0] aq1, aq2, bq1, bq2;
-    always_ff @(posedge clk) begin aq1 <= a; aq2 <= aq1; bq1 <= b; bq2 <= bq1; p <= 128'(aq2) * 128'(bq2); end
-endmodule
-module qsag_gl64_reduce #(parameter bit REG_OUT=1'b1) (
-    input logic clk, input logic [135:0] x, output logic [63:0] r
-);
-    logic [135:0] xq1;
-    always_ff @(posedge clk) begin xq1 <= x; r <= 64'(xq1 / 136'd3); end
-endmodule
-""")
-    def mod_add2_bv(u, v):
-        s = f"(bvadd {zext(u, 64, 65)} {zext(v, 64, 65)})"
-        return f"(ite (bvuge {s} {bv(P, 65)}) ((_ extract 63 0) (bvsub {s} {bv(P, 65)})) ((_ extract 63 0) {s}))"
-
-    def mod_add4_bv(x0, x1, x2, x3):
-        return mod_add2_bv(mod_add2_bv(x0, x1), mod_add2_bv(x2, x3))
-
-    for aw, bw in [(26, 17), (16, 16)]:
-        ys_e4 = yosys_smt2(f"ext4_rtl_{aw}x{bw}", "qsag_ext4_mac", [PKG, e4_stubs, EXT4],
-                           f"-chparam AW {aw} -chparam BW {bw}")
-        ys_e4_abs = (
-            "(declare-fun qmul64 ((_ BitVec 128) (_ BitVec 128)) (_ BitVec 128))\n"
-            "(declare-fun qred136_raw ((_ BitVec 136) (_ BitVec 136)) (_ BitVec 136))\n"
-            + ys_e4.replace("(bvmul ", "(qmul64 ").replace("(bvudiv ", "(qred136_raw ")
-        )
-        # Stage 0: all 18 canonical pre-sum registers ma_q[0..8], mb_q[0..8]
-        fl1 = flatten_ys_smt2(ys_e4_abs, "lec_top", 1)
-        a_s0, b_s0 = flat_acc("a", 0), flat_acc("b", 0)
-        al = [f"((_ extract {64*i+63} {64*i}) {a_s0})" for i in range(4)]
-        bl = [f"((_ extract {64*i+63} {64*i}) {b_s0})" for i in range(4)]
-        can_h = "".join(f"(assert (bvult {al[i]} {bv(P, 64)}))\n(assert (bvult {bl[i]} {bv(P, 64)}))\n" for i in range(4))
-        exp_a = [al[0], al[1], mod_add2_bv(al[0], al[1]), al[2], al[3], mod_add2_bv(al[2], al[3]),
-                 mod_add2_bv(al[0], al[2]), mod_add2_bv(al[1], al[3]), mod_add4_bv(*al)]
-        exp_b = [bl[0], bl[1], mod_add2_bv(bl[0], bl[1]), bl[2], bl[3], mod_add2_bv(bl[2], bl[3]),
-                 mod_add2_bv(bl[0], bl[2]), mod_add2_bv(bl[1], bl[3]), mod_add4_bv(*bl)]
-        maq, mbq = flat_acc("ma_q", 1), flat_acc("mb_q", 1)
-        s0_eqs = (
-            [f"(= ((_ extract {64*i+63} {64*i}) {maq}) {exp_a[i]})" for i in range(9)]
-            + [f"(= ((_ extract {64*i+63} {64*i}) {mbq}) {exp_b[i]})" for i in range(9)]
-        )
-        if not record(f"ext4_mac_stage0_{aw}x{bw}",
-                      f"qsag_ext4_mac AW={aw} BW={bw}: all 18 Stage-0 pre-sum registers ma_q[0..8], mb_q[0..8] canonical mod p",
-                      "unsat", fl1 + can_h + "(assert (not (and " + " ".join(s0_eqs) + ")))\n(check-sat)\n",
-                      prefer_bitwuzla=True):
-            raise SystemExit("failed ext4 Stage-0 proof")
-
-        # Full 7-cycle pipeline Stage 4..6 check
-        fl7 = flatten_ys_smt2(ys_e4_abs, "lec_top", 7)
-        c_s0 = flat_acc("c", 0)
-        cl = [f"((_ extract {64*i+63} {64*i}) {c_s0})" for i in range(4)]
-        c_hyp = "".join(f"(assert (bvult {cl[i]} {bv(P, 64)}))\n" for i in range(4))
-        m_s4 = flat_acc("m", 4)
-        ms4 = [f"((_ extract {128*i+127} {128*i}) {m_s4})" for i in range(9)]
-        m_hyp = "".join(f"(assert (bvule {ms4[i]} {bv((P - 1)**2, 128)}))\n" for i in range(9))
-        if aw > 16:
-            C1_136 = bv(0x0000_0001_0000_0001, 136)
-            pm = [zext(ms4[i], 128, 136) for i in range(9)]
-            nm = [zext(f"(bvnot {ms4[i]})", 128, 136) for i in range(8)]
-            def mul7_136(x): return f"(bvadd {x} (bvadd (bvshl {x} {bv(1,136)}) (bvshl {x} {bv(2,136)})))"
-            def bsum(ts):
-                r = ts[0]
-                for t in ts[1:]: r = f"(bvadd {r} {t})"
-                return r
-            exp_acc = [
-                bsum([bv(14 * 0x100000001, 136), zext(cl[0], 64, 136), pm[0], mul7_136(pm[1]), mul7_136(pm[5]), mul7_136(nm[3]), mul7_136(nm[4])]),
-                bsum([bv(2 * 0x100000001, 136),  zext(cl[1], 64, 136), pm[2], pm[3], mul7_136(pm[4]), nm[0], nm[1]]),
-                bsum([bv(16 * 0x100000001, 136), zext(cl[2], 64, 136), pm[6], mul7_136(pm[7]), nm[0], mul7_136(nm[1]), nm[3], mul7_136(nm[4])]),
-                bsum([bv(4 * 0x100000001, 136),  zext(cl[3], 64, 136), pm[8], pm[0], pm[1], pm[3], pm[4], nm[6], nm[7], nm[2], nm[5]]),
-            ]
-            accq5 = flat_acc("acc_q", 5)
-            y7 = flat_acc("y", 7)
-            eqs_w = []
-            for k in range(4):
-                ak = f"((_ extract {136*k+135} {136*k}) {accq5})"
-                yk = f"((_ extract {64*k+63} {64*k}) {y7})"
-                eqs_w.append(f"(= {ak} {exp_acc[k]})")
-                eqs_w.append(f"(= {yk} ((_ extract 63 0) (qred136_raw {ak} {bv(3, 136)})))")
-            if not record("ext4_mac_pipe_26x17",
-                          "qsag_ext4_mac AW=26 BW=17: 7-cycle RTL Stage-4 accumulators & Stage-6 reducer join over all inputs",
-                          "unsat", fl7 + can_h + c_hyp + m_hyp + "(assert (not (and " + " ".join(eqs_w) + ")))\n(check-sat)\n",
-                          prefer_bitwuzla=True):
-                raise SystemExit("failed ext4 AW=26 7-cycle RTL proof")
-        else:
-            # Prove ECP5 AW=16 Stage-4 128->66b fold (`v_q` congruent mod p & < 3p) AND Stage-5..6 72b B66 Karatsuba + red72!
-            vq5 = flat_acc("v_q", 5)
-            v_clauses = []
-            for i in range(9):
-                vi = zext(f"((_ extract {66*i+65} {66*i}) {vq5})", 66, 136)
-                lo_i = zext(f"((_ extract 63 0) {ms4[i]})", 64, 136)
-                mid_i = zext(f"((_ extract 95 64) {ms4[i]})", 32, 136)
-                hi_i = zext(f"((_ extract 127 96) {ms4[i]})", 32, 136)
-                v_exact = f"(bvsub (bvadd {bv(P, 136)} (bvadd {lo_i} (bvshl {mid_i} {bv(32, 136)}))) (bvadd {mid_i} {hi_i}))"
-                v_clauses.append(f"(= {vi} {v_exact})")
-                v_clauses.append(f"(bvult {vi} {bv(3 * P, 136)})")
-            if not record("ext4_mac_ecp5_stage4_vfold",
-                          "qsag_ext4_mac AW=16 BW=16: Stage-4 128->66b Solinas fold v_q[0..8] == V(m[i]) in (0, 3p)",
-                          "unsat", fl7 + can_h + c_hyp + m_hyp + "(assert (not (and " + " ".join(v_clauses) + ")))\n(check-sat)\n",
-                          prefer_bitwuzla=True):
-                raise SystemExit("failed ext4 ECP5 Stage-4 v_q proof")
-
-            # Stage 5 (cut at `acc72_q@s6`): exact 72-bit B66 Karatsuba accumulator check (0.1s, zero bvurem!)
-            acc72_s6 = flat_acc("acc72_q", 6)
-            B66_v = 0x00_FFFF_FFFB_0000_0006
-            pv = [zext(f"((_ extract {66*i+65} {66*i}) {vq5})", 66, 72) for i in range(9)]
-            nv = [zext(f"(bvnot ((_ extract {66*i+65} {66*i}) {vq5}))", 66, 72) for i in range(8)]
-            cs72 = [zext(cl[k], 64, 72) for k in range(4)]
-            v_bound72 = "".join(f"(assert (bvult {pv[i]} {bv(3 * P, 72)}))\n" for i in range(9))
-            def bsum72(ts):
-                r = ts[0]
-                for t in ts[1:]: r = f"(bvadd {r} {t})"
-                return r
-            s0_72 = bsum72([pv[1], pv[5], nv[3], nv[4]])
-            s2_72 = bsum72([pv[7], nv[1], nv[4]])
-            exp72 = [
-                bsum72([bv(14 * B66_v + 1, 72), cs72[0], pv[0], f"(bvshl {s0_72} {bv(3, 72)})", f"(bvnot {s0_72})"]),
-                bsum72([bv(3 * B66_v, 72),      cs72[1], pv[2], pv[3], f"(bvshl {pv[4]} {bv(3, 72)})", nv[4], nv[0], nv[1]]),
-                bsum72([bv(16 * B66_v + 1, 72), cs72[2], pv[6], nv[0], nv[3], f"(bvshl {s2_72} {bv(3, 72)})", f"(bvnot {s2_72})"]),
-                bsum72([bv(4 * B66_v, 72),      cs72[3], pv[8], pv[0], pv[1], pv[3], pv[4], nv[6], nv[7], nv[2], nv[5]]),
-            ]
-            s5_eqs = [f"(= ((_ extract {72*k+71} {72*k}) {acc72_s6}) {exp72[k]})" for k in range(4)]
-            if not record("ext4_mac_ecp5_stage5_acc72",
-                          "qsag_ext4_mac AW=16 BW=16: Stage-5 72-bit B66 Karatsuba accumulators acc72_q[0..3] exact",
-                          "unsat", fl7 + c_hyp + v_bound72 + "(assert (not (and " + " ".join(s5_eqs) + ")))\n(check-sat)\n",
-                          prefer_bitwuzla=True):
-                raise SystemExit("failed ext4 ECP5 Stage-5 acc72 proof")
-
-            # Stage 6 (`g_red72` from `acc72_q@s6` to `y@s7`, zero bvurem!): prove y_k < p and acc72_k == y_k + p*(m8 + sel)
-            y7 = flat_acc("y", 7)
-            P76 = bv(P, 76)
-            s6_eqs = []
-            acc72_bnds = []
-            for k in range(4):
-                ak72 = f"((_ extract {72*k+71} {72*k}) {acc72_s6})"
-                acc72_bnds.append(f"(assert (bvult {ak72} {bv(120 * (1 << 64), 72)}))\n")
-                ak76 = zext(ak72, 72, 76)
-                m8_76 = zext(f"((_ extract 71 64) {ak72})", 8, 76)
-                yk76 = zext(f"((_ extract {64*k+63} {64*k}) {y7})", 64, 76)
-                q0 = f"(bvmul {m8_76} {P76})"
-                q1 = f"(bvmul (bvadd {m8_76} {bv(1, 76)}) {P76})"
-                s6_eqs.append(f"(bvult {yk76} {P76})")
-                s6_eqs.append(f"(or (= {ak76} (bvadd {yk76} {q0})) (= {ak76} (bvadd {yk76} {q1})))")
-            if not record("ext4_mac_ecp5_stage6_red72",
-                          "qsag_ext4_mac AW=16 BW=16: Stage-6 red72 emits canonical y[0..3] < p congruent to acc72_q mod p",
-                          "unsat", fl7 + "".join(acc72_bnds) + "(assert (not (and " + " ".join(s6_eqs) + ")))\n(check-sat)\n",
-                          prefer_bitwuzla=True):
-                raise SystemExit("failed ext4 ECP5 Stage-6 red72 proof")
-
-            # QF_LIA algebraic congruence & non-overflow of Stage-5 72-bit B66 formulas over Z:
-            M66 = 2**66 - 1
-            KP66 = 5  # (2^66 - 1) + B66 == 5*p
-            lia_decl = "".join(f"(declare-const v{i} Int)\n" for i in range(9)) + "".join(f"(declare-const c{k} Int)\n" for k in range(4))
-            lia_rng = ("(assert (and "
-                       + " ".join(f"(<= 0 v{i}) (< v{i} {3 * P})" for i in range(9)) + " "
-                       + " ".join(f"(<= 0 c{k}) (< c{k} {P})" for k in range(4)) + "))\n")
-            nv_i = [f"(- {M66} v{i})" for i in range(8)]
-            s0_i = f"(+ v1 v5 {nv_i[3]} {nv_i[4]})"
-            s2_i = f"(+ v7 {nv_i[1]} {nv_i[4]})"
-            # Note: in W=72 bitvector arithmetic, `8*s_i + (2^72 - 1 - s_i) + 1 = 2^72 + 7*s_i`, dropping 1 * 2^72:
-            e72_int = [
-                f"(+ (* 14 {B66_v}) c0 v0 (* 7 {s0_i}))",
-                f"(+ (* 3 {B66_v}) c1 v2 v3 (* 8 v4) {nv_i[4]} {nv_i[0]} {nv_i[1]})",
-                f"(+ (* 16 {B66_v}) c2 v6 {nv_i[0]} {nv_i[3]} (* 7 {s2_i}))",
-                f"(+ (* 4 {B66_v}) c3 v8 v0 v1 v3 v4 {nv_i[6]} {nv_i[7]} {nv_i[2]} {nv_i[5]})",
-            ]
-            kt_int = [
-                "(+ c0 v0 (* 7 (- (+ v1 v5) (+ v3 v4))))",
-                "(- (+ c1 v2 v3 (* 7 v4)) (+ v0 v1))",
-                "(+ (- (+ c2 v6) (+ v0 v3)) (* 7 (- v7 (+ v1 v4))))",
-                "(- (+ c3 v8 v0 v1 v3 v4) (+ v6 v7 v2 v5))",
-            ]
-            q72_int = [14 * KP66, 3 * KP66, 16 * KP66, 4 * KP66]
-            lia_cs = []
-            for k in range(4):
-                lia_cs.append(f"(> {e72_int[k]} 0)")
-                lia_cs.append(f"(< {e72_int[k]} {120 * (1 << 64)})")
-                lia_cs.append(f"(= (- {e72_int[k]} {kt_int[k]}) (* {P} {q72_int[k]}))")
-            if not record("ext4_mac_ecp5_b66_algebra",
-                          "QF_LIA: 72-bit B66 Karatsuba formulas stay in (0, 120*2^64) and equal Karatsuba + 5p*K over Z",
-                          "unsat", lia_decl + lia_rng + "(assert (not (and " + " ".join(lia_cs) + ")))\n(check-sat)\n"):
-                raise SystemExit("failed ext4 ECP5 B66 QF_LIA proof")
-
 def group_gl():
     check_adder_contracts()
     check_reduce_algebra()
-    check_ext4_karatsuba_algebra()
     check_reduce("gl64_reduce_reg1", [PKG, RED], "unsat", reg_out=1)
     check_reduce("gl64_reduce_reg0", [PKG, RED], "unsat", reg_out=0)
     check_mul33x32_and_mul64_9dsp()
     check_remainder_glue()
-    check_sbox7_and_ext4_rtl()
+    check_sbox7_rtl()
 
 def group_glmut():
     if not CONTRACTS_READY:
@@ -1172,7 +939,7 @@ def group_glmut():
     # Mutant 7: `qsag_p2_sbox7` wires `.b(x3)` instead of `.b(x2)` on `u_x4`
     sb_stub = os.path.join(OUT, "glmul_stub_sbox.sv")
     if not os.path.exists(sb_stub):
-        check_sbox7_and_ext4_rtl()
+        check_sbox7_rtl()
     m_sb = mutate(SBOX, "u_x4 (.clk(clk), .a(x2), .b(x2), .r(x4));", "u_x4 (.clk(clk), .a(x2), .b(x3), .r(x4));", "mut_sbox7.sv")
     ys_msb = yosys_smt2("mut_sbox7", "qsag_p2_sbox7", [PKG, sb_stub, m_sb], "-chparam AW 16 -chparam BW 16", use_contracts=False)
     ys_msb_abs = "(declare-fun qglmul ((_ BitVec 64) (_ BitVec 64)) (_ BitVec 64))\n" + ys_msb.replace("(bvmul ", "(qglmul ")
@@ -1183,31 +950,14 @@ def group_glmut():
                   "sat", flatten_ys_smt2(ys_msb_abs, "lec_top", 13) + f"(assert (not (= {flat_acc('y', 13)} {mx7})))\n(check-sat)\n",
                   prefer_bitwuzla=True):
         raise SystemExit("mutant 7 failed")
-    # Mutant 8: `qsag_ext4_mac` AW=16 `72'(2)*B66 + 1` limb-1 bias bug
-    e4_stubs = os.path.join(OUT, "ext4_stubs.sv")
-    m_e4 = mutate(EXT4, "72'(3) * B66, 72'(c1),", "72'(2) * B66 + 72'd1, 72'(c1),", "mut_ext4_b66.sv")
-    ys_me4 = yosys_smt2("mut_ext4_b66", "qsag_ext4_mac", [PKG, e4_stubs, m_e4], "-chparam AW 16 -chparam BW 16")
-    ys_me4_abs = ("(declare-fun qmul64 ((_ BitVec 128) (_ BitVec 128)) (_ BitVec 128))\n"
-                  "(declare-fun qred136_raw ((_ BitVec 136) (_ BitVec 136)) (_ BitVec 136))\n"
-                  + ys_me4.replace("(bvmul ", "(qmul64 ").replace("(bvudiv ", "(qred136_raw "))
-    fl7m = flatten_ys_smt2(ys_me4_abs, "lec_top", 7)
-    vq5m = flat_acc("v_q", 5)
-    c1_72 = zext(f"((_ extract 127 64) {flat_acc('c', 0)})", 64, 72)
-    pv_m = [zext(f"((_ extract {66*i+65} {66*i}) {vq5m})", 66, 72) for i in range(5)]
-    nv_m = [zext(f"(bvnot ((_ extract {66*i+65} {66*i}) {vq5m}))", 66, 72) for i in range(5)]
-    vb_m = f"(assert (bvult {c1_72} {bv(P, 72)}))\n" + "".join(f"(assert (bvult {pv_m[i]} {bv(3 * P, 72)}))\n" for i in range(5))
-    exp72_1 = f"(bvadd {bv(3 * 0x00_FFFF_FFFB_0000_0006, 72)} (bvadd {c1_72} (bvadd {pv_m[2]} (bvadd {pv_m[3]} (bvadd (bvshl {pv_m[4]} {bv(3, 72)}) (bvadd {nv_m[4]} (bvadd {nv_m[0]} {nv_m[1]})))))))"
-    got72_1 = f"((_ extract 143 72) {flat_acc('acc72_q', 6)})"
-    if not record("mut_ext4_ecp5_b66_y1", "mutant tooth: 2*B66+1 bias fault in qsag_ext4_mac AW=16 limb 1 is refuted",
-                  "sat", fl7m + vb_m + f"(assert (not (= {got72_1} {exp72_1})))\n(check-sat)\n",
-                  prefer_bitwuzla=True):
-        raise SystemExit("mutant 8 failed")
-
 def group_ext5():
     """Z3 formal verification of zk-Hem v2 14-multiply Split-(3,2) Karatsuba F_p[X]/(X^5 - 3) MAC:
       1) Range proof: 0 < acc_k < 2^136 for all 5 limbs over all 128-bit m_i and 64-bit c_k;
       2) Universal modular congruence proof: acc_k - schoolbook_k == p * Q_k over Z;
       3) RTL Stage-0 canonical pre-adder + Stage-4 CSA recombination equivalence on actual `qsag_ext5_mac.sv` + mutant `sat`."""
+    import fp5_check
+    fp5_check.run(sys.modules[__name__])
+
     if not CONTRACTS_READY:
         check_adder_contracts()
     M128 = 2**128 - 1
@@ -1542,6 +1292,92 @@ endmodule
                   "sat", build_stage4_acc_query(ys_ms6_abs, 4), prefer_bitwuzla=True):
         raise SystemExit("failed ext5 mutant 3")
 
+    # (e) Compositional proof of AW=16 folded Stage 4..6 (`g_ecp5_post`) vs AW=26 (`g_wide_post`):
+    #   (e1) RTL proof of 128b->66b product fold: 0 < folded < 3*p and m + k*p == folded + q*p;
+    #   (e2) RTL proof of Stage-5 72b Karatsuba accumulators acc72_q[0..4] + Stage-6 72b->64b g_red72;
+    #   (e3) QF_LIA congruence join proving y_ecp5[k] == y_wide[k] for all k = 0..4.
+    ext5_e16_sv = os.path.join(OUT, "ext5_ecp5_cut.sv")
+    open(ext5_e16_sv, "w").write(
+        open(EXT5).read().replace(
+            "output logic [319:0] y",
+            "output logic [319:0] y,\n    input logic [13:0][127:0] cut_m,\n"
+            "    output logic [13:0][65:0] dbg_prod,\n    output logic [4:0][71:0] dbg_acc72"
+        ).replace(
+            ".clk(clk), .a(ma_q[i]), .b(mb_q[i]), .p(m[i]));",
+            ".clk(clk), .a(64'd0), .b(64'd0), .p());\n        assign m[i] = cut_m[i];"
+        ).replace(
+            "endmodule",
+            "    assign dbg_prod = product_q;\n    assign dbg_acc72 = acc72_q;\nendmodule"
+        )
+    )
+    ys_e16 = yosys_smt2("ext5_ecp5_cut", "qsag_ext5_mac", [PKG, RED, stub_sv, ext5_e16_sv], "-chparam AW 16 -chparam BW 16")
+    m0_128 = f"((_ extract 127 0) {flat_acc('cut_m', 4)})"
+    pr0_66 = f"((_ extract 65 0) {flat_acc('dbg_prod', 5)})"
+    m0_lo = zext(f"((_ extract 63 0) {m0_128})", 64, 72)
+    m0_mid = zext(f"((_ extract 95 64) {m0_128})", 32, 72)
+    m0_hi = zext(f"((_ extract 127 96) {m0_128})", 32, 72)
+    pr0_72 = zext(pr0_66, 66, 72)
+    fold_spec = f"(bvsub (bvsub (bvadd {m0_lo} (bvshl {m0_mid} {bv(32, 72)}) {bv(P, 72)}) {m0_mid}) {m0_hi})"
+    if not record("ext5_ecp5_prod_fold_rtl",
+                  "qsag_ext5_mac AW=16 Stage-4 RTL: product_q[0]@s5 == lo + mid*2^32 + p - mid - hi in (0, 3p)",
+                  "unsat",
+                  flatten_ys_smt2(ys_e16, "lec_top", 5)
+                  + f"(assert (not (and (= {pr0_72} {fold_spec}) (bvugt {pr0_72} {bv(0, 72)}) (bvult {pr0_72} {bv(3 * P, 72)}))))\n(check-sat)\n",
+                  prefer_bitwuzla=True):
+        raise SystemExit("failed ext5 AW=16 Stage-4 product fold RTL proof")
+
+    NEG_BIAS = 0x00_ffff_fffb_0000_0006
+    for k in range(5):
+        ak_72 = f"((_ extract {72*k+71} {72*k}) {flat_acc('dbg_acc72', 6)})"
+        yk_64 = f"((_ extract {64*k+63} {64*k}) {flat_acc('y', 7)})"
+        ak_lo = zext(f"((_ extract 63 0) {ak_72})", 64, 72)
+        ak_hi = zext(f"((_ extract 71 64) {ak_72})", 8, 72)
+        v72 = f"(bvsub (bvadd {ak_lo} (bvshl {ak_hi} {bv(32, 72)})) {ak_hi})"
+        yk_72 = zext(yk_64, 64, 72)
+        red_ok = (f"(and (bvult {yk_64} {bv(P, 64)}) "
+                  f"(or (= {v72} {yk_72}) (= {v72} (bvadd {yk_72} {bv(P, 72)}))))")
+        if not record(f"ext5_ecp5_red72_rtl_limb{k}",
+                      f"qsag_ext5_mac AW=16 Stage-6 RTL limb {k}: for acc72 < 113*p, y < p and y == acc72 (mod p)",
+                      "unsat",
+                      flatten_ys_smt2(ys_e16, "lec_top", 7)
+                      + f"(assert (bvult {ak_72} {bv(113 * P, 72)}))\n"
+                      + f"(assert (not {red_ok}))\n(check-sat)\n",
+                      prefer_bitwuzla=True):
+            raise SystemExit(f"failed ext5 AW=16 g_red72 limb {k}")
+
+    # Algebraic range + mod-p equivalence of the 72-bit NEG_BIAS recombination vs 136-bit C1 recombination:
+    M66 = (1 << 66) - 1
+    lia_e5 = (
+        "".join(f"(declare-const p{i} Int)\n" for i in range(14))
+        + "".join(f"(declare-const ck{k} Int)\n" for k in range(5))
+        + "(assert (and "
+        + " ".join(f"(> p{i} 0) (< p{i} {3 * P})" for i in range(14)) + " "
+        + " ".join(f"(>= ck{k} 0) (< ck{k} {P})" for k in range(5)) + "))\n"
+    )
+    nv_e = [f"(- {M66} p{i})" for i in range(11)]
+    acc72_e = [
+        f"(+ (* 12 {NEG_BIAS}) ck0 (* 4 p0) (* 3 p10) (* 3 p12) (* 3 {nv_e[1]}) (* 3 {nv_e[4]}) (* 3 {nv_e[7]}) (* 3 {nv_e[9]}))",
+        f"(+ (* 7 {NEG_BIAS}) ck1 p3 (* 2 p1) (* 3 p6) (* 3 p13) {nv_e[0]} (* 3 {nv_e[5]}) (* 3 {nv_e[10]}))",
+        f"(+ (* 8 {NEG_BIAS}) ck2 p1 p4 (* 3 p8) {nv_e[0]} {nv_e[2]} (* 3 {nv_e[6]}) (* 3 {nv_e[7]}))",
+        f"(+ (* 4 {NEG_BIAS}) ck3 p5 p9 (* 3 p7) {nv_e[0]} {nv_e[1]} {nv_e[2]} {nv_e[6]})",
+        f"(+ (* 4 {NEG_BIAS}) ck4 p0 p1 p2 p6 p7 p11 {nv_e[3]} {nv_e[8]} {nv_e[9]} {nv_e[10]})",
+    ]
+    exact_e = [
+        "(+ ck0 (* 4 p0) (* 3 p10) (* 3 p12) (- (* 3 (+ p1 p4 p7 p9))))",
+        "(+ ck1 p3 (* 2 p1) (* 3 p6) (* 3 p13) (- (+ p0 (* 3 p5) (* 3 p10))))",
+        "(+ ck2 p1 p4 (* 3 p8) (- (+ p0 p2 (* 3 p6) (* 3 p7))))",
+        "(+ ck3 p5 p9 (* 3 p7) (- (+ p0 p1 p2 p6)))",
+        "(+ ck4 p0 p1 p2 p6 p7 p11 (- (+ p3 p8 p9 p10)))",
+    ]
+    b_mults = [12, 7, 8, 4, 4]
+    for k in range(5):
+        if not record(f"ext5_ecp5_folded_post_equiv_limb{k}",
+                      f"qsag_ext5_mac AW=16 limb {k}: 0 <= acc72 < 113*p < 2^72 and acc72 - exact == {5 * b_mults[k]}*p",
+                      "unsat",
+                      lia_e5 + f"(assert (not (and (>= {acc72_e[k]} 0) (< {acc72_e[k]} {113 * P}) "
+                      f"(= (- {acc72_e[k]} {exact_e[k]}) (* {5 * b_mults[k]} {P})))))\n(check-sat)\n"):
+            raise SystemExit(f"failed ext5 AW=16 folded range/congruence limb {k}")
+
 def gf_xpow():
     t, v = [], 1
     for _ in range(255):
@@ -1843,11 +1679,8 @@ def group_tower():
     """Universal Z3 equivalence of Wiedemann tower128 linear maps, round-trip bijection on RTL,
     Artin-Schreier tower generator defining identities through 3-cycle RTL, Lean KATs, and mutant."""
     fixture_path = os.environ.get("QSAG_FIXTURE",
-                                  os.path.join(ROOT, "../../validation/tests/fixtures/lean_external_oracle_vectors.json"))
-    repo_cand = os.environ.get("QSAG_REPO", os.path.join(ROOT, "../.."))
-    if not os.path.exists(os.path.join(repo_cand, "crates/qsag-asm/src/portable.rs")):
-        repo_cand = "/home/build/qsag-ni-fpga/work/astra/repo"
-    rows, inv, cols, ic, _ = G.matrices(Path(repo_cand))
+                                  os.path.join(ROOT, "tb/fixtures/lean_oracle.json"))
+    rows, inv, cols, ic, _ = G.matrices()
 
     def parity_bool(x, mask):
         bits = [f"(= ((_ extract {i} {i}) {x}) #b1)" for i in range(128) if (mask >> i) & 1]
@@ -1975,7 +1808,12 @@ endmodule
                           f"qsag_gf128_tower_mul 3-cycle RTL vs Lean tower128 KAT #{i} ({name})", "unsat", body):
                 raise SystemExit("failed Lean tower128 KAT in Z3")
 
+def group_xbank():
+    from xbank_check import run
+    run(ROOT, OUT, Z3_SECS, results)
+
 GROUPS = {
+    "xbank": group_xbank,
     "gl": group_gl,
     "glmut": group_glmut,
     "ext5": group_ext5,
@@ -1986,7 +1824,7 @@ GROUPS = {
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    groups = sys.argv[1:] or ["gl", "glmut", "ext5", "gf", "comp", "tower"]
+    groups = sys.argv[1:] or ["gl", "glmut", "ext5", "gf", "comp", "tower", "xbank"]
     for g in groups:
         del results[:]
         GROUPS[g]()

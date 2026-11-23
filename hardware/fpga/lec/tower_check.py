@@ -9,8 +9,7 @@ import gen_tower_map as G
 import lec as L
 from pathlib import Path
 os.makedirs(L.OUT,exist_ok=True)
-repo=Path(os.environ.get('QSAG_REPO', '../repo'))
-rows,inv,cols,ic,gs=G.matrices(repo)
+rows,inv,cols,ic,gs=G.matrices()
 rtl=Path(L.ROOT)/'rtl'
 def parity(x,mask):
     bits=[f'((_ extract {i} {i}) {x})' for i in range(128) if mask>>i&1]
@@ -39,7 +38,7 @@ for i in range(128):
 print('[PASS] 16384 basis products: tower recurrence -> polynomial multiplication (exact bilinear certificate)',flush=True)
 files=[str(rtl/n) for n in ['qsag_clmul_kara.sv','qsag_gf128_reduce.sv','qsag_gf128_clmul.sv','qsag_gf128_tower_map.sv','qsag_gf128_tower_mul.sv']]
 ys=L.yosys_smt2('tower_kat','qsag_gf128_tower_mul',files)
-fixture=json.load(open(os.environ['QSAG_FIXTURE']))
+fixture=json.load(open(os.environ.get('QSAG_FIXTURE', Path(L.ROOT)/'tb/fixtures/lean_oracle.json')))
 for i,k in enumerate(fixture['tower128']):
     vals=[int.from_bytes(bytes.fromhex(k[n]),'little') for n in ['a_le_hex','b_le_hex','mul_le_hex','inv_a_le_hex']]
     for name,b,want in [('mul',vals[1],vals[2]),('inv',vals[3],int(vals[0]!=0))]:

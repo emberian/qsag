@@ -5,7 +5,7 @@ Run from hardware/fpga, optionally passing a qsag repository root.
 from pathlib import Path
 import re, sys, json
 ROOT = Path(__file__).resolve().parents[1]
-repo = Path(sys.argv[1]) if len(sys.argv)>1 else ROOT.parents[1]
+repo = Path(sys.argv[1]) if len(sys.argv)>1 else None
 MASK=(1<<128)-1
 
 def mul(a,b):
@@ -23,10 +23,23 @@ def apply(cols,x):
         if x>>i&1: v ^= c
     return v
 
-def matrices(repo):
-    text=(repo/'crates/qsag-asm/src/portable.rs').read_text()
-    body=text.split('pub const TOWER128_POLY_GENERATORS:')[1].split('= [')[1].split('];')[0]
-    gs=[int(x.replace('_',''),16) for x in re.findall(r'0x[0-9a-f_]+',body)]
+# Canonical polynomial-basis images of the seven tower generators.
+GENERATORS = (
+    0x295ac0b1f4731af9676aac9fa4b20b08,
+    0x500317bd159d73bb34d2f7fba603e341,
+    0x872430dcdf135bcc433f53640b5ab39a,
+    0x08ee6d05a2afa6e5f848729a9637483a,
+    0x6167c15ae3f2515951c65cfffdd09b94,
+    0x11bf2ae00eefb7458f1990f8ffd4b9bc,
+    0x8845a6b78c9fffc36a2a74600cfa98de,
+)
+
+def matrices(repo=None):
+    gs = GENERATORS
+    if repo is not None:
+        text=(repo/'crates/qsag-asm/src/portable.rs').read_text()
+        body=text.split('pub const TOWER128_POLY_GENERATORS:')[1].split('= [')[1].split('];')[0]
+        assert tuple(int(x.replace('_',''),16) for x in re.findall(r'0x[0-9a-f_]+',body)) == gs
     assert len(gs)==7
     for i,g in enumerate(gs): assert mul(g,g)^mul(gs[i-1] if i else 1,g)==1
     cols=[]
@@ -181,7 +194,7 @@ if __name__=='__main__':
         '',
     ]
     (ROOT/'rtl/qsag_gf128_compact.sv').write_text('\n'.join(cmp_lines))
-    fixture=json.loads((repo/'validation/tests/fixtures/lean_external_oracle_vectors.json').read_text())
+    fixture=json.loads((ROOT/'tb/fixtures/lean_oracle.json').read_text())
     for k in fixture['tower128']:
         a,b,c,iv=[int.from_bytes(bytes.fromhex(k[x]),'little') for x in ['a_le_hex','b_le_hex','mul_le_hex','inv_a_le_hex']]
         assert apply(ic,mul(apply(cols,a),apply(cols,b)))==c
