@@ -1957,9 +1957,9 @@ def tower128X : Tower128 :=
     `sign(sk, m) = sk * (sk + m)`. -/
 def tower128BeaverSig : AbstractSigScheme Unit Tower128 Tower128 Tower128 :=
   { sign := fun sk m => towerMul 7 sk (towerAdd 7 sk m)
-    verify := fun _ _ _ => true
-    complete := fun _ _ => True
-    completeness := fun _ _ => rfl }
+    verify := fun _ m sig => decide (sig = towerMul 7 (towerOne 7) (towerAdd 7 (towerOne 7) m))
+    complete := fun _ sk => sk = towerOne 7
+    completeness := fun h _ => by subst h; exact decide_eq_true rfl }
 
 def tower128State : IdealTsigState Unit Tower128 :=
   { pk := (), threshold := 2, numParties := 3, corruptParties := [2]

@@ -7300,7 +7300,7 @@ theorem prodEufCmaWin_eq (suite : TweakableHashSuite) (params : PqHashParams)
         decide (o.msgStar ∉ (productionSigningLog suite params o.sk o.queries).map Prod.fst)) := by
   rfl
 
-#export_eqns prodToyStatefulParams prodToyForgery
+#export_eqns prodToyStatefulParams prodToyForgery prodGrind
 
 end Qsag
 end
