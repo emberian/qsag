@@ -1,0 +1,73 @@
+{
+  "library": "nangate45",
+  "nand2_um2": 0.798,
+  "abc_target_ps": 2500,
+  "area_um2": 539621.17,
+  "seq_area_um2": 47847.28,
+  "kGE": 676.22,
+  "seq_kGE": 59.96,
+  "num_cells": 434460,
+  "sram_banks": "4 x sram_dp_64x16384_bank (512 KiB total, foundry macro excluded from stdcell kGE)",
+  "macros": {
+    "qsag_gl64_mul_csa": {
+      "area_um2": 24320.912,
+      "kGE": 30.48,
+      "abc_delay_ps": 3767.05
+    },
+    "qsag_p2_me": {
+      "area_um2": 48173.132,
+      "kGE": 60.37,
+      "abc_delay_ps": 4951.1
+    },
+    "qsag_p2_mi_tail": {
+      "area_um2": 5963.986,
+      "kGE": 7.47,
+      "abc_delay_ps": 3535.15
+    },
+    "qsag_p2_mi_apply": {
+      "area_um2": 22870.68,
+      "kGE": 28.66,
+      "abc_delay_ps": 2503.13
+    },
+    "qsag_p2_canopy_ff": {
+      "area_um2": 6143.536,
+      "kGE": 7.7,
+      "abc_delay_ps": 2491.64
+    },
+    "qsag_ext4_kara_inputs": {
+      "area_um2": 3327.926,
+      "kGE": 4.17,
+      "abc_delay_ps": 2516.85
+    },
+    "qsag_ext4_kara_combine": {
+      "area_um2": 18379.802,
+      "kGE": 23.03,
+      "abc_delay_ps": 4180.65
+    },
+    "qsag_keccak_round": {
+      "area_um2": 9314.788,
+      "kGE": 11.67,
+      "abc_delay_ps": 423.65
+    },
+    "qsag_gf128_mul": {
+      "area_um2": 17548.552,
+      "kGE": 21.99,
+      "abc_delay_ps": 1188.37
+    },
+    "qsag_tower128_to_poly": {
+      "area_um2": 6585.096,
+      "kGE": 8.25,
+      "abc_delay_ps": 595.17
+    },
+    "qsag_poly_to_tower128": {
+      "area_um2": 6595.47,
+      "kGE": 8.27,
+      "abc_delay_ps": 584.34
+    },
+    "qsag_ni_asic_top": {
+      "area_um2": 165916.968,
+      "kGE": 207.92,
+      "abc_delay_ps": 2655.78
+    }
+  }
+}
