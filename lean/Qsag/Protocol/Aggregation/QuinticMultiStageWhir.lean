@@ -1028,3 +1028,1031 @@ theorem table_fold_flip (s k A : Nat) (hs : s+1 ≤ 32) (hk : 0 < k) (hA : k ≤
 
 /-- The stage-zero flip estimate on arbitrary 256-point statements outside the
     actual WHIR language, for any valid first sumcheck message. -/
+theorem multiStage_first_fold_flip (x : WhirStmt K)
+    (hx : ¬ whirInLang zkHemV2MultiStageEnv zkHemV2MultiStageSched x)
+    (msg : List K) (hlen : msg.length ≤ 3)
+    (hclaim : RoundPoly.evalCoeffs msg zero +ᵍ RoundPoly.evalCoeffs msg one = x.claim) :
+    qsum (2^22480) (fun c => if foldClaimLive (stageDomain 7) 8 88 (pairRoot 7)
+      (pairPos 7 x.table) (pairNeg 7 x.table) [(one,one)] msg (whirField c.val 0)
+      then 1 else 0) ≤ 2^22080 * (128 * (2^400 / quinticGoldilocksCard + 1)) := by
+  have n : (stageDomain 7).length = 128 := by simp [stageDomain]
+  have h := foldClaimLive_seed_bound 22080 (stageDomain 7) 8 88 (pairRoot 7)
+    (pairPos 7 x.table) (pairNeg 7 x.table) (stageDomain_nodup 7 (by decide))
+    (by decide) (by decide) (by rw [n]; decide) (by rw [n]; decide)
+    (pairRoot_spec 7 (by decide)) [(one,one)] msg hlen (by
+      intro P hp hc he
+      apply hx
+      refine ⟨P, ?_, pair_agreement_to_scalar 7 88 (by decide) _ _ hc, ?_⟩
+      · change P.length ≤ 17; omega
+      · change RoundPoly.evalCoeffs P one = x.claim
+        rw [← hclaim, he]
+        simp only [kernelValue, LawfulCommRing.one_mul, LawfulCommRing.add_zero])
+  simpa only [n, show max 2 128 = 128 by decide] using h
+
+theorem multiStage_fold_budget (st : WhirStage) (h : st ∈ zkHemV2MultiStageSched.stages) :
+    RatBound.le ⟨2^22080 * (128 * (2^400 / quinticGoldilocksCard + 1)),
+      2^22480, Nat.two_pow_pos _⟩ (st.foldBound quinticGoldilocksCard quinticGoldilocksCard_pos) := by
+  simp only [zkHemV2MultiStageSched, List.mem_cons, List.not_mem_nil, or_false] at h
+  rcases h with rfl | rfl | rfl <;> rw [WhirStage.foldBound_eq] <;> decide +kernel
+
+/-- The terminal polynomial is fixed in the commit round. A successful terminal
+    check supplies both the carried claim and all sampled scalar evaluations. -/
+def terminalLive (s t : Nat) (prev : K → K) (terms : List (K × K)) (cl : K) (P : List K) (c : Nat) : Bool :=
+  (List.range t).all (fun j =>
+    let z := cosetPoint s (whirPosition c j (2^s))
+    decide (cl = kernelValue P terms ∧ prev z = RoundPoly.evalCoeffs P z))
+
+theorem terminalLive_mass (s t k A : Nat) (hs : s ≤ 32) (hk : 0 < k) (hA : k ≤ A)
+    (prev : K → K) (terms : List (K × K)) (cl : K) (P : List K) (hp : P.length ≤ k)
+    (hFalse : wordLive (stageDomain s) k A prev terms cl = false) :
+    qsum ((2^32)^t * 2^2000) (fun c => if terminalLive s t prev terms cl P c.val then 1 else 0) ≤
+      (2^(32-s)*A)^t * 2^2000 := by
+  let good := fun j => decide (cl = kernelValue P terms ∧ prev (cosetPoint s j) = RoundPoly.evalCoeffs P (cosetPoint s j))
+  exact whirPosition_all_good_seeds s t A hs good (by
+    simpa only [good, decide_eq_true_eq] using false_word_agrees s k A hs hk hA prev terms cl P hp hFalse)
+
+def multiStageFoldBad : Nat := 2^22080 * (128 * (2^400 / quinticGoldilocksCard + 1))
+
+def multiStageShiftBad : Nat := (2^25*88)^640 * 2^2000 +
+  (2^32)^640 * (2^1600 * (641 * (2^400/quinticGoldilocksCard+1)))
+
+theorem multiStage_shift_budget (st : WhirStage) (h : st ∈ zkHemV2MultiStageSched.stages) :
+    RatBound.le ⟨multiStageShiftBad, 2^22480, Nat.two_pow_pos _⟩
+      (st.shiftBound quinticGoldilocksCard quinticGoldilocksCard_pos) := by
+  simp only [zkHemV2MultiStageSched, List.mem_cons, List.not_mem_nil, or_false] at h
+  rcases h with rfl | rfl | rfl <;> rw [WhirStage.shiftBound_eq] <;> unfold multiStageShiftBad <;> decide +kernel
+
+/-! ## Round-by-round state for the 256-point schedule -/
+
+private inductive CertStage where | first | middle | last
+private def CertStage.log : CertStage → Nat | .first => 7 | .middle => 6 | .last => 5
+private def CertStage.coeffs : CertStage → Nat | .first => 8 | .middle => 4 | .last => 2
+private def CertStage.threshold : CertStage → Nat | .first => 88 | .middle => 44 | .last => 22
+
+private structure CertInput where
+  table : List K
+  terms : List (K × K)
+  claim : K
+
+private structure CertFold where
+  word : K → K
+  terms : List (K × K)
+  claim : K
+
+private abbrev Round := WhirMsg K × Nat
+
+private def validRound (i : CertInput) (m : WhirMsg K) : Bool :=
+  decide (m.poly.length ≤ 3 ∧ RoundPoly.evalCoeffs m.poly zero +ᵍ RoundPoly.evalCoeffs m.poly one = i.claim)
+
+private def makeFold (st : CertStage) (i : CertInput) (r : Round) : CertFold :=
+  let α := whirField r.2 0
+  ⟨fun z => quinticWhirFold2 (pairRoot st.log z) α (pairPos st.log i.table z) (pairNeg st.log i.table z),
+    i.terms.map (foldKernelTerm α), RoundPoly.evalCoeffs r.1.poly α⟩
+
+private def inputLive (st : CertStage) (i : CertInput) :=
+  wordLive (stageDomain (st.log+1)) (2*st.coeffs) (2*st.threshold) (pairPos (st.log+1) i.table) i.terms i.claim
+
+private def foldedLive (st : CertStage) (f : CertFold) :=
+  wordLive (stageDomain st.log) st.coeffs st.threshold f.word f.terms f.claim
+
+private theorem foldedLive_eq (st : CertStage) (i : CertInput) (r : Round) :
+    foldedLive st (makeFold st i r) =
+      foldClaimLive (stageDomain st.log) st.coeffs st.threshold (pairRoot st.log)
+        (pairPos st.log i.table) (pairNeg st.log i.table) i.terms r.1.poly (whirField r.2 0) := by
+  unfold foldedLive wordLive makeFold foldClaimLive foldCandidates
+  dsimp only
+  congr 1
+  funext p
+  apply Bool.eq_iff_iff.mpr
+  simp only [decide_eq_true_eq]; exact eq_comm
+
+private def makeShift (st : CertStage) (f : CertFold) (cm an : Round) : CertInput :=
+  let pts := (shiftPositions st.log 640 (an.2/2^2000)).map (cosetPoint st.log)
+  let γ := whirField an.2 0
+  ⟨cm.1.table, f.terms ++ weightedPoints γ ([whirField cm.2 0] ++ pts),
+    combineClaim f.claim γ (an.1.answers ++ pts.map f.word)⟩
+
+private inductive CertPhase where
+  | input (st : CertStage) (i : CertInput)
+  | fold (st : CertStage) (f : CertFold)
+  | commit (st : CertStage) (f : CertFold) (cm : Round)
+  | done (ok : Bool)
+  | dead
+
+private def CertPhase.live : CertPhase → Bool
+  | .input st i => inputLive st i
+  | .fold st f | .commit st f _ => foldedLive st f
+  | .done ok => ok
+  | .dead => false
+
+private def certStart (x : WhirStmt K) : CertPhase := .input .first ⟨x.table,[(one,one)],x.claim⟩
+
+private def certStep : CertPhase → Round → CertPhase
+  | .input st i, r => if validRound i r.1 then .fold st (makeFold st i r) else .dead
+  | .fold st f, r => .commit st f r
+  | .commit st f cm, an =>
+    if an.1.answers.length = 1 then
+      match st with
+      | .first => .input .middle (makeShift .first f cm an)
+      | .middle => .input .last (makeShift .middle f cm an)
+      | .last => .done (decide (cm.1.poly.length ≤ 2) && terminalLive 5 640 f.word f.terms f.claim cm.1.poly an.2)
+    else .dead
+  | _, _ => .dead
+
+private def certBudget (r : Nat) : Nat :=
+  match r % 3 with
+  | 0 => multiStageFoldBad
+  | 1 => 0
+  | _ => multiStageShiftBad
+
+private def CertPhase.atRound (r : Nat) : CertPhase → Prop
+  | .input .. => r%3 = 0
+  | .fold .. => r%3 = 1
+  | .commit .. => r%3 = 2
+  | _ => True
+
+private theorem certRound_step (r : Nat) (p : CertPhase) (m : Round) (hp : p.atRound r) :
+    (certStep p m).atRound (r+1) := by
+  cases p with
+  | input st i =>
+    change r%3 = 0 at hp
+    simp only [certStep]; split
+    · change (r+1)%3 = 1; omega
+    · trivial
+  | fold st f =>
+    change r%3 = 1 at hp
+    change (r+1)%3 = 2; omega
+  | commit st f cm =>
+    change r%3 = 2 at hp
+    simp only [certStep]; split
+    · cases st with
+      | first | middle => change (r+1)%3 = 0; omega
+      | last => trivial
+    · trivial
+  | dead | done => trivial
+
+private theorem certRound_run (r : Nat) (p : CertPhase) (tr : List Round) (hp : p.atRound r) :
+    (tr.foldl certStep p).atRound (r+tr.length) := by
+  induction tr generalizing r p with
+  | nil => exact hp
+  | cons m tr ih =>
+    simpa only [List.foldl_cons, List.length_cons, Nat.add_assoc, Nat.add_comm 1]
+      using ih (r+1) (certStep p m) (certRound_step r p m hp)
+
+private theorem certStart_false (x : WhirStmt K) (hx : ¬ whirInLang zkHemV2MultiStageEnv zkHemV2MultiStageSched x) :
+    (certStart x).live = false := by
+  cases h : (certStart x).live with
+  | false => rfl
+  | true =>
+    change wordLive (stageDomain 8) 16 176 (pairPos 8 x.table) [(one,one)] x.claim = true at h
+    obtain ⟨P,hp,hc,he⟩ := (wordLive_iff _ _ _ _ _ _ (stageDomain_nodup 8 (by decide)) (by decide) (by decide)).mp h
+    apply False.elim; apply hx
+    refine ⟨P, ?_, ?_, ?_⟩
+    · change P.length ≤ 17; omega
+    · rw [scalar_agreement 8 (by decide)] at hc
+      exact hc
+    · change RoundPoly.evalCoeffs P one = x.claim
+      simpa only [kernelValue, LawfulCommRing.one_mul, LawfulCommRing.add_zero] using he
+
+private theorem certStage_geom (st : CertStage) : st.log+1 ≤ 32 ∧ 0 < st.coeffs ∧
+    st.coeffs ≤ st.threshold ∧ 2^st.log+st.coeffs ≤ 2*st.threshold ∧
+    2*2^st.log+st.coeffs ≤ 3*st.threshold ∧ max 2 (2^st.log) ≤ 128 := by
+  cases st <;> decide
+
+private theorem certInput_flip (st : CertStage) (i : CertInput) (m : WhirMsg K) (hp : inputLive st i = false) :
+    qsum (2^22480) (fun c => if (certStep (.input st i) (m,c.val)).live then 1 else 0) ≤ multiStageFoldBad := by
+  cases hm : validRound i m with
+  | false => simp only [certStep, hm, Bool.false_eq_true, ↓reduceIte, CertPhase.live, qsum_const, Nat.mul_zero, Nat.zero_le]
+  | true =>
+    obtain ⟨hlen, he⟩ := of_decide_eq_true hm
+    obtain ⟨hs,hk,hA,hov,hTriple,hmax⟩ := certStage_geom st
+    simp only [certStep, hm, ↓reduceIte, CertPhase.live, foldedLive_eq]
+    apply Nat.le_trans (table_fold_flip _ _ _ hs hk hA hov hTriple i.table m.poly i.terms i.claim hlen he hp)
+    exact Nat.mul_le_mul_left _ (Nat.mul_le_mul_right _ hmax)
+
+private theorem certShift_budget_eq (st : CertStage) :
+    (2^(32-st.log)*st.threshold)^640*2^2000 +
+      (2^32)^640*(2^1600*(641*(2^400/quinticGoldilocksCard+1))) = multiStageShiftBad := by
+  cases st <;> rfl
+
+private theorem shift_live_eq (st st' : CertStage) (f : CertFold) (cm an : Round)
+    (hlog : st'.log+1 = st.log) (hk : 2*st'.coeffs = st.coeffs) (ha : 2*st'.threshold = st.threshold) :
+    inputLive st' (makeShift st f cm an) =
+      shiftTableLive st.log 640 st.coeffs st.threshold (pairPos st.log cm.1.table) f.word f.terms f.claim
+        [whirField cm.2 0] an.1.answers (an.2/2^2000) (whirField an.2 0) := by
+  simp only [inputLive, makeShift, shiftTableLive, hlog,hk,ha,List.map_map,Function.comp_def]
+
+private theorem certCommit_flip (st : CertStage) (f : CertFold) (cm : Round) (m : WhirMsg K)
+    (hp : foldedLive st f = false) :
+    qsum (2^22480) (fun c => if (certStep (.commit st f cm) (m,c.val)).live then 1 else 0) ≤ multiStageShiftBad := by
+  by_cases hy : m.answers.length = 1
+  · obtain ⟨hs,hk,hA,hov,_,_⟩ := certStage_geom st
+    have count (st' : CertStage) (hl : st'.log+1 = st.log) (hd : 2*st'.coeffs = st.coeffs)
+        (ha : 2*st'.threshold = st.threshold) :
+        qsum (2^22480) (fun c => if inputLive st' (makeShift st f cm (m,c.val)) then 1 else 0) ≤ multiStageShiftBad := by
+      simp only [shift_live_eq st st' f cm _ hl hd ha]
+      rw [← certShift_budget_eq st]
+      exact shiftTableLive_mass st.log 640 st.coeffs st.threshold (by omega) hk hA hov _ f.word f.terms f.claim
+        [whirField cm.2 0] m.answers hy hp
+    cases st with
+    | first => simpa only [certStep,hy,↓reduceIte,CertPhase.live] using count .middle rfl rfl rfl
+    | middle => simpa only [certStep,hy,↓reduceIte,CertPhase.live] using count .last rfl rfl rfl
+    | last =>
+      by_cases hd : cm.1.poly.length ≤ 2
+      · simp only [certStep,hy,↓reduceIte,CertPhase.live,hd,decide_true,Bool.true_and]
+        have h := terminalLive_mass 5 640 2 22 (by decide) (by decide) (by decide) f.word f.terms f.claim cm.1.poly hd hp
+        apply Nat.le_trans h
+        rw [← certShift_budget_eq .last]
+        exact Nat.le_add_right _ _
+      · simp only [certStep,hy,↓reduceIte,CertPhase.live,hd,decide_false,Bool.false_and,Bool.false_eq_true,
+          qsum_const,Nat.mul_zero,Nat.zero_le]
+  · simp only [certStep,hy,↓reduceIte,CertPhase.live,Bool.false_eq_true,qsum_const,Nat.mul_zero,Nat.zero_le]
+
+private theorem certPhase_flip (p : CertPhase) (r : Nat) (hr : p.atRound r) (hp : p.live = false) (m : WhirMsg K) :
+    qsum (2^22480) (fun c => if (certStep p (m,c.val)).live then 1 else 0) ≤ certBudget r := by
+  cases p with
+  | input st i => change r%3=0 at hr; rw [certBudget,hr]; exact certInput_flip st i m hp
+  | fold st f =>
+    change r%3=1 at hr
+    change foldedLive st f = false at hp
+    simp only [certStep,CertPhase.live,hp,Bool.false_eq_true,↓reduceIte,qsum_const,Nat.mul_zero,Nat.zero_le]
+  | commit st f cm => change r%3=2 at hr; rw [certBudget,hr]; exact certCommit_flip st f cm m hp
+  | dead | done => simp only [certStep,CertPhase.live,Bool.false_eq_true,↓reduceIte,qsum_const,Nat.mul_zero,Nat.zero_le]
+
+/-! ## Nonconstant acceptance and OOD mutation -/
+
+def embedNat (n : Nat) : K := QuinticGoldilocks.ofBase (Goldilocks.ofNat n)
+
+def examplePoly : List K := [one, embedNat 2, embedNat 3, zero, zero, one]
+
+def exampleTable (k : Nat) (P : List K) : List K :=
+  (List.range (2 ^ k)).map fun j => RoundPoly.evalCoeffs P (cosetPoint k j)
+
+def exampleStmt : WhirStmt K := ⟨exampleTable 8 examplePoly, RoundPoly.evalCoeffs examplePoly one⟩
+
+/-- Fold challenges are one, OOD points are two, and the answer challenge samples index zero.
+    The committed tables are evaluations of the first and second folded polynomials. -/
+def exampleTranscript (lastAnswer : K) : List (WhirMsg K × Nat) :=
+  let p1 := foldPolyCoeffs one examplePoly
+  let p2 := foldPolyCoeffs one p1
+  let p3 := foldPolyCoeffs one p2
+  [(⟨[], [zero, embedNat 4, embedNat 3], []⟩, 1),
+   (⟨exampleTable 7 p1, [], []⟩, 2), (⟨[], [], [RoundPoly.evalCoeffs p1 (embedNat 2)]⟩, 0),
+   (⟨[], [zero, embedNat 4, embedNat 3], []⟩, 1),
+   (⟨exampleTable 6 p2, [], []⟩, 2), (⟨[], [], [RoundPoly.evalCoeffs p2 (embedNat 2)]⟩, 0),
+   (⟨[], [zero, embedNat 6, one], []⟩, 1),
+   (⟨[], p3, []⟩, 2), (⟨[], [], [lastAnswer]⟩, 0)]
+
+theorem example_all_three_odd_parts :
+    [examplePoly, foldPolyCoeffs one examplePoly,
+     foldPolyCoeffs one (foldPolyCoeffs one examplePoly)].all
+      (fun p => decide (foldPolyCoeffs zero p ≠ foldPolyCoeffs one p)) = true := by
+  decide +kernel
+
+private theorem combineClaim_zero (c : K) (vs : List K) : combineClaim c zero vs = c := by
+  rw [combineClaim.public_eq_1]
+  suffices ∀ (l : List K), l.foldl (fun (acc : K × K) v =>
+      (acc.1 +ᵍ acc.2 *ᵍ v, acc.2 *ᵍ zero)) (c, zero) = (c, zero) by rw [this]
+  intro l
+  induction l with
+  | nil => rfl
+  | cons v l ih => simpa only [List.foldl_cons, LawfulCommRing.zero_mul,
+      LawfulCommRing.add_zero] using ih
+
+private theorem whirField_small (n : Nat) (hn : n < 8) :
+    whirField n 0 = embedNat n := by
+  have he : encodeQuinticNat (embedNat n) = n := by
+    have hlt : n < goldilocksPrime := Nat.lt_trans hn (by decide)
+    rw [encodeQuinticNat.public_eq_1]
+    simp only [embedNat, QuinticGoldilocks.ofBase, Goldilocks.ofNat, Nat.mod_eq_of_lt hlt]
+    change n + goldilocksPrime * (0 + goldilocksPrime * (0 + goldilocksPrime * (0 + goldilocksPrime * 0))) = n
+    simp
+  unfold whirField
+  rw [show 400 * (0 % 5) = 0 by decide, Nat.shiftRight_zero, Nat.mod_eq_of_lt
+    (Nat.lt_trans hn (by decide : 8 < 2 ^ 400))]
+  rw [decodeQuintic400.public_eq_1, Nat.mod_eq_of_lt (Nat.lt_trans hn (by decide : 8 < quinticGoldilocksCard)),
+    ← he, decodeQuinticNat_encodeQuinticNat, he]
+
+private theorem cosetPoint_zero (k : Nat) : cosetPoint k 0 = one := by
+  rw [cosetPoint, basePower_eq, ZkHemV2.fpow_zero, QuinticGoldilocks.ofBase_one]
+
+private theorem cosetPoint_half (k : Nat) (hk : k + 1 ≤ 32) :
+    cosetPoint (k + 1) (2 ^ k) = neg one := by
+  rw [cosetPoint, basePower_eq, ZkHemV2.twoAdicElem_half_pow k hk,
+      QuinticGoldilocks.ofBase_neg, QuinticGoldilocks.ofBase_one]
+
+/-- Reading each stage at positions 0 and n yields the two antipodal evaluations. -/
+def examplePair (p : List K) : List K :=
+  [RoundPoly.evalCoeffs p one, RoundPoly.evalCoeffs p (neg one)]
+
+def exampleValues : List K :=
+  let tape := fun p => (List.replicate 640 (examplePair p)).flatten
+  let p1 := foldPolyCoeffs one examplePoly
+  tape examplePoly ++ (tape p1 ++ tape (foldPolyCoeffs one p1))
+
+private theorem examplePair_fold (p : List K) :
+    foldBlock zkHemV2MultiStageEnv [one] one (examplePair p) =
+      RoundPoly.evalCoeffs (foldPolyCoeffs one p) one := by
+  have h0 : fiberPoint 1 one 0 = one := by rw [fiberPoint, cosetPoint_zero, LawfulCommRing.mul_one]
+  have he : fiberEvaluations 1 one p = examplePair p := by
+    rw [fiberEvaluations, show (List.range (2^1)) = [0,1] by decide]
+    simp only [List.map_cons, List.map_nil, h0, examplePair]
+    rw [show (1 : Nat) = 2^0 + 0 by rfl, fiberPoint_antipode 0 0 (by decide), h0]
+  have hf := foldBlock_evalCoeffs zkHemV2MultiStageEnv (by rfl) (by rfl) [one] one p
+    (by decide) (Ne.symm LawfulField.zero_ne_one)
+  simpa only [List.foldl_cons, List.foldl_nil, List.length_cons, List.length_nil, he, Nat.reduceAdd,
+    ZkHemV2.pow2Iter_one, LawfulCommRing.one_mul] using hf
+
+private theorem repeatedPair_length (n : Nat) (p : List K) :
+    ((List.replicate n (examplePair p)).flatten).length = n * 2 := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [List.replicate_succ, List.flatten_cons, List.length_append, ih, Nat.succ_mul]
+    change 2 + n * 2 = n * 2 + 2
+    omega
+
+private theorem repeatedPair_at (n j : Nat) (p : List K) (hj : j < n) :
+    (((List.replicate n (examplePair p)).flatten).drop (j * 2)).take 2 = examplePair p := by
+  induction j generalizing n with
+  | zero =>
+    cases n with
+    | zero => omega
+    | succ n => rw [List.replicate_succ, List.flatten_cons]; rfl
+  | succ j ih =>
+    cases n with
+    | zero => omega
+    | succ n =>
+      rw [List.replicate_succ, List.flatten_cons, Nat.succ_mul, Nat.add_comm (j * 2) 2,
+        ← List.drop_drop]
+      exact ih n (by omega)
+
+private theorem zeroSeed_field (j : Nat) : whirField 0 j = zero := by
+  simp only [whirField, Nat.zero_shiftRight, Nat.zero_mod, decodeQuintic400.public_eq_1]
+  have h := decodeQuinticNat_encodeQuinticNat (zero : K)
+  have he : encodeQuinticNat (zero : K) = 0 := by rw [encodeQuinticNat.public_eq_1]; rfl
+  rwa [he] at h
+
+private theorem zeroSeed_pos (j n : Nat) : whirPosition 0 j n = 0 := by
+  simp only [whirPosition, Nat.zero_shiftRight, Nat.zero_mod]
+
+private theorem check_nonterminal (env : WhirEnv K) (allVs : List (StageView K)) (i : Nat)
+    (st next : WhirStage) (rest : List WhirStage) (v : StageView K) (vs : List (StageView K))
+    (c c' : K) (as : List K) (p tail : List K)
+    (hr : stageFoldRun env i st.sumcheckDeg c v.folds = some (c', as))
+    (hy : v.answer.1.answers.length = st.oodCount) (hk : st.foldK = 1)
+    (hg : env.chalField v.answer.2 st.queryCount = zero) :
+    whirCheckStagesAux env allVs i (st :: next :: rest) (v :: vs) c
+        ((List.replicate st.queryCount (examplePair p)).flatten ++ tail) =
+      whirCheckStagesAux env allVs (i + 1) (next :: rest) vs c' tail := by
+  rw [whirCheckStagesAux.eq_1, hr]
+  simp only [hy, decide_true, hk, hg, combineClaim_zero, List.isEmpty_cons,
+    Bool.false_eq_true, ↓reduceIte, List.length_append, repeatedPair_length,
+    show 2^1 = 2 by rfl, Nat.le_add_right, Bool.true_and]
+  rw [← repeatedPair_length st.queryCount p, List.drop_left]
+
+private theorem check_terminal (env : WhirEnv K) (allVs : List (StageView K)) (i : Nat)
+    (st : WhirStage) (v : StageView K) (c c' : K) (as : List K) (p : List K)
+    (hr : stageFoldRun env i st.sumcheckDeg c v.folds = some (c', as))
+    (hy : v.answer.1.answers.length = st.oodCount) (hk : st.foldK = 1)
+    (hraw : env.foldBlockRaw = none)
+    (hpoint : ∀ j, env.chalPos v.answer.2 j st.domainSize = 0)
+    (hfold : foldBlock env as (env.domPt i 0) (examplePair p) =
+      RoundPoly.evalCoeffs v.commit.1.poly (env.domPt (i+1) 0))
+    (hdeg : v.commit.1.poly.length ≤ env.finalDeg + 1)
+    (hclaim : c' = match env.finalClaimViews with
+      | none => env.finalClaim v.commit.1.poly as | some f => f allVs as) :
+    whirCheckStagesAux env allVs i [st] [v] c (List.replicate st.queryCount (examplePair p)).flatten =
+    (((List.range st.oodCount).map (env.chalField v.commit.2)).zip v.answer.1.answers).all
+      (fun zy => decide (RoundPoly.evalCoeffs v.commit.1.poly zy.1 = zy.2)) := by
+  have hmap : (List.range st.queryCount).map (fun j =>
+      foldBlock env as (env.domPt i 0) (((List.replicate st.queryCount (examplePair p)).flatten.drop
+        (j*2)).take 2)) =
+      List.replicate st.queryCount (RoundPoly.evalCoeffs v.commit.1.poly (env.domPt (i+1) 0)) := by
+    conv => rhs; rw [← List.length_range (n := st.queryCount), ← List.map_const (l := List.range st.queryCount)]
+    apply List.map_congr_left
+    intro j hj
+    rw [repeatedPair_at _ _ _ (List.mem_range.mp hj), hfold]
+    rfl
+  rw [whirCheckStagesAux.eq_1, hr]
+  simp only [hy, decide_true, hk, hraw, hpoint, List.isEmpty_nil, ↓reduceIte, repeatedPair_length,
+    show 2^1 = 2 by rfl, Nat.le_refl, Bool.true_and, decide_eq_true hdeg, Bool.and_true,
+    hmap]
+  have ht : ((List.range st.queryCount).zip (List.replicate st.queryCount
+      (RoundPoly.evalCoeffs v.commit.1.poly (env.domPt (i+1) 0)))).all
+      (fun jv => decide (RoundPoly.evalCoeffs v.commit.1.poly (env.domPt (i+1) 0) = jv.2)) = true := by
+    apply List.all_eq_true.mpr
+    intro a ha
+    exact decide_eq_true (List.eq_of_mem_replicate (List.of_mem_zip ha).2).symm
+  rw [ht, Bool.and_true]
+  cases hv : env.finalClaimViews <;> simp only [hv] at hclaim ⊢ <;> simp [hclaim]
+
+private def refStage (k d a : Nat) : WhirStage := ⟨1,k,4,1,640,d,a,1,4,8,2,256⟩
+
+private def foldOne := foldPolyCoeffs one examplePoly
+private def foldTwo := foldPolyCoeffs one foldOne
+private def foldThree := foldPolyCoeffs one foldTwo
+
+private def exampleView (a b : Nat) (p : List K) (answer : K) : StageView K :=
+  ⟨[(⟨[zero, embedNat a, embedNat b], []⟩, 1)], (⟨p, []⟩, 2), (⟨[], [answer]⟩, 0)⟩
+
+private def viewsFor (answer : K) : List (StageView K) :=
+  [exampleView 4 3 [] (RoundPoly.evalCoeffs foldOne (embedNat 2)),
+   exampleView 4 3 [] (RoundPoly.evalCoeffs foldTwo (embedNat 2)),
+   exampleView 6 1 foldThree answer]
+
+def examplePublic (y : K) : List (WhirPub K × Nat) :=
+  (exampleTranscript y).map fun (m,c) => (⟨m.poly,m.answers⟩, c)
+
+private theorem example_split (y : K) :
+    splitStages zkHemV2MultiStageSched.stages (examplePublic y) = some (viewsFor y) := by rfl
+
+private theorem example_sumcheck (i a b : Nat) (p : List K) (y : K)
+    (h : (a,b) = (4,3) ∨ (a,b) = (6,1)) :
+    stageFoldRun zkHemV2MultiStageEnv i 2 (embedNat 7) (exampleView a b p y).folds =
+      some (embedNat 7, [one]) := by
+  rw [stageFoldRun.public_eq_1]
+  change sumcheckRun zkHemV2MultiStageEnv 2 (embedNat 7)
+    [(⟨[zero, embedNat a, embedNat b], []⟩, 1)] = _
+  let q := [zero, embedNat a, embedNat b]
+  have hd : q.length ≤ 2 + 1 := Nat.le_refl 3
+  have hc : RoundPoly.evalCoeffs q zero +ᵍ RoundPoly.evalCoeffs q one = embedNat 7 := by
+    rcases h with h | h <;> injection h with ea eb <;> subst a <;> subst b <;> decide +kernel
+  have he : RoundPoly.evalCoeffs q one = embedNat 7 := by
+    rcases h with h | h <;> injection h with ea eb <;> subst a <;> subst b <;> decide +kernel
+  have ha : zkHemV2MultiStageEnv.chalField 1 0 = one := whirField_small 1 (by decide)
+  rw [sumcheckRun.public_eq_2]
+  change (if q.length ≤ 2+1 ∧ _ then _ else _) = _
+  rw [ite_eq_left ⟨hd,hc⟩, ha, sumcheckRun.public_eq_1, he]
+  rfl
+
+private theorem example_terminalClaim (y : K) :
+    terminalKernel zkHemV2MultiStageSched.stages (viewsFor y) [(one,one)] = embedNat 7 := by
+  have h1 : whirField 1 0 = one := whirField_small 1 (by decide)
+  simp only [zkHemV2MultiStageSched, viewsFor, exampleView, terminalKernel, List.foldl_cons,
+    List.foldl_nil, List.isEmpty_cons, List.isEmpty_nil, Bool.false_eq_true, ↓reduceIte,
+    h1, zeroSeed_field, weightedPoints, List.append_nil, List.map_cons, List.map_nil]
+  decide +kernel
+
+theorem example_verdict (y : K) :
+    whirVerdict zkHemV2MultiStageEnv zkHemV2MultiStageSched (embedNat 7)
+      (examplePublic y) exampleValues = decide (embedNat 7 = y) := by
+  rw [whirVerdict.public_eq_1, example_split]
+  dsimp only
+  rw [whirCheckStages.public_eq_1]
+  let env := zkHemV2MultiStageEnv
+  let cs := embedNat 7
+  let v0 := exampleView 4 3 [] (RoundPoly.evalCoeffs foldOne (embedNat 2))
+  let v1 := exampleView 4 3 [] (RoundPoly.evalCoeffs foldTwo (embedNat 2))
+  let v2 := exampleView 6 1 foldThree y
+  let tape := fun p => (List.replicate 640 (examplePair p)).flatten
+  change whirCheckStagesAux env (viewsFor y) 0 [refStage 7 8 88, refStage 6 4 44, refStage 5 2 22]
+    [v0, v1, v2] cs (tape examplePoly ++ (tape foldOne ++ tape foldTwo)) = _
+  have hg : env.chalField 0 640 = zero := zeroSeed_field _
+  apply Eq.trans (check_nonterminal env (viewsFor y) 0 (refStage 7 8 88) (refStage 6 4 44) _ v0 _
+    cs cs [one] examplePoly (tape foldOne ++ tape foldTwo) (example_sumcheck 0 4 3 _ _ (.inl rfl)) rfl rfl hg)
+  apply Eq.trans (check_nonterminal env (viewsFor y) 1 (refStage 6 4 44) (refStage 5 2 22) _ v1 _
+    cs cs [one] foldOne (tape foldTwo) (example_sumcheck 1 4 3 _ _ (.inl rfl)) rfl rfl hg)
+  have dom (i : Nat) : env.domPt i 0 = one := cosetPoint_zero _
+  have hf : foldBlock env [one] (env.domPt 2 0) (examplePair foldTwo) =
+      RoundPoly.evalCoeffs foldThree (env.domPt 3 0) := by
+    rw [dom, dom]; exact examplePair_fold _
+  apply Eq.trans (check_terminal env (viewsFor y) 2 (refStage 5 2 22) v2 cs cs [one] foldTwo
+    (example_sumcheck 2 6 1 _ _ (.inr rfl)) rfl rfl rfl (fun j => zeroSeed_pos j _) hf
+    (by change foldThree.length ≤ 2; decide +kernel) (example_terminalClaim y).symm)
+  change ([env.chalField 2 0].zip [y]).all _ = _
+  have h2 : env.chalField 2 0 = embedNat 2 := whirField_small _ (by decide)
+  rw [h2]
+  change (decide (RoundPoly.evalCoeffs foldThree (embedNat 2) = y) && true) = _
+  rw [show RoundPoly.evalCoeffs foldThree (embedNat 2) = embedNat 7 by decide +kernel, Bool.and_true]
+
+private def pairQueries (i k : Nat) : List (Nat × Nat) :=
+  (List.replicate 640 [(i,0), (i,2^k)]).flatten
+
+private theorem example_stage_queries (i k d a u v : Nat) (p : List K) (y : K) :
+    stageQueries zkHemV2MultiStageEnv i (refStage k d a) (exampleView u v p y) =
+      pairQueries i k := by
+  rw [stageQueries.public_eq_1]
+  change ((List.range 640).flatMap fun j => (List.range 2).map fun b =>
+    (i, whirPosition 0 j (2^k) + b * 2^k)) = _
+  simp only [zeroSeed_pos, show List.range 2 = [0,1] by decide, List.map_cons, List.map_nil,
+    Nat.zero_mul, Nat.one_mul, Nat.zero_add, List.flatMap_def]
+  change (List.map (Function.const Nat [(i,0),(i,2^k)]) _).flatten = _
+  rw [List.map_const, List.length_range]
+  rfl
+
+private theorem example_queries (y : K) : whirQueries zkHemV2MultiStageEnv zkHemV2MultiStageSched
+    (examplePublic y) = pairQueries 0 7 ++ (pairQueries 1 6 ++ pairQueries 2 5) := by
+  rw [whirQueries.public_eq_1, example_split]
+  change allStageQueries zkHemV2MultiStageEnv 0 [refStage 7 8 88, refStage 6 4 44, refStage 5 2 22]
+    (viewsFor y) = _
+  simp only [viewsFor, allStageQueries.public_eq_1, allStageQueries.public_eq_2,
+    example_stage_queries, List.append_nil]
+
+private theorem exampleTable_getD (k j : Nat) (p : List K) (hj : j < 2^k) :
+    (exampleTable k p).getD j zero = RoundPoly.evalCoeffs p (cosetPoint k j) := by
+  rw [exampleTable, List.getD_eq_getElem?_getD, List.getElem?_map,
+      List.getElem?_eq_getElem (List.length_range ▸ hj), List.getElem_range]
+  rfl
+
+private theorem example_reads_pair (i k : Nat) (p : List K) (f : Nat × Nat → K)
+    (hk : k + 1 ≤ 32) (hf : ∀ j, f (i,j) = (exampleTable (k+1) p).getD j zero) :
+    (pairQueries i k).map f = (List.replicate 640 (examplePair p)).flatten := by
+  have h0 := Nat.two_pow_pos k
+  have h2 : 2^k < 2^(k+1) := by rw [Nat.pow_succ]; omega
+  simp only [pairQueries, List.map_flatten, List.map_replicate, List.map_cons, List.map_nil,
+    hf, exampleTable_getD _ 0 _ (Nat.two_pow_pos _), exampleTable_getD _ _ _ h2,
+    cosetPoint_zero, cosetPoint_half _ hk, examplePair]
+
+private theorem example_reads (y : K) :
+    (whirQueries zkHemV2MultiStageEnv zkHemV2MultiStageSched (examplePublic y)).map
+      (fun q => whirTable zkHemV2MultiStageSched exampleStmt ((exampleTranscript y).map Prod.fst) q.1 q.2) =
+      exampleValues := by
+  let f := fun q : Nat × Nat =>
+    whirTable zkHemV2MultiStageSched exampleStmt ((exampleTranscript y).map Prod.fst) q.1 q.2
+  change List.map f _ = _
+  rw [example_queries, List.map_append, List.map_append]
+  have h0 (j : Nat) : f (0,j) = (exampleTable 8 examplePoly).getD j zero := by
+    rw [show f (0,j) = _ from whirTable.public_eq_1 _ _ _ j]
+    rfl
+  have hi0 : commitRoundIdx zkHemV2MultiStageSched.stages 0 = 1 := by
+    rw [zkHemV2MultiStageSched, commitRoundIdx.public_eq_2]
+  have hi1 : commitRoundIdx zkHemV2MultiStageSched.stages 1 = 4 := by
+    rw [zkHemV2MultiStageSched, commitRoundIdx.public_eq_3, commitRoundIdx.public_eq_2]; rfl
+  have h1 (j : Nat) : f (1,j) = (exampleTable 7 foldOne).getD j zero := by
+    change whirTable _ _ _ (0+1) j = _
+    rw [whirTable.public_eq_2, hi0]; rfl
+  have h2 (j : Nat) : f (2,j) = (exampleTable 6 foldTwo).getD j zero := by
+    change whirTable _ _ _ (1+1) j = _
+    rw [whirTable.public_eq_2, hi1]; rfl
+  rw [example_reads_pair 0 7 _ f (by decide) h0, example_reads_pair 1 6 _ f (by decide) h1,
+    example_reads_pair 2 5 _ f (by decide) h2]
+  rfl
+
+theorem example_verify (y : K) :
+    (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).verify exampleStmt
+      (exampleTranscript y) = decide (embedNat 7 = y) := by
+  rw [OracleIop.verify_eq]
+  change (true && whirVerdict zkHemV2MultiStageEnv zkHemV2MultiStageSched exampleStmt.claim
+    (examplePublic y) ((whirQueries _ _ (examplePublic y)).map _)) = _
+  rw [Bool.true_and]
+  apply Eq.trans (congrArg (whirVerdict zkHemV2MultiStageEnv zkHemV2MultiStageSched exampleStmt.claim
+    (examplePublic y)) (example_reads y))
+  exact example_verdict y
+
+theorem zkHemV2MultiStage_honest_accepts :
+    (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).verify exampleStmt
+      (exampleTranscript (embedNat 7)) = true := by rw [example_verify]; decide +kernel
+
+theorem tooth_changed_ood_rejected :
+    (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).verify exampleStmt
+      (exampleTranscript (embedNat 8)) = false := by rw [example_verify]; decide +kernel
+
+theorem accepted_example_ood (y : K)
+    (h : (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).verify exampleStmt
+      (exampleTranscript y) = true) : y = embedNat 7 := by
+  rw [example_verify, decide_eq_true_eq] at h; exact h.symm
+
+theorem inhabited_succinctWhirAggregate_honest_accepts :
+    ∃ y, (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).verify exampleStmt
+      (exampleTranscript y) = true := ⟨_, zkHemV2MultiStage_honest_accepts⟩
+
+/-! ## Equivalence with the reads and checks of the oracle verifier -/
+
+private def pub (r : Round) : WhirPub K × Nat := (⟨r.1.poly,r.1.answers⟩, r.2)
+private def mkView (f cm an : Round) : StageView K := ⟨[pub f], pub cm, pub an⟩
+
+private def twiceMap {α β : Type} (l : List α) (a b : α → β) :=
+  l.flatMap (fun j => [a j,b j])
+
+private theorem twiceMap_length {α β : Type} (l : List α) (a b : α → β) :
+    (twiceMap l a b).length = l.length*2 := by
+  induction l with
+  | nil => rfl
+  | cons j js ih =>
+    change ((twiceMap js a b).length+1+1) = (js.length+1)*2
+    omega
+
+private theorem twiceMap_at {α β : Type} (l : List α) (a b : α → β) (tail : List β)
+    (j : Nat) (hj : j < l.length) :
+    (((twiceMap l a b ++ tail).drop (j*2)).take 2) = [a l[j], b l[j]] := by
+  induction l generalizing j with
+  | nil => cases hj
+  | cons z zs ih =>
+    cases j with
+    | zero => rfl
+    | succ j =>
+      change j+1 < zs.length+1 at hj
+      rw [Nat.succ_mul]
+      exact ih j (by omega)
+
+private def queryCells (st : CertStage) (i c : Nat) : List (Nat × Nat) :=
+  twiceMap (shiftPositions st.log 640 (c/2^2000)) (fun j => (i,j)) (fun j => (i,j+2^st.log))
+
+private def readStage (st : CertStage) (table : List K) (c : Nat) : List K :=
+  twiceMap (shiftPositions st.log 640 (c/2^2000)) (fun j => table.getD j zero)
+    (fun j => table.getD (2^st.log+j) zero)
+
+private def CertStage.whir (st : CertStage) := refStage st.log st.coeffs st.threshold
+
+private theorem stage_queries_exact (st : CertStage) (i : Nat) (f cm an : Round) :
+    stageQueries zkHemV2MultiStageEnv i st.whir (mkView f cm an) = queryCells st i an.2 := by
+  rw [stageQueries.public_eq_1]
+  change (List.range 640).flatMap (fun j => ([0,1] : List Nat).map (fun b =>
+    (i, whirPosition an.2 j (2^st.log) + b * 2^st.log))) = _
+  simp only [queryCells, twiceMap, shiftPositions, List.flatMap_map,
+    List.map_cons, List.map_nil, Nat.zero_mul, Nat.one_mul, Nat.add_zero, whirPosition_high]
+
+private theorem read_stage_exact (st : CertStage) (i c : Nat) (table : List K) (g : Nat × Nat → K)
+    (h : ∀ j, g (i,j) = table.getD j zero) : (queryCells st i c).map g = readStage st table c := by
+  simp only [queryCells, readStage, twiceMap, List.map_flatMap, List.map_cons,
+    List.map_nil, h, Nat.add_comm (2^st.log)]
+
+private theorem readStage_length (st : CertStage) (table : List K) (c : Nat) : (readStage st table c).length = 1280 := by
+  rw [readStage, twiceMap_length]; simp [shiftPositions]
+
+private theorem foldBlock_pair (x α a b : K) :
+    foldBlock zkHemV2MultiStageEnv [α] x [a,b] = quinticWhirFold2 x α a b := by
+  rw [foldBlock, show zkHemV2MultiStageEnv.fiberPoint = some fiberPoint from rfl, foldBlock]
+  simp only [show [a,b].length / 2 = 1 by simp, List.range_one, List.map_cons, List.map_nil, List.headD_cons]
+  change quinticWhirFold2 (fiberPoint 1 x 0) α a b = _
+  rw [fiberPoint, cosetPoint_zero, LawfulCommRing.mul_one]
+
+private def getFolded (i : Nat) (an : Round) (s : Nat) (α : K) (vals : List K) :=
+  (List.range 640).map (fun j =>
+    foldBlock zkHemV2MultiStageEnv [α] (zkHemV2MultiStageEnv.domPt i (whirPosition an.2 j (2^s)))
+      ((vals.drop (j*2)).take 2))
+
+private theorem fold_read_stage (st : CertStage) (i : Nat) (hdom : ∀ j, zkHemV2MultiStageEnv.domPt i j = cosetPoint (st.log+1) j)
+    (input : CertInput) (f an : Round) (tail : List K) :
+    getFolded i an st.log (whirField f.2 0) (readStage st input.table an.2 ++ tail) =
+    ((shiftPositions st.log 640 (an.2/2^2000)).map (cosetPoint st.log)).map (makeFold st input f).word := by
+  simp only [getFolded, shiftPositions, List.map_map, Function.comp_def]
+  apply List.map_congr_left
+  intro j hj
+  let qs := shiftPositions st.log 640 (an.2/2^2000)
+  have hj' : j < qs.length := by simpa [qs,shiftPositions] using List.mem_range.mp hj
+  have ix : qs[j] = shiftPos st.log (an.2/2^2000) j := by simp [qs,shiftPositions]
+  have pair := twiceMap_at qs (fun j => input.table.getD j zero)
+    (fun j => input.table.getD (2^st.log+j) zero) tail j hj'
+  change ((readStage st input.table an.2 ++ tail).drop (j*2)).take 2 = _ at pair
+  have hn : shiftPos st.log (an.2/2^2000) j < 2^st.log := Nat.mod_lt _ (Nat.two_pow_pos _)
+  have hs := (certStage_geom st).1
+  have idx := coord_index st.log _ (by omega) hn
+  rw [pair, ix, foldBlock_pair, hdom, whirPosition_high]
+  simp only [makeFold, pairRoot, pairPos, pairNeg, idx]
+
+private theorem stage_run_exact (st : CertStage) (i : Nat) (input : CertInput) (f cm an : Round) :
+    stageFoldRun zkHemV2MultiStageEnv i st.whir.sumcheckDeg input.claim (mkView f cm an).folds =
+      if validRound input f.1 then some ((makeFold st input f).claim,[whirField f.2 0]) else none := by
+  rw [stageFoldRun.public_eq_1]
+  change sumcheckRun zkHemV2MultiStageEnv 2 input.claim [pub f] = _
+  rw [sumcheckRun.public_eq_2]
+  simp only [pub, validRound, makeFold, sumcheckRun.public_eq_1, Option.map_some, decide_eq_true_eq]
+  split <;> simp_all [show zkHemV2MultiStageEnv.chalField = whirField from rfl]
+
+private def nextPoints (st : CertStage) (an : Round) :=
+  (shiftPositions st.log 640 (an.2/2^2000)).map (cosetPoint st.log)
+
+private theorem field640 (c : Nat) : whirField c 640 = whirField c 0 := by
+  unfold whirField; rw [show 640%5=0 by decide]
+
+private theorem nonterminal_accept (st : CertStage) (i : Nat) (hdom : ∀ j, zkHemV2MultiStageEnv.domPt i j = cosetPoint (st.log+1) j)
+    (allVs : List (StageView K)) (input : CertInput) (f cm an : Round)
+    (next : WhirStage) (rest : List WhirStage) (vs : List (StageView K)) (tail : List K)
+    (h : whirCheckStagesAux zkHemV2MultiStageEnv allVs i (st.whir :: next :: rest)
+      (mkView f cm an :: vs) input.claim (readStage st input.table an.2 ++ tail) = true) :
+    validRound input f.1 = true ∧ an.1.answers.length = 1 ∧
+    whirCheckStagesAux zkHemV2MultiStageEnv allVs (i+1) (next :: rest) vs
+      (makeShift st (makeFold st input f) cm an).claim tail = true := by
+  rw [whirCheckStagesAux.eq_1, stage_run_exact st i input f cm an] at h
+  cases hv : validRound input f.1 with
+  | false => rw [hv] at h; contradiction
+  | true =>
+    rw [hv] at h
+    simp only [↓reduceIte, List.isEmpty_cons, Bool.false_eq_true,
+      show zkHemV2MultiStageEnv.foldBlockRaw = none from rfl] at h
+    dsimp only [mkView,pub,CertStage.whir,refStage,WhirStage.domainSize] at h
+    rw [show zkHemV2MultiStageEnv.chalField = whirField from rfl, field640,
+        show zkHemV2MultiStageEnv.chalPos = whirPosition from rfl] at h
+    let vals := readStage st input.table an.2 ++ tail
+    change (decide (an.1.answers.length = 1) && decide (1280 ≤ vals.length) &&
+      whirCheckStagesAux zkHemV2MultiStageEnv allVs (i+1) (next::rest) vs
+        (combineClaim (makeFold st input f).claim (whirField an.2 0)
+          (an.1.answers ++ getFolded i an st.log (whirField f.2 0) vals))
+        (vals.drop 1280)) = true at h
+    have hd : vals.drop 1280 = tail := by change (_ ++ tail).drop 1280 = tail; rw [← readStage_length st input.table an.2, List.drop_left]
+    obtain ⟨⟨hy,_⟩,h⟩ := Bool.and_eq_true_iff.mp h |>.imp Bool.and_eq_true_iff.mp id
+    refine ⟨rfl, of_decide_eq_true hy, ?_⟩
+    rw [hd, fold_read_stage st i hdom input f an tail] at h
+    exact h
+
+private theorem kernel_step (st : CertStage) (next : WhirStage) (rest : List WhirStage)
+    (vs : List (StageView K)) (input : CertInput) (f cm an : Round) :
+    terminalKernel (st.whir :: next :: rest) (mkView f cm an :: vs) input.terms =
+      terminalKernel (next :: rest) vs (makeShift st (makeFold st input f) cm an).terms := by
+  have pts : (List.range 640).map (fun j => cosetPoint st.log (whirPosition an.2 j (2^st.log))) =
+      nextPoints st an := by simp only [nextPoints, shiftPositions, List.map_map, Function.comp_def, whirPosition_high]
+  rw [terminalKernel]
+  dsimp only [List.isEmpty_cons, Bool.false_eq_true, ↓reduceIte, CertStage.whir, refStage,
+    WhirStage.domainSize, mkView,pub,List.foldl_cons,List.foldl_nil]
+  rw [List.range_one, List.map_cons, List.map_nil, field640, pts]
+  rfl
+
+private theorem kernel_last (input : CertInput) (f cm an : Round) :
+    terminalKernel [CertStage.last.whir] [mkView f cm an] input.terms =
+      kernelValue cm.1.poly (makeFold .last input f).terms := by
+  rw [terminalKernel]
+  change List.foldl _ zero (makeFold .last input f).terms = _
+  rw [kernelValue_foldl, LawfulCommRing.zero_add]; rfl
+
+private theorem terminal_accept (allVs : List (StageView K)) (input : CertInput) (f cm an : Round)
+    (hkern : terminalKernel zkHemV2MultiStageSched.stages allVs [(one,one)] =
+      kernelValue cm.1.poly (makeFold .last input f).terms)
+    (h : whirCheckStagesAux zkHemV2MultiStageEnv allVs 2 [CertStage.last.whir] [mkView f cm an]
+      input.claim (readStage .last input.table an.2) = true) :
+    validRound input f.1 = true ∧ an.1.answers.length = 1 ∧ cm.1.poly.length ≤ 2 ∧
+      terminalLive 5 640 (makeFold .last input f).word (makeFold .last input f).terms
+        (makeFold .last input f).claim cm.1.poly an.2 = true := by
+  rw [whirCheckStagesAux.eq_1, stage_run_exact .last 2 input f cm an] at h
+  cases hv : validRound input f.1 with
+  | false => rw [hv] at h; contradiction
+  | true =>
+    rw [hv] at h
+    simp only [↓reduceIte, List.isEmpty_nil, show zkHemV2MultiStageEnv.foldBlockRaw = none from rfl] at h
+    let f' := makeFold .last input f
+    let vals := readStage .last input.table an.2
+    let pin := fun jv : Nat × K => decide (RoundPoly.evalCoeffs cm.1.poly
+      (cosetPoint 5 (whirPosition an.2 jv.1 32)) = jv.2)
+    change (decide (an.1.answers.length = 1) && decide (1280 ≤ vals.length) &&
+      (decide (cm.1.poly.length ≤ 2) && _ &&
+        ((List.range 640).zip (getFolded 2 an 5 (whirField f.2 0) vals)).all pin &&
+        decide (f'.claim = terminalKernel zkHemV2MultiStageSched.stages allVs [(one,one)]) &&
+        decide (vals.length = 1280))) = true at h
+    simp only [Bool.and_eq_true,decide_eq_true_eq,hkern] at h
+    obtain ⟨⟨hy,_⟩,⟨⟨⟨⟨hd,_⟩,ha⟩,hcl⟩,_⟩⟩ := h
+    refine ⟨rfl,hy,hd,List.all_eq_true.mpr ?_⟩
+    intro j hj
+    have hread := fold_read_stage .last 2 (fun _ => rfl) input f an []
+    rw [List.append_nil] at hread
+    change getFolded 2 an 5 (whirField f.2 0) vals = (nextPoints .last an).map f'.word at hread
+    rw [hread] at ha
+    let vs := (nextPoints .last an).map f'.word
+    have hj' : j < ((List.range 640).zip vs).length := by
+      simpa [vs,nextPoints,shiftPositions] using List.mem_range.mp hj
+    have he := List.all_eq_true.mp ha _ (List.getElem_mem hj')
+    have ee := of_decide_eq_true (show decide (_ = _) = true from he)
+    simp only [List.getElem_zip, List.getElem_range, vs, nextPoints, shiftPositions, List.getElem_map,
+      CertStage.log] at ee
+    rw [show (32 : Nat) = 2^5 by decide, whirPosition_high] at ee
+    exact decide_eq_true ⟨hcl, by simpa only [whirPosition_high] using ee.symm⟩
+
+private def nine (a b c d e f g h i : Round) : List Round := [a,b,c,d,e,f,g,h,i]
+private def threeViews (a b c d e f g h i : Round) := [mkView a b c,mkView d e f,mkView g h i]
+
+private theorem parse_nine (a b c d e f g h i : Round) :
+    splitStages zkHemV2MultiStageSched.stages ((nine a b c d e f g h i).map pub) =
+      some (threeViews a b c d e f g h i) := by rfl
+
+private theorem nine_reads (x : WhirStmt K) (a b c d e f g h i : Round) :
+    (whirQueries zkHemV2MultiStageEnv zkHemV2MultiStageSched ((nine a b c d e f g h i).map pub)).map
+      (fun p => whirTable zkHemV2MultiStageSched x ((nine a b c d e f g h i).map Prod.fst) p.1 p.2) =
+      readStage .first x.table c.2 ++ (readStage .middle b.1.table f.2 ++ readStage .last e.1.table i.2) := by
+  let rd := fun p : Nat × Nat => whirTable zkHemV2MultiStageSched x ((nine a b c d e f g h i).map Prod.fst) p.1 p.2
+  change List.map rd _ = _
+  rw [whirQueries.public_eq_1, parse_nine]
+  change (allStageQueries _ 0 [CertStage.first.whir,CertStage.middle.whir,CertStage.last.whir]
+    [mkView a b c,mkView d e f,mkView g h i]).map rd = _
+  simp only [allStageQueries.public_eq_1, allStageQueries.public_eq_2, stage_queries_exact, List.append_nil,
+    List.map_append]
+  have hi0 : commitRoundIdx zkHemV2MultiStageSched.stages 0 = 1 := by
+    rw [zkHemV2MultiStageSched, commitRoundIdx.public_eq_2]
+  have hi1 : commitRoundIdx zkHemV2MultiStageSched.stages 1 = 4 := by
+    rw [zkHemV2MultiStageSched, commitRoundIdx.public_eq_3, commitRoundIdx.public_eq_2]; rfl
+  have h0 (j : Nat) : rd (0,j) = x.table.getD j zero := whirTable.public_eq_1 _ _ _ _
+  have h1 (j : Nat) : rd (1,j) = b.1.table.getD j zero := by
+    change whirTable _ _ _ (0+1) j = _
+    rw [whirTable.public_eq_2,hi0]; rfl
+  have h2 (j : Nat) : rd (2,j) = e.1.table.getD j zero := by
+    change whirTable _ _ _ (1+1) j = _
+    rw [whirTable.public_eq_2,hi1]; rfl
+  rw [read_stage_exact _ 0 _ _ rd h0, read_stage_exact _ 1 _ _ rd h1, read_stage_exact _ 2 _ _ rd h2]
+
+private theorem cert_nine_accept (x : WhirStmt K) (a b c d e f g h i : Round)
+    (ha : (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).verify x
+      (nine a b c d e f g h i) = true) : ((nine a b c d e f g h i).foldl certStep (certStart x)).live = true := by
+  let vs := threeViews a b c d e f g h i
+  let inp : CertInput := ⟨x.table,[(one,one)],x.claim⟩
+  let mid := makeShift .first (makeFold .first inp a) b c
+  let last := makeShift .middle (makeFold .middle mid d) e f
+  rw [OracleIop.verify_eq] at ha
+  change (true && whirVerdict zkHemV2MultiStageEnv zkHemV2MultiStageSched x.claim
+    ((nine a b c d e f g h i).map pub)
+    ((whirQueries zkHemV2MultiStageEnv zkHemV2MultiStageSched ((nine a b c d e f g h i).map pub)).map
+      (fun q => whirTable zkHemV2MultiStageSched x ((nine a b c d e f g h i).map Prod.fst) q.1 q.2))) = true at ha
+  rw [Bool.true_and, nine_reads, whirVerdict.public_eq_1, parse_nine] at ha
+  change whirCheckStages zkHemV2MultiStageEnv 0 zkHemV2MultiStageSched.stages vs inp.claim _ = true at ha
+  rw [whirCheckStages.public_eq_1] at ha
+  change whirCheckStagesAux _ vs 0 [CertStage.first.whir,CertStage.middle.whir,CertStage.last.whir]
+    [mkView a b c,mkView d e f,mkView g h i] inp.claim _ = true at ha
+  obtain ⟨h0,hy0,ha⟩ := nonterminal_accept .first 0 (fun _ => rfl) vs inp a b c _ _ _ _ ha
+  obtain ⟨h1,hy1,ha⟩ := nonterminal_accept .middle 1 (fun _ => rfl) vs mid d e f _ _ _ _ ha
+  have hk : terminalKernel zkHemV2MultiStageSched.stages vs [(one,one)] =
+      kernelValue h.1.poly (makeFold .last last g).terms := by
+    change terminalKernel [CertStage.first.whir,CertStage.middle.whir,CertStage.last.whir]
+      [mkView a b c,mkView d e f,mkView g h i] inp.terms = _
+    rw [kernel_step .first _ _ _ inp, kernel_step .middle _ _ _ mid, kernel_last]
+  obtain ⟨h2,hy2,hd,hf⟩ := terminal_accept vs last g h i hk ha
+  change (List.foldl certStep (.input .first inp) [a,b,c,d,e,f,g,h,i]).live = true
+  simp only [List.foldl_cons, certStep, h0,hy0,h1,hy1,h2,hy2,hd, ↓reduceIte, decide_true,
+    List.foldl_nil,CertPhase.live,Bool.true_and,mid,last] at *
+  exact hf
+
+
+/-! ## The schedule certificate and succinct QROM bound -/
+
+private def certState (x : WhirStmt K) (tr : List Round) := (tr.foldl certStep (certStart x)).live
+
+private theorem cert_accept (x : WhirStmt K) (tr : List Round)
+    (h : (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).verify x tr = true) :
+    certState x tr = true := by
+  have hv := h
+  rw [OracleIop.verify_eq] at hv
+  have hlen : tr.length = 9 := of_decide_eq_true (Bool.and_eq_true_iff.mp hv).1
+  obtain ⟨a, tr, rfl⟩ : ∃ x xs, tr = x::xs := by cases tr with
+    | nil => simp at hlen
+    | cons x xs => exact ⟨x,xs,rfl⟩
+  obtain ⟨b, tr, rfl⟩ : ∃ x xs, tr = x::xs := by cases tr with
+    | nil => simp at hlen
+    | cons x xs => exact ⟨x,xs,rfl⟩
+  obtain ⟨c, tr, rfl⟩ : ∃ x xs, tr = x::xs := by cases tr with
+    | nil => simp at hlen
+    | cons x xs => exact ⟨x,xs,rfl⟩
+  obtain ⟨d, tr, rfl⟩ : ∃ x xs, tr = x::xs := by cases tr with
+    | nil => simp at hlen
+    | cons x xs => exact ⟨x,xs,rfl⟩
+  obtain ⟨e, tr, rfl⟩ : ∃ x xs, tr = x::xs := by cases tr with
+    | nil => simp at hlen
+    | cons x xs => exact ⟨x,xs,rfl⟩
+  obtain ⟨f, tr, rfl⟩ : ∃ x xs, tr = x::xs := by cases tr with
+    | nil => simp at hlen
+    | cons x xs => exact ⟨x,xs,rfl⟩
+  obtain ⟨g, tr, rfl⟩ : ∃ x xs, tr = x::xs := by cases tr with
+    | nil => simp at hlen
+    | cons x xs => exact ⟨x,xs,rfl⟩
+  obtain ⟨hh, tr, rfl⟩ : ∃ x xs, tr = x::xs := by cases tr with
+    | nil => simp at hlen
+    | cons x xs => exact ⟨x,xs,rfl⟩
+  obtain ⟨i, tr, rfl⟩ : ∃ x xs, tr = x::xs := by cases tr with
+    | nil => simp at hlen
+    | cons x xs => exact ⟨x,xs,rfl⟩
+  have hn : tr.length = 0 := by simp only [List.length_cons] at hlen; omega
+  obtain rfl := List.eq_nil_of_length_eq_zero hn
+  exact cert_nine_accept x a b c d e f g hh i h
+
+private theorem cert_covers (r : Fin zkHemV2MultiStageSched.numRounds) :
+    RatBound.le ⟨certBudget r.val, 2^22480, Nat.two_pow_pos _⟩
+      (zkHemV2MultiStageSched.roundBounds.getD r.val RatBound.one) := by
+  rcases r with ⟨r,hr⟩
+  change r < 9 at hr
+  have casesR : r=0 ∨ r=1 ∨ r=2 ∨ r=3 ∨ r=4 ∨ r=5 ∨ r=6 ∨ r=7 ∨ r=8 := by omega
+  rcases casesR with h|h|h|h|h|h|h|h|h <;> subst r <;>
+    rw [WhirVerifierSchedule.roundBounds_eq] <;>
+    simp only [zkHemV2MultiStageSched,stagesRoundBounds_cons,stagesRoundBounds_nil,
+      WhirStage.roundBounds_eq,WhirStage.foldBound_eq,WhirStage.shiftBound_eq,WhirStage.oodBound_eq,binom2_eq] <;>
+    unfold certBudget <;> decide +kernel
+
+/-- Constructive nine-round WHIR certificate on 256 → 128 → 64 → 32 scalar cells. -/
+def zkHemV2MultiStageCert : WhirScheduleCert zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 where
+  cert := {
+    state := certState
+    bad := fun r => certBudget r.val
+    init := certStart_false
+    accept := cert_accept
+    flip := by
+      intro x _ r pre m hlen hfalse
+      have hr := certRound_run 0 (certStart x) pre (show 0%3=0 by decide)
+      rw [Nat.zero_add, hlen] at hr
+      change qsum (2^22480) (fun c => if certState x (pre ++ [(m,c.val)]) then 1 else 0) ≤ _
+      simp only [certState,List.foldl_append,List.foldl_cons,List.foldl_nil]
+      exact certPhase_flip _ r.val hr hfalse m
+  }
+  covers := cert_covers
+
+/-- The closed succinct QROM reduction for the certified schedule. The remaining
+    hypotheses are the Merkle root reconstruction and false-statement conditions. -/
+theorem zkHemV2MultiStage_succinct_closed_qrom_soundness {D : Type} [DecidableEq D] {cardX cardAnc Q : Nat}
+    (M : MerkleSetup D K)
+    (dfltRoot : D)
+    (codec : FsCodec (SuccinctRoundMsg D (WhirPub K)) zkHemV2MultiStageSched.numRounds cardX)
+    (aux : Fin cardX → List (K × List D))
+    (claim : K) (initRoots : Nat → D) (tblOf : Nat → D → Nat → K)
+    (hx : ¬ whirInLang zkHemV2MultiStageEnv zkHemV2MultiStageSched
+      ((whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot).liftStmt claim initRoots tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec 22480) (o : Fin cardX),
+      succinctFsAccept (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480)
+        (whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot) M codec aux claim initRoots H o = true →
+      let str := fsTranscript codec H (codec.dec o)
+      ∀ q ∈ (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).queries claim (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 ((whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).depth q.1)
+          (tblOf q.1 ((whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)) =
+          (whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot).rootsOf initRoots (str.map Prod.fst) q.1)
+    (A : QuantumAdv cardX 22480 cardAnc Q) :
+    RatBound.le
+      ⟨uniformOracleSum 22480 cardX (fun H =>
+          QVec.queryMassOn
+            (succinctFsAccept (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480)
+              (whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot) M codec aux claim initRoots H)
+            (runQuantumAdv A H)),
+        (2 ^ 22480) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 22480))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (RatBound.add (scheduleQromError zkHemV2MultiStageSched Q)
+        ⟨uniformOracleSum 22480 cardX (fun H =>
+            QVec.queryMassOn
+              (succinctFsCollisionEvent (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480)
+                (whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot) M codec aux claim initRoots tblOf H)
+              (runQuantumAdv A H)),
+          (2 ^ 22480) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+          Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 22480))
+            (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩) :=
+  whir_succinct_closed_qrom_soundness _ _ M dfltRoot zkHemV2MultiStageCert codec aux claim initRoots tblOf hx hRoots A
+
+theorem zkHemV2MultiStage_succinct_qrom_128 {D : Type} [DecidableEq D] {cardX cardAnc Q : Nat}
+    (M : MerkleSetup D K)
+    (dfltRoot : D)
+    (codec : FsCodec (SuccinctRoundMsg D (WhirPub K)) zkHemV2MultiStageSched.numRounds cardX)
+    (aux : Fin cardX → List (K × List D))
+    (claim : K) (initRoots : Nat → D) (tblOf : Nat → D → Nat → K)
+    (hx : ¬ whirInLang zkHemV2MultiStageEnv zkHemV2MultiStageSched
+      ((whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot).liftStmt claim initRoots tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec 22480) (o : Fin cardX),
+      succinctFsAccept (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480)
+        (whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot) M codec aux claim initRoots H o = true →
+      let str := fsTranscript codec H (codec.dec o)
+      ∀ q ∈ (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).queries claim (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 ((whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480).depth q.1)
+          (tblOf q.1 ((whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)) =
+          (whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot).rootsOf initRoots (str.map Prod.fst) q.1)
+    (A : QuantumAdv cardX 22480 cardAnc Q) (prof : WhirCommitmentProfile) (hQ : Q ≤ 2^64)
+
+    (hMerkle : RatBound.le
+        ⟨uniformOracleSum 22480 cardX (fun H =>
+            QVec.queryMassOn
+              (succinctFsCollisionEvent (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480)
+                (whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot) M codec aux claim initRoots tblOf H)
+              (runQuantumAdv A H)),
+          (2 ^ 22480) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+          Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 22480))
+            (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩ (merkleProfileQromBound prof Q)) :
+    RatBound.lt
+      ⟨uniformOracleSum 22480 cardX (fun H =>
+          QVec.queryMassOn
+            (succinctFsAccept (whirOracleIop zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480)
+              (whirSuccinctBridge zkHemV2MultiStageEnv zkHemV2MultiStageSched 22480 dfltRoot) M codec aux claim initRoots H)
+            (runQuantumAdv A H)),
+        (2 ^ 22480) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 22480))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (RatBound.invPow2 128) := by
+  have closed := zkHemV2MultiStage_succinct_closed_qrom_soundness M dfltRoot codec aux claim initRoots tblOf hx hRoots A
+  apply ratBound_lt_of_le_of_lt_packed (RatBound.le_trans closed (RatBound.add_le_add (RatBound.le_refl _) hMerkle))
+  have hb := zkHemV2MultiStage_tree_qrom_lt_128_at_2pow64 prof (d := 0) (by decide) hQ
+  simpa only [show 2^(0+1)-1=1 by decide, RatBound.scale, Nat.one_mul] using hb
+
+#verify_kernel zkHemV2MultiStageCert
+#verify_constructive zkHemV2MultiStage_succinct_qrom_128 cert_accept cert_covers zkHemV2MultiStage_succinct_closed_qrom_soundness
+  twiceMap_length twiceMap_at stage_queries_exact read_stage_exact readStage_length foldBlock_pair
+  fold_read_stage stage_run_exact field640 nonterminal_accept kernel_step kernel_last terminal_accept
+  parse_nine nine_reads cert_nine_accept
+
+#verify_inhabited accepted_example_ood inhabited_succinctWhirAggregate_honest_accepts
+#tooth_pair zkHemV2MultiStage_honest_accepts vs tooth_changed_ood_rejected
+
+#verify_constructive foldedLive_eq certRound_step certRound_run certStart_false certStage_geom certInput_flip
+  certShift_budget_eq shift_live_eq certCommit_flip certPhase_flip
+  terminalLive_mass multiStage_shift_budget false_word_agrees shiftTableLive_mass
+  eq_of_length_trim shiftBatchLive_mass
+  wordLive_iff close_word_candidate_unique scalar_agreement table_fold_flip
+  whirPosition_high whirField_low shift_field_mass
+  stageDomain_nodup domain_at coord_index pairRoot_spec cosetPoint_opposite
+  pair_agreement_to_scalar multiStage_first_fold_flip multiStage_fold_budget
+  foldClaimLive_seed_bound whirField_predicate_mass whirField_fold_bad_seeds whirPosition_all_good_seeds
+  foldPolyCoeffs_length kernelValue_congr close_candidate_fold_eq close_fold_wrong_claim
+  eval_split quinticWhirFold2_evalCoeffs basePower_eq cosetPoint_table
+  fiberPoint_antipode fiberPoint_square mul_nonzero fiberPoint_ne_zero fiberEvaluations_getD
+  example_all_three_odd_parts foldBlock_evalCoeffs foldKernelTerm_endpoints kernelValue_foldl kernel_fold_quadratic kernel_wrong_claim_challenges
+  kernelValue_append kernelValue_weighted kernelValue_batch batch_wrong_claim_challenges
+  packedQuinticWhir_geometry zkHemV2MultiStage_geometry
+  zkHemV2MultiStage_tree_qrom_lt_128_at_2pow64 combineClaim_zero whirField_small
+  root_stride power_stride cosetPoint_strided cosetPoint_folded cosetPoint_ne_zero foldBlock_stageQueries
+  interleave_recovers_pair antipodal_foldRound_mass quinticFold_exceptional_challenges foldRound_exception_mass cosetPoint_zero cosetPoint_half examplePair_fold repeatedPair_length repeatedPair_at
+  zeroSeed_field zeroSeed_pos check_nonterminal check_terminal example_split example_sumcheck
+  example_terminalClaim example_verdict example_stage_queries example_queries exampleTable_getD
+  example_reads_pair example_reads example_verify zkHemV2MultiStage_honest_accepts
+  tooth_changed_ood_rejected accepted_example_ood inhabited_succinctWhirAggregate_honest_accepts
+
+end Qsag.SuccinctWhirAgg
+end
