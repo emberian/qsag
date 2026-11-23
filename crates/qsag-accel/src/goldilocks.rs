@@ -644,105 +644,156 @@ pub fn coset_lde_ext2_cpu(
 }
 
 // ============================================================================
-// Quartic Extension Field F_{p^4} = F_{p^2}[w] / (w^2 - u) & 4-Byte Kronecker
+// Quintic Extension Field F_{p^5} = F_p[X] / (X^5 - 3) & 4-Byte Kronecker
 // ============================================================================
 
-/// Canonical `GoldilocksExt4` identity element `[1, 0, 0, 0]`.
-pub const EXT4_ONE: [u64; 4] = [1, 0, 0, 0];
-/// Canonical `GoldilocksExt4` zero element `[0, 0, 0, 0]`.
-pub const EXT4_ZERO: [u64; 4] = [0, 0, 0, 0];
+/// Non-residue $W = 3$ defining $\mathbb{F}_{p^5} = \mathbb{F}_p[X]/(X^5 - 3)$ (`gcd(5, p - 1) = 5`,
+/// $3^{(p-1)/5} \ne 1 \pmod p$).
+pub const GOLDILOCKS_FP5_NONRESIDUE: u64 = 3;
+
+/// Canonical `Fp5` multiplicative identity `[1, 0, 0, 0, 0]`.
+pub const FP5_ONE: [u64; 5] = [1, 0, 0, 0, 0];
+/// Canonical `Fp5` additive identity `[0, 0, 0, 0, 0]`.
+pub const FP5_ZERO: [u64; 5] = [0, 0, 0, 0, 0];
 
 #[inline]
-pub const fn ext4_add(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+pub const fn fp5_add(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
     [
         gl_add(a[0], b[0]),
         gl_add(a[1], b[1]),
         gl_add(a[2], b[2]),
         gl_add(a[3], b[3]),
+        gl_add(a[4], b[4]),
     ]
 }
 
 #[inline]
-pub const fn ext4_sub(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+pub const fn fp5_sub(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
     [
         gl_sub(a[0], b[0]),
         gl_sub(a[1], b[1]),
         gl_sub(a[2], b[2]),
         gl_sub(a[3], b[3]),
+        gl_sub(a[4], b[4]),
     ]
 }
 
 #[inline]
-pub const fn ext4_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    let v0 = ext2_mul([a[0], a[1]], [b[0], b[1]]);
-    let v1 = ext2_mul([a[2], a[3]], [b[2], b[3]]);
-    let mid_raw = ext2_mul(
-        ext2_add([a[0], a[1]], [a[2], a[3]]),
-        ext2_add([b[0], b[1]], [b[2], b[3]]),
-    );
-    let mid = ext2_sub(ext2_sub(mid_raw, v0), v1);
+pub const fn fp5_neg(a: [u64; 5]) -> [u64; 5] {
     [
-        gl_add(v0[0], gl_mul(v1[1], GOLDILOCKS_GENERATOR)),
-        gl_add(v0[1], v1[0]),
-        mid[0],
-        mid[1],
+        gl_neg(a[0]),
+        gl_neg(a[1]),
+        gl_neg(a[2]),
+        gl_neg(a[3]),
+        gl_neg(a[4]),
     ]
 }
 
 #[inline]
-pub const fn ext4_pow_pub(mut base: [u64; 4], mut exp: u64) -> [u64; 4] {
+pub const fn fp5_scale_base(a: [u64; 5], s: u64) -> [u64; 5] {
+    [
+        gl_mul(a[0], s),
+        gl_mul(a[1], s),
+        gl_mul(a[2], s),
+        gl_mul(a[3], s),
+        gl_mul(a[4], s),
+    ]
+}
+
+/// Constant-time schoolbook multiplication in $\mathbb{F}_p[X]/(X^5 - 3)$.
+#[inline]
+pub const fn fp5_mul(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
+    let w = GOLDILOCKS_FP5_NONRESIDUE;
+    let hi0 = gl_add(
+        gl_add(gl_mul(a[1], b[4]), gl_mul(a[2], b[3])),
+        gl_add(gl_mul(a[3], b[2]), gl_mul(a[4], b[1])),
+    );
+    let c0 = gl_add(gl_mul(a[0], b[0]), gl_mul(w, hi0));
+
+    let hi1 = gl_add(
+        gl_add(gl_mul(a[2], b[4]), gl_mul(a[3], b[3])),
+        gl_mul(a[4], b[2]),
+    );
+    let lo1 = gl_add(gl_mul(a[0], b[1]), gl_mul(a[1], b[0]));
+    let c1 = gl_add(lo1, gl_mul(w, hi1));
+
+    let hi2 = gl_add(gl_mul(a[3], b[4]), gl_mul(a[4], b[3]));
+    let lo2 = gl_add(
+        gl_add(gl_mul(a[0], b[2]), gl_mul(a[1], b[1])),
+        gl_mul(a[2], b[0]),
+    );
+    let c2 = gl_add(lo2, gl_mul(w, hi2));
+
+    let hi3 = gl_mul(a[4], b[4]);
+    let lo3 = gl_add(
+        gl_add(gl_mul(a[0], b[3]), gl_mul(a[1], b[2])),
+        gl_add(gl_mul(a[2], b[1]), gl_mul(a[3], b[0])),
+    );
+    let c3 = gl_add(lo3, gl_mul(w, hi3));
+
+    let c4 = gl_add(
+        gl_add(
+            gl_add(gl_mul(a[0], b[4]), gl_mul(a[1], b[3])),
+            gl_add(gl_mul(a[2], b[2]), gl_mul(a[3], b[1])),
+        ),
+        gl_mul(a[4], b[0]),
+    );
+    [c0, c1, c2, c3, c4]
+}
+
+#[inline]
+pub const fn fp5_pow_pub(mut base: [u64; 5], mut exp: u64) -> [u64; 5] {
     base = [
         gl_reduce_u64(base[0]),
         gl_reduce_u64(base[1]),
         gl_reduce_u64(base[2]),
         gl_reduce_u64(base[3]),
+        gl_reduce_u64(base[4]),
     ];
-    let mut acc = EXT4_ONE;
+    let mut acc = FP5_ONE;
     while exp > 0 {
         if (exp & 1) == 1 {
-            acc = ext4_mul(acc, base);
+            acc = fp5_mul(acc, base);
         }
-        base = ext4_mul(base, base);
+        base = fp5_mul(base, base);
         exp >>= 1;
     }
     acc
 }
 
-/// Build a 4-byte (`1,024`-entry = `32 KiB`) multilinear equality Kronecker table over
-/// $\mathbb{F}_{p^4}$ supporting up to `32` variables (`num_vars <= 26` in VRAM WHIR).
+/// Build a 4-byte (`1,024`-entry = `40 KiB`) multilinear equality Kronecker table over
+/// $\mathbb{F}_{p^5}$ supporting up to `32` variables.
 /// Panics if `point` contains more than 32 variables.
-pub fn eq_kronecker_1024(point: &[[u64; 4]]) -> [[u64; 4]; 1024] {
-    multilinear_kronecker_1024(point, true)
+pub fn eq_kronecker_fp5_1024(point: &[[u64; 5]]) -> [[u64; 5]; 1024] {
+    multilinear_kronecker_fp5_1024(point, true)
 }
 
-/// Build a 4-byte (`1,024`-entry = `32 KiB`) multilinear monomial Kronecker table over
-/// $\mathbb{F}_{p^4}$ supporting up to `32` variables (`num_vars <= 26` in VRAM WHIR).
+/// Build a 4-byte (`1,024`-entry = `40 KiB`) multilinear monomial Kronecker table over
+/// $\mathbb{F}_{p^5}$ supporting up to `32` variables.
 /// Panics if `point` contains more than 32 variables.
-pub fn mono_kronecker_1024(point: &[[u64; 4]]) -> [[u64; 4]; 1024] {
-    multilinear_kronecker_1024(point, false)
+pub fn mono_kronecker_fp5_1024(point: &[[u64; 5]]) -> [[u64; 5]; 1024] {
+    multilinear_kronecker_fp5_1024(point, false)
 }
 
-fn multilinear_kronecker_1024(point: &[[u64; 4]], equality: bool) -> [[u64; 4]; 1024] {
+fn multilinear_kronecker_fp5_1024(point: &[[u64; 5]], equality: bool) -> [[u64; 5]; 1024] {
     assert!(
         point.len() <= 32,
         "Kronecker tables support at most 32 variables"
     );
-    let mut out = [EXT4_ZERO; 1024];
+    let mut out = [FP5_ZERO; 1024];
     for (byte_idx, table) in out.as_chunks_mut::<256>().0.iter_mut().enumerate() {
-        table[0] = EXT4_ONE;
+        table[0] = FP5_ONE;
         let start = byte_idx * 8;
         let bits = point.len().saturating_sub(start).min(8);
-        // Double the populated prefix per variable; missing high bits stay zero. This
-        // shares partial products instead of recomputing eight factors for every entry.
         for bit in 0..bits {
             let p = point[start + bit];
-            let complement = ext4_sub(EXT4_ONE, p);
+            let complement = fp5_sub(FP5_ONE, p);
             let half = 1 << bit;
             for k in 0..half {
                 let prefix = table[k];
-                table[half + k] = ext4_mul(prefix, p);
+                table[half + k] = fp5_mul(prefix, p);
                 if equality {
-                    table[k] = ext4_mul(prefix, complement);
+                    table[k] = fp5_mul(prefix, complement);
                 }
             }
         }
@@ -750,86 +801,76 @@ fn multilinear_kronecker_1024(point: &[[u64; 4]], equality: bool) -> [[u64; 4]; 
     out
 }
 
-/// Build a 4-byte (`1,024`-entry = `32 KiB`) geometric Kronecker table for `scale * z^i`
-/// over $0 \le i < 2^{32}$.
-pub fn geometric_kronecker_1024(scale: [u64; 4], z: [u64; 4]) -> [[u64; 4]; 1024] {
-    let mut out = [EXT4_ZERO; 1024];
-    let z_c = [
-        gl_reduce_u64(z[0]),
-        gl_reduce_u64(z[1]),
-        gl_reduce_u64(z[2]),
-        gl_reduce_u64(z[3]),
-    ];
-    let mut cur = [
-        gl_reduce_u64(scale[0]),
-        gl_reduce_u64(scale[1]),
-        gl_reduce_u64(scale[2]),
-        gl_reduce_u64(scale[3]),
-    ];
+/// Build a 4-byte (`1,024`-entry = `40 KiB`) geometric Kronecker table over $\mathbb{F}_{p^5}$
+/// for `scale * z^i` ($0 \le i < 2^{32}$).
+pub fn geometric_kronecker_fp5_1024(scale: [u64; 5], z: [u64; 5]) -> [[u64; 5]; 1024] {
+    let mut out = [FP5_ZERO; 1024];
+    let z_c = z.map(gl_reduce_u64);
+    let mut cur = scale.map(gl_reduce_u64);
     for slot in &mut out[0..256] {
         *slot = cur;
-        cur = ext4_mul(cur, z_c);
+        cur = fp5_mul(cur, z_c);
     }
-    let z_8 = ext4_pow_pub(z_c, 256);
-    cur = EXT4_ONE;
+    let z_8 = fp5_pow_pub(z_c, 256);
+    cur = FP5_ONE;
     for slot in &mut out[256..512] {
         *slot = cur;
-        cur = ext4_mul(cur, z_8);
+        cur = fp5_mul(cur, z_8);
     }
-    let z_16 = ext4_pow_pub(z_8, 256);
-    cur = EXT4_ONE;
+    let z_16 = fp5_pow_pub(z_8, 256);
+    cur = FP5_ONE;
     for slot in &mut out[512..768] {
         *slot = cur;
-        cur = ext4_mul(cur, z_16);
+        cur = fp5_mul(cur, z_16);
     }
-    let z_24 = ext4_pow_pub(z_16, 256);
-    cur = EXT4_ONE;
+    let z_24 = fp5_pow_pub(z_16, 256);
+    cur = FP5_ONE;
     for slot in &mut out[768..1024] {
         *slot = cur;
-        cur = ext4_mul(cur, z_24);
+        cur = fp5_mul(cur, z_24);
     }
     out
 }
 
-/// Build a paired `2 x 1,024` (`2,048`-entry = `64 KiB`) geometric Kronecker table for two OOD points.
-pub fn pair_geometric_kronecker_2048(
-    s0: [u64; 4],
-    z0: [u64; 4],
-    s1: [u64; 4],
-    z1: [u64; 4],
-) -> [[u64; 4]; 2048] {
-    let mut out = [EXT4_ZERO; 2048];
-    out[0..1024].copy_from_slice(&geometric_kronecker_1024(s0, z0));
-    out[1024..2048].copy_from_slice(&geometric_kronecker_1024(s1, z1));
+/// Build a paired `2 x 1,024` (`2,048`-entry = `80 KiB`) geometric Kronecker table over $\mathbb{F}_{p^5}$.
+pub fn pair_geometric_kronecker_fp5_2048(
+    s0: [u64; 5],
+    z0: [u64; 5],
+    s1: [u64; 5],
+    z1: [u64; 5],
+) -> [[u64; 5]; 2048] {
+    let mut out = [FP5_ZERO; 2048];
+    out[0..1024].copy_from_slice(&geometric_kronecker_fp5_1024(s0, z0));
+    out[1024..2048].copy_from_slice(&geometric_kronecker_fp5_1024(s1, z1));
     out
 }
 
 #[cfg(test)]
-mod kronecker_tests {
+mod kronecker_fp5_tests {
     use super::*;
 
     #[test]
-    fn shared_products_match_independent_factors_at_every_byte_boundary() {
-        let point: [[u64; 4]; 32] = core::array::from_fn(|i| [i as u64 + 2, u64::MAX, 7, 11]);
+    fn shared_products_match_independent_factors_at_every_byte_boundary_fp5() {
+        let point: [[u64; 5]; 32] = core::array::from_fn(|i| [i as u64 + 2, u64::MAX, 7, 11, 13]);
         for n in [0, 1, 7, 8, 9, 16, 23, 24, 25, 26, 31, 32] {
-            let eq = eq_kronecker_1024(&point[..n]);
-            let mono = mono_kronecker_1024(&point[..n]);
+            let eq = eq_kronecker_fp5_1024(&point[..n]);
+            let mono = mono_kronecker_fp5_1024(&point[..n]);
             for byte in 0..4 {
                 for k in 0..256 {
-                    let mut want_eq = EXT4_ONE;
-                    let mut want_mono = EXT4_ONE;
+                    let mut want_eq = FP5_ONE;
+                    let mut want_mono = FP5_ONE;
                     for bit in 0..8 {
                         let idx = byte * 8 + bit;
                         if idx < n {
                             if k & (1 << bit) != 0 {
-                                want_eq = ext4_mul(want_eq, point[idx]);
-                                want_mono = ext4_mul(want_mono, point[idx]);
+                                want_eq = fp5_mul(want_eq, point[idx]);
+                                want_mono = fp5_mul(want_mono, point[idx]);
                             } else {
-                                want_eq = ext4_mul(want_eq, ext4_sub(EXT4_ONE, point[idx]));
+                                want_eq = fp5_mul(want_eq, fp5_sub(FP5_ONE, point[idx]));
                             }
                         } else if k & (1 << bit) != 0 {
-                            want_eq = EXT4_ZERO;
-                            want_mono = EXT4_ZERO;
+                            want_eq = FP5_ZERO;
+                            want_mono = FP5_ZERO;
                         }
                     }
                     assert_eq!(eq[byte * 256 + k], want_eq, "eq n={n} byte={byte} k={k}");
@@ -844,8 +885,21 @@ mod kronecker_tests {
     }
 
     #[test]
+    fn fp5_x_to_5_reduces_to_3_and_distributes() {
+        let x = [0, 1, 0, 0, 0];
+        assert_eq!(fp5_pow_pub(x, 5), [3, 0, 0, 0, 0]);
+        let a = [11, 22, 33, 44, 55];
+        let b = [66, 77, 88, 99, 101];
+        let c = [7, 13, 19, 23, 29];
+        assert_eq!(
+            fp5_mul(a, fp5_add(b, c)),
+            fp5_add(fp5_mul(a, b), fp5_mul(a, c))
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "at most 32")]
     fn oversized_points_are_not_silently_truncated() {
-        eq_kronecker_1024(&[EXT4_ONE; 33]);
+        eq_kronecker_fp5_1024(&[FP5_ONE; 33]);
     }
 }

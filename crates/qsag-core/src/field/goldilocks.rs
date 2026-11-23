@@ -59,10 +59,11 @@ impl CanonicalLift {
     /// Strictly validate `raw < GOLDILOCKS_PRIME`, rejecting all $2^{32} - 1$ aliases in $[p, 2^{64})$.
     #[inline]
     pub const fn try_new(raw: u64) -> Result<Self, CanonicalLiftError> {
-        if raw < GOLDILOCKS_PRIME {
-            Ok(Self(Goldilocks(raw)))
-        } else {
-            Err(CanonicalLiftError { raw_value: raw })
+        match ::qsag_verified::goldilocks::goldilocks_from_canonical(raw) {
+            Ok(v) => Ok(Self(Goldilocks(v.0))),
+            Err(err) => Err(CanonicalLiftError {
+                raw_value: err.raw_value,
+            }),
         }
     }
 
@@ -77,21 +78,22 @@ impl CanonicalLift {
     }
 }
 
-#[inline]
-const fn exp_pow2(mut x: Goldilocks, mut k: u32) -> Goldilocks {
-    while k > 0 {
-        x = x.square();
-        k -= 1;
-    }
-    x
-}
-
 impl Goldilocks {
     pub const ZERO: Self = Self(0);
     pub const ONE: Self = Self(1);
     pub const TWO: Self = Self(2);
     pub const NON_RESIDUE: Self = Self(7);
     pub const NEG_ONE: Self = Self(GOLDILOCKS_PRIME - 1);
+
+    #[inline(always)]
+    const fn to_verified(self) -> ::qsag_verified::goldilocks::Goldilocks {
+        ::qsag_verified::goldilocks::Goldilocks(self.0)
+    }
+
+    #[inline(always)]
+    const fn from_verified(v: ::qsag_verified::goldilocks::Goldilocks) -> Self {
+        Self(v.0)
+    }
 
     /// Strict canonical lift: rejects every integer in $[p, 2^{64})$.
     #[inline]
@@ -102,41 +104,31 @@ impl Goldilocks {
         }
     }
 
-    /// Branchless canonicalization of an arbitrary `u64` modulo $p$ (`x < p ? x : x - p`).
+    /// Branchless canonicalization of an arbitrary `u64` modulo $p$ (`x < p ? x : x - p`),
+    /// wired directly to Aeneas-verified `qsag_verified::goldilocks::goldilocks_canon`.
     #[inline(always)]
     pub const fn from_u64_reduced(x: u64) -> Self {
-        let (diff, borrow) = x.overflowing_sub(GOLDILOCKS_PRIME);
-        let mask = (borrow as u64).wrapping_neg();
-        Self((x & mask) | (diff & !mask))
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_canon(x))
     }
 
     /// Reduce `lo + 2^64 * hi` for `hi < 2^32`, using $2^{64} \equiv 2^{32} - 1 \pmod p$.
     #[inline(always)]
     pub const fn reduce96(lo: u64, hi: u64) -> Self {
         debug_assert!(hi >> 32 == 0);
-        let adj = (hi << 32).wrapping_sub(hi);
-        let (s, c) = lo.overflowing_add(adj);
-        Self::from_u64_reduced(s.wrapping_add((c as u64).wrapping_neg() & GOLDILOCKS_EPSILON))
+        Self::reduce128((lo as u128) | ((hi as u128) << 64))
     }
 
-    /// `7 * self` (the quadratic non-residue) without a 64x64 multiplication.
+    /// `7 * self` (the quadratic non-residue), wired through verified reduction.
     #[inline(always)]
     pub const fn mul_by_7(self) -> Self {
-        let v = self.0 as u128;
-        let prod = (v << 3) - v;
-        Self::reduce96(prod as u64, (prod >> 64) as u64)
+        self.const_mul(Self::NON_RESIDUE)
     }
 
-    /// Branchless 128-to-64 Goldilocks modular reduction.
+    /// Branchless 128-to-64 Goldilocks modular reduction, wired directly to
+    /// Aeneas-verified `qsag_verified::goldilocks::goldilocks_reduce128`.
     #[inline(always)]
     pub const fn reduce128(x: u128) -> Self {
-        let lo = x as u64;
-        let hi = (x >> 64) as u64;
-        let hi_lo = hi & GOLDILOCKS_EPSILON;
-        let hi_hi = hi >> 32;
-        let mid = (hi_lo << 32).wrapping_sub(hi_lo);
-        let lo_c = Self::from_u64_reduced(lo);
-        lo_c.const_add(Self(mid)).const_sub(Self(hi_hi))
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_reduce128(x))
     }
 
     /// Reduce an arbitrary 128-bit integer modulo $p$ (used for 128-bit challenge squeezing).
@@ -204,44 +196,62 @@ impl Goldilocks {
         ct_eq_u64(self.0, rhs.0)
     }
 
-    /// Branchless modular addition.
+    /// Branchless modular addition, wired directly to `qsag_verified::goldilocks::goldilocks_add`.
     #[inline(always)]
     pub const fn const_add(self, rhs: Self) -> Self {
-        let rem_p = GOLDILOCKS_PRIME - rhs.0;
-        let (diff, borrow) = self.0.overflowing_sub(rem_p);
-        let plain_sum = self.0.wrapping_add(rhs.0);
-        let mask = (borrow as u64).wrapping_neg();
-        Self((plain_sum & mask) | (diff & !mask))
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_add(
+            self.to_verified(),
+            rhs.to_verified(),
+        ))
     }
 
-    /// Branchless modular subtraction.
+    /// Branchless modular subtraction, wired directly to `qsag_verified::goldilocks::goldilocks_sub`.
     #[inline(always)]
     pub const fn const_sub(self, rhs: Self) -> Self {
-        let (diff, borrow) = self.0.overflowing_sub(rhs.0);
-        let adj = (borrow as u64).wrapping_neg() & GOLDILOCKS_PRIME;
-        Self(diff.wrapping_add(adj))
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_sub(
+            self.to_verified(),
+            rhs.to_verified(),
+        ))
     }
 
-    /// Branchless negation (`0 - self mod p`).
+    /// Branchless negation (`0 - self mod p`), wired directly to `qsag_verified::goldilocks::goldilocks_neg`.
     #[inline(always)]
     pub const fn const_neg(self) -> Self {
-        Self::ZERO.const_sub(self)
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_neg(
+            self.to_verified(),
+        ))
     }
 
-    /// Branchless modular multiplication via 128-to-64 shift/mask reduction.
+    /// Branchless modular multiplication, wired directly to `qsag_verified::goldilocks::goldilocks_mul`.
     #[inline(always)]
     pub const fn const_mul(self, rhs: Self) -> Self {
-        Self::reduce128((self.0 as u128) * (rhs.0 as u128))
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_mul(
+            self.to_verified(),
+            rhs.to_verified(),
+        ))
     }
 
     #[inline(always)]
     pub const fn square(self) -> Self {
-        self.const_mul(self)
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_square(
+            self.to_verified(),
+        ))
+    }
+
+    /// Branchless Poseidon2 monomial S-box `x^7 mod p`, wired directly to `qsag_verified::goldilocks::goldilocks_pow7`.
+    #[inline(always)]
+    pub const fn pow7(self) -> Self {
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_pow7(
+            self.to_verified(),
+        ))
     }
 
     /// Public-exponent binary exponentiation.
     #[inline]
     pub const fn pow(self, mut exp: u64) -> Self {
+        if exp == 7 {
+            return self.pow7();
+        }
         let mut base = self;
         let mut acc = Self::ONE;
         while exp > 0 {
@@ -254,19 +264,13 @@ impl Goldilocks {
         acc
     }
 
-    /// Fixed addition chain $a^{p - 2} \bmod p$ (`0` maps to `0` unconditionally without data branch).
+    /// Fixed addition chain $a^{p - 2} \bmod p$ (`0` maps to `0` unconditionally without data branch),
+    /// wired directly to `qsag_verified::goldilocks::goldilocks_inv_or_zero`.
     #[inline]
     pub const fn inv_or_zero(self) -> Self {
-        let t2 = self.square().const_mul(self);
-        let t3 = t2.square().const_mul(self);
-        let t6 = exp_pow2(t3, 3).const_mul(t3);
-        let t12 = exp_pow2(t6, 6).const_mul(t6);
-        let t24 = exp_pow2(t12, 12).const_mul(t12);
-        let t30 = exp_pow2(t24, 6).const_mul(t6);
-        let t31 = t30.square().const_mul(self);
-        let t32 = t31.square().const_mul(self);
-        let hi = exp_pow2(t31, 33);
-        hi.const_mul(t32)
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_inv_or_zero(
+            self.to_verified(),
+        ))
     }
 
     /// Fixed-work inverse, mapping zero to zero without a secret-dependent branch.
@@ -275,11 +279,14 @@ impl Goldilocks {
         self.inv_or_zero()
     }
 
-    /// Checked inverse for public validation (`None` iff `self == ZERO`).
+    /// Checked inverse for public validation (`None` iff `self == ZERO`),
+    /// wired directly to `qsag_verified::goldilocks::goldilocks_inv`.
     #[inline]
     pub const fn checked_inv(self) -> Option<Self> {
-        let cand = self.inv_or_zero();
-        if self.0 == 0 { None } else { Some(cand) }
+        match ::qsag_verified::goldilocks::goldilocks_inv(self.to_verified()) {
+            Some(v) => Some(Self::from_verified(v)),
+            None => None,
+        }
     }
 }
 
@@ -432,39 +439,52 @@ impl GoldilocksExt2 {
     }
 
     #[inline(always)]
-    pub const fn const_add(self, rhs: Self) -> Self {
-        Self {
-            c0: self.c0.const_add(rhs.c0),
-            c1: self.c1.const_add(rhs.c1),
+    const fn to_verified(self) -> ::qsag_verified::goldilocks::GoldilocksExt2 {
+        ::qsag_verified::goldilocks::GoldilocksExt2 {
+            c0: self.c0.to_verified(),
+            c1: self.c1.to_verified(),
         }
+    }
+
+    #[inline(always)]
+    const fn from_verified(v: ::qsag_verified::goldilocks::GoldilocksExt2) -> Self {
+        Self {
+            c0: Goldilocks::from_verified(v.c0),
+            c1: Goldilocks::from_verified(v.c1),
+        }
+    }
+
+    #[inline(always)]
+    pub const fn const_add(self, rhs: Self) -> Self {
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_ext2_add(
+            self.to_verified(),
+            rhs.to_verified(),
+        ))
     }
 
     #[inline(always)]
     pub const fn const_sub(self, rhs: Self) -> Self {
-        Self {
-            c0: self.c0.const_sub(rhs.c0),
-            c1: self.c1.const_sub(rhs.c1),
-        }
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_ext2_sub(
+            self.to_verified(),
+            rhs.to_verified(),
+        ))
     }
 
     #[inline(always)]
     pub const fn const_neg(self) -> Self {
-        Self {
-            c0: self.c0.const_neg(),
-            c1: self.c1.const_neg(),
-        }
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_ext2_neg(
+            self.to_verified(),
+        ))
     }
 
-    /// $(a_0 + a_1 u)(b_0 + b_1 u) = (a_0 b_0 + 7 a_1 b_1) + (a_0 b_1 + a_1 b_0) u$.
+    /// $(a_0 + a_1 u)(b_0 + b_1 u) = (a_0 b_0 + 7 a_1 b_1) + (a_0 b_1 + a_1 b_0) u$,
+    /// wired directly to `qsag_verified::goldilocks::goldilocks_ext2_mul`.
     #[inline(always)]
     pub const fn const_mul(self, rhs: Self) -> Self {
-        let a0b0 = self.c0.const_mul(rhs.c0);
-        let a1b1 = self.c1.const_mul(rhs.c1);
-        let sum_a = self.c0.const_add(self.c1);
-        let sum_b = rhs.c0.const_add(rhs.c1);
-        let c1 = sum_a.const_mul(sum_b).const_sub(a0b0).const_sub(a1b1);
-        let c0 = a0b0.const_add(a1b1.mul_by_7());
-        Self { c0, c1 }
+        Self::from_verified(::qsag_verified::goldilocks::goldilocks_ext2_mul(
+            self.to_verified(),
+            rhs.to_verified(),
+        ))
     }
 
     #[inline(always)]

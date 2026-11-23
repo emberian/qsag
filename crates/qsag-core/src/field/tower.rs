@@ -12,120 +12,6 @@ use core::hint::black_box;
 use crate::wipe::ct_eq_u128;
 
 #[inline(always)]
-const fn scale_x_t1(a: u8) -> u8 {
-    let lo = a & 1;
-    let hi = (a >> 1) & 1;
-    hi | ((lo ^ hi) << 1)
-}
-
-#[inline(always)]
-const fn scale_x_t2(a: u8) -> u8 {
-    let lo = a & 0x3;
-    let hi = (a >> 2) & 0x3;
-    hi | ((lo ^ scale_x_t1(hi)) << 2)
-}
-
-#[inline(always)]
-const fn scale_x_t3(a: u8) -> u8 {
-    let lo = a & 0xF;
-    let hi = a >> 4;
-    hi | ((lo ^ scale_x_t2(hi)) << 4)
-}
-
-#[inline(always)]
-const fn scale_x_t4(a: u16) -> u16 {
-    let lo = (a & 0xFF) as u8;
-    let hi = (a >> 8) as u8;
-    (hi as u16) | (((lo ^ scale_x_t3(hi)) as u16) << 8)
-}
-
-#[inline(always)]
-const fn scale_x_t5(a: u32) -> u32 {
-    let lo = (a & 0xFFFF) as u16;
-    let hi = (a >> 16) as u16;
-    (hi as u32) | (((lo ^ scale_x_t4(hi)) as u32) << 16)
-}
-
-#[inline(always)]
-const fn scale_x_t6(a: u64) -> u64 {
-    let lo = (a & 0xFFFF_FFFF) as u32;
-    let hi = (a >> 32) as u32;
-    (hi as u64) | (((lo ^ scale_x_t5(hi)) as u64) << 32)
-}
-
-#[inline(always)]
-const fn tower_mul_t1(a: u8, b: u8) -> u8 {
-    let a0 = a & 1;
-    let a1 = (a >> 1) & 1;
-    let b0 = b & 1;
-    let b1 = (b >> 1) & 1;
-    let p = a0 & b0;
-    let q = a1 & b1;
-    let r = (a0 ^ a1) & (b0 ^ b1);
-    (p ^ q) | ((r ^ p) << 1)
-}
-
-#[inline(always)]
-const fn tower_mul_t2(a: u8, b: u8) -> u8 {
-    let a0 = a & 0x3;
-    let a1 = (a >> 2) & 0x3;
-    let b0 = b & 0x3;
-    let b1 = (b >> 2) & 0x3;
-    let p = tower_mul_t1(a0, b0);
-    let q = tower_mul_t1(a1, b1);
-    let r = tower_mul_t1(a0 ^ a1, b0 ^ b1);
-    (p ^ q) | ((r ^ p ^ q ^ scale_x_t1(q)) << 2)
-}
-
-#[inline(always)]
-pub const fn tower_mul_t3(a: u8, b: u8) -> u8 {
-    let a0 = a & 0xF;
-    let a1 = a >> 4;
-    let b0 = b & 0xF;
-    let b1 = b >> 4;
-    let p = tower_mul_t2(a0, b0);
-    let q = tower_mul_t2(a1, b1);
-    let r = tower_mul_t2(a0 ^ a1, b0 ^ b1);
-    (p ^ q) | ((r ^ p ^ q ^ scale_x_t2(q)) << 4)
-}
-
-#[inline(always)]
-const fn tower_mul_t4(a: u16, b: u16) -> u16 {
-    let a0 = (a & 0xFF) as u8;
-    let a1 = (a >> 8) as u8;
-    let b0 = (b & 0xFF) as u8;
-    let b1 = (b >> 8) as u8;
-    let p = tower_mul_t3(a0, b0);
-    let q = tower_mul_t3(a1, b1);
-    let r = tower_mul_t3(a0 ^ a1, b0 ^ b1);
-    ((p ^ q) as u16) | (((r ^ p ^ q ^ scale_x_t3(q)) as u16) << 8)
-}
-
-#[inline]
-const fn tower_mul_t5(a: u32, b: u32) -> u32 {
-    let a0 = (a & 0xFFFF) as u16;
-    let a1 = (a >> 16) as u16;
-    let b0 = (b & 0xFFFF) as u16;
-    let b1 = (b >> 16) as u16;
-    let p = tower_mul_t4(a0, b0);
-    let q = tower_mul_t4(a1, b1);
-    let r = tower_mul_t4(a0 ^ a1, b0 ^ b1);
-    ((p ^ q) as u32) | (((r ^ p ^ q ^ scale_x_t4(q)) as u32) << 16)
-}
-
-#[inline]
-const fn tower_mul_t6(a: u64, b: u64) -> u64 {
-    let a0 = (a & 0xFFFF_FFFF) as u32;
-    let a1 = (a >> 32) as u32;
-    let b0 = (b & 0xFFFF_FFFF) as u32;
-    let b1 = (b >> 32) as u32;
-    let p = tower_mul_t5(a0, b0);
-    let q = tower_mul_t5(a1, b1);
-    let r = tower_mul_t5(a0 ^ a1, b0 ^ b1);
-    ((p ^ q) as u64) | (((r ^ p ^ q ^ scale_x_t5(q)) as u64) << 32)
-}
-
-#[inline(always)]
 const fn swar_mul_x0_128(v: u128) -> u128 {
     const M1: u128 = 0x5555_5555_5555_5555_5555_5555_5555_5555;
     let lo = v & M1;
@@ -149,180 +35,59 @@ const fn swar_mul_x2_128(v: u128) -> u128 {
     hi | ((lo ^ swar_mul_x1_128(hi)) << 4)
 }
 
+/// Scalar multiplication in $\mathcal{T}_3 = \mathbb{F}_{2^8}$, wired directly to
+/// Aeneas-verified `qsag_verified::tower::gf256_mul`.
 #[inline(always)]
-const fn swar_mul_x3_128(v: u128) -> u128 {
-    const M8: u128 = 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
-    let lo = v & M8;
-    let hi = (v >> 8) & M8;
-    hi | ((lo ^ swar_mul_x2_128(hi)) << 8)
+pub const fn tower_mul_t3(a: u8, b: u8) -> u8 {
+    ::qsag_verified::tower::gf256_mul(
+        ::qsag_verified::tower::Gf256(a),
+        ::qsag_verified::tower::Gf256(b),
+    )
+    .0
 }
 
+/// Scalar multiplication in $\mathcal{T}_7 = \mathbb{F}_{2^{128}}$, wired directly to
+/// Aeneas-verified `qsag_verified::tower::tower128_mul`.
 #[inline(always)]
-const fn swar_mul_x4_128(v: u128) -> u128 {
-    const M16: u128 = 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
-    let lo = v & M16;
-    let hi = (v >> 16) & M16;
-    hi | ((lo ^ swar_mul_x3_128(hi)) << 16)
-}
-
-/// 100% branchless 4-lane SWAR multiplication in $\mathcal{T}_5^4 = (\mathbb{F}_{2^{32}})^4$ packed
-/// inside a single `u128` register (`0` secret branches, `0` table lookups).
-#[inline]
-const fn swar_mul_t5_x4(x: u128, y: u128) -> u128 {
-    const LANE_LSB_32: u128 = 0x0000_0001_0000_0001_0000_0001_0000_0001;
-    let mut basis = [0u128; 32];
-    basis[0] = x;
-    basis[1] = swar_mul_x0_128(basis[0]);
-    let mut j = 0usize;
-    while j < 2 {
-        basis[2 + j] = swar_mul_x1_128(basis[j]);
-        j += 1;
-    }
-    let mut j = 0usize;
-    while j < 4 {
-        basis[4 + j] = swar_mul_x2_128(basis[j]);
-        j += 1;
-    }
-    let mut j = 0usize;
-    while j < 8 {
-        basis[8 + j] = swar_mul_x3_128(basis[j]);
-        j += 1;
-    }
-    let mut j = 0usize;
-    while j < 16 {
-        basis[16 + j] = swar_mul_x4_128(basis[j]);
-        j += 1;
-    }
-
-    let mut acc = 0u128;
-    let mut bit = 0usize;
-    while bit < 32 {
-        let lane_bits = (y >> bit) & LANE_LSB_32;
-        let mask = lane_bits.wrapping_mul(0xFFFF_FFFF);
-        acc ^= basis[bit] & mask;
-        bit += 1;
-    }
-    acc
-}
-
-#[inline]
-pub const fn tower_mul_t7_karatsuba_ref(a: u128, b: u128) -> u128 {
-    let a0 = a as u64;
-    let a1 = (a >> 64) as u64;
-    let b0 = b as u64;
-    let b1 = (b >> 64) as u64;
-    let p = tower_mul_t6(a0, b0);
-    let q = tower_mul_t6(a1, b1);
-    let r = tower_mul_t6(a0 ^ a1, b0 ^ b1);
-    ((p ^ q) as u128) | (((r ^ p ^ q ^ scale_x_t6(q)) as u128) << 64)
-}
-
-#[inline]
 pub const fn tower_mul_t7(a: u128, b: u128) -> u128 {
-    let a_lo = a as u64;
-    let a_hi = (a >> 64) as u64;
-    let a_xr = a_lo ^ a_hi;
-    let b_lo = b as u64;
-    let b_hi = (b >> 64) as u64;
-    let b_xr = b_lo ^ b_hi;
-
-    let a_lo0 = a_lo as u32;
-    let a_lo1 = (a_lo >> 32) as u32;
-    let a_hi0 = a_hi as u32;
-    let a_hi1 = (a_hi >> 32) as u32;
-    let a_xr0 = a_xr as u32;
-    let a_xr1 = (a_xr >> 32) as u32;
-
-    let b_lo0 = b_lo as u32;
-    let b_lo1 = (b_lo >> 32) as u32;
-    let b_hi0 = b_hi as u32;
-    let b_hi1 = (b_hi >> 32) as u32;
-    let b_xr0 = b_xr as u32;
-    let b_xr1 = (b_xr >> 32) as u32;
-
-    let x0 = (a_lo0 as u128)
-        | ((a_lo1 as u128) << 32)
-        | (((a_lo0 ^ a_lo1) as u128) << 64)
-        | ((a_hi0 as u128) << 96);
-    let y0 = (b_lo0 as u128)
-        | ((b_lo1 as u128) << 32)
-        | (((b_lo0 ^ b_lo1) as u128) << 64)
-        | ((b_hi0 as u128) << 96);
-    let z0 = swar_mul_t5_x4(x0, y0);
-
-    let x1 = (a_hi1 as u128)
-        | (((a_hi0 ^ a_hi1) as u128) << 32)
-        | ((a_xr0 as u128) << 64)
-        | ((a_xr1 as u128) << 96);
-    let y1 = (b_hi1 as u128)
-        | (((b_hi0 ^ b_hi1) as u128) << 32)
-        | ((b_xr0 as u128) << 64)
-        | ((b_xr1 as u128) << 96);
-    let z1 = swar_mul_t5_x4(x1, y1);
-
-    let p_p = z0 as u32;
-    let p_q = (z0 >> 32) as u32;
-    let p_r = (z0 >> 64) as u32;
-    let q_p = (z0 >> 96) as u32;
-
-    let q_q = z1 as u32;
-    let q_r = (z1 >> 32) as u32;
-    let r_p = (z1 >> 64) as u32;
-    let r_q = (z1 >> 96) as u32;
-
-    let r_r = tower_mul_t5(a_xr0 ^ a_xr1, b_xr0 ^ b_xr1);
-
-    let p = ((p_p ^ p_q) as u64) | (((p_r ^ p_p ^ p_q ^ scale_x_t5(p_q)) as u64) << 32);
-    let q = ((q_p ^ q_q) as u64) | (((q_r ^ q_p ^ q_q ^ scale_x_t5(q_q)) as u64) << 32);
-    let r = ((r_p ^ r_q) as u64) | (((r_r ^ r_p ^ r_q ^ scale_x_t5(r_q)) as u64) << 32);
-    ((p ^ q) as u128) | (((r ^ p ^ q ^ scale_x_t6(q)) as u128) << 64)
+    ::qsag_verified::tower::tower128_mul(
+        ::qsag_verified::tower::Tower128(a),
+        ::qsag_verified::tower::Tower128(b),
+    )
+    .0
 }
 
-#[inline]
-const fn tower_scale_x_bits(k: u32, a: u128) -> u128 {
-    if k == 0 {
-        a & 1
-    } else {
-        let half = 1u32 << (k - 1);
-        let mask = if half == 128 {
-            u128::MAX
-        } else {
-            (1u128 << half) - 1
-        };
-        let lo = a & mask;
-        let hi = (a >> half) & mask;
-        let scaled_hi = tower_scale_x_bits(k - 1, hi);
-        hi | ((lo ^ scaled_hi) << half)
-    }
-}
-
-/// Constant-time branchless multiplication in Wiedemann tower level $\mathcal{T}_k$ ($0 \le k \le 7$).
-/// Dispatches statically on public level `k` into unrolled register-width Karatsuba circuits (`0` secret branches).
+/// Constant-time branchless multiplication in Wiedemann tower level $\mathcal{T}_k$ ($0 \le k \le 7$),
+/// wired directly to Aeneas-verified `qsag_verified::tower::{gf16_mul, gf256_mul, tower128_mul}`
+/// via the canonical tower subfield embedding $\mathcal{T}_0 \subset \dots \subset \mathcal{T}_7$.
 #[inline]
 pub const fn tower_mul_bits(k: u32, a: u128, b: u128) -> u128 {
+    assert!(k <= 7, "tower_mul_bits level k must be <= 7");
+    let bits = 1u32 << k;
+    let mask = if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    };
+    let am = a & mask;
+    let bm = b & mask;
     match k {
-        0 => (a & 1) & (b & 1),
-        1 => tower_mul_t1((a & 0x3) as u8, (b & 0x3) as u8) as u128,
-        2 => tower_mul_t2((a & 0xF) as u8, (b & 0xF) as u8) as u128,
-        3 => tower_mul_t3(a as u8, b as u8) as u128,
-        4 => tower_mul_t4(a as u16, b as u16) as u128,
-        5 => tower_mul_t5(a as u32, b as u32) as u128,
-        6 => tower_mul_t6(a as u64, b as u64) as u128,
-        7 => tower_mul_t7(a, b),
-        _ => {
-            let half = 1u32 << (k - 1);
-            let mask = (1u128 << half) - 1;
-            let a_lo = a & mask;
-            let a_hi = (a >> half) & mask;
-            let b_lo = b & mask;
-            let b_hi = (b >> half) & mask;
-            let p = tower_mul_bits(k - 1, a_lo, b_lo);
-            let q = tower_mul_bits(k - 1, a_hi, b_hi);
-            let r = tower_mul_bits(k - 1, a_lo ^ a_hi, b_lo ^ b_hi);
-            let lo = p ^ q;
-            let hi = r ^ p ^ q ^ tower_scale_x_bits(k - 1, q);
-            lo | (hi << half)
-        }
+        0 => am & bm,
+        2 => ::qsag_verified::tower::gf16_mul(
+            ::qsag_verified::tower::Gf16(am as u8),
+            ::qsag_verified::tower::Gf16(bm as u8),
+        )
+        .0 as u128,
+        1 | 3 => ::qsag_verified::tower::gf256_mul(
+            ::qsag_verified::tower::Gf256(am as u8),
+            ::qsag_verified::tower::Gf256(bm as u8),
+        )
+        .0 as u128,
+        _ => ::qsag_verified::tower::tower128_mul(
+            ::qsag_verified::tower::Tower128(am),
+            ::qsag_verified::tower::Tower128(bm),
+        )
+        .0,
     }
 }
 
@@ -334,7 +99,7 @@ pub const GF256_MUL_BASIS: [[u8; 8]; 256] = {
     while c < 256 {
         let mut bit = 0usize;
         while bit < 8 {
-            tbl[c][bit] = tower_mul_bits(3, c as u128, 1u128 << bit) as u8;
+            tbl[c][bit] = tower_mul_t3(c as u8, 1u8 << bit);
             bit += 1;
         }
         c += 1;
@@ -343,21 +108,11 @@ pub const GF256_MUL_BASIS: [[u8; 8]; 256] = {
 };
 
 /// 100% branchless Fermat inversion $a^{2^8 - 2} = a^{254}$ in $\mathcal{T}_3 = \mathbb{F}_{2^8}$
-/// (`0` subfield zero-branches `[P1-06]`; maps `0 -> 0`).
+/// (`0` subfield zero-branches `[P1-06]`; maps `0 -> 0`), wired directly to
+/// Aeneas-verified `qsag_verified::tower::gf256_inv_or_zero`.
 #[inline]
 pub const fn tower_fermat_inv_gf256(a: u8) -> u8 {
-    let x = a as u128;
-    let x2 = tower_mul_bits(3, x, x);
-    let x3 = tower_mul_bits(3, x2, x);
-    let x6 = tower_mul_bits(3, x3, x3);
-    let x7 = tower_mul_bits(3, x6, x);
-    let x12 = tower_mul_bits(3, x6, x6);
-    let x15 = tower_mul_bits(3, x12, x3);
-    let x30 = tower_mul_bits(3, x15, x15);
-    let x60 = tower_mul_bits(3, x30, x30);
-    let x120 = tower_mul_bits(3, x60, x60);
-    let x127 = tower_mul_bits(3, x120, x7);
-    tower_mul_bits(3, x127, x127) as u8
+    ::qsag_verified::tower::gf256_inv_or_zero(::qsag_verified::tower::Gf256(a)).0
 }
 
 /// 100% branchless Fermat inversion $a^{2^{128} - 2}$ in $\mathcal{T}_7 = \mathbb{F}_{2^{128}}$
@@ -367,24 +122,24 @@ pub const fn tower_fermat_inv_128(a: u128) -> u128 {
     #[inline]
     const fn sq_n(mut v: u128, mut n: u32) -> u128 {
         while n > 0 {
-            v = tower_mul_bits(7, v, v);
+            v = tower_mul_t7(v, v);
             n -= 1;
         }
         v
     }
     let t1 = a; // a^(2^1 - 1)
-    let t2 = tower_mul_bits(7, sq_n(t1, 1), t1); // a^(2^2 - 1)
-    let t4 = tower_mul_bits(7, sq_n(t2, 2), t2); // a^(2^4 - 1)
-    let t8 = tower_mul_bits(7, sq_n(t4, 4), t4); // a^(2^8 - 1)
-    let t16 = tower_mul_bits(7, sq_n(t8, 8), t8); // a^(2^16 - 1)
-    let t32 = tower_mul_bits(7, sq_n(t16, 16), t16); // a^(2^32 - 1)
-    let t64 = tower_mul_bits(7, sq_n(t32, 32), t32); // a^(2^64 - 1)
-    let t96 = tower_mul_bits(7, sq_n(t64, 32), t32);
-    let t112 = tower_mul_bits(7, sq_n(t96, 16), t16);
-    let t120 = tower_mul_bits(7, sq_n(t112, 8), t8);
-    let t124 = tower_mul_bits(7, sq_n(t120, 4), t4);
-    let t126 = tower_mul_bits(7, sq_n(t124, 2), t2);
-    let t127 = tower_mul_bits(7, sq_n(t126, 1), t1); // a^(2^127 - 1)
+    let t2 = tower_mul_t7(sq_n(t1, 1), t1); // a^(2^2 - 1)
+    let t4 = tower_mul_t7(sq_n(t2, 2), t2); // a^(2^4 - 1)
+    let t8 = tower_mul_t7(sq_n(t4, 4), t4); // a^(2^8 - 1)
+    let t16 = tower_mul_t7(sq_n(t8, 8), t8); // a^(2^16 - 1)
+    let t32 = tower_mul_t7(sq_n(t16, 16), t16); // a^(2^32 - 1)
+    let t64 = tower_mul_t7(sq_n(t32, 32), t32); // a^(2^64 - 1)
+    let t96 = tower_mul_t7(sq_n(t64, 32), t32);
+    let t112 = tower_mul_t7(sq_n(t96, 16), t16);
+    let t120 = tower_mul_t7(sq_n(t112, 8), t8);
+    let t124 = tower_mul_t7(sq_n(t120, 4), t4);
+    let t126 = tower_mul_t7(sq_n(t124, 2), t2);
+    let t127 = tower_mul_t7(sq_n(t126, 1), t1); // a^(2^127 - 1)
     sq_n(t127, 1) // a^(2^128 - 2)
 }
 
@@ -404,16 +159,24 @@ impl TowerGf256 {
 
     #[inline]
     pub const fn add(self, rhs: Self) -> Self {
-        Self(self.0 ^ rhs.0)
+        Self(
+            ::qsag_verified::tower::gf256_add(
+                ::qsag_verified::tower::Gf256(self.0),
+                ::qsag_verified::tower::Gf256(rhs.0),
+            )
+            .0,
+        )
     }
 
-    /// Constant-time branchless multiplication in $\mathcal{T}_3 = \mathbb{F}_{2^8}$.
+    /// Constant-time branchless multiplication in $\mathcal{T}_3 = \mathbb{F}_{2^8}$,
+    /// wired directly to `qsag_verified::tower::gf256_mul`.
     #[inline]
     pub const fn mul(self, rhs: Self) -> Self {
-        Self(tower_mul_bits(3, self.0 as u128, rhs.0 as u128) as u8)
+        Self(tower_mul_t3(self.0, rhs.0))
     }
 
-    /// Branchless constant-time Fermat inverse $x^{254}$ (`0 -> 0`, zero internal branches).
+    /// Branchless constant-time Fermat inverse $x^{254}$ (`0 -> 0`, zero internal branches),
+    /// wired directly to `qsag_verified::tower::gf256_inv_or_zero`.
     #[inline]
     pub const fn ct_inv(self) -> Self {
         Self(tower_fermat_inv_gf256(self.0))
@@ -446,7 +209,9 @@ impl Tower128 {
 
     #[inline]
     pub const fn embed_gf256(x: TowerGf256) -> Self {
-        Self(x.0 as u128)
+        Self(
+            ::qsag_verified::tower::embed_gf256_to_tower128(::qsag_verified::tower::Gf256(x.0)).0,
+        )
     }
 
     #[inline]
@@ -466,13 +231,20 @@ impl Tower128 {
 
     #[inline]
     pub const fn add(self, rhs: Self) -> Self {
-        Self(self.0 ^ rhs.0)
+        Self(
+            ::qsag_verified::tower::tower128_add(
+                ::qsag_verified::tower::Tower128(self.0),
+                ::qsag_verified::tower::Tower128(rhs.0),
+            )
+            .0,
+        )
     }
 
-    /// Constant-time branchless multiplication in $\mathcal{T}_7 = \mathbb{F}_{2^{128}}$.
+    /// Constant-time branchless multiplication in $\mathcal{T}_7 = \mathbb{F}_{2^{128}}$,
+    /// wired directly to `qsag_verified::tower::tower128_mul`.
     #[inline]
     pub const fn mul(self, rhs: Self) -> Self {
-        Self(tower_mul_bits(7, self.0, rhs.0))
+        Self(tower_mul_t7(self.0, rhs.0))
     }
 
     /// 100% branchless 16-lane SWAR subfield scalar multiplication
@@ -952,13 +724,21 @@ mod tests {
             let s = TowerGf256(s_raw);
             assert_eq!(z.mul_gf256(s), z.mul(Tower128::embed_gf256(s)));
         }
-        // Exhaustive 128 x 128 = 16,384 basis-product check proving `swar_mul_t5_x4` `tower_mul_t7`
-        // matches `tower_mul_t7_karatsuba_ref` across all 2^256 pairs by F_2-bilinearity!
+        // Exhaustive 128 x 128 = 16,384 basis-product parity check across `tower_mul_t7`,
+        // `tower_mul_bits(7, ..)`, and Aeneas-verified `qsag_verified::tower::tower128_mul`.
         for i in 0..128 {
             let ei = 1u128 << i;
             for j in 0..128 {
                 let ej = 1u128 << j;
-                assert_eq!(tower_mul_t7(ei, ej), tower_mul_t7_karatsuba_ref(ei, ej));
+                assert_eq!(
+                    tower_mul_t7(ei, ej),
+                    ::qsag_verified::tower::tower128_mul(
+                        ::qsag_verified::tower::Tower128(ei),
+                        ::qsag_verified::tower::Tower128(ej),
+                    )
+                    .0
+                );
+                assert_eq!(tower_mul_bits(7, ei, ej), tower_mul_t7(ei, ej));
             }
         }
     }

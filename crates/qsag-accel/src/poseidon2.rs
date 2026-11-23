@@ -1211,8 +1211,8 @@ pub fn poseidon2_gl24_apply_mi(st: &mut [u64; 24]) {
     }
     st[0] = gl_add(s, gl_neg(gl_shl_small(st[0], 23)));
     st[1] = gl_add(s, gl_reduce_u64(st[1]));
-    for j in 2..24 {
-        st[j] = gl_add(s, gl_shl_small(st[j], (j - 1) as u32));
+    for (j, x) in st.iter_mut().enumerate().skip(2) {
+        *x = gl_add(s, gl_shl_small(*x, (j - 1) as u32));
     }
 }
 

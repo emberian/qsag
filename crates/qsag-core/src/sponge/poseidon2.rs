@@ -286,8 +286,8 @@ pub fn poseidon2_gl24_apply_mi(st: &mut Poseidon2State24) {
     }
     st[0] = s - goldilocks_shl_small(st[0], 23);
     st[1] += s;
-    for j in 2..24 {
-        st[j] = s + goldilocks_shl_small(st[j], (j - 1) as u32);
+    for (j, x) in st.iter_mut().enumerate().skip(2) {
+        *x = s + goldilocks_shl_small(*x, (j - 1) as u32);
     }
 }
 
