@@ -1,0 +1,15 @@
+RTL File                                Hit / Total  Coverage
+--------------------------------------------------------------
+dregg_ro_puf_bch.sv                     176 / 192      91.67%
+qsag_ass2_core.sv                        51 / 51      100.00%
+qsag_ass2_crypto.sv                     196 / 196     100.00%
+qsag_ass2_enclave_top.sv                293 / 329      89.06%
+qsag_ass2_host.sv                       122 / 123      99.19%
+qsag_ass2_irom.sv                       509 / 509     100.00%
+qsag_ass2_ripple_cnt.sv                   2 / 3        66.67%
+qsag_ass2_sram.sv                         2 / 2       100.00%
+qsag_ass2_uart.sv                        45 / 45      100.00%
+qsag_gl64_karatsuba_csa.sv                4 / 4       100.00%
+qsag_trng.sv                             67 / 67      100.00%
+--------------------------------------------------------------
+TOTAL PRODUCTION RTL                   1467 / 1521     96.45%
