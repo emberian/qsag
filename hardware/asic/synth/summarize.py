@@ -5,9 +5,8 @@ import re
 import sys
 from collections import defaultdict
 
-NAND2 = {"sky130": ("sky130_fd_sc_hd__nand2_1", 3.7536), "ihp130": ("sg13g2_nand2_1", 7.2576),
-         "nangate45": ("NAND2_X1", 0.798), "asap7": ("NAND2xp5_ASAP7_75t_R", 0.05832)}
-LIBS = ["sky130", "ihp130", "nangate45", "asap7"]
+NAND2 = {"sky130": ("sky130_fd_sc_hd__nand2_1", 3.7536), "ihp130": ("sg13g2_nand2_1", 7.2576)}
+LIBS = ["sky130", "ihp130"]
 rows = defaultdict(dict)
 top = {}
 fails = []

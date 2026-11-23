@@ -1,42 +1,33 @@
-# QSAG-NI v2 ASIC Logic-Area & Foundry Library Characterization (`IHP SG13G2` & `Sky130 HD`)
+# QSAG-NI v2 foundry synthesis and timing
 
-> **Deployment & Scope Note:** `qsag_ni_asic_top` (`~660–720 kGE` logic + external SRAM) is a full-rate WHIR / `zk-Hem v2` hardware proof-verifier datapath (~`4.8–8.8 mm²` in 130 nm CMOS — far larger than a `1.73 mm²` `GF180MCU` `SLOT_0P5X0P5` shuttle slot). Its real deployable hardware targets in this repository are **Lattice `ECP5-85F`** ([`hardware/fpga/`](../../fpga)) and **AWS EC2 F2 `VU47P`** ([`hardware/aws_f2/`](../../aws_f2)), while our manufacturable `SLOT_0P5X0P5` tapeout enclave is **`ASS2-0P5 / Dregg-64`** ([`hardware/ass2/`](../../ass2)).
->
-> Earlier synthesis/OpenROAD comparisons using non-manufacturable academic libraries (`Nangate45`, `ASAP7`) and unverified `sram_dp_64x16384_bank` LEF blackbox stubs have been demoted to [`history/academic-pdk-cosplay/`](../../../history/academic-pdk-cosplay) (see [`history/README.md`](../../../history/README.md)).
+The complete pure-quintic (`Fp5 = F_p[X]/(X^5 - 3)`, zero quartic residue) `QSAG-NI v2` design was mapped using Yosys at the typical corner of each manufacturable 130 nm open foundry library (`IHP SG13G2` and `Sky130 HD`). The flow links the mapped datapath, controller, and initialized synchronous 32 KiB ROM (`4,096 × 64-bit`). Four 128 KiB dual-port SRAM banks (`512 KiB` total) are area and timing black boxes. A `kGE` is 1,000 library `NAND2` gates by area (`7.2576 µm²` on `IHP SG13G2`, `3.7536 µm²` on `Sky130 HD`).
 
-`kGE` = mapped standard-cell area divided by the foundry library's 2-input NAND gate (`sky130`: `sky130_fd_sc_hd__nand2_1 = 3.7536 um^2`, `ihp130`: `sg13g2_nand2_1 = 7.2576 um^2`). Dual-port SRAM banks are blackboxed during logic synthesis and excluded from standard-cell `kGE`.
+> **Library note:** `IHP SG13G2` and `Sky130 HD` are the manufacturable 130 nm foundry targets. `Nangate45` (`FreePDK45`) and `ASAP7` are purposely non-manufacturable academic reference libraries and are excluded from foundry signoff. Foundry tapeout signoff requires characterized SRAM/ROM macros, extracted parasitic SPEF interconnect, DRC/LVS, and multi-corner physical signoff.
 
----
+[Foundry synthesis & OpenSTA log](logs/foundry_synth_sta.log)
 
-## 1. Hierarchical Manufacturable-PDK Logic Synthesis (`synth/hier/{ihp130,sky130}/result.json`)
+## Mapped standard-cell area (pure Quintic `Fp5`)
 
-Shared 9-multiplier Solinas–Karatsuba carry-save architecture (`qsag_asic_ext4_p2_shared.sv` + `qsag_fp5_seq.sv`):
+| Library | `NAND2` (`µm²`) | `AUTO_VERIFY=0` (`kGE`) | `AUTO_VERIFY=1` (`kGE`) | Autonomous Engine excl. ROM (`kGE`) | Synchronous 32 KiB ROM (`kGE`) | Top-level Auto Glue (`kGE`) |
+|---|---:|---:|---:|---:|---:|---:|
+| **IHP SG13G2** | 7.2576 | **660.996** | **709.610** | 22.994 | 21.068 | 4.552 |
+| **Sky130 HD** | 3.7536 | **734.229** | **784.540** | 24.718 | 21.957 | 3.636 |
 
-| Foundry PDK | `NAND2` (`um^2`) | Total Stdcell Area (`um^2`) | **Whole-Top Stdcell (`kGE`)** | Sequential (`kGE`) | Mapped Cells |
-|---|---:|---:|---:|---:|---:|
-| **IHP SG13G2 (130 nm)** | 7.2576 | 4,793,182.54 | **660.44 kGE** | 71.42 | 416,430 |
-| **Sky130 HD (130 nm)** | 3.7536 | 2,703,155.04 | **720.15 kGE** | 84.39 | 394,730 |
+Engine area excludes the synchronous ROM column (`4,096 × 64-bit`, `25,448` bytes active firmware + constants). Disabling autonomous verification (`AUTO_VERIFY=0`) removes the autonomous engine, the synchronous ROM, and the top-level SRAM/register-file mux glue (`-48.614 kGE` total on `IHP SG13G2`, `-50.311 kGE` total on `Sky130 HD`) and makes `0x50` fail closed (`verify_fail <= 1'b1`).
 
-### Per-Submodule Breakdown (`kGE` / Zero-Wireload ABC `stime` `ns`)
+## OpenSTA pre-layout static timing (`IHP SG13G2` 3-corner + `Sky130 HD` TT)
 
-| Submodule | Instances | IHP SG13G2 (`kGE` / `ns`) | Sky130 HD (`kGE` / `ns`) |
-|---|---:|---:|---:|
-| `qsag_gl64_mul_csa` (Solinas–Karatsuba 64×64 mod $p$) | 9 | 29.24 / 10.44 | 32.16 / 14.02 |
-| `qsag_p2_me` (Poseidon2 external $M_E$ + RC) | 1 | 58.68 / 14.03 | 66.12 / 21.06 |
-| `qsag_p2_mi_tail` + `qsag_p2_mi_apply` ($M_I$) | 1 + 1 | 34.67 / 9.92 | 39.13 / 14.41 |
-| `qsag_p2_canopy_ff` (Jive/Canopy feed-forward) | 1 | 7.56 / 7.33 | 8.29 / 10.46 |
-| `qsag_keccak_round` (2 rounds/clk `Keccak-p[1600]`) | 2 | 11.49 / 1.05 | 13.39 / 1.78 |
-| `qsag_gf128_mul` (Karatsuba CLMUL + `0x87` reduce) | 1 | 22.01 / 3.04 | 24.81 / 5.48 |
-| `qsag_tower128_to_poly` + `poly_to_tower128` | 2 + 1 | 8.37 / 1.45 | 9.68 / 2.86 |
-| `qsag_ni_asic_top` (controller, muxes, glue, FFs) | 1 | 207.76 / 8.59 | 216.32 / 12.80 |
+The ideal reference clock constraint in `synth/run_foundry_v2.py` is `100 ns` (`10 MHz`) with zero I/O delays across unbuffered pre-layout Yosys netlists (SRAM macros modeled as black boxes). All eight unbuffered pre-layout analyses fail that `100 ns` constraint (`-202.93 ns` to `-645.59 ns` worst negative slack). Physical timing closure requires hierarchical buffering, floorplanning, clock-tree synthesis, characterized SRAM macro `.lib`s, and extracted interconnect. [Mapping and STA script](run_foundry_v2.py)
 
----
+| Library and corner | Min period, `AUTO_VERIFY=0` (`ns`) | Slack, `AUTO_VERIFY=0` (`ns`) | Min period, `AUTO_VERIFY=1` (`ns`) | Slack, `AUTO_VERIFY=1` (`ns`) |
+|---|---:|---:|---:|---:|
+| **IHP SG13G2 TT** (`1.20 V, 25 °C`) | 488.22 | -388.2245 | 505.88 | -405.8846 |
+| **IHP SG13G2 FF** (`1.32 V, −40 °C`) | 302.93 | -202.9302 | 314.15 | -214.1516 |
+| **IHP SG13G2 SS** (`1.08 V, 125 °C`) | 719.59 | -619.5864 | 745.59 | -645.5927 |
+| **Sky130 HD TT** (`1.80 V, 25 °C`) | 706.07 | -606.0749 | 694.02 | -594.0190 |
 
-## 2. Pre-Layout Static Timing Characterization (`OpenSTA 3.1.0`, Ideal Wireload)
+## Synchronous FPGA BRAM ROM inference
 
-| Foundry PDK | Corner | Min Period (`ns`) | **Pre-Layout Fmax (`MHz`)** | Total Power (`mW`) | Leakage (`mW`) |
-|---|---|---:|---:|---:|---:|
-| **IHP SG13G2** | `ff_m40C_1v32` | **37.63** | **26.57** | 187.840 | 0.1383 |
-| **IHP SG13G2** | `tt_025C_1v20` | **56.99** | **17.55** | 117.490 | 0.0598 |
-| **IHP SG13G2** | `ss_125C_1v08` | **89.28** | **11.20** | 61.161 | 0.2606 |
-| **Sky130 HD** | `tt_025C_1v80` | **151.32** | **6.61** | 112.930 | 0.0010 |
+The synchronous-read `4,096 × 64-bit` (`32 KiB`) `qsag_auto_rom` infers pure dedicated block RAM with **zero fabric LUTs** on both FPGA targets:
+- **AMD Virtex UltraScale+ (`synth_xilinx -family xcup`):** `8 × RAMB36E2`, `0` LUTs ([bram_xilinx.log](logs/bram_xilinx.log))
+- **Lattice ECP5-85F (`synth_ecp5`):** `16 × DP16KD`, `0` LUTs ([bram_ecp5.log](logs/bram_ecp5.log))
