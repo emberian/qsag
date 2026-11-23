@@ -6,6 +6,3 @@ lint_off -rule UNUSEDSIGNAL -file "*/sh_ddr.stub.sv"
 lint_off -rule UNUSEDPARAM -file "*/sh_ddr.stub.sv"
 // Explicitly unconnected DDR return ports when DDR_PRESENT=0.
 lint_off -rule PINCONNECTEMPTY -file "*/cl_qsag_f2.sv"
-// VAT_ID controls only the simulation-only PUF and TRNG profiles.
-lint_off -rule UNUSEDPARAM -file "*/dregg_ro_puf_bch.sv" -match "*'VAT_ID'*"
-lint_off -rule UNUSEDPARAM -file "*/qsag_trng.sv" -match "*'VAT_ID'*"
