@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SIMD Finite-Field Kernels (`GF(2^8)` `GFNI`/`vpshufb`/`Russian-peasant`,
 //! `GF(2^128)` `VPCLMULQDQ` 2-lane & batched MulAcc vs `polyval`/`ghash`, and `Goldilocks` +
-//! `Ext2` + `Ext4` + Radix-2 NTT + `Poseidon2` Algebraic Bijectivity vs Plonky3 `p3-goldilocks`).
+//! `Ext2` + Quintic `Fp5` + Radix-2 NTT + `Poseidon2` Algebraic Bijectivity vs Plonky3 `p3-goldilocks`).
 
 use ghash::universal_hash::{KeyInit, UniversalHash as _};
 use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
@@ -10,8 +10,9 @@ use p3_field::{AbstractExtensionField, AbstractField, Field, PrimeField64, TwoAd
 use p3_goldilocks::Goldilocks as P3Goldilocks;
 use polyval::Polyval;
 use proptest::prelude::*;
+use qsag_agg::QuinticFp5;
 use qsag_agg::field::{
-    GOLDILOCKS_PRIME, Goldilocks as AggGl, GoldilocksExt2, GoldilocksExt2Ops, GoldilocksExt4,
+    GOLDILOCKS_PRIME, Goldilocks as AggGl, GoldilocksExt2, GoldilocksExt2Ops,
     TWO_ADIC_ROOT_OF_UNITY_32, intt_goldilocks, ntt_goldilocks,
 };
 use qsag_asm::{
@@ -31,7 +32,7 @@ use qsag_core::sponge::poseidon2::{
 };
 use qsag_external_validation::{
     ALL_SIMD_BACKENDS, gf2_128_poly87_mul_ref, gf256_poly11b_inv, gf256_poly11b_mul,
-    gfni_affine_byte, goldilocks_mul_u128_ref, p3_ext4_inv, p3_ext4_mul, p3_ext4_pow,
+    gfni_affine_byte, goldilocks_mul_u128_ref, p3_fp5_inv, p3_fp5_mul, p3_fp5_pow,
     poseidon2_ref,
 };
 
@@ -531,14 +532,13 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(10_000))]
 
     /// 10,000-case property-based test comparing `Goldilocks`, `GoldilocksExt2`, and
-    /// `GoldilocksExt4` (`mul`, `square`, `inv`, Frobenius $x \mapsto x^p$) against Plonky3!
+    /// Quintic `Fp5` (`mul`, `square`, `inv`, Frobenius $x \mapsto x^p$) against Plonky3!
     #[test]
-    fn goldilocks_base_ext2_and_ext4_10000_cases_against_plonky3(
-        x_raw in any::<[u64; 4]>(),
-        y_raw in any::<[u64; 4]>(),
+    fn goldilocks_base_ext2_and_quintic_fp5_10000_cases_against_plonky3(
+        x_raw in any::<[u64; 5]>(),
+        y_raw in any::<[u64; 5]>(),
     ) {
-        // 1. Base field + `goldilocks_dot2_ct` vs Plonky3. The kernels take the raw words;
-        //    only the Plonky3 operands are reduced.
+        // 1. Base field + `goldilocks_dot2_ct` vs Plonky3.
         let (a0, b0, a1, b1) = (x_raw[0], y_raw[0], x_raw[1], y_raw[1]);
         let p3 = |x: u64| P3Goldilocks::from_canonical_u64(x % GOLDILOCKS_PRIME);
 
@@ -568,7 +568,6 @@ proptest! {
         prop_assert_eq!(q_e2_prod.c0.to_canonical_u64(), p3_e2_prod[0].as_canonical_u64());
         prop_assert_eq!(q_e2_prod.c1.to_canonical_u64(), p3_e2_prod[1].as_canonical_u64());
 
-        // `inv` is `None` exactly at zero; `inv_or_zero` maps zero to zero.
         let e2_limbs = |z: GoldilocksExt2| [z.c0.to_canonical_u64(), z.c1.to_canonical_u64()];
         let p3_e2_inv = p3_e2_x.try_inverse().map(|z| {
             let limbs: &[P3Goldilocks] = z.as_base_slice();
@@ -577,18 +576,19 @@ proptest! {
         prop_assert_eq!(q_e2_x.inv().map(e2_limbs), p3_e2_inv);
         prop_assert_eq!(e2_limbs(q_e2_x.inv_or_zero()), p3_e2_inv.unwrap_or([0, 0]));
 
-        // 3. Quartic extension `GoldilocksExt4`: mul, square, inverse, and Frobenius `x^p`.
-        let q_x = GoldilocksExt4::from_limbs(x_raw.map(AggGl::from_u64_reduced));
-        let q_y = GoldilocksExt4::from_limbs(y_raw.map(AggGl::from_u64_reduced));
-        let limbs = |z: GoldilocksExt4| z.to_limbs().map(|l| l.to_canonical_u64());
+        // 3. Quintic extension `Fp5`: mul, square, inv/inv_or_zero, and Frobenius `x^p`.
+        let q_x = QuinticFp5::from_limbs(x_raw.map(AggGl::from_u64_reduced));
+        let q_y = QuinticFp5::from_limbs(y_raw.map(AggGl::from_u64_reduced));
+        let limbs = |z: QuinticFp5| z.to_limbs().map(|l| l.to_canonical_u64());
         let (xl, yl) = (limbs(q_x), limbs(q_y));
 
-        prop_assert_eq!(limbs(q_x * q_y), p3_ext4_mul(xl, yl));
-        prop_assert_eq!(limbs(q_x.square()), p3_ext4_mul(xl, xl));
-        prop_assert_eq!(limbs(q_x.frobenius()), p3_ext4_pow(xl, GOLDILOCKS_PRIME));
+        prop_assert_eq!(limbs(q_x * q_y), p3_fp5_mul(xl, yl));
+        prop_assert_eq!(limbs(q_x.square()), p3_fp5_mul(xl, xl));
+        prop_assert_eq!(limbs(q_x.frobenius()), p3_fp5_pow(xl, GOLDILOCKS_PRIME));
+        prop_assert_eq!(limbs(q_x.inv_or_zero()), p3_fp5_inv(xl));
         if !q_x.is_zero() {
-            prop_assert_eq!(limbs(q_x.inv()), p3_ext4_inv(xl));
-            prop_assert_eq!(q_x * q_x.inv(), GoldilocksExt4::ONE);
+            prop_assert_eq!(limbs(q_x.inverse()), p3_fp5_inv(xl));
+            prop_assert_eq!(q_x * q_x.inverse(), QuinticFp5::ONE);
         }
     }
 }

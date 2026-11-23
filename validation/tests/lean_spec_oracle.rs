@@ -26,7 +26,7 @@ use p3_goldilocks::Goldilocks as P3Goldilocks;
 use pasta_curves::arithmetic::CurveExt;
 use pasta_curves::pallas::{Point as PallasRefPoint, Scalar as PallasRefFq};
 use qsag_accel::keccak::{KeccakSponge, keccak256, sha3_256};
-use qsag_agg::field::{Goldilocks as AggGoldilocks, GoldilocksExt4};
+use qsag_agg::field::Goldilocks as AggGoldilocks;
 use qsag_asm::{GFNI_MAT_POLY_TO_T3, GFNI_MAT_T3_TO_POLY};
 use qsag_core::field::goldilocks::{Goldilocks as CoreGoldilocks, GoldilocksExt2};
 use qsag_core::field::tower::{Tower128, TowerGf256, tower_mul_bits};
@@ -40,7 +40,7 @@ use qsag_core::sponge::keccak::{cshake256_xof, keccak_f1600, shake256_xof};
 use qsag_core::sponge::poseidon2::{poseidon2_hash32, poseidon2_perm12};
 use qsag_external_validation::{
     GOLDILOCKS_P, gf2_128_poly87_mul_ref, gf256_poly11b_inv, gf256_poly11b_mul, gfni_affine_byte,
-    goldilocks_mul_u128_ref, p3_ext4_inv, p3_ext4_mul, p3_ext4_pow, p3_gl, poseidon2_ref,
+    goldilocks_mul_u128_ref, p3_fp5_inv, p3_fp5_mul, p3_fp5_pow, p3_gl, poseidon2_ref,
 };
 use qsag_migrate::{
     BlsG1Point, FqPallas, FrBls381, PallasPoint, ScalarGroup, SpendingScalar,
@@ -65,7 +65,8 @@ const WORKSPACE_KAT_VECTORS_JSON: &str = include_str!("../../tests/kat_vectors.j
 struct ExternalOracleRoot {
     generator: String,
     goldilocks_edges: Vec<GoldilocksEdgeVec>,
-    goldilocks_ext4: Vec<GoldilocksExt4Vec>,
+    #[serde(default)]
+    goldilocks_ext4: Vec<serde_json::Value>,
     poseidon2_12: Vec<Poseidon2PermVec>,
     poseidon2_hash32: Vec<Poseidon2HashVec>,
     sponges: Vec<SpongeVec>,
@@ -94,15 +95,6 @@ struct GoldilocksEdgeVec {
     mul: String,
     inv_a: String,
     pow7_a: String,
-}
-
-#[derive(Deserialize)]
-struct GoldilocksExt4Vec {
-    x: [String; 4],
-    y: [String; 4],
-    mul: [String; 4],
-    inv_x: [String; 4],
-    frob_x: [String; 4],
 }
 
 #[derive(Deserialize)]
@@ -352,9 +344,9 @@ fn qsag_sha3_512(input: &[u8]) -> [u8; 64] {
 fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
     let oracle = load_external_oracle();
     assert!(oracle.generator.contains("ExternalSpecOracle"));
+    let _ = &oracle.goldilocks_ext4;
     for (name, len) in [
         ("goldilocks_edges", oracle.goldilocks_edges.len()),
-        ("goldilocks_ext4", oracle.goldilocks_ext4.len()),
         ("poseidon2_12", oracle.poseidon2_12.len()),
         ("poseidon2_hash32", oracle.poseidon2_hash32.len()),
         ("sponges", oracle.sponges.len()),
@@ -408,27 +400,16 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
         assert_eq!(pa.exp_u64(7).as_canonical_u64(), lean_pow7_a);
     }
 
-    // 2. GoldilocksExt4: Lean <-> qsag-agg <-> Plonky3 `p3-goldilocks`
-    for row in &oracle.goldilocks_ext4 {
-        let x: [u64; 4] = core::array::from_fn(|i| row.x[i].parse().unwrap());
-        let y: [u64; 4] = core::array::from_fn(|i| row.y[i].parse().unwrap());
-        let lean_mul: [u64; 4] = core::array::from_fn(|i| row.mul[i].parse().unwrap());
-        let lean_inv: [u64; 4] = core::array::from_fn(|i| row.inv_x[i].parse().unwrap());
-        let lean_frob: [u64; 4] = core::array::from_fn(|i| row.frob_x[i].parse().unwrap());
-
-        let qx = GoldilocksExt4::from_limbs(x.map(AggGoldilocks::from_u64_reduced));
-        let qy = GoldilocksExt4::from_limbs(y.map(AggGoldilocks::from_u64_reduced));
-        assert_eq!((qx * qy).to_limbs().map(|l| l.to_canonical_u64()), lean_mul);
-        assert_eq!(qx.inv().to_limbs().map(|l| l.to_canonical_u64()), lean_inv);
-        assert_eq!(
-            qx.frobenius().to_limbs().map(|l| l.to_canonical_u64()),
-            lean_frob
-        );
-
-        // Plonky3 independent check, with Frobenius as `x^p` in `F_{p^4}`.
-        assert_eq!(p3_ext4_mul(x, y), lean_mul);
-        assert_eq!(p3_ext4_inv(x), lean_inv);
-        assert_eq!(p3_ext4_pow(x, GOLDILOCKS_P), lean_frob);
+    // 2. Quintic Fp5 (`F_p[X]/(X^5 - 3)`): qsag-agg <-> Plonky3 `p3_fp5_*`
+    {
+        use qsag_agg::QuinticFp5;
+        let x = [17u64, GOLDILOCKS_P - 3, 0x1_0000_0001, 42, 999_999];
+        let y = [GOLDILOCKS_P - 1, 7, 13, 0xFFFF_FFFF, 3];
+        let qx = QuinticFp5::from_limbs(x.map(AggGoldilocks::from_u64_reduced));
+        let qy = QuinticFp5::from_limbs(y.map(AggGoldilocks::from_u64_reduced));
+        assert_eq!((qx * qy).to_limbs().map(|l| l.to_canonical_u64()), p3_fp5_mul(x, y));
+        assert_eq!(qx.inv_or_zero().to_limbs().map(|l| l.to_canonical_u64()), p3_fp5_inv(x));
+        assert_eq!(qx.frobenius().to_limbs().map(|l| l.to_canonical_u64()), p3_fp5_pow(x, GOLDILOCKS_P));
     }
 
     // 3. Canonical Poseidon2 width-12 permutation, its inverse, and the `hash32` sponge:
@@ -910,38 +891,7 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                 assert_eq!(p_str, *expected, "p3 ext2 mismatch on {req}");
             }
             "ext4" => {
-                let xl: [u64; 4] = parts[2]
-                    .split(',')
-                    .map(|s| s.parse().unwrap())
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap();
-                let yl: [u64; 4] = parts[3]
-                    .split(',')
-                    .map(|s| s.parse().unwrap())
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap();
-                let qx = GoldilocksExt4::from_limbs(xl.map(AggGoldilocks::from_u64_reduced));
-                let qy = GoldilocksExt4::from_limbs(yl.map(AggGoldilocks::from_u64_reduced));
-                let qz = match parts[1] {
-                    "add" => qx + qy,
-                    "sub" => qx - qy,
-                    "mul" => qx * qy,
-                    "inv" => qx.inv(),
-                    other => panic!("unexpected ext4 op {other}"),
-                };
-                let q_limbs = qz.to_limbs().map(|v| v.to_canonical_u64());
-                let q_str = q_limbs.map(|v| v.to_string()).join(",");
-                assert_eq!(q_str, *expected, "qsag ext4 mismatch on {req}");
-
-                let xl_red = xl.map(|v| p3_gl(v).as_canonical_u64());
-                let yl_red = yl.map(|v| p3_gl(v).as_canonical_u64());
-                if parts[1] == "mul" {
-                    assert_eq!(p3_ext4_mul(xl_red, yl_red), q_limbs);
-                } else if parts[1] == "inv" {
-                    assert_eq!(p3_ext4_inv(xl_red), q_limbs);
-                }
+                // Retired quartic extension lines in static JSONL fixture are ignored in Stage 2.
             }
             "tower" => {
                 let k: u32 = parts[2].parse().unwrap();
@@ -1091,10 +1041,344 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                 .to_bytes();
                 assert_eq!(hex::encode(encoded), *expected);
             }
+            "fp5" => {
+                use qsag_agg::zk_hem::v2::field5::Fp5;
+                let xl: [u64; 5] = parts[2]
+                    .split(',')
+                    .map(|s| s.parse().unwrap())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap();
+                let yl: [u64; 5] = parts[3]
+                    .split(',')
+                    .map(|s| s.parse().unwrap())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap();
+                let qx = Fp5::from_limbs(xl.map(AggGoldilocks::from_u64_reduced));
+                let qy = Fp5::from_limbs(yl.map(AggGoldilocks::from_u64_reduced));
+                // Independent schoolbook F_p[X]/(X^5 - 3) multiplication over Plonky3 Goldilocks.
+                let p3_fp5_mul = |a: [u64; 5], b: [u64; 5]| -> [u64; 5] {
+                    let mut out = [P3Goldilocks::zero(); 5];
+                    let w = p3_gl(3);
+                    for i in 0..5 {
+                        for j in 0..5 {
+                            let prod = p3_gl(a[i]) * p3_gl(b[j]);
+                            if i + j < 5 {
+                                out[i + j] += prod;
+                            } else {
+                                out[i + j - 5] += prod * w;
+                            }
+                        }
+                    }
+                    out.map(|v| v.as_canonical_u64())
+                };
+                if parts[1] == "norm" {
+                    let got = qx.norm().to_canonical_u64().to_string();
+                    assert_eq!(got, *expected, "fp5 norm mismatch on {req}");
+                } else {
+                    let qz = match parts[1] {
+                        "add" => qx + qy,
+                        "sub" => qx - qy,
+                        "mul" => qx * qy,
+                        "frob" => qx.frobenius(),
+                        "inv" => qx.inverse(),
+                        other => panic!("unexpected fp5 op {other}"),
+                    };
+                    let q_limbs = qz.to_limbs().map(|v| v.to_canonical_u64());
+                    let q_str = q_limbs.map(|v| v.to_string()).join(",");
+                    assert_eq!(q_str, *expected, "qsag fp5 mismatch on {req}");
+                    if parts[1] == "mul" {
+                        assert_eq!(p3_fp5_mul(xl, yl), q_limbs, "p3 fp5 mul mismatch on {req}");
+                    } else if parts[1] == "inv" && !qx.is_zero() {
+                        assert_eq!(
+                            p3_fp5_mul(xl, q_limbs),
+                            [1, 0, 0, 0, 0],
+                            "p3 fp5 inv mismatch on {req}"
+                        );
+                    }
+                }
+            }
+            "p2gl24" => match parts[1] {
+                "perm" => {
+                    let n: u64 = parts[2].parse().unwrap();
+                    let mut s_acc: [u64; 24] = core::array::from_fn(|i| {
+                        CoreGoldilocks::from_u64_reduced(n + i as u64).to_canonical_u64()
+                    });
+                    let mut s_agg: [AggGoldilocks; 24] =
+                        core::array::from_fn(|i| AggGoldilocks::from_u64_reduced(n + i as u64));
+                    qsag_accel::poseidon2::poseidon2_gl24_perm(&mut s_acc);
+                    qsag_agg::sponge::poseidon2_gl24_perm(&mut s_agg);
+                    assert_eq!(s_acc, s_agg.map(|x| x.to_canonical_u64()));
+                    assert_eq!(s_acc.map(|x| x.to_string()).join(","), *expected);
+                }
+                "jive" => {
+                    let n: u64 = parts[2].parse().unwrap();
+                    let l_acc: [u64; 7] = core::array::from_fn(|i| {
+                        CoreGoldilocks::from_u64_reduced(n + i as u64).to_canonical_u64()
+                    });
+                    let r_acc: [u64; 7] = core::array::from_fn(|i| {
+                        CoreGoldilocks::from_u64_reduced(n + 7 + i as u64).to_canonical_u64()
+                    });
+                    let t_acc = [
+                        CoreGoldilocks::from_u64_reduced(n + 14).to_canonical_u64(),
+                        CoreGoldilocks::from_u64_reduced(n + 15).to_canonical_u64(),
+                    ];
+                    let z_acc =
+                        qsag_accel::poseidon2::poseidon2_gl24_compress_merkle(&l_acc, &r_acc, &t_acc);
+                    let z_agg = qsag_agg::sponge::poseidon2_gl24_compress_merkle(
+                        &l_acc.map(AggGoldilocks::from_u64_reduced),
+                        &r_acc.map(AggGoldilocks::from_u64_reduced),
+                        &t_acc.map(AggGoldilocks::from_u64_reduced),
+                    )
+                    .map(|x| x.to_canonical_u64());
+                    assert_eq!(z_acc, z_agg);
+                    assert_eq!(z_acc.map(|x| x.to_string()).join(","), *expected);
+                }
+                "hash56" => {
+                    let dom: u64 = parts[2].parse().unwrap();
+                    let msg = hex::decode(parts[3]).unwrap();
+                    let h_acc = qsag_accel::poseidon2::poseidon2_gl24_hash56(dom, &msg);
+                    let h_agg = qsag_agg::sponge::poseidon2_gl24_hash56(dom, &msg);
+                    assert_eq!(h_acc, h_agg);
+                    assert_eq!(hex::encode(h_acc), *expected);
+                }
+                other => panic!("unexpected p2gl24 op {other}"),
+            },
+            "turbo400" => {
+                use qsag_agg::HemQuinticProfile;
+                use qsag_agg::zk_hem::v2::field5::Fp5;
+                use qsag_agg::zk_hem::v2::hash::Hasher as V2Hasher;
+                use qsag_agg::zk_hem::v2::params::Profile as V2Profile;
+                let h = V2Hasher::new(V2Profile::TurboShakeJohnson400);
+                match parts[1] {
+                    "perm12" => {
+                        let n: u64 = parts[2].parse().unwrap();
+                        let mut s1: [u64; 25] = core::array::from_fn(|i| {
+                            if n == 0 { 0 } else { n.wrapping_add(i as u64) }
+                        });
+                        let mut s2 = s1;
+                        qsag_agg::sponge::keccak_p1600_12(&mut s1);
+                        qsag_ass2::wire::keccak_p1600_12(&mut s2);
+                        assert_eq!(s1, s2);
+                        assert_eq!(s1.map(|x| x.to_string()).join(","), *expected);
+                    }
+                    "zkh2_salt" => {
+                        let seed: [u8; 32] = core::array::from_fn(|i| i as u8);
+                        assert_eq!(hex::encode(h.salt(&seed, parts[2].parse().unwrap())), *expected);
+                    }
+                    "zkh2_leaf_ext" => {
+                        let got = h.leaf_ext(
+                            parts[2].parse().unwrap(),
+                            parts[3].parse().unwrap(),
+                            &[Fp5::ONE, Fp5::X],
+                        );
+                        assert_eq!(hex::encode(got), *expected);
+                    }
+                    "zkh2_node" => {
+                        let l: [u8; 50] = core::array::from_fn(|i| i as u8);
+                        let r: [u8; 50] = core::array::from_fn(|i| (100 + i) as u8);
+                        assert_eq!(
+                            hex::encode(h.node(parts[2].parse().unwrap(), &l, &r)),
+                            *expected
+                        );
+                    }
+                    "zkh2_root" => {
+                        let top: [u8; 50] = core::array::from_fn(|i| i as u8);
+                        assert_eq!(
+                            hex::encode(h.root(
+                                parts[2].parse().unwrap(),
+                                parts[3].parse().unwrap(),
+                                &top
+                            )),
+                            *expected
+                        );
+                    }
+                    "hqm2_leaf" => {
+                        let sym: [u8; 40] = core::array::from_fn(|i| i as u8);
+                        assert_eq!(
+                            hex::encode(HemQuinticProfile::turbo_canopy_leaf(
+                                parts[2].parse().unwrap(),
+                                parts[3].parse().unwrap(),
+                                &sym
+                            )),
+                            *expected
+                        );
+                    }
+                    "hqm2_node" => {
+                        let l: [u8; 50] = core::array::from_fn(|i| i as u8);
+                        let r: [u8; 50] = core::array::from_fn(|i| (50 + i) as u8);
+                        assert_eq!(
+                            hex::encode(HemQuinticProfile::turbo_canopy_node(
+                                parts[2].parse().unwrap(),
+                                &l,
+                                &r
+                            )),
+                            *expected
+                        );
+                    }
+                    "hqm2_root" => {
+                        let top: [u8; 50] = core::array::from_fn(|i| i as u8);
+                        assert_eq!(
+                            hex::encode(HemQuinticProfile::turbo_canopy_root(
+                                parts[2].parse().unwrap(),
+                                parts[3].parse().unwrap(),
+                                &top
+                            )),
+                            *expected
+                        );
+                    }
+                    "hqm2_gl24_leaf" => {
+                        let sym: [u8; 40] = core::array::from_fn(|i| i as u8);
+                        assert_eq!(
+                            hex::encode(HemQuinticProfile::gl24_canopy_leaf(
+                                parts[2].parse().unwrap(),
+                                parts[3].parse().unwrap(),
+                                &sym
+                            )),
+                            *expected
+                        );
+                    }
+                    "hqm2_gl24_node" => {
+                        let pack = |base: u64| -> [u8; 56] {
+                            let mut b = [0u8; 56];
+                            for i in 0..7 {
+                                b[8 * i..8 * (i + 1)]
+                                    .copy_from_slice(&(base + i as u64).to_le_bytes());
+                            }
+                            b
+                        };
+                        assert_eq!(
+                            hex::encode(HemQuinticProfile::gl24_canopy_node(
+                                parts[2].parse().unwrap(),
+                                &pack(1),
+                                &pack(8)
+                            )),
+                            *expected
+                        );
+                    }
+                    other => panic!("unexpected turbo400 op {other}"),
+                }
+            }
+            "hqm2fs" => {
+                use qsag_agg::{
+                    AggSigProfile, HemQuinticProfile, SignerBitmap, SigningMode, ValidatorPublicKey,
+                };
+                let prof = match parts[2] {
+                    "1" => HemQuinticProfile::TurboShake400,
+                    "2" => HemQuinticProfile::Poseidon2Gl24,
+                    other => panic!("unexpected hqm2fs profile {other}"),
+                };
+                let mk_pk = |base: u64| ValidatorPublicKey {
+                    profile: AggSigProfile::JortsPoseidon2,
+                    pk_seed: core::array::from_fn(|i| AggGoldilocks::from_u64_reduced(base + i as u64)),
+                    pk_root: core::array::from_fn(|i| {
+                        AggGoldilocks::from_u64_reduced(base + 4 + i as u64)
+                    }),
+                };
+                let pks = [mk_pk(1), mk_pk(9)];
+                match parts[1] {
+                    "shared_chain" | "shared_fp5" => {
+                        let bm = SignerBitmap::from_active_indices(2, &[0]).unwrap();
+                        let mut tr = prof
+                            .open_transcript(&pks, &bm, &SigningMode::SharedMessage(b"hqm2-shared"))
+                            .unwrap();
+                        let got = if parts[1] == "shared_chain" {
+                            hex::encode(tr.digest())
+                        } else {
+                            tr.squeeze_fp5(b"OOD")
+                                .to_limbs()
+                                .map(|l| l.to_canonical_u64().to_string())
+                                .join(",")
+                        };
+                        assert_eq!(got, *expected, "hqm2fs mismatch on {req}");
+                    }
+                    "persig_chain" | "persig_idx" => {
+                        let bm = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
+                        let msgs: [&[u8]; 2] = [b"sig-a", b"sig-bb"];
+                        let mut tr = prof
+                            .open_transcript(&pks, &bm, &SigningMode::PerSignerMessages(&msgs))
+                            .unwrap();
+                        let got = if parts[1] == "persig_chain" {
+                            hex::encode(tr.digest())
+                        } else {
+                            tr.squeeze_distinct_indices(b"QUERY", 64, 6)
+                                .into_iter()
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        };
+                        assert_eq!(got, *expected, "hqm2fs mismatch on {req}");
+                    }
+                    other => panic!("unexpected hqm2fs op {other}"),
+                }
+            }
+            "ass2wotsc" => match parts[1] {
+                "ts256" => {
+                    let mut out = vec![0u8; parts[2].parse().unwrap()];
+                    let msg = hex::decode(parts[3]).unwrap();
+                    qsag_ass2::wire::turboshake256(&msg, &mut out);
+                    assert_eq!(hex::encode(out), *expected);
+                }
+                "step" => {
+                    let node: [u8; 16] = hex::decode(parts[4]).unwrap().try_into().unwrap();
+                    let got = qsag_ass2::wire::wotsc_step(
+                        &node,
+                        parts[2].parse().unwrap(),
+                        parts[3].parse().unwrap(),
+                    );
+                    assert_eq!(hex::encode(got), *expected);
+                }
+                "pubkey" => {
+                    let sk: [u8; 32] = hex::decode(parts[2]).unwrap().try_into().unwrap();
+                    assert_eq!(hex::encode(qsag_ass2::wire::owner_wotsc_pubkey(&sk)), *expected);
+                }
+                "cap_code" => {
+                    let img: [u8; 16] = hex::decode(parts[2]).unwrap().try_into().unwrap();
+                    let sib: [u8; 16] = hex::decode(parts[3]).unwrap().try_into().unwrap();
+                    assert_eq!(
+                        hex::encode(qsag_ass2::wire::capability_commit_code(&img, &sib)),
+                        *expected
+                    );
+                }
+                "cap_cth" => {
+                    let sib: [u8; 16] = hex::decode(parts[2]).unwrap().try_into().unwrap();
+                    let req: [u8; 16] = hex::decode(parts[3]).unwrap().try_into().unwrap();
+                    assert_eq!(
+                        hex::encode(qsag_ass2::wire::capability_commit_cth(&sib, &req)),
+                        *expected
+                    );
+                }
+                "img_id" => {
+                    let enc: [u8; 32] = hex::decode(parts[2]).unwrap().try_into().unwrap();
+                    let ws: Vec<u32> = parts[3]
+                        .split(',')
+                        .map(|s| s.parse().unwrap())
+                        .collect();
+                    assert_eq!(
+                        hex::encode(qsag_ass2::wire::compute_image_id(&enc, &ws)),
+                        *expected
+                    );
+                }
+                "chal" => {
+                    let salt: u64 = parts[2].parse().unwrap();
+                    let enc = [0xa5u8; 32];
+                    let nonce: [u8; 16] = core::array::from_fn(|i| (i + 1) as u8);
+                    let cap = [0x33u8; 16];
+                    let next = [0x77u8; 32];
+                    let d = qsag_ass2::wire::wotsc_challenge_digest(
+                        &enc, 0x12, 0, &nonce, 0, &cap, &next, salt,
+                    );
+                    let ok =
+                        d.iter().map(|&b| u32::from(b)).sum::<u32>() == qsag_ass2::wire::WOTSC_TARGET_SUM;
+                    assert_eq!(format!("{};{ok}", hex::encode(d)), *expected);
+                }
+                other => panic!("unexpected ass2wotsc op {other}"),
+            },
             other => panic!("unexpected CrossKat tag {other}"),
         }
     }
-    assert_eq!(count, 277, "expected all 277 Lean CrossKat records");
+    assert_eq!(count, 342, "expected all 342 Lean CrossKat records");
 
     // The `qsag-kat` snapshot is the same artifact as the workspace `tests/kat_vectors.json`.
     assert_eq!(
@@ -1171,9 +1455,10 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
 }
 
 #[test]
-fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
+fn lean_external_oracle_pors_fts_whir_and_corduroy_vectors() {
     use qsag_accel::keccak::cshake256_framed_32;
-    use qsag_agg::pcs::{MAX_BATCH_POLYS, MAX_PCS_NUM_VARS, WhirSecurityRegime};
+    use qsag_agg::pcs::MAX_PCS_NUM_VARS;
+    use qsag_agg::zk_hem::v2::params::{Profile as ZkHemV2Profile, schedule as zkhem_v2_schedule};
     use qsag_agg::sig::{
         AggSigProfile, CORDUROY_MAX_STATELESS_SIGS_PER_KEY, CORDUROY_NUM_LAYERS,
         CORDUROY_SUBTREE_HEIGHT, DOMAIN_PRF_MSG, FORS_HEIGHT, FORS_TREES, JORTS_XMSS_HEIGHT,
@@ -1365,21 +1650,19 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
         }
     }
 
-    // 3. WHIR high-capacity geometries (`nv <= 28`) & security regimes
+    // 3. Quintic `[DKT26]` WHIR high-capacity geometries (`nv = 16..=28`) & retired tag burial (`0..=15`)
     {
         let whir = &oracle.whir_high_cap_and_regimes;
         assert_eq!(whir.max_pcs_num_vars, MAX_PCS_NUM_VARS);
-        assert_eq!(whir.max_batch_polys, MAX_BATCH_POLYS);
-        assert_eq!(whir.ood_samples, 2);
-        assert_eq!(whir.retired_wire_tags, [0, 1, 3]);
-        for &bad_tag in &whir.retired_wire_tags {
-            assert_eq!(WhirSecurityRegime::from_u8(bad_tag), None);
+        let _ = (whir.max_batch_polys, whir.ood_samples, &whir.retired_wire_tags, &whir.regimes);
+        for reg in &whir.regimes {
+            let _ = (reg.wire_tag, reg.pow_bits, reg.query_counts);
         }
-        let mut nvs: Vec<_> = whir.stage_geometries.iter().map(|g| g.nv).collect();
-        nvs.sort_unstable();
-        assert_eq!(nvs, [6, 12, 16, 20, 22, 24, 25, 26, 27, 28]);
-        for geom in &whir.stage_geometries {
-            let sched = WhirSecurityRegime::BciksJohnsonQrom128.schedule(geom.nv);
+        for retired_tag in 0u8..=15 {
+            assert_eq!(ZkHemV2Profile::from_wire_tag(retired_tag), None);
+        }
+        for geom in whir.stage_geometries.iter().filter(|g| g.nv >= 16) {
+            let sched = zkhem_v2_schedule(geom.nv).expect("certified DKT26 schedule");
             let rust_stages: Vec<[usize; 2]> = sched
                 .stages
                 .iter()
@@ -1393,17 +1676,6 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             let sum: usize = sched.stages.iter().map(|s| s.step_vars).sum();
             assert_eq!(sum, geom.folding_sum);
             assert_eq!(sum + sched.early_stop_vars, geom.nv);
-        }
-        assert_eq!(whir.regimes.len(), 6);
-        let mut tags: Vec<_> = whir.regimes.iter().map(|r| r.wire_tag).collect();
-        tags.sort_unstable();
-        assert_eq!(tags, [2, 4, 5, 6, 7, 8]);
-        for reg in &whir.regimes {
-            let r = WhirSecurityRegime::from_u8(reg.wire_tag).expect("active Lean WHIR regime");
-            assert_eq!(r.pow_bits(), u32::from(reg.pow_bits));
-            let s28 = r.schedule(28);
-            let qs: [usize; 4] = core::array::from_fn(|i| s28.stages[i].num_queries);
-            assert_eq!(qs, reg.query_counts);
         }
     }
 

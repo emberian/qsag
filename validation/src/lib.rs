@@ -2,8 +2,7 @@
 //! Shared reference-oracle helpers, basis isomorphisms, and algebraic inverse
 //! utilities for QSAG external differential validation and property-based testing.
 
-use p3_field::extension::BinomialExtensionField;
-use p3_field::{AbstractExtensionField, AbstractField, Field, PrimeField64};
+use p3_field::{AbstractField, Field, PrimeField64};
 use p3_goldilocks::Goldilocks as P3Goldilocks;
 use qsag_asm::SimdBackend;
 
@@ -21,57 +20,64 @@ pub const ALL_SIMD_BACKENDS: [SimdBackend; 4] = [
     SimdBackend::X86Avx512GfniVpclmul,
 ];
 
-type P3Ext2 = BinomialExtensionField<P3Goldilocks, 2>;
-
 /// Plonky3 Goldilocks element of `raw mod p`.
 #[inline]
 pub fn p3_gl(raw: u64) -> P3Goldilocks {
     P3Goldilocks::from_canonical_u64(raw % GOLDILOCKS_P)
 }
 
-/// Limbs `[c00, c01, c10, c11]` of `(c00 + c01 u) + (c10 + c11 u) v` with `u^2 = 7`, `v^2 = u`,
-/// as the pair of Plonky3 quadratic-extension coefficients of `1` and `v`.
-fn p3_ext4_split(a: [u64; 4]) -> (P3Ext2, P3Ext2) {
-    (
-        P3Ext2::from_base_slice(&[p3_gl(a[0]), p3_gl(a[1])]),
-        P3Ext2::from_base_slice(&[p3_gl(a[2]), p3_gl(a[3])]),
-    )
-}
-
-fn p3_ext4_join(c0: P3Ext2, c1: P3Ext2) -> [u64; 4] {
-    let (c0, c1): (&[P3Goldilocks], &[P3Goldilocks]) = (c0.as_base_slice(), c1.as_base_slice());
-    [c0[0], c0[1], c1[0], c1[1]].map(|x| x.as_canonical_u64())
-}
-
-/// Reference `GoldilocksExt4` product over Plonky3's quadratic extension:
-/// `(a0 + a1 v)(b0 + b1 v) = (a0 b0 + u a1 b1) + (a0 b1 + a1 b0) v`.
-pub fn p3_ext4_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    let u = P3Ext2::from_base_slice(&[P3Goldilocks::zero(), P3Goldilocks::one()]);
-    let ((a0, a1), (b0, b1)) = (p3_ext4_split(a), p3_ext4_split(b));
-    p3_ext4_join(a0 * b0 + u * a1 * b1, a0 * b1 + a1 * b0)
-}
-
-/// Reference `GoldilocksExt4` inverse through the norm to the quadratic extension (`0 -> 0`).
-pub fn p3_ext4_inv(a: [u64; 4]) -> [u64; 4] {
-    let u = P3Ext2::from_base_slice(&[P3Goldilocks::zero(), P3Goldilocks::one()]);
-    let (a0, a1) = p3_ext4_split(a);
-    match (a0 * a0 - u * a1 * a1).try_inverse() {
-        Some(norm_inv) => p3_ext4_join(a0 * norm_inv, -(a1 * norm_inv)),
-        None => [0; 4],
+/// Independent Plonky3-backed product in Quintic `Fp5` = $\mathbb{F}_p[X]/(X^5 - 3)$.
+pub fn p3_fp5_mul(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
+    let w = P3Goldilocks::from_canonical_u64(3);
+    let pa = a.map(p3_gl);
+    let pb = b.map(p3_gl);
+    let mut out = [P3Goldilocks::zero(); 5];
+    for i in 0..5 {
+        for j in 0..5 {
+            let term = pa[i] * pb[j];
+            if i + j < 5 {
+                out[i + j] += term;
+            } else {
+                out[i + j - 5] += w * term;
+            }
+        }
     }
+    out.map(|x| x.as_canonical_u64())
 }
 
-/// Reference `GoldilocksExt4` power by square-and-multiply; `exp = p` is the Frobenius map.
-pub fn p3_ext4_pow(mut base: [u64; 4], mut exp: u64) -> [u64; 4] {
-    let mut acc = [1, 0, 0, 0];
+/// Independent Plonky3-backed power in Quintic `Fp5` = $\mathbb{F}_p[X]/(X^5 - 3)$;
+/// `exp = p` computes the Frobenius endomorphism $x \mapsto x^p$.
+pub fn p3_fp5_pow(mut base: [u64; 5], mut exp: u64) -> [u64; 5] {
+    let mut acc = [1, 0, 0, 0, 0];
+    base = base.map(|v| v % GOLDILOCKS_P);
     while exp > 0 {
         if exp & 1 == 1 {
-            acc = p3_ext4_mul(acc, base);
+            acc = p3_fp5_mul(acc, base);
         }
-        base = p3_ext4_mul(base, base);
+        base = p3_fp5_mul(base, base);
         exp >>= 1;
     }
     acc
+}
+
+/// Independent Plonky3-backed multiplicative inverse in Quintic `Fp5` via the Galois norm
+/// $N(x) = x \cdot x^p \cdot x^{p^2} \cdot x^{p^3} \cdot x^{p^4} \in \mathbb{F}_p$ (`0 -> 0`).
+pub fn p3_fp5_inv(a: [u64; 5]) -> [u64; 5] {
+    let canon = a.map(|v| v % GOLDILOCKS_P);
+    if canon == [0; 5] {
+        return [0; 5];
+    }
+    let phi1 = p3_fp5_pow(canon, GOLDILOCKS_P);
+    let phi2 = p3_fp5_pow(phi1, GOLDILOCKS_P);
+    let phi3 = p3_fp5_pow(phi2, GOLDILOCKS_P);
+    let phi4 = p3_fp5_pow(phi3, GOLDILOCKS_P);
+    let conj = p3_fp5_mul(p3_fp5_mul(phi1, phi2), p3_fp5_mul(phi3, phi4));
+    let norm = p3_fp5_mul(canon, conj);
+    debug_assert_eq!(&norm[1..], &[0, 0, 0, 0]);
+    match p3_gl(norm[0]).try_inverse() {
+        Some(norm_inv) => conj.map(|c| (p3_gl(c) * norm_inv).as_canonical_u64()),
+        None => [0; 5],
+    }
 }
 
 /// Reference AES / Rijndael $\mathbb{F}_{2}[x]/(x^8 + x^4 + x^3 + x + 1)$ (`0x11B`) byte multiplication.

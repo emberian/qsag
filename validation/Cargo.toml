@@ -25,6 +25,7 @@ qsag-fts = { path = "../crates/qsag-fts", features = ["std"] }
 qsag-policy = { path = "../crates/qsag-policy", features = ["std"] }
 qsag-hd = { path = "../crates/qsag-hd", features = ["std"] }
 qsag-migrate = { path = "../crates/qsag-migrate", features = ["std"] }
+qsag-ass2 = { path = "../crates/qsag-ass2" }
 qsag-quorum = { path = "../crates/qsag-quorum", features = ["std", "testing-ephemeral"], optional = true }
 
 # Property-based testing & serialization
