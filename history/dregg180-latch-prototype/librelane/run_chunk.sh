@@ -1,5 +1,5 @@
 #!/bin/sh
-# One bounded LibreLane stage per invocation, inside scripts/astra_rx.sh.
+# One bounded LibreLane stage per invocation, inside scripts/rx.sh.
 # first <step> creates a new run; <step> <step> resumes it. Never erase a run.
 set -eu
 PDK_ROOT=${PDK_ROOT:-/work/proj/gf180mcu}

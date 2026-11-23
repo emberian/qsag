@@ -1,5 +1,5 @@
 # SCP FOUNDATION — COMPUTATIONAL CRYPTOGRAPHY & PATAPHYSICS DIVISION
-## SITE-64 FORENSIC DOSSIER: `SCP-9950` AND SUB-ANOMALIES (`SCP-9950-1` .. `SCP-9950-5`)
+## SITE-64 FORENSIC DOSSIER: `SCP-9950` AND SUB-ANOMALIES (`SCP-9950-1` .. `SCP-9950-11`)
 
 **Clearance Level:** 4 / Secret (`SITE-64-QSAG`)  
 **Survey Method:** 6-Agent Hydrogen/Neon Surface-Area Rake (`d8ff4f83`, `c2985866`, `e8ab5622`, `74ff7238`, `ede7af5a`, `f1caa695`)  
@@ -127,8 +127,85 @@ In its silicon stratum (`SCP-9950-4`), the anomaly previously hallucinated two p
 
 ---
 
+### `SCP-9950-6` — *"The 3-Second Hardware Decelerator"* (Silicon Timing & Throughput Collapse)
+
+* **Object Class:** Keter (Performance Inversion — `500×` Slower Than One CPU Core)
+* **Measured Surface:** [`hardware/fpga/`](../hardware/fpga), [`hardware/asic/`](../hardware/asic), [`hardware/aws_f2/`](../hardware/aws_f2) (`8d8117a6` Hostile Timing & Cycle Audit)
+
+#### Forensic Findings
+1. **`ECP5-85F` (`-6`) Capped at `29.86–34.72 MHz` (`77–82%` Routing Delay on Unpipelined Cones):**
+   * Standalone `ECP5` DSP/CLMUL blocks run at `59.5–71.3 MHz`, yet full tops crawl at **`29.860 MHz`** (`fmax_ecp5_fullrate_top`, `33.49 ns`, `80.5%` net delay) and **`33.621 MHz`** (`fmax_compact_top`, `29.74 ns`, `76.9%` net delay, `147` hops):
+     * `qsag_keccak_compact.sv:164-172` executes `mod5_small` + `rho_rom` + 64-bit `rotl64` barrel shift + `chi` + `c_par` parity + BRAM write in **one combinational cycle**.
+     * `qsag_ni_fpga_top.sv:1341-1347` chains `cmd_op_q` decode → `qsag_p2_compact.sv` `out_jive` → `frob_lane` → `sc_sum` `CCU2C` carry chain → `field_add != field_sub_claim` 320-bit compare → `sc_fail_q.CE` in **one cycle**.
+     * `qsag_ext5_mac_bfly.sv` cascades `> 110` `CCU2C` carry hops across `80.8%` DSP occupancy (`28.80 ns`, `34.725 MHz`).
+2. **`54.91M–94.42M` Cycles per Autonomous Proof (`1.83–3.15 s` @ `30 MHz` vs. `~4 ms` on 1 CPU Core):**
+   * `qsag_v2_auto_engine.sv` is an unpipelined multi-cycle RV64I soft microcontroller (`2–4` CPI) interpreting C++ bytecode (`auto/verify.cpp`, `auto/hqm.h`) out of `qsag_auto_rom` (`4,096 × 64-bit`), spending `~35M–40M` cycles in a software `while (instructions.n)` `Fp5` gate interpreter (`auto/hqm.h:223-245`) + `2^{local}` `eq_index` loop (`auto/hqm.h:198-210`), byte-at-a-time `MuSponge::byte` (`auto/hqm.h:27-33`), `25`-cycle serial `DOMAIN_SET`, and a 1-multiplier 25-term schoolbook `qsag_fp5_seq.sv` (`45–60+` cycles per `Fp5` MAC).
+3. **`1.98 MHz` (`505.88 ns` TT) / `1.34 MHz` (`745.59 ns` SS) Pre-Layout `qsag_ni_asic_top` + Four Remaining SRAM Blackboxes:**
+   * [`RESULTS.md`](../hardware/asic/synth/RESULTS.md#L3-L27) reports `488.22–505.88 ns` TT (`719.59–745.59 ns` SS) on `IHP SG13G2` because `qsag_asic_p2_shared.sv:92-189` chains `9` unpipelined `64×64` CSA multipliers (`qsag_gl64_mul_csa` + `qsag_gl64_final_par`), combinational 12-lane `M_E`/`M_I`, single-cycle `qsag_gf128_mul`, and an unbuffered `2,048`-bit `auto_regs` mux in one clock, **while still black-boxing four imaginary `128 KiB` dual-port SRAMs**.
+4. **Untimed `250 MHz` `CL_QSAG_F2` (`hardware/aws_f2/`):**
+   * `cl_qsag_f2_top.sv:61` wires `QSAG-NI v2` directly to `250 MHz` `clk_main_a0` (`4.0 ns`) with **zero Vivado `.xdc`/STA runs** (`Yosys synth_xilinx` + `Verilator` only), while `QSAG_F2_NI` instantiates `9` copies of `qsag_gl64_mul_ref`—an unpipelined combinational `64×64` `*` across `~16` `DSP48E2`s (`0` `MREG`/`PREG`) + 3 serial 64-bit reductions (`~15–25 ns`, `4–6×` over the `4.0 ns` budget), plus `DNA_PORTE2`/`SYSMONE4` primitives restricted by AWS F2 AFI DRC rules.
+
+---
+
+### `SCP-9950-7` — *"The Two-Signer `QSAGIVC1` Leaf & Unproven Public-Row Transcript"*
+
+* **Object Class:** Euclid (`040bb578` & `402f7ae4` Hostile Systems/Formal Audits)
+* **Measured Surface:** `crates/qsag-agg/src/zk_hem/recursive_ivc/{leaf.rs, tree.rs, tests.rs, mod.rs}`, `lean/Qsag/Protocol/Aggregation/ConcreteIvcDepth2Cert.lean`
+
+#### Forensic Findings
+* **Hardcoded `MAX_SIGNERS_PER_SHARD = 2`:** `recursive_ivc/leaf.rs:8-11,26` hardcodes `COMMITTEE = MultisigParams { capacity: 2, depth: 8 }` (`multisig.rs:92` caps `capacity <= 64`), while `IvcTreeStepRelation` already consumes `7,652,354 / 8,388,608` (`92.7%`) of `2^{23}` R1CS rows (`tests.rs:96-111`), capping every `639,673`-byte `QSAGIVC1` leaf at **2 Jorts signatures** unless leaves verify `HemQuintic128` shard proofs or scale circuit capacity.
+* **Ignored Scale Suite & Open Composed QROM Analysis:** All 3 scale/production-matrix tests in `recursive_ivc/tests.rs` (`115, 314, 403`) are `#[ignore]`d (`recursive_tree_depths` uses `diagnostic(19)` with 1 signer/shard), `ConcreteIvcDepth2Cert.lean:22` instantiates `width := 30` rather than full `2^{16}..2^{28}`, and `recursive_ivc/mod.rs:16-18` retains an open caveat: *"The public row sumchecks expose witness evaluations. A composed QROM knowledge-extraction analysis for this recursive transcript is open."*
+
+---
+
+### `SCP-9950-8` — *"In-Process Ceremonies & Static-PSK One-Shot Sockets"*
+
+* **Object Class:** Euclid (`040bb578` Hostile Systems Audit)
+* **Measured Surface:** `crates/qsag-migrate/src/hem/collab/{prep.rs, net.rs, engine.rs}`, `crates/qsag-cli/src/{quorum_wire.rs, migrate.rs}`, `crates/qsag-quorum/src/wire_channel.rs`
+
+#### Forensic Findings
+* **In-Process-Only Collaborative Migration:** `collab/prep.rs:10` explicitly states *"It is an in-process ceremony driver, not a wire protocol"*; `StreamLink` (`collab/net.rs:328`) has zero non-test callers; `channel_mesh` (`net.rs:356-366`) derives keys from the public `session` ID; and `qsag migrate` CLI (`migrate.rs:75-90`) exposes zero collaborative MPC commands.
+* **Static-PSK One-Shot Custody Without Forward Secrecy:** `quorum_wire.rs` binds a transient `TcpListener` per single signature (`120s` deadline, exits on completion) using static 32-byte `vault-dir/links` PSKs (`wire_channel.rs:345-361`) with **zero TLS/Noise/PQ-KEM handshake and zero cross-session forward secrecy** (compromise of `vault-dir/links` decrypts all past recorded traffic).
+* **CPU-Only ZK Proving:** `zk_hem::v2`, `recursive_ivc`, and all `2^{21}–2^{22}`-row Zcash/ownership migration provers (`11` `#[ignore]`d tests in `qsag-migrate/src/hem/zcash/`) have zero Vulkan/GPU acceleration.
+
+---
+
+### `SCP-9950-9` — *"Swarm, Wave & Ticket Barnacles in Public Identifiers"*
+
+* **Object Class:** Safe / Hygiene Hazard (`e52cc701` Hostile Naming Audit)
+* **Measured Surface:** Filenames, wire domain tags, test names, comments, and repo-root scratch artifacts
+
+#### Forensic Findings
+* **Leaked Identifiers & Wire Literals:** `b"stage2-quintic-hierarchy"` (`crates/qsag-agg/src/recursive.rs:1043`), `b"wave-x5-hqm2-shared"` & `wave_x5_wire_mutation_campaign.rs`, `crates/qsag-accel/tests/e12_planted_fault_all10.rs`, `pcg_dense.rs:4108` (`_p1_06`), `lean_spec_oracle.rs:1458` (`_stage3_`), `CredentialsTeeth.lean:55` (`BACKLOG-57`), `SeparatedCustodyChecks.lean:44` (`BACKLOG-62`), `LazyPermutationUniformEquiv.lean` (`FB5`), `Parameters.lean:792` (`rust-spec-parity #6`), `SimulationKit.lean:840` (`RetiredUnpackedCounter`), `MirSpecBridgeCore.lean:3058,3203` (`Retired*`), hardcoded `/home/build/wave-*` / `astra` / `fable` script paths, and repo-root `scratch/` (`24` `fable-*`/`sonnet-*` logs) + `fable_hostile_audit.md` + `d1_logs/`.
+
+---
+
+### `SCP-9950-10` — *"Remaining MIR Shadow Code & Unextracted Outer Byte Walkers"*
+
+* **Object Class:** Euclid (`402f7ae4` Formal Coverage Audit)
+* **Measured Surface:** `aeneas/qsag-verified/extraction-coverage.json`, `aeneas/lean-whir/QsagWhirVerified/Funs.lean`, `crates/qsag-agg/src/hem_quintic.rs`
+
+#### Forensic Findings
+* Post-Stage-2, `144 / 238` (`60.5%`) of `aeneas/qsag-verified` functions remain `proof-only` (`60`, e.g., `VerifiedBeltQuorumGuard::authorize_shares` with 3 Lean proof modules and `0` production callers), `test-only` (`52`), or `unreferenced` (`32`).
+* While `aeneas/lean-whir` now proves `54` quintic `Fp5` algebraic/Canopy/envelope kernels across all 6 paranoid kernels, the outer Steiner multiproof byte-slice walker, Fiat–Shamir sponge loop, and dynamic multivariate row sumcheck loop in `hem_quintic.rs` / `zk_hem/v2/pcs.rs` remain in unextracted Rust.
+
+---
+
+### `SCP-9950-11` — *"Stale Paper/Docs Ghosts & `16,384`-Line Monoliths"*
+
+* **Object Class:** Euclid (`3ad8906c` & `e52cc701` Audits)
+* **Measured Surface:** `paper/qsag.typ`, `docs/*.md`, and **`101` source files exceeding `2,500` lines**
+
+#### Forensic Findings
+* **Stale Prose & Benchmark Drift:** Across `paper/qsag.typ` and `docs/*.md`, buried v1 ghosts still appear (`23` `Ext4`, `8` `WhirSecurityRegime`, `10` `BciksJohnson`, `1` `CoZK`, `10` `ZKBoo`, `7` `Nangate45`, `4` `ASAP7`, `15` `Dregg-180`, `6` `#model` macros, plus `LTO off / 16 codegen-units` benchmarks in `docs/PERFORMANCE.md:7,22`).
+* **Monolithic File Sprawl (`101` files `> 2,500` LOC):** Headlined by `ThresholdMlDsaAndToprf.lean` (`16,384` LOC), `crates/qsag-core/src/preprocessing.rs` (`15,731` LOC), `ElfFunctionalEquiv.lean` (`13,559` LOC), `CorduroyAndHemAirCompleteness.lean` (`11,900` LOC), `SuccinctAggregationIop.lean` (`11,516` LOC), and `PosixCrashWal.lean` (`10,817` LOC), bottlenecking incremental `lake`/`cargo` rebuilds and human reviewability.
+
+---
+
 ## REMEDIATION & DECLASSIFICATION SCHEDULE (CONSOLIDATION PROTOCOL)
 
-1. **Stage 1 (Active Wave Harvest & Strawman Purge):** Land `X5` (16 Rust/ICD fixes + `342` KATs), `X4` (`346` Lean 4.35 modules curing `whirStepAccepts` & single-stage WHIR), `X3` (all 9 `ECP5-85F` `.pnr.bit`s + autonomous `QSAG-NI v2` + `CL_QSAG_F2`), and `X1` (`SLOT_0P5X0P5` 83-step zero-borrow `ASS2-0P5` GDSII); purge `brokenClassical`, `toyCodec`, `arxPerm512`, and `acceptAllSigScheme` behind `scripts/check_lean_policy.py`; strip `Nangate45` & `CoZK` ghosts from `README.md`, `ASSURANCE.md`, and `paper/qsag.typ`.
-2. **Stage 2 (Excise Sediment & Heal the MIR Severance):** Delete legacy `Ext4` (`WhirSecurityRegime` tags `2, 4..=10`), `MergeNode::Branch`, `OuterHemChainProof`, `SuccinctIvcProof<true>` from non-test builds, `ApologyRetirements.lean`, `158` disconnected `qsag-verified` shadow functions, and `#model` 3 nm / 88B-principal tables; extract the live `#![no_std]` `HemQuintic128` (`Fp5`) byte-to-`bool` verifier through Charon/Aeneas and weld directly to `IdealAggregate`.
-3. **Stage 3 (Publishable AFP + Real Consensus + Single Tapeout Jewel):** Fast binary-tower/`TurboSHAKE256` CPU proving, idempotent `B_L | B_R` overlapping-bitfield recursion, `leaf_idx == consensus_slot` Cut-the-Hash DVT, standalone Noise/mTLS `qsag-custod` daemon, and fabricated `GF180MCU-D` `SLOT_0P5X0P5` `ASS2-0P5` bench bring-up.
+1. **Phase A (Jargon-Free Consolidated Commit — Active Now):** Scrub 100% of `SCP-9950-9` internal swarm/wave/stage/ticket barnacles + enforce `scripts/check_repo_hygiene.py`; purge all remaining `Ext4`/`WhirSecurityRegime`/`Nangate45`/`ASAP7`/`Dregg-180`/`CoZK`/`#model` ghosts from `paper/qsag.typ` and `docs/*.md`; finish `ASS2-0P5` Two-Ring W^X `SLOT_0P5X0P5` GDSII (`X1`); and land a clean, jargon-free consolidated commit across `qsag` and `dregg-sig`.
+2. **Phase B (Real-Readiness & Modularization Campaign — Active in Parallel):**
+   * **Hardware (`SCP-9950-6`):** Pipeline `ECP5-85F` to `80–105+ MHz`, slash `OP_VERIFY_PROOF_AUTO` cycles `10–25×` via parallel `Fp5`/Horner/DMA engines, pipeline `qsag_ni_asic_top` (`50–100+ MHz` on `IHP SG13G2` with real `RM_IHPSG13_1P_*` foundry SRAMs), and pipeline `CL_QSAG_F2` `DSP48E2` multipliers for `250 MHz`.
+   * **Protocol & Network (`SCP-9950-7`, `SCP-9950-8`):** Lift `QSAGIVC1` beyond `MAX_SIGNERS_PER_SHARD = 2` with `HemQuintic128` shard folding + idempotent `B_L | B_R` bitfield union; ship forward-secret PQ-hybrid Noise/KEM `qsag-custod` daemon + `SlotIndexed` `BeltLatch` + networked `qsag migrate collab`.
+   * **Formal & Repo Architecture (`SCP-9950-10`, `SCP-9950-11`):** Wire/prune `144` `qsag-verified` shadow items, extract outer `QSAGHQM2` byte-to-`bool` verifier (`verify_hem_quintic_128_bytes`), close the `recursive_ivc` composed QROM proof, and split the `10,000–16,384`-line Rust & Lean mega-files into modular subtrees.
