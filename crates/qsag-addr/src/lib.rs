@@ -50,10 +50,10 @@ pub enum AddressVersion {
 
 impl AddressVersion {
     pub const fn from_u8(v: u8) -> Result<Self, AddrError> {
-        match v {
-            0x01 => Ok(Self::V1Cshake256),
-            0x02 => Ok(Self::V2Poseidon2),
-            other => Err(AddrError::UnsupportedVersion(other)),
+        match VerifiedIntentAddressVersion::from_u8(v) {
+            Some(VerifiedIntentAddressVersion::V1) => Ok(Self::V1Cshake256),
+            Some(VerifiedIntentAddressVersion::V2) => Ok(Self::V2Poseidon2),
+            None => Err(AddrError::UnsupportedVersion(v)),
         }
     }
 }
@@ -63,10 +63,10 @@ impl AddressVersion {
 #[repr(u16)]
 pub enum WitnessSuiteTag {
     MlDsa44 = 0x0101,
-    MlDsa65 = 0x0102,
+    MlDsa65 = VerifiedIntentSuiteTag::MlDsa65.to_u16(),
     MlDsa87 = 0x0103,
     SlhDsa128s = 0x0201,
-    SlhDsa128f = 0x0202,
+    SlhDsa128f = VerifiedIntentSuiteTag::SlhDsa128f.to_u16(),
     SlhDsa192s = 0x0203,
     SlhDsa192f = 0x0204,
     SlhDsa256s = 0x0205,
@@ -74,25 +74,24 @@ pub enum WitnessSuiteTag {
     Baggy = 0x0211,
     Jorts = 0x0212,
     QuorumJorts = 0x0213,
-    JortsPoseidon2 = 0x0214,
+    JortsPoseidon2 = VerifiedIntentSuiteTag::JortsPoseidon2.to_u16(),
     CorduroyPoseidon2 = 0x0215,
     FrontierSumFts = 0x0301,
-    ParallelSeededFts = 0x0302,
     PiHdCommitInventory = 0x0401,
-    PiHdLinearModule = 0x0402,
-    HybridSecp256k1MlDsa44 = 0x0501,
-    HybridEd25519MlDsa65 = 0x0502,
+    HybridSecp256k1MlDsa44 = VerifiedIntentSuiteTag::HybridSecp256k1MlDsa44.to_u16(),
+    HybridEd25519MlDsa65 = VerifiedIntentSuiteTag::HybridEd25519MlDsa65.to_u16(),
     PolicyPredicateScript = 0x0601,
 }
 
 impl WitnessSuiteTag {
     pub const fn from_u16(v: u16) -> Result<Self, AddrError> {
+        if let Some(tag) = VerifiedIntentSuiteTag::from_u16(v) {
+            return Ok(intent_suite_from_verified(tag));
+        }
         match v {
             0x0101 => Ok(Self::MlDsa44),
-            0x0102 => Ok(Self::MlDsa65),
             0x0103 => Ok(Self::MlDsa87),
             0x0201 => Ok(Self::SlhDsa128s),
-            0x0202 => Ok(Self::SlhDsa128f),
             0x0203 => Ok(Self::SlhDsa192s),
             0x0204 => Ok(Self::SlhDsa192f),
             0x0205 => Ok(Self::SlhDsa256s),
@@ -100,14 +99,9 @@ impl WitnessSuiteTag {
             0x0211 => Ok(Self::Baggy),
             0x0212 => Ok(Self::Jorts),
             0x0213 => Ok(Self::QuorumJorts),
-            0x0214 => Ok(Self::JortsPoseidon2),
             0x0215 => Ok(Self::CorduroyPoseidon2),
             0x0301 => Ok(Self::FrontierSumFts),
-            0x0302 => Ok(Self::ParallelSeededFts),
             0x0401 => Ok(Self::PiHdCommitInventory),
-            0x0402 => Ok(Self::PiHdLinearModule),
-            0x0501 => Ok(Self::HybridSecp256k1MlDsa44),
-            0x0502 => Ok(Self::HybridEd25519MlDsa65),
             0x0601 => Ok(Self::PolicyPredicateScript),
             other => Err(AddrError::UnsupportedSuiteTag(other)),
         }
@@ -135,9 +129,7 @@ impl WitnessSuiteTag {
             | Self::JortsPoseidon2
             | Self::CorduroyPoseidon2
             | Self::FrontierSumFts
-            | Self::ParallelSeededFts
-            | Self::PiHdCommitInventory
-            | Self::PiHdLinearModule => KeyIdentityKind::SingleOrThreshold,
+            | Self::PiHdCommitInventory => KeyIdentityKind::SingleOrThreshold,
         }
     }
 
@@ -166,11 +158,9 @@ pub enum KeyIdentityKind {
 
 impl KeyIdentityKind {
     pub const fn from_u8(v: u8) -> Result<Self, AddrError> {
-        match v {
-            0x01 => Ok(Self::SingleOrThreshold),
-            0x02 => Ok(Self::HybridConjunctive),
-            0x03 => Ok(Self::ScriptPredicate),
-            other => Err(AddrError::UnsupportedIdentityKind(other)),
+        match VerifiedIntentIdentityKind::from_u8(v) {
+            Some(kind) => Ok(intent_identity_kind_from_verified(kind)),
+            None => Err(AddrError::UnsupportedIdentityKind(v)),
         }
     }
 }
@@ -237,6 +227,29 @@ pub const fn try_encode_intent_128(intent: &CanonicalIntent128) -> Result<[u8; 1
 
 /// Encode [`CanonicalIntent128`] deterministically into a fixed 128-byte wire frame.
 pub const fn encode_intent_128(intent: &CanonicalIntent128) -> [u8; 128] {
+    if let Some(suite_tag) = VerifiedIntentSuiteTag::from_u16(intent.suite_tag as u16) {
+        let address_version = match intent.address_version {
+            AddressVersion::V1Cshake256 => VerifiedIntentAddressVersion::V1,
+            AddressVersion::V2Poseidon2 => VerifiedIntentAddressVersion::V2,
+        };
+        let identity_kind = match intent.identity_kind {
+            KeyIdentityKind::SingleOrThreshold => VerifiedIntentIdentityKind::SingleOrThreshold,
+            KeyIdentityKind::HybridConjunctive => VerifiedIntentIdentityKind::HybridConjunctive,
+            KeyIdentityKind::ScriptPredicate => VerifiedIntentIdentityKind::ScriptPredicate,
+        };
+        return qsag_verified::encode_intent_128(&VerifiedCanonicalIntent128 {
+            suite_tag,
+            address_version,
+            identity_kind,
+            chain_id: intent.chain_id,
+            nonce: intent.nonce,
+            timestamp_secs: intent.timestamp_secs,
+            amount_units: intent.amount_units,
+            rolling_window_spent: intent.rolling_window_spent,
+            recipient_commitment: intent.recipient_commitment,
+            payload_digest: intent.payload_digest,
+        });
+    }
     let mut out = [0u8; 128];
     let magic = INTENT_V1_MAGIC.to_be_bytes();
     let suite = (intent.suite_tag as u16).to_be_bytes();
@@ -1389,7 +1402,7 @@ mod tests {
         // Poseidon2 v2 address roundtrip
         let addr_v2 = QsagAddress::from_pubkey_poseidon2(
             "qsp",
-            WitnessSuiteTag::ParallelSeededFts,
+            WitnessSuiteTag::FrontierSumFts,
             KeyIdentityKind::SingleOrThreshold,
             &[0xABu8; 64],
         )

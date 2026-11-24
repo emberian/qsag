@@ -279,9 +279,7 @@ fn canonical_intent_128_aligns_suite_tags_and_enforces_identity_kind_consistency
         WitnessSuiteTag::JortsPoseidon2,
         WitnessSuiteTag::CorduroyPoseidon2,
         WitnessSuiteTag::FrontierSumFts,
-        WitnessSuiteTag::ParallelSeededFts,
         WitnessSuiteTag::PiHdCommitInventory,
-        WitnessSuiteTag::PiHdLinearModule,
         WitnessSuiteTag::HybridSecp256k1MlDsa44,
         WitnessSuiteTag::HybridEd25519MlDsa65,
         WitnessSuiteTag::PolicyPredicateScript,
@@ -549,7 +547,6 @@ fn typed_hybrid_kernels_refuse_non_hybrid_suites_and_match_the_envelope() {
     for suite in [
         WitnessSuiteTag::MlDsa44,
         WitnessSuiteTag::SlhDsa128s,
-        WitnessSuiteTag::ParallelSeededFts,
         WitnessSuiteTag::PolicyPredicateScript,
     ] {
         assert!(!hybrid_domain_framing_ok(
