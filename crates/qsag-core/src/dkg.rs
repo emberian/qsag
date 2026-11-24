@@ -35,8 +35,8 @@ use core::fmt;
 
 use crate::field::goldilocks::{Goldilocks, GoldilocksExt2};
 use crate::field::tower::{
-    PublicGf256Matrix, Tower128, TowerGf256, bs_gf256_insert_lane, bs_gf256_xor,
-    lagrange_weights_zero_gf256,
+    PublicGf256Matrix, Tower128, TowerGf256, bs_gf256_extract_lane, bs_gf256_insert_lane,
+    bs_gf256_xor, lagrange_weights_zero_gf256,
 };
 use crate::preprocessing::{
     OtMesh, PartyPrivateRng, PreprocessError, commit_and_open_degree_ext2,
@@ -411,9 +411,10 @@ pub fn shamir_reconstruct_seed32_gf256(shares: &[&ShamirSeedShare256]) -> Option
             acc = acc.add(mat.mul_elem(s.bit_shares[bit_idx]));
         }
         let v = u64::from(acc.0);
-        let is_zero = ct_eq_u64(v, 0);
         let is_one = ct_eq_u64(v, 1);
-        valid &= u8::from(is_zero | is_one);
+        valid &= u8::from(qsag_verified::gf256_is_boolean_frobenius(
+            qsag_verified::Gf256(acc.0),
+        ));
         out[bit_idx / 8] |= ct_select_u8(is_one, 1u8 << (bit_idx % 8), 0);
     }
     if core::hint::black_box(valid) == 0 {
@@ -1372,11 +1373,8 @@ pub fn spdz_verify_seed256_boolean_gf256(
             party_rngs,
         )?;
         for bit in 0..64 {
-            let mut upper_nonzero = 0u64;
-            for u_open_pl_item in u_open[..8].iter().skip(1) {
-                upper_nonzero |= (*u_open_pl_item >> bit) & 1;
-            }
-            if upper_nonzero != 0 {
+            let value = bs_gf256_extract_lane(&u_open, bit);
+            if !qsag_verified::gf256_is_boolean_frobenius(qsag_verified::Gf256(value.0)) {
                 return Err(DkgError::NonBooleanSeedBitDetected {
                     bit_idx: 64 * w + bit,
                 });
@@ -2390,30 +2388,27 @@ pub fn spdz_verify_seed256_boolean_goldilocks_with_quorum(
         ));
     }
 
-    // Commit-before-open every authenticated b^2-b residual. Keep the exact
-    // zero check, but report an unindexed failure rather than claiming that a
-    // public bit index identifies a faulty dealer.
-    let mut diff_sh = SecretBuffer(vec![vec![Goldilocks::ZERO; 256]; n]);
-    let mut diff_mac = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; 256]; n]);
-    for p in 0..n {
-        for m in 0..256 {
-            diff_sh[p][m] = flat[p][256 + m] - flat[p][m];
-            diff_mac[p][m] = flat_macs[p][256 + m] - flat_macs[p][m];
+    // Check a public claim of zero for one fresh random combination of the
+    // authenticated residuals. Its MAC residual is alpha*S. Blinding that
+    // residual opens only rho*alpha*S, even on malformed bit inputs.
+    let seed = run_commit_and_open_coin(&auth_sid, b"GL_DKG_BOOL_CHECK", session_id, party_rngs)?;
+    let mut challenges = PartyPrivateRng::from_seed(seed, b"GL_DKG_BOOL_WEIGHTS");
+    let mut mac_residual = SecretBuffer(vec![GoldilocksExt2::ZERO; n]);
+    for m in 0..256 {
+        let chi = challenges.next_ext2();
+        for (slot, &party) in active_quorum.iter().enumerate() {
+            mac_residual[party] +=
+                (chi * (flat_macs[party][256 + m] - flat_macs[party][m])).mul_base(lambdas_0[slot]);
         }
     }
-    drop((flat, flat_macs));
-    let diffs = commit_and_open_spdz_goldilocks_batch_quorum(
+    let blinded = crate::preprocessing::blind_open_ext2(
         &auth_sid,
-        "dkg_gl_bool_diff",
-        t,
-        eval_points,
-        &diff_sh,
-        &diff_mac,
-        &alpha_shamir,
+        "dkg_gl_bool_check",
+        &mac_residual,
+        Some(ot_mesh),
         party_rngs,
     )?;
-    drop((diff_sh, diff_mac, alpha_shamir));
-    if diffs.iter().any(|&d| d != Goldilocks::ZERO) {
+    if !blinded.ct_eq(GoldilocksExt2::ZERO) {
         return Err(DkgError::NonBooleanSeedDetected);
     }
     Ok(())
@@ -2797,6 +2792,20 @@ pub fn run_dealerless_reshare_seed32_goldilocks(
         }
     }
 
+    let mut out = Vec::with_capacity(new_n);
+    for j in 0..new_n {
+        let bits = new_bits[j];
+        out.push(ShamirPoseidonSeedShare::from_bit_shares(
+            j,
+            next_gen,
+            new_eval_points[j],
+            bits,
+        ));
+    }
+    let root = recompute_public_root(&out)?;
+    if !ct_eq_bytes32(&root, enrolled_root) {
+        return Err(DkgError::PublicRootMismatch);
+    }
     // SPDZ-MAC-authenticated Booleanity (`b_m^2 - b_m == 0`) & global `0..new_n` degree `< new_t`!
     spdz_verify_seed256_boolean_goldilocks(
         &session_id,
@@ -2807,24 +2816,10 @@ pub fn run_dealerless_reshare_seed32_goldilocks(
         new_party_rngs,
     )?;
 
-    let mut out = Vec::with_capacity(new_n);
-    for j in 0..new_n {
-        let bits = new_bits[j];
-        wipe_goldilocks(&mut new_bits[j]);
-        out.push(ShamirPoseidonSeedShare::from_bit_shares(
-            j,
-            next_gen,
-            new_eval_points[j],
-            bits,
-        ));
+    for share in old_shares {
+        share.wipe_and_invalidate();
     }
-    finish_reshare(
-        old_shares,
-        out,
-        enrolled_root,
-        recompute_public_root,
-        ShamirPoseidonSeedShare::wipe_and_invalidate,
-    )
+    Ok(out)
 }
 
 // ============================================================================
@@ -3379,60 +3374,37 @@ pub fn latch_quorum_intersects_honestly(acks: usize, n: usize, t: usize) -> bool
     }
 }
 
-struct LatchMacAuthority(Vec<[u8; 32]>);
-impl PartialEq for LatchMacAuthority {
-    fn eq(&self, other: &Self) -> bool {
-        if self.0.len() != other.0.len() {
-            return false;
-        }
-        self.0
-            .iter()
-            .zip(&other.0)
-            .fold(true, |same, (a, b)| same & ct_eq_bytes32(a, b))
-    }
-}
-impl Eq for LatchMacAuthority {}
-impl fmt::Debug for LatchMacAuthority {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("LatchMacAuthority([REDACTED])")
-    }
-}
-impl Drop for LatchMacAuthority {
-    fn drop(&mut self) {
-        qsag_asm::volatile_fill(&mut self.0, [0; 32]);
-    }
-}
-impl LatchMacAuthority {
-    fn tag(
-        &self,
-        party: usize,
-        n: usize,
-        t: usize,
-        epoch: u64,
-        binding: &[u8; 32],
-        mask: &[u8],
-    ) -> [u8; 32] {
-        cshake256_32_multi_frame(
-            b"QSAG.EPOCH.CUSTODIAN.ACK/v1",
-            &[
-                &self.0[party],
-                &(party as u64).to_be_bytes(),
-                &(n as u64).to_be_bytes(),
-                &(t as u64).to_be_bytes(),
-                &epoch.to_be_bytes(),
-                binding,
-                mask,
-            ],
-        )
-    }
+const LATCH_SIGNATURE_PARAMS: crate::fips205::Fips205Params =
+    crate::fips205::Fips205Params::SLH_DSA_SHAKE_128F;
+const LATCH_SIGNATURE_CONTEXT: &[u8] = b"QSAG.EPOCH.CUSTODIAN.ACK/v2";
+
+fn ack_digest(
+    party: usize,
+    n: usize,
+    t: usize,
+    epoch: u64,
+    binding: &[u8; 32],
+    mask: &[u8],
+) -> [u8; 32] {
+    cshake256_32_multi_frame(
+        LATCH_SIGNATURE_CONTEXT,
+        &[
+            &(party as u64).to_be_bytes(),
+            &(n as u64).to_be_bytes(),
+            &(t as u64).to_be_bytes(),
+            &epoch.to_be_bytes(),
+            binding,
+            mask,
+        ],
+    )
 }
 
-/// Pinned committee latch-MAC authority capability bound into authenticated signing-share
+/// Pinned committee signature verification keys bound into authenticated signing-share
 /// custody ([`crate::poseidon2_mpc::Poseidon2SpdzAuthenticatedKeyShare::enroll_latch_authority`])
 /// so signing and retry ceremonies verify [`EpochLatchCertificate`]s against the enrolled
-/// committee's custodian keys rather than an untrusted authority supplied inside the certificate.
+/// committee's custodian verification keys rather than an untrusted authority supplied inside the certificate.
 #[derive(Clone, PartialEq, Eq)]
-pub struct EpochLatchAuthorityPublic(Arc<LatchMacAuthority>);
+pub struct EpochLatchAuthorityPublic(Arc<Vec<crate::fips205::SlhPublicKey>>);
 
 impl fmt::Debug for EpochLatchAuthorityPublic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3444,17 +3416,17 @@ impl EpochLatchAuthorityPublic {
     /// Committee size this authority was provisioned for.
     #[inline]
     pub fn committee_size(&self) -> usize {
-        self.0.0.len()
+        self.0.len()
     }
 
     /// Constant-time check that `certificate` carries this exact enrolled authority.
     #[inline]
     pub fn matches_certificate(&self, certificate: &EpochLatchCertificate) -> bool {
-        *self.0 == *certificate.authority
+        self == &certificate.authority
     }
 
     /// Authenticate `certificate` for `(n, t, epoch, binding)` AND enforce that its
-    /// custodian MAC authority matches this pinned committee authority in constant time.
+    /// custodian verification keys match this pinned committee authority.
     pub fn verify_certificate(
         &self,
         certificate: &EpochLatchCertificate,
@@ -3463,11 +3435,10 @@ impl EpochLatchAuthorityPublic {
         epoch: u64,
         binding: &[u8; 32],
     ) -> Result<(), EpochLatchError> {
-        certificate.verify_for(n, t, epoch, binding)?;
-        if self.0.0.len() != n || !self.matches_certificate(certificate) {
+        if self.0.len() != n || !self.matches_certificate(certificate) {
             return Err(EpochLatchError::CertificateCommitteeMismatch);
         }
-        Ok(())
+        certificate.verify_for(n, t, epoch, binding)
     }
 }
 
@@ -3481,9 +3452,7 @@ impl EpochLatchAuthorityPublic {
 /// matter which `t` members sign.
 ///
 /// The fields are private and there is no other constructor. This is an in-process capability,
-/// like the rest of this crate's single-process protocol drivers: it carries per-custodian MACs verified with a private local authority; a
-/// deployment whose members run on separate hosts has to transport each acknowledgement over
-/// its own authenticated channels before treating it as one.
+/// with individual custodian signatures over the roster and reservation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EpochLatchCertificate {
     n: usize,
@@ -3493,8 +3462,8 @@ pub struct EpochLatchCertificate {
     /// Acknowledging committee members, strictly increasing.
     acks: Vec<usize>,
     signer_mask: Vec<u8>,
-    tags: Vec<[u8; 32]>,
-    authority: Arc<LatchMacAuthority>,
+    tags: Vec<Vec<u8>>,
+    authority: EpochLatchAuthorityPublic,
 }
 
 impl EpochLatchCertificate {
@@ -3573,11 +3542,13 @@ impl EpochLatchCertificate {
         let mut valid_acks = 0;
         for (&party, tag) in self.acks.iter().zip(&self.tags) {
             expected_mask[party / 8] |= 1 << (party % 8);
-            valid_acks += usize::from(ct_eq_bytes32(
+            let digest = ack_digest(party, n, t, self.epoch, &self.binding, &self.signer_mask);
+            valid_acks += usize::from(crate::fips205::slh_verify(
+                &LATCH_SIGNATURE_PARAMS,
+                &digest,
                 tag,
-                &self
-                    .authority
-                    .tag(party, n, t, self.epoch, &self.binding, &self.signer_mask),
+                LATCH_SIGNATURE_CONTEXT,
+                &self.authority.0[party],
             ));
         }
         if expected_mask != self.signer_mask || !latch_quorum_intersects_honestly(valid_acks, n, t)
@@ -3621,12 +3592,29 @@ pub struct QuorumEpochLatchCluster {
     max_faulty: usize,
     latch_quorum: usize,
     signer_latches: Vec<EpochLatchState>,
-    authority: Arc<LatchMacAuthority>,
+    authority: EpochLatchAuthorityPublic,
+    signing_keys: Arc<Vec<crate::fips205::SlhSecretKey>>,
     #[cfg(feature = "std")]
     durable_latches: Option<Vec<FsWalEpochLatch>>,
 }
 
 impl QuorumEpochLatchCluster {
+    #[cfg(any(test, feature = "std"))]
+    fn enrollment(
+        seeds: &[[u8; 32]],
+    ) -> Option<(EpochLatchAuthorityPublic, Vec<crate::fips205::SlhSecretKey>)> {
+        let mut public = Vec::with_capacity(seeds.len());
+        let mut private = Vec::with_capacity(seeds.len());
+        for seed in seeds {
+            let seed = SecretBuffer(cshake256_hash32(b"QSAG.EPOCH.ACK.KEY/v2", seed));
+            let (sk, pk) =
+                crate::fips205::slh_keygen_from_seed(&LATCH_SIGNATURE_PARAMS, &seed[..]).ok()?;
+            public.push(pk);
+            private.push(sk);
+        }
+        Some((EpochLatchAuthorityPublic(Arc::new(public)), private))
+    }
+
     pub const fn committee_size(&self) -> usize {
         self.n
     }
@@ -3642,7 +3630,7 @@ impl QuorumEpochLatchCluster {
 
     /// Pinned authority handle to enroll on the committee's authenticated signing shares.
     pub fn authority(&self) -> EpochLatchAuthorityPublic {
-        EpochLatchAuthorityPublic(Arc::clone(&self.authority))
+        self.authority.clone()
     }
 
     /// Current durable checkpoints of all custodian WALs when backed by [`FsWalEpochLatch`].
@@ -3663,21 +3651,24 @@ impl QuorumEpochLatchCluster {
             return None;
         }
         let cid = NEXT_TEST_CLUSTER_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let seeds = SecretBuffer(
+            (0..n)
+                .map(|i| {
+                    cshake256_32_multi_frame(
+                        b"TEST-ONLY-LATCH-KEY",
+                        &[&cid.to_be_bytes(), &(i as u64).to_be_bytes()],
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        let (authority, signing_keys) = Self::enrollment(&seeds)?;
         Some(Self {
             n,
             max_faulty,
             latch_quorum,
             signer_latches: (0..n).map(|_| EpochLatchState::new()).collect(),
-            authority: Arc::new(LatchMacAuthority(
-                (0..n)
-                    .map(|i| {
-                        cshake256_32_multi_frame(
-                            b"TEST-ONLY-LATCH-KEY",
-                            &[&cid.to_be_bytes(), &(i as u64).to_be_bytes()],
-                        )
-                    })
-                    .collect(),
-            )),
+            authority,
+            signing_keys: Arc::new(signing_keys),
             #[cfg(feature = "std")]
             durable_latches: None,
         })
@@ -3690,36 +3681,36 @@ impl QuorumEpochLatchCluster {
             max_faulty: self.max_faulty,
             latch_quorum: self.latch_quorum,
             signer_latches: (0..self.n).map(|_| EpochLatchState::new()).collect(),
-            authority: Arc::clone(&self.authority),
+            authority: self.authority.clone(),
+            signing_keys: Arc::clone(&self.signing_keys),
             #[cfg(feature = "std")]
             durable_latches: None,
         }
     }
 
     /// Production enrollment/recovery. Each custodian owns a locked, authenticated WAL.
-    /// MAC keys must be independently provisioned secrets, stable across recovery.
+    /// Custodian signing seeds must be independently provisioned and stable across recovery.
     #[cfg(feature = "std")]
     pub fn from_durable_latches(
         max_faulty: usize,
         latches: Vec<FsWalEpochLatch>,
         mac_keys: Vec<[u8; 32]>,
     ) -> Option<Self> {
-        let authority = Arc::new(LatchMacAuthority(mac_keys));
+        let seeds = SecretBuffer(mac_keys);
         let n = latches.len();
         let sum = n.checked_add(max_faulty)?;
         let latch_quorum = sum.checked_div(2)?.checked_add(1)?;
-        if n == 0 || latch_quorum > n || authority.0.len() != n {
+        if n == 0 || latch_quorum > n || seeds.len() != n {
             return None;
         }
         for p in 0..n {
-            if ct_eq_bytes32(&authority.0[p], &[0; 32])
-                || authority.0[..p]
-                    .iter()
-                    .any(|k| ct_eq_bytes32(k, &authority.0[p]))
+            if ct_eq_bytes32(&seeds[p], &[0; 32])
+                || seeds[..p].iter().any(|k| ct_eq_bytes32(k, &seeds[p]))
             {
                 return None;
             }
         }
+        let (authority, signing_keys) = Self::enrollment(&seeds)?;
         let signer_latches = latches
             .iter()
             .map(|latch| EpochLatchState {
@@ -3732,6 +3723,7 @@ impl QuorumEpochLatchCluster {
             latch_quorum,
             signer_latches,
             authority,
+            signing_keys: Arc::new(signing_keys),
             durable_latches: Some(latches),
         })
     }
@@ -3856,10 +3848,17 @@ impl QuorumEpochLatchCluster {
         let tags = acks
             .iter()
             .map(|&p| {
-                self.authority
-                    .tag(p, self.n, t, epoch, &binding, &signer_mask)
+                let digest = ack_digest(p, self.n, t, epoch, &binding, &signer_mask);
+                crate::fips205::slh_sign(
+                    &LATCH_SIGNATURE_PARAMS,
+                    &digest,
+                    LATCH_SIGNATURE_CONTEXT,
+                    &self.signing_keys[p],
+                    None,
+                )
+                .map_err(|_| EpochLatchError::CertificateCommitteeMismatch)
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         let cert = EpochLatchCertificate {
             n: self.n,
             t,
@@ -3868,7 +3867,7 @@ impl QuorumEpochLatchCluster {
             acks,
             signer_mask,
             tags,
-            authority: Arc::clone(&self.authority),
+            authority: self.authority.clone(),
         };
         cert.verify_for(self.n, t, epoch, &binding)?;
         Ok(cert)
@@ -4169,7 +4168,8 @@ mod tests {
             .is_err()
         );
         for row in &mut shares {
-            row[77] += Goldilocks::from_u64_reduced(2);
+            // Bit 77 is one. A uniform shift preserves degree but violates Booleanity.
+            row[77] += Goldilocks::ONE;
         }
         assert_eq!(
             spdz_verify_seed256_boolean_goldilocks_with_quorum(
@@ -4265,6 +4265,25 @@ mod tests {
         let mut reshare_rngs = make_rngs(old_t, 0x60);
         let mut new_rngs = make_rngs(new_n, 0x61);
         let mut new_mesh = OtMesh::establish_ideal_for_test([0x47; 32], &mut new_rngs);
+        let untouched = new_mesh.transcript_digest();
+        let reserve = new_mesh.staged_ext2_blinded_checks();
+        let wrong_root = run_dealerless_reshare_seed32_goldilocks(
+            [0x49; 32],
+            old_t,
+            &(0..old_t).collect::<Vec<_>>(),
+            &mut old_shares,
+            new_t,
+            &new_pts,
+            &mut new_mesh,
+            &mut reshare_rngs,
+            &mut new_rngs,
+            &[1; 32],
+            |_| Ok([2; 32]),
+        );
+        assert!(matches!(wrong_root, Err(DkgError::PublicRootMismatch)));
+        assert_eq!(new_mesh.transcript_digest(), untouched);
+        assert_eq!(new_mesh.staged_ext2_blinded_checks(), reserve);
+        assert!(old_shares.iter().all(ShamirPoseidonSeedShare::is_valid));
         let new_shares = run_dealerless_reshare_seed32_goldilocks(
             [0x48; 32],
             old_t,
