@@ -96,6 +96,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use qsag_verified::{RssCutGateSession, VerifiedRssPoisonLatch};
 
 use qsag_asm::{BitPlane256, KeccakState4x};
 
@@ -1351,8 +1352,7 @@ fn bind_planes_chunk(
             for q in 0..4 {
                 for c in 0..64 {
                     let lane = 64 * q + c;
-                    dst[lane] =
-                        fe_mul_x_pow([lo[c][q], hi[c][q]], (lane % BLOCK_LANES) as u32);
+                    dst[lane] = fe_mul_x_pow([lo[c][q], hi[c][q]], (lane % BLOCK_LANES) as u32);
                 }
             }
         } else {
@@ -1574,7 +1574,7 @@ pub struct Rss256Engine {
     barrier_index: u64,
     unverified: bool,
     /// Set by the first failed barrier, coin flip or opening comparison; never cleared.
-    poison_latch: qsag_verified::VerifiedRssPoisonLatch,
+    poison_latch: VerifiedRssPoisonLatch,
     staging: bool,
     wave_index: u64,
     bank: BeaverBank256,
@@ -1611,7 +1611,7 @@ impl Rss256Engine {
             last_seed: [0u8; 32],
             barrier_index: 0,
             unverified: false,
-            poison_latch: qsag_verified::VerifiedRssPoisonLatch::new_clean(),
+            poison_latch: VerifiedRssPoisonLatch::new_clean(),
             staging: false,
             wave_index: 0,
             bank: BeaverBank256::empty(),
@@ -1688,10 +1688,7 @@ impl Rss256Engine {
 
     /// Latch the poison flag, then drop everything that was awaiting verification.
     fn poison<T>(&mut self, error: Rss256Error) -> Result<T, Rss256Error> {
-        let latch = core::mem::replace(
-            &mut self.poison_latch,
-            qsag_verified::VerifiedRssPoisonLatch::new_clean(),
-        );
+        let latch = core::mem::replace(&mut self.poison_latch, VerifiedRssPoisonLatch::new_clean());
         self.poison_latch = latch.record_check_result(false).0;
         self.cluster.poison();
         self.pending.clear_and_wipe();
@@ -2703,7 +2700,7 @@ impl Rss256Engine {
                         &bytes,
                         &salt,
                     );
-                    qsag_verified::RssCutGateSession::new_round1_committed(session_id, commitment)
+                    RssCutGateSession::new_round1_committed(session_id, commitment)
                 })
                 .collect();
             let mut echo: Vec<Plane> = share.to_vec();
@@ -2739,16 +2736,25 @@ impl Rss256Engine {
                 // The product proof and both holder comparisons have accepted. This
                 // engine uses replicated product proofs, with no SPDZ MAC residual.
                 let (gate, checked) = gate.advance_round3_verify_consistency(session_id, 0, 0, 0);
-                let (_, released) = gate.open_verified_cut(session_id);
-                let Ok(mut released) = released else {
+                if checked.is_err()
+                    || gate.is_poisoned()
+                    || !gate.is_consistency_verified()
+                    || gate.phase() != qsag_verified::RssCutPhase::Round3ConsistencyVerified
+                    || gate.session_id() != session_id
+                {
+                    qsag_asm::volatile_fill(&mut echo, [0; 4]);
+                    qsag_asm::volatile_fill(&mut out, [0; 4]);
+                    return self.poison(Rss256Error::OpenShareMismatch { slot });
+                }
+                let (_, released) = gate.step(qsag_verified::RssCutStepInput::OpenVerifiedCut {
+                    req_session_id: session_id,
+                });
+                let Ok(qsag_verified::RssCutStepOutput::CutReleased(mut released)) = released
+                else {
                     qsag_asm::volatile_fill(&mut echo, [0; 4]);
                     qsag_asm::volatile_fill(&mut out, [0; 4]);
                     return self.poison(Rss256Error::OpenShareMismatch { slot });
                 };
-                if checked.is_err() {
-                    qsag_asm::volatile_fill(&mut released, 0);
-                    return self.poison(Rss256Error::OpenShareMismatch { slot });
-                }
                 for (word, bytes) in output.iter_mut().zip(released.as_chunks::<8>().0.iter()) {
                     *word ^= u64::from_le_bytes(*bytes);
                 }
