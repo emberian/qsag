@@ -4,32 +4,16 @@
 //! discrete GPU backend (`VulkanSpirvBackend`), transcript-bound reports,
 //! and verified kernel digest registry (`VerifiedKernelDigestRegistry`).
 
-#![cfg_attr(
-    not(all(
-        feature = "std",
-        any(target_os = "linux", target_os = "macos"),
-        target_pointer_width = "64"
-    )),
-    forbid(unsafe_code)
-)]
-#![cfg_attr(
-    all(
-        feature = "std",
-        any(target_os = "linux", target_os = "macos"),
-        target_pointer_width = "64"
-    ),
-    deny(unsafe_code)
-)]
+#![cfg_attr(not(feature = "std"), forbid(unsafe_code))]
+#![cfg_attr(feature = "std", deny(unsafe_code))]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
-#[cfg(feature = "alloc")]
-pub mod aws_f2;
-#[cfg(feature = "alloc")]
-pub use aws_f2::{AwsF2Backend, F2Ass2Cluster, F2NiSession};
+#[cfg(feature = "std")]
+pub use qsag_asm::fill_os_random;
 
 pub mod ct;
 pub mod gf2_128;
@@ -161,6 +145,8 @@ pub enum AccelError {
     /// The accelerator failed to execute the job (device, driver, or lock failure). No output
     /// was produced and no CPU fallback ran.
     BackendFailure,
+    /// The selected backend has no kernel for this operation.
+    UnsupportedOperation,
     /// A receipt was requested for a job descriptor that does not belong to the pinned kernel slot.
     KernelSlotMismatch {
         pin: KernelSlot,
@@ -193,6 +179,7 @@ impl core::fmt::Display for AccelError {
             Self::InvalidTwiddles => {
                 f.write_str("NTT twiddles are not successive powers of a primitive root")
             }
+            Self::UnsupportedOperation => f.write_str("operation is unavailable on this backend"),
             Self::BackendFailure => f.write_str("accelerator backend failed to execute the job"),
             Self::KernelSlotMismatch { pin, descriptor } => write!(
                 f,
@@ -235,20 +222,30 @@ impl KernelTargetArch {
     }
 }
 
-/// Enumerates the 6 certified batch compute kernels in [`AcceleratorBackend`].
+/// Identifies a compute kernel for artifact pins and execution receipts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum KernelSlot {
     BatchKeccakF1600 = 0,
     BatchPoseidon2Perm12 = 1,
     GoldilocksNtt = 2,
-    CosetLdeExt2 = 3,
     MerkleLayerPoseidon2 = 4,
     BdozGf2128BatchDot = 5,
+    Fp5CosetLde = 6,
+    Fp5WhirFold = 7,
+    Fp5SumcheckReduce = 8,
+    Poseidon2Gl24Merkle = 9,
+    TurboShake400Canopy = 10,
 }
 
 impl KernelSlot {
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 10;
+
+    /// Dense array index. Receipt discriminant 3 is reserved for the retired quadratic kernel.
+    pub const fn index(self) -> usize {
+        let id = self as usize;
+        if id < 3 { id } else { id - 1 }
+    }
 
     /// Algorithm domain label bound into every keyed [`ExecutionReceipt`] for this slot.
     pub const fn algorithm_domain(self) -> &'static [u8] {
@@ -258,18 +255,26 @@ impl KernelSlot {
             // canonical Poseidon2-12 is bound by the test vectors; Lean pins this label.
             Self::BatchPoseidon2Perm12 => b"QSAG.ACCEL.ALG.POSEIDON2_PERM12.V1",
             Self::GoldilocksNtt => b"QSAG.ACCEL.ALG.GOLDILOCKS_NTT.V1",
-            Self::CosetLdeExt2 => b"QSAG.ACCEL.ALG.COSET_LDE_EXT2.V1",
             Self::MerkleLayerPoseidon2 => b"QSAG.ACCEL.ALG.MERKLE_POSEIDON2.V1",
+            Self::Fp5CosetLde => b"QSAG.ACCEL.ALG.FP5_COSET_LDE.V1",
+            Self::Fp5WhirFold => b"QSAG.ACCEL.ALG.FP5_WHIR_FOLD.V1",
+            Self::Fp5SumcheckReduce => b"QSAG.ACCEL.ALG.FP5_SUMCHECK_REDUCE.V1",
+            Self::Poseidon2Gl24Merkle => b"QSAG.ACCEL.ALG.POSEIDON2_GL24_MERKLE.V1",
+            Self::TurboShake400Canopy => b"QSAG.ACCEL.ALG.TURBOSHAKE400_CANOPY.V1",
             Self::BdozGf2128BatchDot => b"QSAG.ACCEL.ALG.BDOZ_GF2_128_DOT.V1",
         }
     }
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; Self::COUNT] = [
         Self::BatchKeccakF1600,
         Self::BatchPoseidon2Perm12,
         Self::GoldilocksNtt,
-        Self::CosetLdeExt2,
         Self::MerkleLayerPoseidon2,
         Self::BdozGf2128BatchDot,
+        Self::Fp5CosetLde,
+        Self::Fp5WhirFold,
+        Self::Fp5SumcheckReduce,
+        Self::Poseidon2Gl24Merkle,
+        Self::TurboShake400Canopy,
     ];
 }
 
@@ -286,15 +291,25 @@ pub enum BatchJobDescriptor {
         length: usize,
         inverse: bool,
     },
-    CosetLdeExt2 {
-        domain_len: usize,
-        blowup: usize,
-        shift: u64,
-    },
     MerkleLayerPoseidon2 {
         num_parents: usize,
         pk_seed: [u64; 4],
         layer: u32,
+    },
+    Fp5CosetLde {
+        elements: usize,
+    },
+    Fp5WhirFold {
+        elements: usize,
+    },
+    Fp5SumcheckReduce {
+        elements: usize,
+    },
+    Poseidon2Gl24Merkle {
+        elements: usize,
+    },
+    TurboShake400Canopy {
+        elements: usize,
     },
     BdozGf2128BatchDot {
         num_elements: usize,
@@ -307,8 +322,12 @@ impl BatchJobDescriptor {
             Self::KeccakF1600 { .. } => KernelSlot::BatchKeccakF1600,
             Self::Poseidon2Perm12 { .. } => KernelSlot::BatchPoseidon2Perm12,
             Self::GoldilocksNtt { .. } => KernelSlot::GoldilocksNtt,
-            Self::CosetLdeExt2 { .. } => KernelSlot::CosetLdeExt2,
             Self::MerkleLayerPoseidon2 { .. } => KernelSlot::MerkleLayerPoseidon2,
+            Self::Fp5CosetLde { .. } => KernelSlot::Fp5CosetLde,
+            Self::Fp5WhirFold { .. } => KernelSlot::Fp5WhirFold,
+            Self::Fp5SumcheckReduce { .. } => KernelSlot::Fp5SumcheckReduce,
+            Self::Poseidon2Gl24Merkle { .. } => KernelSlot::Poseidon2Gl24Merkle,
+            Self::TurboShake400Canopy { .. } => KernelSlot::TurboShake400Canopy,
             Self::BdozGf2128BatchDot { .. } => KernelSlot::BdozGf2128BatchDot,
         }
     }
@@ -328,15 +347,6 @@ impl BatchJobDescriptor {
                 out[1] = inverse as u8;
                 out[8..16].copy_from_slice(&(length as u64).to_be_bytes());
             }
-            Self::CosetLdeExt2 {
-                domain_len,
-                blowup,
-                shift,
-            } => {
-                out[8..16].copy_from_slice(&(domain_len as u64).to_be_bytes());
-                out[16..24].copy_from_slice(&(blowup as u64).to_be_bytes());
-                out[24..32].copy_from_slice(&gl_reduce_u64(shift).to_be_bytes());
-            }
             Self::MerkleLayerPoseidon2 {
                 num_parents,
                 pk_seed,
@@ -348,7 +358,22 @@ impl BatchJobDescriptor {
                     out[16 + i * 8..24 + i * 8].copy_from_slice(&gl_reduce_u64(limb).to_be_bytes());
                 }
             }
-            Self::BdozGf2128BatchDot { num_elements } => {
+            Self::Fp5CosetLde {
+                elements: num_elements,
+            }
+            | Self::Fp5WhirFold {
+                elements: num_elements,
+            }
+            | Self::Fp5SumcheckReduce {
+                elements: num_elements,
+            }
+            | Self::Poseidon2Gl24Merkle {
+                elements: num_elements,
+            }
+            | Self::TurboShake400Canopy {
+                elements: num_elements,
+            }
+            | Self::BdozGf2128BatchDot { num_elements } => {
                 out[8..16].copy_from_slice(&(num_elements as u64).to_be_bytes());
             }
         }
@@ -720,7 +745,7 @@ pub trait AcceleratorBackend: Send + Sync {
         merkle_layer_poseidon2_fixed_tweak_cpu(children, tweak, out_parents)
     }
 
-    /// 2-lane BDOZ GF($2^{128}$) inner product over $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$
+    /// 2-lane BDOZ GF($2^{128}$) inner product over $\mathbb{F}_2\[x\]/(x^{128} + x^7 + x^2 + x + 1)$
     /// (`shares.len() == weights.len()`).
     fn bdoz_gf2_128_batch_dot(
         &self,
@@ -744,8 +769,12 @@ impl CpuReferenceBackend {
             // Framing version; canonical Poseidon2-12 profile, also registered in Lean.
             KernelSlot::BatchPoseidon2Perm12 => b"QSAG.CPU_REF.POSEIDON2_PERM12.V1",
             KernelSlot::GoldilocksNtt => b"QSAG.CPU_REF.GOLDILOCKS_NTT.V1",
-            KernelSlot::CosetLdeExt2 => b"QSAG.CPU_REF.COSET_LDE_EXT2.V1",
             KernelSlot::MerkleLayerPoseidon2 => b"QSAG.CPU_REF.MERKLE_POSEIDON2.V1",
+            KernelSlot::Fp5CosetLde => b"QSAG.CPU_REF.FP5_COSET_LDE.V1",
+            KernelSlot::Fp5WhirFold => b"QSAG.CPU_REF.FP5_WHIR_FOLD.V1",
+            KernelSlot::Fp5SumcheckReduce => b"QSAG.CPU_REF.FP5_SUMCHECK_REDUCE.V1",
+            KernelSlot::Poseidon2Gl24Merkle => b"QSAG.CPU_REF.POSEIDON2_GL24_MERKLE.V1",
+            KernelSlot::TurboShake400Canopy => b"QSAG.CPU_REF.TURBOSHAKE400_CANOPY.V1",
             KernelSlot::BdozGf2128BatchDot => b"QSAG.CPU_REF.BDOZ_GF2_128_DOT.V1",
         };
         CertifiedKernelPin::from_kernel_artifact(slot, KernelTargetArch::CpuReference, tag)
@@ -989,7 +1018,7 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
         pins: [CertifiedKernelPin; KernelSlot::COUNT],
     ) -> Result<(), KernelRegistryError> {
         for (idx, pin) in pins.iter().enumerate() {
-            if pin.target_arch != arch || (pin.slot as usize) != idx {
+            if pin.target_arch != arch || pin.slot.index() != idx {
                 return Err(KernelRegistryError::PinMismatch {
                     slot: KernelSlot::ALL[idx],
                 });
@@ -1016,7 +1045,7 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
     ) -> Result<&CertifiedKernelPin, KernelRegistryError> {
         for entry in self.profiles.iter().take(self.len).flatten() {
             if entry.0 == arch {
-                return Ok(&entry.1[slot as usize]);
+                return Ok(&entry.1[slot.index()]);
             }
         }
         Err(KernelRegistryError::UnsupportedTargetArch(arch))

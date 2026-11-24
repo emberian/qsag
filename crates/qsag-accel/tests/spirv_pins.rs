@@ -1,4 +1,4 @@
-//! SHA-256 pins of the six embedded SPIR-V modules.
+//! SHA-256 pins of the embedded SPIR-V modules.
 //!
 //! `test_spirv_shaders_reproducible_from_comp_sources` (in `vulkan_rdna2_differential.rs`)
 //! checks that the embedded words are what `glslangValidator 14.3.0` produces from
@@ -11,7 +11,7 @@ use qsag_accel::KernelSlot;
 use qsag_accel::sha2::sha256;
 use qsag_accel::spirv_kernels::{shader_source_filename, spirv_kernel_bytes, spirv_kernel_words};
 
-const PINS: [(&str, &str); 6] = [
+const PINS: [(&str, &str); KernelSlot::COUNT] = [
     (
         "keccak_f1600.comp",
         "7bf1c70e4c21de7e75140d4b9fe40f4309fcd4a53407ed4cd5093d3c9157244f",
@@ -25,16 +25,32 @@ const PINS: [(&str, &str); 6] = [
         "f0a593ae773214a66bc937dc4cf13f68ec4c8c75be177c567c3b546c0007add4",
     ),
     (
-        "coset_lde_ext2.comp",
-        "71aee0355d7745f26ffc2f534e83e89650224ee211318931ccfddf5932923d1c",
-    ),
-    (
         "merkle_layer_poseidon2.comp",
         "92e0593a7f25939313497b3b8c392d2dafb10a5897adf4fc736c05840cac9ae0",
     ),
     (
         "bdoz_gf2_128_dot.comp",
         "16430babdf5008c5f824152a1d2fbef2963c8b056b89f6cccfba1860639eda64",
+    ),
+    (
+        "fp5_coset_lde.comp",
+        "280d7ba5e34f23bad52b8bf239265fd5a2985d08670fc8d871a7102ebe4dc79d",
+    ),
+    (
+        "fp5_whir_fold.comp",
+        "b69c8bf9ae5c309344e4b4eff5b989f1f4c153c7a217a86fb07396b9282e0035",
+    ),
+    (
+        "fp5_sumcheck_reduce.comp",
+        "31929b46043b9a91f6c14959f7a48ce53f1502d2fe491c354e2a62587b17f1fc",
+    ),
+    (
+        "poseidon2_gl24_merkle.comp",
+        "2339c477302d14f9151cb425ae18e4d19e5506b70b443a7eb6e7c5673723a3da",
+    ),
+    (
+        "turboshake400_canopy.comp",
+        "edaa37846b2bfdb3502714e6e517b8636267bd1748110b091314597f7c959d63",
     ),
 ];
 
