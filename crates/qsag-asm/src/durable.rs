@@ -299,7 +299,7 @@ impl LockedRecord {
         let id = file_identity(&verify_path(&lock, &name)?);
         if fresh {
             header[..8].copy_from_slice(LOCK_MAGIC);
-            File::open("/dev/urandom")?.read_exact(&mut header[8..16])?;
+            crate::fill_os_random(&mut header[8..16])?;
             header[16..].copy_from_slice(&id);
             lock.write_all(&header)?;
             lock.sync_all()?;

@@ -120,9 +120,8 @@ impl AnchorTicket {
 }
 
 fn fresh_nonce() -> std::io::Result<[u8; 32]> {
-    use std::io::Read;
     let mut nonce = [0; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+    qsag_asm::fill_os_random(&mut nonce)?;
     Ok(nonce)
 }
 

@@ -24,6 +24,10 @@ use crate::field::tower::{Tower128, TowerGf256};
 use core::hint::black_box;
 use qsag_asm::volatile_fill;
 
+/// Fill a secret buffer directly from the operating system.
+#[cfg(feature = "std")]
+pub use qsag_accel::fill_os_random;
+
 /// Deterministically overwrite a byte slice with zeros (`core::ptr::write_volatile` + `SeqCst` fence).
 #[inline(never)]
 pub fn wipe_bytes(buf: &mut [u8]) {

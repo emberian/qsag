@@ -68,16 +68,16 @@ pub struct KeccakState8x(pub [[u64; 8]; 25]);
 pub struct KeccakRow256(pub [[u64; 4]; 5]);
 
 /// Intel `VGF2P8AFFINEQB` 64-bit matrix mapping Wiedemann $\mathcal{T}_3$ (`TowerGf256`)
-/// $\to \mathbb{F}_2[z]/(z^8 + z^4 + z^3 + z + 1)$ (`0x11B`), sending generator $z \leftrightarrow \text{0x30} \in \mathcal{T}_3$.
+/// $\to \mathbb{F}_2\[z\]/(z^8 + z^4 + z^3 + z + 1)$ (`0x11B`), sending generator $z \leftrightarrow \text{0x30} \in \mathcal{T}_3$.
 pub const GFNI_MAT_T3_TO_POLY: u64 = 0x7150_0A8A_86BE_78CE;
 
-/// Inverse Intel `VGF2P8AFFINEQB` 64-bit matrix mapping $\mathbb{F}_2[z]/(z^8 + z^4 + z^3 + z + 1)$
+/// Inverse Intel `VGF2P8AFFINEQB` 64-bit matrix mapping $\mathbb{F}_2\[z\]/(z^8 + z^4 + z^3 + z + 1)$
 /// (`0x11B`) $\to$ Wiedemann $\mathcal{T}_3$ (`TowerGf256`).
 pub const GFNI_MAT_POLY_TO_T3: u64 = 0xA1E4_F8E0_72A2_700C;
 
-/// Exact Artin–Schreier roots $X_0, X_1, \dots, X_6 \in \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$
+/// Exact Artin–Schreier roots $X_0, X_1, \dots, X_6 \in \mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1)$
 /// satisfying $X_0^2 + X_0 + 1 = 0$ and $X_k^2 + X_{k-1} X_k + 1 = 0$ ($1 \le k \le 6$), defining
-/// the canonical field isomorphism $\Psi : \mathcal{T}_7 \xrightarrow{\sim} \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$.
+/// the canonical field isomorphism $\Psi : \mathcal{T}_7 \xrightarrow{\sim} \mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1)$.
 pub const TOWER128_POLY_GENERATORS: [u128; 7] = [
     0x295a_c0b1_f473_1af9_676a_ac9f_a4b2_0b08,
     0x5003_17bd_159d_73bb_34d2_f7fb_a603_e341,
@@ -266,7 +266,7 @@ pub const fn sim_gf2p8affineqb(x: u8, matrix_qword: u64, imm8: u8) -> u8 {
     out
 }
 
-/// Constant-time polynomial multiplication in $\mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$.
+/// Constant-time polynomial multiplication in $\mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1)$.
 #[inline]
 pub const fn poly128_mul_const(mut a: u128, mut b: u128) -> u128 {
     let mut acc = 0u128;
@@ -349,7 +349,7 @@ pub const fn clmul256_reduce_0x87(lo128: u128, hi128: u128) -> u128 {
 }
 
 /// Compact `128`-word (`2 KiB` per direction, `0` 16 KiB nibble LUTs!) $\mathbb{F}_2$-linear basis
-/// matrices between Wiedemann $\mathcal{T}_7$ and $\mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$.
+/// matrices between Wiedemann $\mathcal{T}_7$ and $\mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1)$.
 const fn build_tower128_basis_pair() -> ([u128; 128], [u128; 128]) {
     // Verify Artin-Schreier defining equations at compile time!
     let mut k = 0usize;
@@ -450,10 +450,10 @@ const fn build_tower128_basis_pair() -> ([u128; 128], [u128; 128]) {
 
 const TOWER128_BASIS_PAIR: ([u128; 128], [u128; 128]) = build_tower128_basis_pair();
 
-/// 128 basis columns of $\Psi : \mathcal{T}_7 \to \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$.
+/// 128 basis columns of $\Psi : \mathcal{T}_7 \to \mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1)$.
 pub const T7_TO_POLY_BASIS: [u128; 128] = TOWER128_BASIS_PAIR.0;
 
-/// 128 basis columns of $\Psi^{-1} : \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1) \to \mathcal{T}_7$.
+/// 128 basis columns of $\Psi^{-1} : \mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1) \to \mathcal{T}_7$.
 pub const POLY_TO_T7_BASIS: [u128; 128] = TOWER128_BASIS_PAIR.1;
 
 // Compile-time check of GFNI_MAT_T3_TO_POLY and GFNI_MAT_POLY_TO_T3 roundtrip on basis bits!
@@ -477,7 +477,7 @@ macro_rules! linear128_step {
     };
 }
 
-/// Constant-time linear basis map $\Psi : \mathcal{T}_7 \to \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$
+/// Constant-time linear basis map $\Psi : \mathcal{T}_7 \to \mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1)$
 /// (`0` branches, `0` variable shifts, `0` 16 KiB table scans — pure constant-shift bit-matrix XOR!).
 #[inline]
 pub fn tower128_to_poly128_portable(x: u128) -> u128 {
@@ -664,7 +664,7 @@ pub fn tower128_to_poly128_portable(x: u128) -> u128 {
     acc
 }
 
-/// Constant-time inverse linear basis map $\Psi^{-1} : \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1) \to \mathcal{T}_7$
+/// Constant-time inverse linear basis map $\Psi^{-1} : \mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1) \to \mathcal{T}_7$
 /// (`0` branches, `0` variable shifts, `0` 16 KiB table scans!).
 #[inline]
 pub fn poly128_to_tower128_portable(y: u128) -> u128 {
@@ -1048,7 +1048,7 @@ pub fn gf256_shamir_mac_portable(acc: &mut [u8], shares: &[u8], scalar: u8) {
     crate::wipe::wipe_vector_scratch();
 }
 
-/// Portable 2-lane polynomial-basis BDOZ MAC inner product over $\mathbb{F}_2[z]/(z^{128}+z^7+z^2+z+1)$:
+/// Portable 2-lane polynomial-basis BDOZ MAC inner product over $\mathbb{F}_2\[z\]/(z^{128}+z^7+z^2+z+1)$:
 /// computes `(acc0, acc1) = (\bigoplus_i a_lane0[i] * b_lane0[i], \bigoplus_i a_lane1[i] * b_lane1[i])`
 /// using delayed 256-bit carryless accumulation + single `0x87` reduction at the end!
 pub fn tower128_bdoz_2lane_poly_mac_portable(

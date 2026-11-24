@@ -4,7 +4,7 @@
 //! Provides native ARMv8-A / Apple M-series / Neoverse vector kernels for all operations that
 //! previously fell back to scalar code on `aarch64`:
 //! 1. **`GF(2^8)` Shamir `mul` & `mac` (`NEON` `vqtbl1q_u8` + `vmull_p8` `PMULL`):**
-//!    Maps Wiedemann $\mathcal{T}_3 \xrightarrow{\Phi} \mathbb{F}_2[z]/(z^8 + z^4 + z^3 + z + 1)$
+//!    Maps Wiedemann $\mathcal{T}_3 \xrightarrow{\Phi} \mathbb{F}_2\[z\]/(z^8 + z^4 + z^3 + z + 1)$
 //!    via register-resident split-nibble `vqtbl1q_u8` tables, multiplies 16 bytes in parallel
 //!    via hardware polynomial carryless `vmull_p8` / `vmull_high_p8`, and fuses `0x11B` modular
 //!    reduction with $\Phi^{-1}$ in register-resident `vqtbl1q_u8` tables (`0` secret-indexed

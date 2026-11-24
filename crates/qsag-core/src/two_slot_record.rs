@@ -77,7 +77,6 @@ impl TwoSlotRecord {
         limit: usize,
         payload: &[u8],
     ) -> io::Result<Self> {
-        use std::io::Read;
         let key = Key(key);
         let [slot_a, slot_b] = paths.slots;
         let genesis = LockedRecord::create_new(paths.genesis)?;
@@ -87,7 +86,7 @@ impl TwoSlotRecord {
         ];
         let slot_identities = slots.each_ref().map(LockedRecord::lock_identity_seal);
         let mut record_id = [0; 32];
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut record_id)?;
+        qsag_asm::fill_os_random(&mut record_id)?;
         let mut this = Self {
             genesis,
             slots: slots.map(Some),

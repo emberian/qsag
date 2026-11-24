@@ -50,31 +50,12 @@ pub struct CpuCapabilities {
 /// Hardware Data-Independent Timing (`Intel DOIT` / `ARMv8.4-DIT`) status report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HardwareDitStatus {
-    /// ARMv8.4-DIT (`PSTATE.DIT = 1`) was actively set in userspace via `msr dit, #1`.
-    EnabledUserspaceArmDit,
-    /// Intel `IA32_ARCH_CAPABILITIES` MSR (`0x10A`) is enumerated by `CPUID.7.0:EDX[29]`, while
-    /// `DOITM` (`MSR 0x10A` bit 12 / `MSR 0x1B01` bit 0) remains strictly ring-0 kernel-managed.
-    EnumeratedIntelDoitKernelManaged,
-    /// No hardware timing mode was reported. This does not establish instruction timing
-    /// guarantees; the historical variant name is retained for source compatibility.
-    ImplicitAluConstantTimeOnly,
-}
-
-impl HardwareDitStatus {
-    /// Scoped kernels enable ARM `PSTATE.DIT` and restore its previous value on return.
-    /// A capability query does not itself enable DIT.
-    #[allow(non_upper_case_globals)]
-    pub const EnabledByGuard: Self = Self::EnabledUserspaceArmDit;
-
-    /// Confirmed DOITM support; activation and its current state are kernel-controlled.
-    /// Only the capability query with `x86_doit_enumerated = true` confirms support.
-    /// The legacy `enable_hardware_dit` function reports MSR existence alone.
-    #[allow(non_upper_case_globals)]
-    pub const SupportedKernelControlled: Self = Self::EnumeratedIntelDoitKernelManaged;
-
+    /// Scoped kernels enable ARM PSTATE.DIT and restore it on return.
+    EnabledByGuard,
+    /// Hardware timing protection is managed by the kernel.
+    SupportedKernelControlled,
     /// No hardware timing mode is exposed by this capability snapshot.
-    #[allow(non_upper_case_globals)]
-    pub const UnsupportedOnCpu: Self = Self::ImplicitAluConstantTimeOnly;
+    UnsupportedOnCpu,
 }
 
 impl CpuCapabilities {
@@ -83,7 +64,6 @@ impl CpuCapabilities {
     /// (0x10A), but reading bit 12 requires ring 0. Confirmed support is represented by
     /// `x86_doit_enumerated`; enabling `IA32_UARCH_MISC_CTL` (0x1B01) bit 0 also requires
     /// ring 0, and this query never claims that the kernel has enabled it.
-    /// Existing enum variants are retained; the descriptive associated constants are aliases.
     pub fn hardware_dit_status(&self) -> Option<HardwareDitStatus> {
         if self.aarch64_dit {
             Some(HardwareDitStatus::EnabledByGuard)
@@ -572,13 +552,13 @@ pub fn enable_hardware_dit() -> HardwareDitStatus {
             unsafe {
                 crate::aarch64_asm::enable_dit_aarch64();
             }
-            return HardwareDitStatus::EnabledUserspaceArmDit;
+            return HardwareDitStatus::EnabledByGuard;
         }
     }
     if caps.x86_arch_capabilities_msr {
-        HardwareDitStatus::EnumeratedIntelDoitKernelManaged
+        HardwareDitStatus::SupportedKernelControlled
     } else {
-        HardwareDitStatus::ImplicitAluConstantTimeOnly
+        HardwareDitStatus::UnsupportedOnCpu
     }
 }
 

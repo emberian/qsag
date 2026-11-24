@@ -21,7 +21,7 @@
 //!    - `aarch64` `NEON` + `FEAT_SHA3` (`eor3.16b`, `rax1.2d`, `xar.2d`, `bcax.16b`).
 //! 2. **32-Way `GF(2^8)` Shamir Multiplication & MAC (Wiedemann $\mathcal{T}_3$ Exact):**
 //!    - `x86_64` `GFNI` (`vgf2p8affineqb` + `vgf2p8mulb` via proved basis isomorphism
-//!      $\Phi : \mathcal{T}_3 \xrightarrow{\sim} \mathbb{F}_2[z]/(z^8 + z^4 + z^3 + z + 1)$),
+//!      $\Phi : \mathcal{T}_3 \xrightarrow{\sim} \mathbb{F}_2\[z\]/(z^8 + z^4 + z^3 + z + 1)$),
 //!    - `x86_64` `AVX2` fallback (`vpshufb` register-synthesized nibble LUT + branchless
 //!      Russian-peasant arithmetic, zero memory table lookups).
 //! 3. **2-Lane `Tower128` ($\mathcal{T}_7 = \mathbb{F}_{2^{128}}$) BDOZ MAC Inner Product:**
@@ -41,6 +41,11 @@
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
+
+#[cfg(feature = "std")]
+mod os_random;
+#[cfg(feature = "std")]
+pub use os_random::fill_os_random;
 
 pub mod bitslice;
 pub mod cpuid;
@@ -685,7 +690,7 @@ pub fn gf256_shamir_mac_avx2_russian_peasant(acc: &mut [u8], shares: &[u8], scal
 }
 
 /// 2-lane simultaneous 128-bit BDOZ MAC inner product in polynomial basis
-/// $\mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$ (`VPCLMULQDQ` / `PCLMULQDQ` / `PMULL`).
+/// $\mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1)$ (`VPCLMULQDQ` / `PCLMULQDQ` / `PMULL`).
 #[inline]
 pub fn tower128_bdoz_2lane_poly_mac(lhs_pairs: &[[u128; 2]], rhs_pairs: &[[u128; 2]]) -> [u128; 2] {
     tower128_bdoz_2lane_poly_mac_with_backend(lhs_pairs, rhs_pairs, detect_backend())
@@ -937,7 +942,7 @@ fn transpose64x64(rows: &mut [u64]) {
     }
 }
 
-/// The basis map $\Psi : \mathcal{T}_7 \to \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$ of
+/// The basis map $\Psi : \mathcal{T}_7 \to \mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1)$ of
 /// [`tower128_to_poly128_ct`] applied to 64 elements at once. The elements are bitsliced into
 /// 128 coefficient planes and every output plane is a XOR of input-plane combinations chosen by
 /// public selectors, so the running time and memory accesses do not depend on `vals`.
@@ -978,7 +983,7 @@ pub fn tower128_to_poly128_x64_ct(vals: &mut [u128; 64]) {
 
 /// 2-lane BDOZ MAC inner product in **exact Wiedemann $\mathcal{T}_7$ (`Tower128`) coordinates**,
 /// bit-for-bit identical to `qsag_core::field::tower::Tower128::mul` via the compile-time verified
-/// field isomorphism $\Psi : \mathcal{T}_7 \xrightarrow{\sim} \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$.
+/// field isomorphism $\Psi : \mathcal{T}_7 \xrightarrow{\sim} \mathbb{F}_2\[z\]/(z^{128} + z^7 + z^2 + z + 1)$.
 pub fn tower128_bdoz_2lane_mac(lhs_pairs: &[[u128; 2]], rhs_pairs: &[[u128; 2]]) -> [u128; 2] {
     tower128_bdoz_2lane_mac_with_backend(lhs_pairs, rhs_pairs, detect_backend())
 }
