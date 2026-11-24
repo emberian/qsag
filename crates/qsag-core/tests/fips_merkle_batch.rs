@@ -51,3 +51,13 @@ fn batched_merkle_matches_scalar_for_tails_and_address_domains() {
         }
     }
 }
+
+#[cfg(not(feature = "testing-ephemeral"))]
+#[test]
+fn release_parameter_lookup_excludes_the_compact_test_profile() {
+    use qsag_core::fips205::Fips205Params;
+    for name in ["compact-test", "SLH-DSA-SHAKE-compact-test"] {
+        assert!(Fips205Params::by_name(name).is_none());
+    }
+    assert!(Fips205Params::by_name("SLH-DSA-SHAKE-128f").is_some());
+}

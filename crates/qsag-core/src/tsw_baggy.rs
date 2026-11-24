@@ -494,7 +494,14 @@ pub fn th_xof_msg<S: TweakableHashSuite>(
 /// Canonical `TSW` target sum $\lfloor \ell_1 (w - 1) / 2 \rfloor$.
 #[inline]
 pub const fn canonical_target_sum(w: usize, ell1: usize) -> usize {
-    (ell1 * w.saturating_sub(1)) / 2
+    if w <= u32::MAX as usize && ell1 <= u32::MAX as usize {
+        match qsag_verified::tsw_canonical_target_sum(w as u32, ell1 as u32) {
+            Some(target) => target as usize,
+            None => 0,
+        }
+    } else {
+        (ell1 * w.saturating_sub(1)) / 2
+    }
 }
 
 /// Target-Sum Winternitz (`TSW`) checker.
@@ -521,6 +528,14 @@ pub fn extract_base_w_digits_checked(
     ell1: usize,
     digest_bytes: &[u8],
 ) -> Option<Vec<usize>> {
+    extract_base_w_digits(w, ell1, digest_bytes)
+}
+
+fn extract_base_w_digits<D: From<u8>>(
+    w: usize,
+    ell1: usize,
+    digest_bytes: &[u8],
+) -> Option<Vec<D>> {
     if !(2..=256).contains(&w) || !w.is_power_of_two() {
         return None;
     }
@@ -531,12 +546,12 @@ pub fn extract_base_w_digits_checked(
     }
     let mut out = Vec::with_capacity(ell1);
     for idx in 0..ell1 {
-        let mut digit = 0usize;
+        let mut digit = 0u8;
         for bit in 0..lg_w {
             let pos = idx * lg_w + bit;
-            digit = (digit << 1) | usize::from((digest_bytes[pos / 8] >> (7 - (pos % 8))) & 1);
+            digit = (digit << 1) | ((digest_bytes[pos / 8] >> (7 - (pos % 8))) & 1);
         }
-        out.push(digit);
+        out.push(D::from(digit));
     }
     Some(out)
 }
@@ -561,9 +576,9 @@ pub fn grind_tsw_leaf_counter<S: TweakableHashSuite>(
 ) -> Option<(u32, Vec<usize>, [u8; 32])> {
     for ctr in 0..max_grind {
         let hmsg = th_hash_leaf_msg(suite, r_rand, pk_seed, pk_root, mu, tree_idx, kp_idx, ctr);
-        let digits = extract_base_w_digits_checked(w, ell1, &hmsg)?;
-        if check_target_sum(w, ell1, target, &digits) {
-            return Some((ctr, digits, hmsg));
+        let digits = extract_base_w_digits(w, ell1, &hmsg)?;
+        if qsag_verified::tsw_check_target_sum(w as u32, ell1, target as u64, &digits) {
+            return Some((ctr, digits.into_iter().map(|d| d as usize).collect(), hmsg));
         }
     }
     None
@@ -592,9 +607,9 @@ pub fn grind_tsw_internal_counter<S: TweakableHashSuite>(
         let hmsg = th_hash_internal_node(
             suite, pk_seed, pk_root, node_root, layer_idx, tree_idx, kp_idx, ctr,
         );
-        let digits = extract_base_w_digits_checked(w, ell1, &hmsg)?;
-        if check_target_sum(w, ell1, target, &digits) {
-            return Some((ctr, digits, hmsg));
+        let digits = extract_base_w_digits(w, ell1, &hmsg)?;
+        if qsag_verified::tsw_check_target_sum(w as u32, ell1, target as u64, &digits) {
+            return Some((ctr, digits.into_iter().map(|d| d as usize).collect(), hmsg));
         }
     }
     None
@@ -945,6 +960,45 @@ impl MonotonicEpochLatch {
     pub const fn in_flight(&self) -> Option<(u64, [u8; 32])> {
         self.in_flight
     }
+
+    fn authorize_epoch(
+        &self,
+        epoch: u64,
+        limit: u64,
+        mu: &[u8; 32],
+    ) -> Result<(qsag_verified::EpochLatch, qsag_verified::EpochAuthGrant), EpochLatchError> {
+        // This latch's WAL binds only an epoch and digest. Its storage owner
+        // supplies the key scope, and retries have no independent randomizer.
+        let prior = match self.in_flight {
+            Some((epoch, msg_digest)) => {
+                qsag_verified::LastBoundEpoch::Bound(qsag_verified::BoundEpochRecord {
+                    epoch,
+                    msg_digest,
+                    r_rand: [0; 32],
+                })
+            }
+            None => qsag_verified::LastBoundEpoch::Unset,
+        };
+        qsag_verified::EpochLatch::from_cursor(self.next_epoch, limit, [0; 32], prior)
+            .and_then(|cursor| {
+                qsag_verified::EpochLatch::acquire_or_retry(
+                    cursor,
+                    qsag_verified::EpochSignRequest {
+                        requested_epoch: epoch,
+                        key_epoch_id: [0; 32],
+                        msg_digest: *mu,
+                        deterministic_r_rand: [0; 32],
+                    },
+                )
+            })
+            .map_err(|error| match error {
+                qsag_verified::EpochLatchError::TreeExhausted { .. } => EpochLatchError::Exhausted,
+                qsag_verified::EpochLatchError::EpochEquivocationAttempt { .. } => {
+                    EpochLatchError::EquivocationRefused
+                }
+                _ => EpochLatchError::PersistenceFailure,
+            })
+    }
 }
 
 impl Default for MonotonicEpochLatch {
@@ -963,26 +1017,23 @@ impl StatefulEpochLatch for MonotonicEpochLatch {
             return Err(EpochLatchError::InvalidCapacity);
         }
         let limit = 1u64 << max_sigs_log2;
-        if self.next_epoch >= limit {
-            return Err(EpochLatchError::Exhausted);
-        }
-        let ep = self.next_epoch;
-        self.next_epoch = ep + 1;
-        self.in_flight = Some((ep, *mu));
-        Ok(ep)
+        let (next, grant) = self.authorize_epoch(self.next_epoch, limit, mu)?;
+        let qsag_verified::LastBoundEpoch::Bound(bound) =
+            qsag_verified::EpochLatch::last_bound(&next)
+        else {
+            return Err(EpochLatchError::PersistenceFailure);
+        };
+        self.next_epoch = next.next_epoch();
+        self.in_flight = Some((bound.epoch, bound.msg_digest));
+        Ok(grant.authorized_epoch)
     }
 
     fn retry_latched_epoch(&mut self, epoch: u64, mu: &[u8; 32]) -> Result<u64, EpochLatchError> {
-        let Some((latched_ep, latched_mu)) = self.in_flight else {
-            return Err(EpochLatchError::EpochNotInFlight);
-        };
-        if latched_ep != epoch {
+        if self.in_flight.map(|(bound, _)| bound) != Some(epoch) {
             return Err(EpochLatchError::EpochNotInFlight);
         }
-        if !ct_eq_bytes32(&latched_mu, mu) {
-            return Err(EpochLatchError::EquivocationRefused);
-        }
-        Ok(latched_ep)
+        let (_, grant) = self.authorize_epoch(epoch, self.next_epoch, mu)?;
+        Ok(grant.authorized_epoch)
     }
 
     fn peek_next_epoch(&self) -> u64 {

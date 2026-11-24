@@ -286,18 +286,22 @@ impl Fips205Adrs {
     /// Encode to 32 big-endian bytes matching `Qsag.encodeFips205Adrs`.
     #[inline]
     pub const fn to_bytes(&self) -> [u8; 32] {
+        qsag_verified::encode_fips205_adrs(self.verified())
+    }
+
+    const fn verified(&self) -> qsag_verified::Fips205Adrs {
         let ty = match qsag_verified::Fips205AdrsType::from_u32(self.adrs_type.to_u32()) {
             Some(ty) => ty,
             None => unreachable!(),
         };
-        qsag_verified::encode_fips205_adrs(qsag_verified::Fips205Adrs::from_tree_u96(
+        qsag_verified::Fips205Adrs::from_tree_u96(
             self.layer,
             self.tree,
             ty,
             self.key_pair,
             self.f5,
             self.f6,
-        ))
+        )
     }
 
     /// Decode a canonical 32-byte uncompressed `ADRS` (`None` if `type > 6`).
@@ -558,6 +562,7 @@ impl Fips205Params {
             "SLH-DSA-SHAKE-192f" | "slh-dsa-shake-192f" | "192f" => Some(Self::SLH_DSA_SHAKE_192F),
             "SLH-DSA-SHAKE-256s" | "slh-dsa-shake-256s" | "256s" => Some(Self::SLH_DSA_SHAKE_256S),
             "SLH-DSA-SHAKE-256f" | "slh-dsa-shake-256f" | "256f" => Some(Self::SLH_DSA_SHAKE_256F),
+            #[cfg(any(test, feature = "testing-ephemeral"))]
             "SLH-DSA-SHAKE-compact-test" | "compact-test" => Some(Self::SLH_DSA_SHAKE_COMPACT_TEST),
             _ => None,
         }
@@ -1131,22 +1136,7 @@ pub fn try_wots_base16_digits_and_csum(msg_n: &[u8]) -> Result<([u8; 67], usize)
             actual: n,
         });
     }
-    let ell1 = 2 * n;
-    let mut digits = [0u8; 67];
-    let mut csum: u32 = 0;
-    for i in 0..n {
-        let hi = msg_n[i] >> 4;
-        let lo = msg_n[i] & 0x0F;
-        digits[2 * i] = hi;
-        digits[2 * i + 1] = lo;
-        csum += (15 - hi as u32) + (15 - lo as u32);
-    }
-    let shifted = (csum << 4) as u16;
-    let cbytes = shifted.to_be_bytes();
-    digits[ell1] = cbytes[0] >> 4;
-    digits[ell1 + 1] = cbytes[0] & 0x0F;
-    digits[ell1 + 2] = cbytes[1] >> 4;
-    Ok((digits, ell1 + 3))
+    Ok(wots_base16_digits_and_csum(msg_n))
 }
 
 /// Compute the `2n + 3` base-16 WOTS+ digits (`2n` message nibbles + `3` big-endian checksum
@@ -1157,6 +1147,11 @@ pub fn wots_base16_digits_and_csum(msg_n: &[u8]) -> ([u8; 67], usize) {
     debug_assert!(msg_n.len() == 16 || msg_n.len() == 24 || msg_n.len() == 32);
     let ell1 = 2 * n;
     let mut digits = [0u8; 67];
+    if let Ok(msg) = msg_n.try_into() {
+        let verified = qsag_verified::fips205_wots_checksum(msg);
+        digits[..verified.len()].copy_from_slice(&verified);
+        return (digits, verified.len());
+    }
     let mut csum: u32 = 0;
     for i in 0..n {
         let hi = msg_n[i] >> 4;
@@ -2062,6 +2057,23 @@ pub fn wots_pk_from_sig(
                 .min()
                 .unwrap_or(15) as u32;
 
+            if n == 16 && count < 4 {
+                let seed = pk_seed.try_into().expect("16-byte seed");
+                for index in base..base + count {
+                    chain_adrs.f5 = index as u32;
+                    let start = u32::from(digits[index]);
+                    let endpoint = qsag_verified::fips205_wots_chain(
+                        sig[index].bytes[..16].try_into().unwrap(),
+                        start,
+                        15 - start,
+                        seed,
+                        chain_adrs.verified(),
+                    )
+                    .expect("base-16 WOTS digit");
+                    tmp[index] = SlhBlock::from_slice(&endpoint).unwrap();
+                }
+                continue;
+            }
             if count > 4 {
                 let mut f5_w = [0u64; 8];
                 let mut starts = [15u32; 8];
