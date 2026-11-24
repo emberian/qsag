@@ -84,6 +84,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
+use qsag_verified::VerifiedWaistbandRootGuard;
 
 use crate::keccak_mpc::TSW_SUITE_MIDSTATE;
 use crate::pors_fp::{
@@ -1442,7 +1443,7 @@ fn check_key_binding<E: BaggyEngine>(
 }
 
 fn waistband_pk_tag(pk_seed: &[u8; 32], pk_root: &[u8; 32]) -> [u8; 32] {
-    cshake256_32(
+    qsag_verified::cshake256_32(
         b"QSAG.BAGGY.WAISTBAND.PK_TAG/v1",
         &encode_multi_frame(&[pk_seed, pk_root]),
     )
@@ -1470,7 +1471,7 @@ fn verify_waistband_derivation(
     let active_cache = ctx.cache_bound.unwrap_or(ctx.binding);
     let cache_pk_tag = waistband_pk_tag(active_cache.pk_seed(), active_cache.pk_root());
     let cache_params_tag = *active_cache.params_digest();
-    let mut guard = qsag_verified::VerifiedWaistbandRootGuard::new_enrolled(
+    let mut guard = VerifiedWaistbandRootGuard::new_enrolled(
         key_pk_tag,
         key_params_tag,
         key.layer,
@@ -1485,11 +1486,18 @@ fn verify_waistband_derivation(
             req_kp: key.key_pair,
             cache_pk_tag: key_pk_tag,
             cache_params_tag: key_params_tag,
-            recomputed_child_root: ctx.expected_child_root,
+            recomputed_child_root: guard.expected_static_child_root(),
             candidate_ancestor_codeword_tag: waistband_codeword_tag(locked),
         };
         let (locked_guard, lock_res) = guard.authorize_ancestor_derivation(lock_req);
         lock_res.map_err(|_| BaggyError::CacheEntryUnauthenticated)?;
+        if locked_guard.is_poisoned()
+            || !locked_guard.has_locked_codeword()
+            || locked_guard.locked_ancestor_codeword_tag()
+                != lock_req.candidate_ancestor_codeword_tag
+        {
+            return Err(BaggyError::CacheEntryUnauthenticated);
+        }
         guard = locked_guard;
     }
     let req = qsag_verified::WaistbandDerivationRequest {

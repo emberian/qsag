@@ -42,24 +42,26 @@
 //! refuse with [`BeltLatchError::EchoKeysMissing`].
 //!
 //! ### Epoch window
-//! A fresh bind is accepted only for `epoch <= next_epoch + MAX_EPOCH_JUMP`
-//! ([`BeltLatchError::EpochJumpTooLarge`] otherwise), so one request can burn at most
-//! [`MAX_EPOCH_JUMP`] leaves instead of the whole key. A signer whose log is further behind
-//! its peers than the window cannot join them in one step.
+//! Sequential wallets accept fresh binds through `next_epoch + MAX_EPOCH_JUMP`.
+//! Consensus signers use [`BeltLatch::recover_slot_indexed`] to bind any forward slot
+//! within capacity. [`BeltLatch::bind_consensus_slot`] returns that slot as the leaf
+//! index and permanently burns skipped indices. Only [`BeltLatch::bind`] permits
+//! exact replay of the in-flight record during recovery.
 //!
 //! ### Log failure is terminal
 //! If [`DurableWal::sync_persist`] fails, nothing is known about what reached storage. The
-//! latch sets a poison flag before it returns the error, and from then on `latched_salt`,
+//! latch remains poisoned when it returns the error, and from then on `latched_salt`,
 //! `bind`, `echo_for` and `verify_peer_echoes` return [`BeltLatchError::WalPoisoned`]. The
 //! only way forward is a new latch recovered from the log.
 
 use alloc::vec::Vec;
 use core::fmt;
+use qsag_verified::BeltLatchKernel;
 
 use crate::sponge::keccak::{Cshake256Xof, cshake256_32, cshake256_32_multi_frame};
 use crate::wipe::{ct_eq_bytes32, wipe_bytes32};
 
-/// Largest distance above the high-water mark at which a fresh epoch may be bound.
+/// Largest permitted forward jump in sequential wallet mode.
 pub const MAX_EPOCH_JUMP: u64 = 64;
 
 /// Longest digit vector a record may carry: the bound of the verified transition kernel,
@@ -103,7 +105,7 @@ impl BeltLatchRecord {
 /// Everything a write-ahead log must hold: the high-water mark and the in-flight record.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct BeltLatchState {
-    /// Every epoch below this value has been bound at least once.
+    /// Every lower index is consumed, including indices skipped by a forward jump.
     pub next_epoch: u64,
     pub in_flight: Option<BeltLatchRecord>,
 }
@@ -944,26 +946,62 @@ pub fn permits_authorise(
     Ok(())
 }
 
+/// How a signer allocates leaves within the enrolled tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BeltIndexingMode {
+    /// Advance at most `MAX_EPOCH_JUMP` beyond the next wallet epoch.
+    #[default]
+    SequentialBounded,
+    /// Use the consensus slot as the leaf index, burning every intervening leaf.
+    SlotIndexed,
+}
+
+fn kernel_digits(bytes: &[u8]) -> qsag_verified::BeltLatchDigits {
+    let mut padded = [0u8; MAX_TARGET_SUM_DIGITS];
+    padded[..bytes.len()].copy_from_slice(bytes);
+    qsag_verified::BeltLatchDigits {
+        len: bytes.len() as u8,
+        row0: padded[0..32].try_into().unwrap(),
+        row1: padded[32..64].try_into().unwrap(),
+        row2: padded[64..96].try_into().unwrap(),
+        row3: padded[96..128].try_into().unwrap(),
+    }
+}
+
+fn kernel_error(e: qsag_verified::BeltLatchKernelError) -> BeltLatchError {
+    use qsag_verified::BeltLatchKernelError as E;
+    match e {
+        E::InvalidCapacity => BeltLatchError::InvalidCapacity,
+        E::Exhausted => BeltLatchError::Exhausted,
+        E::EpochAlreadyBound => BeltLatchError::EpochAlreadyBound,
+        E::RetrySaltMismatch => BeltLatchError::RetrySaltMismatch,
+        E::DigitsMismatch => BeltLatchError::DigitsMismatch,
+        E::EpochConsumed => BeltLatchError::EpochConsumed,
+        E::EpochJumpTooLarge => BeltLatchError::EpochJumpTooLarge,
+        E::WalPoisoned | E::WalPersistFailed => BeltLatchError::WalPoisoned,
+    }
+}
+
 /// One signer's latch (see the module documentation). Not `Clone`.
 pub struct BeltLatch<W: DurableWal> {
+    indexing_mode: BeltIndexingMode,
     wal: W,
-    capacity_log2: usize,
+    kernel: Option<BeltLatchKernel>,
     state: BeltLatchState,
     echo_keys: Option<EchoMacKeys>,
-    /// Set when a persist failed; never cleared.
-    wal_poisoned: bool,
 }
 
 impl<W: DurableWal> fmt::Debug for BeltLatch<W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BeltLatch")
+            .field("indexing_mode", &self.indexing_mode)
             .field("next_epoch", &self.state.next_epoch)
             .field(
                 "in_flight_epoch",
                 &self.state.in_flight.as_ref().map(|r| r.epoch),
             )
             .field("party", &self.echo_keys.as_ref().map(EchoMacKeys::party))
-            .field("wal_poisoned", &self.wal_poisoned)
+            .field("wal_poisoned", &self.is_wal_poisoned())
             .finish()
     }
 }
@@ -972,7 +1010,12 @@ impl<W: DurableWal> BeltLatch<W> {
     /// Recover a latch without echo keys from `wal` (an unwritten log starts at epoch 0).
     /// It binds and replays, but cannot send or check echoes.
     pub fn recover(wal: W, capacity_log2: usize) -> Result<Self, BeltLatchError> {
-        Self::recover_inner(wal, capacity_log2, None)
+        Self::recover_inner(
+            wal,
+            capacity_log2,
+            None,
+            BeltIndexingMode::SequentialBounded,
+        )
     }
 
     /// Recover the latch of party `echo_keys.party()` from `wal`, able to exchange echoes.
@@ -981,34 +1024,113 @@ impl<W: DurableWal> BeltLatch<W> {
         capacity_log2: usize,
         echo_keys: EchoMacKeys,
     ) -> Result<Self, BeltLatchError> {
-        Self::recover_inner(wal, capacity_log2, Some(echo_keys))
+        Self::recover_inner(
+            wal,
+            capacity_log2,
+            Some(echo_keys),
+            BeltIndexingMode::SequentialBounded,
+        )
+    }
+
+    /// Recover the highest bound consensus slot from the durable high-water mark.
+    pub fn recover_slot_indexed(wal: W, capacity_log2: usize) -> Result<Self, BeltLatchError> {
+        Self::recover_inner(wal, capacity_log2, None, BeltIndexingMode::SlotIndexed)
+    }
+
+    /// Recover a consensus signer with authenticated peer echoes.
+    pub fn recover_slot_indexed_with_echo_keys(
+        wal: W,
+        capacity_log2: usize,
+        echo_keys: EchoMacKeys,
+    ) -> Result<Self, BeltLatchError> {
+        Self::recover_inner(
+            wal,
+            capacity_log2,
+            Some(echo_keys),
+            BeltIndexingMode::SlotIndexed,
+        )
+    }
+
+    pub const fn indexing_mode(&self) -> BeltIndexingMode {
+        self.indexing_mode
+    }
+
+    pub fn last_signed_slot(&self) -> Option<u64> {
+        self.state.next_epoch.checked_sub(1)
+    }
+
+    /// Reserve one leaf exactly once. An identical crash replay goes through `bind`.
+    pub fn bind_consensus_slot(
+        &mut self,
+        slot: u64,
+        msg_digest: &[u8; 32],
+        retry_salt: &[u8; 32],
+        target_sum_digits: &[u8],
+    ) -> Result<u64, BeltLatchError> {
+        self.ensure_usable()?;
+        if target_sum_digits.len() > MAX_TARGET_SUM_DIGITS {
+            return Err(BeltLatchError::DigitsTooLong);
+        }
+        let capacity_limit = self
+            .kernel
+            .as_ref()
+            .ok_or(BeltLatchError::WalPoisoned)?
+            .capacity_limit();
+        if slot >= capacity_limit {
+            return Err(BeltLatchError::Exhausted);
+        }
+        if self.latched_salt(slot, msg_digest)?.is_some() {
+            return Err(BeltLatchError::EpochConsumed);
+        }
+        self.bind(slot, msg_digest, retry_salt, target_sum_digits)?;
+        Ok(slot)
     }
 
     fn recover_inner(
         wal: W,
         capacity_log2: usize,
         echo_keys: Option<EchoMacKeys>,
+        indexing_mode: BeltIndexingMode,
     ) -> Result<Self, BeltLatchError> {
         if capacity_log2 == 0 || capacity_log2 > 62 {
             return Err(BeltLatchError::InvalidCapacity);
         }
+        let capacity = 1u64 << capacity_log2;
         let state = wal.load().map_err(BeltLatchError::Wal)?.unwrap_or_default();
+        let kernel = if state.next_epoch == 0 && state.in_flight.is_none() {
+            BeltLatchKernel::new_empty(capacity).map_err(kernel_error)?
+        } else {
+            let current = state.in_flight.as_ref();
+            if current.is_some_and(|r| r.target_sum_digits.len() > MAX_TARGET_SUM_DIGITS) {
+                return Err(BeltLatchError::DigitsTooLong);
+            }
+            let record = qsag_verified::BeltLatchKernelRecord {
+                epoch: current.map_or(0, |r| r.epoch),
+                msg_digest: current.map_or([0; 32], |r| r.msg_digest),
+                retry_salt: current.map_or([0; 32], |r| r.retry_salt),
+                digits: kernel_digits(current.map_or(&[], |r| &r.target_sum_digits)),
+            };
+            BeltLatchKernel::recover(capacity, state.next_epoch, current.is_some(), record)
+                .map_err(kernel_error)?
+        };
         Ok(Self {
+            indexing_mode,
             wal,
-            capacity_log2,
+            kernel: Some(kernel),
             state,
             echo_keys,
-            wal_poisoned: false,
         })
     }
 
     /// Whether a persist has failed on this latch (see the module documentation).
     pub fn is_wal_poisoned(&self) -> bool {
-        self.wal_poisoned
+        self.kernel
+            .as_ref()
+            .is_none_or(BeltLatchKernel::is_wal_poisoned)
     }
 
     fn ensure_usable(&self) -> Result<(), BeltLatchError> {
-        if self.wal_poisoned {
+        if self.is_wal_poisoned() {
             Err(BeltLatchError::WalPoisoned)
         } else {
             Ok(())
@@ -1045,7 +1167,9 @@ impl<W: DurableWal> BeltLatch<W> {
         msg_digest: &[u8; 32],
     ) -> Result<Option<[u8; 32]>, BeltLatchError> {
         self.ensure_usable()?;
-        if let Some(rec) = &self.state.in_flight
+        let kernel = self.kernel.as_ref().ok_or(BeltLatchError::WalPoisoned)?;
+        if kernel.has_in_flight()
+            && let Some(rec) = &self.state.in_flight
             && rec.epoch == epoch
         {
             return if ct_eq_bytes32(&rec.msg_digest, msg_digest) {
@@ -1054,22 +1178,24 @@ impl<W: DurableWal> BeltLatch<W> {
                 Err(BeltLatchError::EpochAlreadyBound)
             };
         }
-        if epoch < self.state.next_epoch {
+        if epoch < kernel.next_epoch() {
             return Err(BeltLatchError::EpochConsumed);
         }
-        if epoch >= 1u64 << self.capacity_log2 {
+        if epoch >= kernel.capacity_limit() {
             return Err(BeltLatchError::Exhausted);
         }
         // `epoch >= next_epoch` here, and `next_epoch <= 2^62`, so the sum cannot overflow.
-        if epoch > self.state.next_epoch + MAX_EPOCH_JUMP {
+        if self.indexing_mode == BeltIndexingMode::SequentialBounded
+            && epoch > kernel.next_epoch() + MAX_EPOCH_JUMP
+        {
             return Err(BeltLatchError::EpochJumpTooLarge);
         }
         Ok(None)
     }
 
     /// Persist the binding of `epoch`, or confirm that the identical binding is in flight.
-    /// Epochs may be skipped (burned), at most [`MAX_EPOCH_JUMP`] at a time, but never
-    /// revisited. A failed persist poisons the latch.
+    /// Skipped epochs burn their leaf indices. Only sequential wallets enforce
+    /// [`MAX_EPOCH_JUMP`]. A failed persist poisons the latch.
     pub fn bind(
         &mut self,
         epoch: u64,
@@ -1077,10 +1203,10 @@ impl<W: DurableWal> BeltLatch<W> {
         retry_salt: &[u8; 32],
         target_sum_digits: &[u8],
     ) -> Result<BindOutcome, BeltLatchError> {
-        self.ensure_usable()?;
+        let replay = self.latched_salt(epoch, msg_digest)?;
         if target_sum_digits.len() > MAX_TARGET_SUM_DIGITS {
-            // Preserve replay error precedence without truncating the kernel's digit input.
-            if let Some(salt) = self.latched_salt(epoch, msg_digest)? {
+            // Preserve poison and replay error precedence without truncating the kernel's digit input.
+            if let Some(salt) = replay {
                 return Err(if !ct_eq_bytes32(&salt, retry_salt) {
                     BeltLatchError::RetrySaltMismatch
                 } else {
@@ -1089,77 +1215,50 @@ impl<W: DurableWal> BeltLatch<W> {
             }
             return Err(BeltLatchError::DigitsTooLong);
         }
-        fn digits(bytes: &[u8]) -> qsag_verified::BeltLatchDigits {
-            let mut padded = [0u8; MAX_TARGET_SUM_DIGITS];
-            padded[..bytes.len()].copy_from_slice(bytes);
-            qsag_verified::BeltLatchDigits {
-                len: bytes.len() as u8,
-                row0: padded[0..32].try_into().unwrap(),
-                row1: padded[32..64].try_into().unwrap(),
-                row2: padded[64..96].try_into().unwrap(),
-                row3: padded[96..128].try_into().unwrap(),
-            }
-        }
-        fn map_error(e: qsag_verified::BeltLatchKernelError) -> BeltLatchError {
-            use qsag_verified::BeltLatchKernelError as E;
-            match e {
-                E::InvalidCapacity => BeltLatchError::InvalidCapacity,
-                E::Exhausted => BeltLatchError::Exhausted,
-                E::EpochAlreadyBound => BeltLatchError::EpochAlreadyBound,
-                E::RetrySaltMismatch => BeltLatchError::RetrySaltMismatch,
-                E::DigitsMismatch => BeltLatchError::DigitsMismatch,
-                E::EpochConsumed => BeltLatchError::EpochConsumed,
-                E::EpochJumpTooLarge => BeltLatchError::EpochJumpTooLarge,
-                E::WalPoisoned | E::WalPersistFailed => BeltLatchError::WalPoisoned,
-            }
-        }
-        let current = self.state.in_flight.as_ref();
-        if current.is_some_and(|r| r.target_sum_digits.len() > MAX_TARGET_SUM_DIGITS) {
-            return Err(BeltLatchError::DigitsTooLong);
-        }
-        let record = qsag_verified::BeltLatchKernelRecord {
-            epoch: current.map_or(0, |r| r.epoch),
-            msg_digest: current.map_or([0; 32], |r| r.msg_digest),
-            retry_salt: current.map_or([0; 32], |r| r.retry_salt),
-            digits: digits(current.map_or(&[], |r| &r.target_sum_digits)),
+        let kernel = self.kernel.take().ok_or(BeltLatchError::WalPoisoned)?;
+        let prev_capacity = kernel.capacity_limit();
+        let prev_next_epoch = kernel.next_epoch();
+        let prev_has_in_flight = kernel.has_in_flight();
+        let prev_in_flight = kernel.in_flight();
+        let kernel = if self.indexing_mode == BeltIndexingMode::SlotIndexed
+            && !kernel.is_wal_poisoned()
+            && epoch > prev_next_epoch
+            && epoch < prev_capacity
+        {
+            BeltLatchKernel::recover(prev_capacity, epoch, prev_has_in_flight, prev_in_flight)
+                .map_err(kernel_error)?
+        } else {
+            kernel
         };
-        let kernel = qsag_verified::BeltLatchKernel::recover(
-            1u64 << self.capacity_log2,
-            self.state.next_epoch,
-            current.is_some(),
-            record,
-        )
-        .map_err(map_error)?;
-        // Compute the success transition, but publish it only after durable persistence.
-        // A failed write instead poisons this handle and leaves its old state intact.
-        let (next_kernel, outcome) = kernel.bind(qsag_verified::BeltLatchBindRequest {
+        let next = replay.is_none().then(|| BeltLatchState {
+            next_epoch: epoch + 1,
+            in_flight: Some(BeltLatchRecord {
+                epoch,
+                msg_digest: *msg_digest,
+                retry_salt: *retry_salt,
+                target_sum_digits: target_sum_digits.to_vec(),
+            }),
+        });
+        let persisted = match &next {
+            Some(state) => self.wal.sync_persist(state),
+            None => Ok(()),
+        };
+        let (kernel, outcome) = kernel.bind(qsag_verified::BeltLatchBindRequest {
             epoch,
             msg_digest: *msg_digest,
             retry_salt: *retry_salt,
-            digits: digits(target_sum_digits),
-            persist_ok: true,
+            digits: kernel_digits(target_sum_digits),
+            persist_ok: persisted.is_ok(),
         });
-        if outcome.map_err(map_error)? == qsag_verified::BeltLatchBindOutcome::Replay {
-            return Ok(BindOutcome::Replay);
+        self.kernel = Some(kernel);
+        persisted.map_err(BeltLatchError::Wal)?;
+        match outcome.map_err(kernel_error)? {
+            qsag_verified::BeltLatchBindOutcome::Fresh => {
+                self.state = next.expect("fresh binding persisted");
+                Ok(BindOutcome::Fresh)
+            }
+            qsag_verified::BeltLatchBindOutcome::Replay => Ok(BindOutcome::Replay),
         }
-        let accepted = next_kernel.in_flight();
-        let next = BeltLatchState {
-            next_epoch: next_kernel.next_epoch(),
-            in_flight: Some(BeltLatchRecord {
-                epoch: accepted.epoch,
-                msg_digest: accepted.msg_digest,
-                retry_salt: accepted.retry_salt,
-                target_sum_digits: target_sum_digits.to_vec(),
-            }),
-        };
-        // Durable first; memory changes only after the log accepted the record. On failure
-        // the flag is set before the error leaves this function.
-        if let Err(e) = self.wal.sync_persist(&next) {
-            self.wal_poisoned = true;
-            return Err(BeltLatchError::Wal(e));
-        }
-        self.state = next;
-        Ok(BindOutcome::Fresh)
     }
 
     /// The echo of the in-flight record addressed to peer `receiver`, sent after
@@ -1292,6 +1391,52 @@ mod tests {
     }
 
     #[test]
+    fn tooth_consensus_skips_reopen_and_echo() {
+        let mut latches: Vec<_> = (0..3)
+            .map(|p| {
+                BeltLatch::recover_slot_indexed_with_echo_keys(MemoryWal::new(), 14, keys_of(p))
+                    .unwrap()
+            })
+            .collect();
+        for slot in [0, 500, 12_345] {
+            for l in &mut latches {
+                assert_eq!(
+                    l.bind_consensus_slot(slot, &[7; 32], &[8; 32], &[1]),
+                    Ok(slot)
+                );
+            }
+            latches = latches
+                .into_iter()
+                .enumerate()
+                .map(|(p, l)| {
+                    BeltLatch::recover_slot_indexed_with_echo_keys(l.into_wal(), 14, keys_of(p))
+                        .unwrap()
+                })
+                .collect();
+            let echoes = all_echoes(&latches);
+            for l in &mut latches {
+                assert_eq!(l.verify_peer_echoes(&echoes).unwrap().epoch(), slot);
+                assert_eq!(
+                    l.bind_consensus_slot(slot, &[1; 32], &[8; 32], &[1]),
+                    Err(BeltLatchError::EpochAlreadyBound)
+                );
+                assert_eq!(
+                    l.bind_consensus_slot(slot, &[7; 32], &[8; 32], &[1]),
+                    Err(BeltLatchError::EpochConsumed)
+                );
+                assert_eq!(
+                    l.bind(slot, &[7; 32], &[8; 32], &[1]),
+                    Ok(BindOutcome::Replay)
+                );
+            }
+        }
+        assert_eq!(
+            latches[0].bind_consensus_slot(501, &[7; 32], &[8; 32], &[1]),
+            Err(BeltLatchError::EpochConsumed)
+        );
+    }
+
+    #[test]
     fn state_encoding_round_trips_and_rejects_every_corruption() {
         let state = BeltLatchState {
             next_epoch: 8,
@@ -1356,6 +1501,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_forward_slot_write_preserves_the_durable_epoch() {
+        let mut latch = BeltLatch::recover_slot_indexed(MemoryWal::new(), 20).unwrap();
+        latch.bind(3, &[1; 32], &[2; 32], &DIGITS_A).unwrap();
+        latch.wal_mut().fail_next_persist();
+        assert_eq!(
+            latch.bind(100_000, &[3; 32], &[4; 32], &DIGITS_B),
+            Err(BeltLatchError::Wal(WalError::Io))
+        );
+        assert!(latch.kernel.as_ref().unwrap().is_wal_poisoned());
+        assert_eq!(latch.next_epoch(), 4);
+        let recovered = BeltLatch::recover_slot_indexed(latch.into_wal(), 20).unwrap();
+        assert_eq!(recovered.in_flight().unwrap().epoch, 3);
+        assert_eq!(recovered.next_epoch(), 4);
+    }
+
+    #[test]
     fn a_failed_persist_binds_nothing_and_poisons_the_latch_until_recovery() {
         let mut l = latch_of(0);
         assert_eq!(l.echo_for(1), Err(BeltLatchError::NothingBound));
@@ -1364,6 +1525,7 @@ mod tests {
             l.bind(0, &[1; 32], &[9; 32], &DIGITS_A),
             Err(BeltLatchError::Wal(WalError::Io))
         );
+        assert!(l.kernel.as_ref().unwrap().is_wal_poisoned());
         assert!(l.is_wal_poisoned());
         assert_eq!(l.in_flight(), None);
         assert_eq!(l.next_epoch(), 0);
@@ -1828,6 +1990,37 @@ mod fs_tests {
             .bind(epoch, &[7; 32], &[9; 32], &[3, 0, 2, 1])
             .unwrap();
         latch.into_wal()
+    }
+
+    #[test]
+    fn tooth_consensus_disk_restart_burns_skipped_slots() {
+        let dir = Scratch::new("consensus");
+        drop(FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap());
+        for slot in [0, 500, 12_345] {
+            let mut latch = BeltLatch::recover_slot_indexed(
+                FsBeltWal::open_existing(dir.wal(), KEY).unwrap(),
+                14,
+            )
+            .unwrap();
+            assert_eq!(
+                latch.bind_consensus_slot(slot, &[7; 32], &[8; 32], &[]),
+                Ok(slot)
+            );
+        }
+        let mut latch =
+            BeltLatch::recover_slot_indexed(FsBeltWal::open_existing(dir.wal(), KEY).unwrap(), 14)
+                .unwrap();
+        assert_eq!(latch.last_signed_slot(), Some(12_345));
+        for (slot, msg, err) in [
+            (12_345, 1, BeltLatchError::EpochAlreadyBound),
+            (12_345, 7, BeltLatchError::EpochConsumed),
+            (501, 7, BeltLatchError::EpochConsumed),
+        ] {
+            assert_eq!(
+                latch.bind_consensus_slot(slot, &[msg; 32], &[8; 32], &[]),
+                Err(err)
+            );
+        }
     }
 
     #[test]

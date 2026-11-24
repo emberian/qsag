@@ -4,8 +4,8 @@
 //! Two orthogonal rollback/fork surfaces threaten stateful hash-based signers (`XMSS`,
 //! `LMS/HSS`, `Jorts`, `FTS`):
 //!
-//! 1. **VM snapshot restore / clone:** [`VmGenIdForkGuard`] and
-//!    [`HypervisorGenerationAnchor`] bind checkpoints to hypervisor ACPI `VMGENID`,
+//! 1. **VM snapshot restore / clone:** `VmGenIdForkGuard` and
+//!    `HypervisorGenerationAnchor` bind checkpoints to hypervisor ACPI `VMGENID`,
 //!    Linux `boot_id`, and a guarded file's `(st_dev, st_ino, st_ctime)` tuple. A changed
 //!    hypervisor generation detects whole-VM snapshot restore or cloning when the
 //!    hypervisor exposes and updates it. Boot/file identity checks add continuity fences.
@@ -13,7 +13,7 @@
 //!    and custody bytes in place can preserve every checked identity. Always combine
 //!    this guard with an independent monotone authority for storage rollback protection.
 //! 2. **Offline disk image rollback across host reboots:**
-//!    [`Tpm2NvMonotoneAnchor`] speaks raw big-endian ISO/IEC 11889 TPM 2.0 command/response
+//!    `Tpm2NvMonotoneAnchor` speaks raw big-endian ISO/IEC 11889 TPM 2.0 command/response
 //!    packets (`TPM2_NV_Increment = 0x00000134`, `TPM2_NV_Read = 0x0000014E` under
 //!    `TPM_ST_SESSIONS = 0x8002` / `TPM_RS_PW = 0x40000009`) directly over `/dev/tpmrm0` in pure
 //!    safe Rust (`#![forbid(unsafe_code)]`, zero C library dependencies), binding [`LedgerCheckpoint`]
@@ -1185,7 +1185,7 @@ pub fn tpm2_nv_change_auth<T: Tpm2Transport + ?Sized>(
     }
     tpm2_nv_read_public(transport, nv_index)?.check_rebind_counter(nv_index)?;
     let mut nonce = [0u8; 32];
-    File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+    qsag_asm::fill_os_random(&mut nonce)?;
     let mut body = Vec::with_capacity(49);
     body.extend_from_slice(&TPM_RH_NULL.to_be_bytes()); // tpmKey
     body.extend_from_slice(&TPM_RH_NULL.to_be_bytes()); // bind
@@ -1239,7 +1239,7 @@ pub fn tpm2_nv_change_auth<T: Tpm2Transport + ?Sized>(
 }
 
 /// Transport abstraction over the Linux kernel TPM 2.0 resource manager (`/dev/tpmrm0`) or
-/// the software model in [`tpm2_model`].
+/// the software model in `tpm2_model`.
 pub trait Tpm2Transport: Send + Sync {
     fn transmit(&self, command: &[u8]) -> Result<Vec<u8>, AntiRollbackError>;
 }
@@ -1555,7 +1555,7 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
     /// Counters alone cannot provide (e): identical increments by different callers
     /// are indistinguishable, and the first value is the TPM's unknown historical
     /// maximum plus one. The reservation uses the TCG r1p59 Part 3 §31.15 ADMIN policy
-    /// operation (paperbin `tcg-tpm2-library-r1p59-part3-commands.pdf`), not an assumed
+    /// operation (TCG TPM 2.0 Library Specification, rev. 1.59, Part 3: Commands), not an assumed
     /// predictable initial value. This transaction argument is ours, not a TCG claim.
     ///
     /// Legacy seals already bound to the destination authenticate against its exact
@@ -2096,11 +2096,12 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
                     }
                     pend_hw
                 } else {
-                    let next_hw = active_hw.checked_add(1).ok_or(
-                        AntiRollbackError::ProtocolFramingError(
-                            "TPM2 64-bit NV counter exhausted",
-                        ),
-                    )?;
+                    let next_hw =
+                        active_hw
+                            .checked_add(1)
+                            .ok_or(AntiRollbackError::ProtocolFramingError(
+                                "TPM2 64-bit NV counter exhausted",
+                            ))?;
 
                     // Phase 1: Stage pending `(next_hw, checkpoint)` to durable disk BEFORE
                     // incrementing the irreversible TPM2 NV counter.
@@ -3831,7 +3832,11 @@ mod tests {
         // happened to be a valid UUID + whitespace.
         let mut padded_64 = b"f47ac10b-58cc-4372-a567-0e02b2c3d479".to_vec();
         padded_64.resize(64, b' ');
-        assert!(read_bounded_id128_reader(io::Cursor::new(&padded_64)).unwrap().is_some());
+        assert!(
+            read_bounded_id128_reader(io::Cursor::new(&padded_64))
+                .unwrap()
+                .is_some()
+        );
 
         let mut oversized_65 = padded_64;
         oversized_65.push(b'X');

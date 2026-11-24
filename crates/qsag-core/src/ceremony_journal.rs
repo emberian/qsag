@@ -2,9 +2,9 @@
 //! Reserve before the first secret-derived network output. A lost permit burns resources;
 //! it never rolls a reservation back. Disk snapshot rollback is detected when callers retain
 //! [`crate::LedgerCheckpoint`] in an external monotonic anchor and recover via
-//! [`FsCeremonyJournal::open_existing_at_least`].
+//! `FsCeremonyJournal::open_existing_at_least`.
 //!
-//! An anchored journal ([`FsCeremonyJournal::create_new_anchored`]) commits every record
+//! An anchored journal (`FsCeremonyJournal::create_new_anchored`) commits every record
 //! under a single-use anchor ticket:
 //!
 //! 1. reserve: the anchor moves from the journal's checkpoint to a reservation that still
