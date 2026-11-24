@@ -827,3 +827,408 @@ pub fn prove_selective_disclosure_with_profile(
 /// that challenge is live. [`ReplayNotPrevented`] is the explicit opt-out for proof
 /// audit; with it, repeated calls with the same valid proof return `true`.
 #[allow(clippy::too_many_arguments)]
+pub fn verify_presentation(
+    pres: &SelectiveDisclosurePresentation,
+    trusted_root: &IssuerRootAttestation,
+    expected_issuer_mldsa_pk: &[u8],
+    expected_oprf_pk: &PublicKey,
+    verifier_scope: &[u8],
+    challenges: &mut dyn PresentationChallenges,
+    mode: PresentationMode,
+    expected_schema_id: u64,
+    expected_arity: usize,
+) -> bool {
+    verify_presentation_with_profile(
+        pres,
+        trusted_root,
+        expected_issuer_mldsa_pk,
+        expected_oprf_pk,
+        verifier_scope,
+        challenges,
+        mode,
+        expected_schema_id,
+        expected_arity,
+        ZkSoundnessProfile::Quantum128,
+    )
+}
+
+/// Verify a [`SelectiveDisclosurePresentation`] under an explicit soundness profile.
+/// The challenge is consumed from `challenges` exactly as in [`verify_presentation`].
+#[allow(clippy::too_many_arguments)]
+pub fn verify_presentation_with_profile(
+    pres: &SelectiveDisclosurePresentation,
+    trusted_root: &IssuerRootAttestation,
+    expected_issuer_mldsa_pk: &[u8],
+    expected_oprf_pk: &PublicKey,
+    verifier_scope: &[u8],
+    challenges: &mut dyn PresentationChallenges,
+    mode: PresentationMode,
+    expected_schema_id: u64,
+    expected_arity: usize,
+    profile: ZkSoundnessProfile,
+) -> bool {
+    challenges.is_live(verifier_scope, &pres.verifier_challenge)
+        && presentation_proof_holds(
+            pres,
+            trusted_root,
+            expected_issuer_mldsa_pk,
+            expected_oprf_pk,
+            verifier_scope,
+            mode,
+            expected_schema_id,
+            expected_arity,
+            profile,
+        )
+        && challenges
+            .consume(verifier_scope, &pres.verifier_challenge)
+            .is_ok()
+}
+
+/// Everything [`verify_presentation_with_profile`] checks except that the challenge
+/// is one the verifier issued: the proof is for `pres.verifier_challenge`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn presentation_proof_holds(
+    pres: &SelectiveDisclosurePresentation,
+    trusted_root: &IssuerRootAttestation,
+    expected_issuer_mldsa_pk: &[u8],
+    expected_oprf_pk: &PublicKey,
+    verifier_scope: &[u8],
+    mode: PresentationMode,
+    expected_schema_id: u64,
+    expected_arity: usize,
+    profile: ZkSoundnessProfile,
+) -> bool {
+    let verifier_challenge = &pres.verifier_challenge;
+    if !trusted_root.verify(expected_issuer_mldsa_pk, expected_oprf_pk) {
+        return false;
+    }
+    if !(1..=MAX_VC_ATTRS).contains(&expected_arity)
+        || pres.arity != expected_arity
+        || pres.schema_id != expected_schema_id
+        || pres.mode != mode
+        || pres.issuer_epoch != trusted_root.issuer_epoch
+        || pres.accumulator_root != trusted_root.accumulator_root
+        || !ct_eq_bytes(&pres.issuer_root_tag, &trusted_root.root_tag)
+    {
+        return false;
+    }
+    let expected_scope_limbs = presentation_scope(
+        verifier_scope,
+        verifier_challenge,
+        &pres.presentation_nonce,
+        mode,
+    );
+    if pres.verifier_scope_limbs != expected_scope_limbs {
+        return false;
+    }
+    let tau = profile.sd_repetitions();
+    if pres.opened_reps.len() != tau || pres.disclosed_attrs.len() > expected_arity {
+        return false;
+    }
+    for (pos, &(idx, val)) in pres.disclosed_attrs.iter().enumerate() {
+        if idx >= expected_arity || !gl_is_canonical(val) {
+            return false;
+        }
+        if pos > 0 && pres.disclosed_attrs[pos - 1].0 >= idx {
+            return false;
+        }
+    }
+    for &x in pres.pres_commit.iter().chain(pres.scope_tag.iter()) {
+        if !gl_is_canonical(x) {
+            return false;
+        }
+    }
+
+    let expected_num_secret_wires = (expected_arity - pres.disclosed_attrs.len())
+        + 4
+        + 4
+        + VC_ACCUMULATOR_DEPTH
+        + 6 * VC_ACCUMULATOR_DEPTH;
+
+    // Validate repetition structural shapes and canonical Goldilocks limbs up front.
+    for o in &pres.opened_reps {
+        let is_last_hidden = (o.hidden_party as usize) == VC_SD_LIMBO_PARTIES - 1;
+        match (&o.aux, is_last_hidden) {
+            (None, true) => {}
+            (Some(aux), false) => {
+                if aux.delta_w.len() != expected_num_secret_wires
+                    || aux.delta_z.len() != SD_TOTAL_GATES
+                    || Fp5::from_canonical_limbs(aux.delta_c).is_none()
+                    || aux.delta_w.iter().any(|&v| !gl_is_canonical(v))
+                    || aux.delta_z.iter().any(|&v| !gl_is_canonical(v))
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        if o.r_poly_without_b.len() != SD_RPOLY_COEFFS
+            || o.alpha.len() != SD_GRID_L
+            || o.beta.len() != SD_GRID_L
+        {
+            return false;
+        }
+        for arr in o
+            .r_poly_without_b
+            .iter()
+            .chain(o.alpha.iter())
+            .chain(o.beta.iter())
+        {
+            if Fp5::from_canonical_limbs(*arr).is_none() {
+                return false;
+            }
+        }
+    }
+
+    let profile_tag: &[u8] = match profile {
+        ZkSoundnessProfile::Classical128 => b"QSAG.VC.SD.LIMBO256.Classical128:17",
+        ZkSoundnessProfile::Quantum128 => b"QSAG.VC.SD.LIMBO256.Quantum128:33",
+    };
+
+    let mut inst_bytes = serialize_sd_instance(&SdInstance {
+        arity: expected_arity,
+        presentation_nonce: &pres.presentation_nonce,
+        issuer_epoch: pres.issuer_epoch,
+        schema_id: pres.schema_id,
+        accumulator_root: &pres.accumulator_root,
+        issuer_root_tag: &pres.issuer_root_tag,
+        verifier_scope_limbs: &pres.verifier_scope_limbs,
+        disclosed_attrs: &pres.disclosed_attrs,
+        pres_commit: &pres.pres_commit,
+        scope_tag: &pres.scope_tag,
+    });
+    inst_bytes.extend_from_slice(verifier_challenge);
+    inst_bytes.extend_from_slice(profile_tag);
+
+    let mut tr = InterleavedTranscript::new(b"QSAG.BLIND_VC.SD_LIMBO.V1", &inst_bytes);
+    tr.absorb(b"VC_SOUNDNESS_PROFILE", profile_tag);
+
+    // Step V1 (parallel): reconstruct 255 GGM leaf seeds and Round-1 party commitments
+    // (requiring only the first Keccak block per party to extract `salt_1[i]`).
+    type LimboPartyBytes = [[u8; 32]; VC_SD_LIMBO_PARTIES];
+    let v_r1: Vec<(LimboPartyBytes, LimboPartyBytes)> = parallel_map_indexed(tau, |rep| {
+        let rep_u32 = rep as u32;
+        let o = &pres.opened_reps[rep];
+        let hidden = o.hidden_party as usize;
+        let leaves = reconstruct_ggm_leaves_256(
+            &o.ggm_copath,
+            o.hidden_party,
+            &pres.presentation_nonce,
+            rep_u32,
+        );
+        let aux_digest = o
+            .aux
+            .as_ref()
+            .map(|a| digest_limbo_aux(&a.delta_w, &a.delta_z, &a.delta_c));
+
+        let mut com_1 = [[0u8; 32]; VC_SD_LIMBO_PARTIES];
+        com_1[hidden] = o.com_1_hidden;
+        for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
+            let base_p = batch * 8;
+            let seeds_8: [[u8; 32]; 8] = core::array::from_fn(|lane| leaves[base_p + lane]);
+            let mut prg =
+                Shake256PartyBatch8::new(&pres.presentation_nonce, rep_u32, base_p, &seeds_8);
+            let salts = prg.extract_salts_1();
+            for lane in 0..8 {
+                let p = base_p + lane;
+                if p == hidden {
+                    continue;
+                }
+                let ad = if p == VC_SD_LIMBO_PARTIES - 1 {
+                    aux_digest.as_ref()
+                } else {
+                    None
+                };
+                com_1[p] = commit_limbo_party_r1(
+                    &pres.presentation_nonce,
+                    rep_u32,
+                    p as u16,
+                    &seeds_8[lane],
+                    ad,
+                    &salts[lane],
+                );
+            }
+        }
+        (leaves, com_1)
+    });
+
+    let mut r1_bundle = Vec::with_capacity(tau * VC_SD_LIMBO_PARTIES * 32);
+    for (_, com_1) in &v_r1 {
+        for c in com_1 {
+            r1_bundle.extend_from_slice(c);
+        }
+    }
+    tr.absorb(b"VC_SD_LIMBO_R1_COMS", &r1_bundle);
+    drop(r1_bundle);
+
+    let mut gamma_seed = [0u8; 32];
+    tr.squeeze_bytes(b"VC_SD_LIMBO_GAMMA", &mut gamma_seed);
+
+    let mut rpoly_bundle = Vec::with_capacity(tau * SD_RPOLY_COEFFS * 40);
+    for o in &pres.opened_reps {
+        for coeff in &o.r_poly_without_b {
+            for &limb in coeff {
+                rpoly_bundle.extend_from_slice(&limb.to_le_bytes());
+            }
+        }
+    }
+    tr.absorb(b"VC_SD_LIMBO_RPOLY", &rpoly_bundle);
+    drop(rpoly_bundle);
+
+    let eval_points = squeeze_nonzero_eval_points(&mut tr, tau);
+
+    let mut expected_final_outs = [0u64; VC_FINAL_OUTPUTS];
+    expected_final_outs[0..6].copy_from_slice(&pres.accumulator_root);
+    expected_final_outs[6..12].copy_from_slice(&pres.pres_commit);
+    expected_final_outs[12..18].copy_from_slice(&pres.scope_tag);
+
+    let total_party_limbs = PARTY_EXT_LIMBS + expected_num_secret_wires + SD_TOTAL_GATES;
+
+    // Step V2 (single streaming pass per repetition, parallel across 16 cores):
+    // evaluate all 255 opened parties and reconstruct the hidden party's online broadcast hash.
+    let v_h_online: Vec<[[u8; 32]; VC_SD_LIMBO_PARTIES]> = parallel_map_indexed(tau, |rep| {
+        let rep_u32 = rep as u32;
+        let o = &pres.opened_reps[rep];
+        let hidden = o.hidden_party as usize;
+        let (ref leaves, _) = v_r1[rep];
+        let (theta, eta) = expand_gamma_weights(&gamma_seed, rep_u32);
+        let tables = EvalTables::new(theta, eta, eval_points[rep]);
+
+        let mut open_alpha_sum = [Fp5::ZERO; SD_GRID_L];
+        let mut open_beta_sum = [Fp5::ZERO; SD_GRID_L];
+        let mut open_sigma_sum = Fp5::ZERO;
+        let mut h_online = [[0u8; 32]; VC_SD_LIMBO_PARTIES];
+
+        let mut batch_tapes: [Vec<u64>; 8] = core::array::from_fn(|_| Vec::new());
+        let mut x_grid = vec![0u64; SD_GRID_B * SD_GRID_L];
+        let mut y_grid = vec![0u64; SD_GRID_B * SD_GRID_L];
+        let mut z_grid = vec![0u64; SD_GRID_B * SD_GRID_L];
+        let x_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = x_grid.as_mut_slice().try_into().unwrap();
+        let y_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = y_grid.as_mut_slice().try_into().unwrap();
+        let z_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = z_grid.as_mut_slice().try_into().unwrap();
+        let mut w_buf = SecretBuffer(vec![0u64; expected_num_secret_wires]);
+        let mut z_buf = SecretBuffer(vec![0u64; SD_TOTAL_GATES]);
+
+        for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
+            let base_p = batch * 8;
+            let seeds_8: [[u8; 32]; 8] = core::array::from_fn(|lane| leaves[base_p + lane]);
+            let active_mask: [bool; 8] = core::array::from_fn(|lane| base_p + lane != hidden);
+            let mut prg =
+                Shake256PartyBatch8::new(&pres.presentation_nonce, rep_u32, base_p, &seeds_8);
+            let _ = prg.extract_salts_1();
+            prg.squeeze_canonical_gl(active_mask, &mut batch_tapes, total_party_limbs);
+
+            for (lane, tape) in batch_tapes.iter_mut().enumerate() {
+                let p = base_p + lane;
+                if p == hidden {
+                    continue;
+                }
+                let (u_p, v_p, mut c_p, m_p) = unpack_party_ext_masks(&tape[..PARTY_EXT_LIMBS]);
+                let w_raw = &tape[PARTY_EXT_LIMBS..PARTY_EXT_LIMBS + expected_num_secret_wires];
+                let z_raw = &tape[PARTY_EXT_LIMBS + expected_num_secret_wires..];
+
+                if p == VC_SD_LIMBO_PARTIES - 1 {
+                    let aux = o.aux.as_ref().expect("validated aux for opened party 255");
+                    for ((dst, &wr), &dw) in w_buf.0.iter_mut().zip(w_raw).zip(&aux.delta_w) {
+                        *dst = gl_add(wr, dw);
+                    }
+                    for ((dst, &zr), &dz) in z_buf.0.iter_mut().zip(z_raw).zip(&aux.delta_z) {
+                        *dst = gl_add(zr, dz);
+                    }
+                    c_p = c_p.add(Fp5::from_limbs(aux.delta_c));
+                    eval_sd_party_shares(
+                        p,
+                        expected_arity,
+                        pres.issuer_epoch,
+                        pres.schema_id,
+                        &pres.verifier_scope_limbs,
+                        &pres.disclosed_attrs,
+                        &expected_final_outs,
+                        &w_buf,
+                        &z_buf,
+                        x_arr,
+                        y_arr,
+                        z_arr,
+                    );
+                } else {
+                    eval_sd_party_shares(
+                        p,
+                        expected_arity,
+                        pres.issuer_epoch,
+                        pres.schema_id,
+                        &pres.verifier_scope_limbs,
+                        &pres.disclosed_attrs,
+                        &expected_final_outs,
+                        w_raw,
+                        z_raw,
+                        x_arr,
+                        y_arr,
+                        z_arr,
+                    );
+                }
+
+                let (alpha_i, beta_i, sigma_i) = eval_party_polynomial_shares(
+                    &u_p, &v_p, c_p, &m_p, x_arr, y_arr, z_arr, &tables,
+                );
+                for l in 0..SD_GRID_L {
+                    open_alpha_sum[l] = open_alpha_sum[l].add(alpha_i[l]);
+                    open_beta_sum[l] = open_beta_sum[l].add(beta_i[l]);
+                }
+                open_sigma_sum = open_sigma_sum.add(sigma_i);
+                h_online[p] = hash_limbo_party_online(
+                    &pres.presentation_nonce,
+                    rep_u32,
+                    p as u16,
+                    &alpha_i,
+                    &beta_i,
+                    sigma_i,
+                );
+                ct_zeroize_u64s(tape);
+            }
+        }
+
+        let mut alpha_hidden = [Fp5::ZERO; SD_GRID_L];
+        let mut beta_hidden = [Fp5::ZERO; SD_GRID_L];
+        let mut prod_at_r = Fp5::ZERO;
+        for l in 0..SD_GRID_L {
+            let a_l = Fp5::from_limbs(o.alpha[l]);
+            let b_l = Fp5::from_limbs(o.beta[l]);
+            alpha_hidden[l] = a_l.sub(open_alpha_sum[l]);
+            beta_hidden[l] = b_l.sub(open_beta_sum[l]);
+            prod_at_r = prod_at_r.add(a_l.mul(b_l));
+        }
+        let r_tilde_at_r = eval_r_poly_without_b(&o.r_poly_without_b, &tables.r_powers);
+        let sigma_total = prod_at_r.sub(r_tilde_at_r);
+        let sigma_hidden = sigma_total.sub(open_sigma_sum);
+
+        h_online[hidden] = hash_limbo_party_online(
+            &pres.presentation_nonce,
+            rep_u32,
+            hidden as u16,
+            &alpha_hidden,
+            &beta_hidden,
+            sigma_hidden,
+        );
+        h_online
+    });
+    ct_zeroize_bytes(&mut gamma_seed);
+
+    let mut r2b_bundle = Vec::with_capacity(tau * (2 * SD_GRID_L * 40 + VC_SD_LIMBO_PARTIES * 32));
+    for (o, h_online) in pres.opened_reps.iter().zip(&v_h_online) {
+        for v in o.alpha.iter().chain(o.beta.iter()) {
+            for &limb in v {
+                r2b_bundle.extend_from_slice(&limb.to_le_bytes());
+            }
+        }
+        for h in h_online {
+            r2b_bundle.extend_from_slice(h);
+        }
+    }
+    tr.absorb(b"VC_SD_LIMBO_R2_ONLINE", &r2b_bundle);
+    drop(r2b_bundle);
+
+    let mut expected_hidden = vec![0u8; tau];
+    tr.squeeze_bytes(b"VC_SD_LIMBO_OPEN", &mut expected_hidden);
+    let actual_hidden: Vec<u8> = pres.opened_reps.iter().map(|o| o.hidden_party).collect();
+    ct_eq_bytes(&actual_hidden, &expected_hidden)
+}

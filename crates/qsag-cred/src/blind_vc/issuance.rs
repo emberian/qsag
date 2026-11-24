@@ -581,3 +581,512 @@ pub fn verify_blind_issuance_request_with_profile(
 }
 
 /// Domain-separated 32-byte commitment tag binding `(issuer_pk_digest, issuer_epoch, accumulator_root)`.
+pub fn compute_accumulator_root_tag(
+    issuer_pk_digest: &[u8; 32],
+    issuer_epoch: u64,
+    accumulator_root: &[u64; 6],
+) -> [u8; 32] {
+    let mut root_le = [0u8; 48];
+    for (i, &limb) in accumulator_root.iter().enumerate() {
+        root_le[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+    }
+    cshake256_framed_32(
+        b"QSAG.VC.ACC_ROOT_TAG.V1",
+        &[issuer_pk_digest, &issuer_epoch.to_le_bytes(), &root_le],
+    )
+}
+
+/// Issuer-signed commitment/attestation binding `(issuer_pk_digest, issuer_epoch, accumulator_root)`
+/// under FIPS 204 `ML-DSA` (compatible with both single-signer [`ml_dsa_sign_deterministic`] and
+/// dealerless [`crate::threshold_mldsa::threshold_sign_mldsa_party`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuerRootAttestation {
+    issuer_pk_digest: [u8; 32],
+    mldsa_level: MlDsaLevel,
+    issuer_mldsa_pk: Vec<u8>,
+    pub(super) issuer_epoch: u64,
+    pub(super) accumulator_root: [u64; 6],
+    pub(super) root_tag: [u8; 32],
+    mldsa_signature: Vec<u8>,
+}
+
+impl IssuerRootAttestation {
+    pub const SIGNING_CONTEXT: &'static [u8] = b"QSAG.VC.ROOT_ATTEST.CTX.V1";
+
+    pub fn signing_message(
+        issuer_pk_digest: &[u8; 32],
+        issuer_epoch: u64,
+        accumulator_root: &[u64; 6],
+        root_tag: &[u8; 32],
+    ) -> [u8; 142] {
+        let mut msg = [0u8; 142];
+        msg[..22].copy_from_slice(b"QSAG.VC.ROOT_ATTEST.V1");
+        msg[22..54].copy_from_slice(issuer_pk_digest);
+        msg[54..62].copy_from_slice(&issuer_epoch.to_le_bytes());
+        for (i, &limb) in accumulator_root.iter().enumerate() {
+            msg[62 + i * 8..62 + (i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+        }
+        msg[110..142].copy_from_slice(root_tag);
+        msg
+    }
+
+    pub const fn issuer_pk_digest(&self) -> &[u8; 32] {
+        &self.issuer_pk_digest
+    }
+
+    pub const fn mldsa_level(&self) -> MlDsaLevel {
+        self.mldsa_level
+    }
+
+    pub fn issuer_mldsa_pk(&self) -> &[u8] {
+        &self.issuer_mldsa_pk
+    }
+
+    pub const fn issuer_epoch(&self) -> u64 {
+        self.issuer_epoch
+    }
+
+    pub const fn accumulator_root(&self) -> &[u64; 6] {
+        &self.accumulator_root
+    }
+
+    pub const fn root_tag(&self) -> &[u8; 32] {
+        &self.root_tag
+    }
+
+    pub fn mldsa_signature(&self) -> &[u8] {
+        &self.mldsa_signature
+    }
+
+    /// Cryptographically verify `(issuer_pk_digest, issuer_epoch, accumulator_root, root_tag)`
+    /// against `expected_issuer_mldsa_pk` and `expected_oprf_pk`.
+    pub fn verify(&self, expected_issuer_mldsa_pk: &[u8], expected_oprf_pk: &PublicKey) -> bool {
+        if !ct_eq_bytes(&self.issuer_pk_digest, &expected_oprf_pk.commitment()) {
+            return false;
+        }
+        if self.issuer_mldsa_pk.len() != expected_issuer_mldsa_pk.len()
+            || !ct_eq_bytes(&self.issuer_mldsa_pk, expected_issuer_mldsa_pk)
+        {
+            return false;
+        }
+        if self.accumulator_root.iter().any(|&x| !gl_is_canonical(x)) {
+            return false;
+        }
+        let expected_tag = compute_accumulator_root_tag(
+            &self.issuer_pk_digest,
+            self.issuer_epoch,
+            &self.accumulator_root,
+        );
+        if !ct_eq_bytes(&self.root_tag, &expected_tag) {
+            return false;
+        }
+        let msg = Self::signing_message(
+            &self.issuer_pk_digest,
+            self.issuer_epoch,
+            &self.accumulator_root,
+            &self.root_tag,
+        );
+        ml_dsa_verify(
+            self.mldsa_level,
+            expected_issuer_mldsa_pk,
+            &msg,
+            Self::SIGNING_CONTEXT,
+            &self.mldsa_signature,
+        )
+    }
+}
+
+/// Holder-local authorization path; contains no other holders' leaves or tokens.
+/// The token and the path are erased on drop, `Debug` does not print them, and
+/// equality compares the token without data-dependent timing.
+#[derive(Clone)]
+pub struct CredentialMembershipWitness {
+    pub leaf_index: usize,
+    pub siblings: [[u64; 6]; VC_ACCUMULATOR_DEPTH],
+    pub accumulator_root: [u64; 6],
+    pub issuer_epoch: u64,
+    pub issuer_pk_digest: [u8; 32],
+    pub issuance_token: Option<[u8; 32]>,
+}
+
+/// Equality of optional issuance tokens. Whether a token is present is public
+/// (it distinguishes test enrolment from issued credentials); its bytes are not.
+pub(super) fn ct_eq_optional_token(a: &Option<[u8; 32]>, b: &Option<[u8; 32]>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => ct_eq_bytes(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+impl PartialEq for CredentialMembershipWitness {
+    fn eq(&self, other: &Self) -> bool {
+        let public = (self.leaf_index == other.leaf_index)
+            & (self.siblings == other.siblings)
+            & (self.accumulator_root == other.accumulator_root)
+            & (self.issuer_epoch == other.issuer_epoch)
+            & (self.issuer_pk_digest == other.issuer_pk_digest);
+        ct_eq_optional_token(&self.issuance_token, &other.issuance_token) & public
+    }
+}
+
+impl Eq for CredentialMembershipWitness {}
+
+impl CredentialMembershipWitness {
+    pub(super) fn erase_secrets(&mut self) {
+        self.issuance_token.secret_wipe();
+        self.siblings.secret_wipe();
+    }
+}
+
+impl Drop for CredentialMembershipWitness {
+    fn drop(&mut self) {
+        self.erase_secrets();
+    }
+}
+
+impl fmt::Debug for CredentialMembershipWitness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialMembershipWitness")
+            .field("leaf_index", &self.leaf_index)
+            .field("accumulator_root", &self.accumulator_root)
+            .field("issuer_epoch", &self.issuer_epoch)
+            .field("issuer_pk_digest", &self.issuer_pk_digest)
+            .field("siblings", &"<REDACTED>")
+            .field("issuance_token", &"<REDACTED>")
+            .finish()
+    }
+}
+
+/// Authoritative issuer accumulator of OPRF-issued credential commitments.
+///
+/// It holds every holder's issuance token (`enrolled_tokens`, needed to hand
+/// out membership witnesses). They are erased on drop, grown without leaving
+/// copies in freed heap blocks, never printed by `Debug`, and compared without
+/// data-dependent timing. The duplicate-issuance index stores a digest of
+/// `(attr_commit, token)`, not the token.
+#[derive(Clone)]
+pub struct IssuerCredentialAccumulator {
+    pub oprf_key: PublicKey,
+    pub issuer_epoch: u64,
+    pub(super) leaves: Vec<[u64; 6]>,
+    pub(super) enrolled_tokens: Vec<Option<[u8; 32]>>,
+    consumed_sessions: BTreeSet<[u8; 32]>,
+    pub(super) issued_tokens: BTreeSet<[u8; 32]>,
+    layers: Vec<Vec<[u64; 6]>>,
+    pub(super) empty: Vec<[u64; 6]>,
+}
+
+impl PartialEq for IssuerCredentialAccumulator {
+    fn eq(&self, other: &Self) -> bool {
+        let public = (self.oprf_key == other.oprf_key)
+            & (self.issuer_epoch == other.issuer_epoch)
+            & (self.leaves == other.leaves)
+            & (self.consumed_sessions == other.consumed_sessions)
+            & (self.issued_tokens == other.issued_tokens)
+            & (self.layers == other.layers)
+            & (self.empty == other.empty)
+            & (self.enrolled_tokens.len() == other.enrolled_tokens.len());
+        let tokens = self
+            .enrolled_tokens
+            .iter()
+            .zip(&other.enrolled_tokens)
+            .fold(true, |acc, (a, b)| acc & ct_eq_optional_token(a, b));
+        tokens & public
+    }
+}
+
+impl Eq for IssuerCredentialAccumulator {}
+
+impl Drop for IssuerCredentialAccumulator {
+    fn drop(&mut self) {
+        self.erase_secrets();
+    }
+}
+
+impl fmt::Debug for IssuerCredentialAccumulator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IssuerCredentialAccumulator")
+            .field("oprf_key", &self.oprf_key)
+            .field("issuer_epoch", &self.issuer_epoch)
+            .field("leaves", &self.leaves.len())
+            .field("root", &self.root())
+            .field("enrolled_tokens", &"<REDACTED>")
+            .finish()
+    }
+}
+
+/// Index key of an issued `(attr_commit, token)` pair: a one-way digest, so the
+/// duplicate-issuance set holds no token.
+pub(super) fn issued_token_index(attr_commit: &[u64; 6], issuance_token: &[u8; 32]) -> [u8; 32] {
+    let mut commit_bytes = [0u8; 48];
+    for (chunk, limb) in commit_bytes
+        .as_chunks_mut::<8>()
+        .0
+        .iter_mut()
+        .zip(attr_commit)
+    {
+        *chunk = limb.to_le_bytes();
+    }
+    cshake256_framed_32(
+        b"QSAG.VC.ISSUED_TOKEN_INDEX.V1",
+        &[&commit_bytes, issuance_token],
+    )
+}
+
+impl IssuerCredentialAccumulator {
+    pub const CAPACITY: usize = 1 << VC_ACCUMULATOR_DEPTH;
+
+    pub(super) fn erase_secrets(&mut self) {
+        self.enrolled_tokens.secret_wipe();
+    }
+
+    pub fn new(oprf_key: PublicKey, issuer_epoch: u64) -> Self {
+        let empty_leaf = [
+            gl_reduce_u64(0x454D_5054_595F_4C30),
+            gl_reduce_u64(0x454D_5054_595F_4C31),
+            (issuer_epoch & 0xffff_ffff),
+            issuer_epoch >> 32,
+            0,
+            0,
+        ];
+        let mut empty = vec![empty_leaf];
+        for level in 0..VC_ACCUMULATOR_DEPTH {
+            empty.push(merkle_hash_pair(
+                &empty[level],
+                &empty[level],
+                issuer_epoch,
+                level as u32,
+            ));
+        }
+        Self {
+            oprf_key,
+            issuer_epoch,
+            leaves: Vec::new(),
+            enrolled_tokens: Vec::new(),
+            consumed_sessions: BTreeSet::new(),
+            issued_tokens: BTreeSet::new(),
+            layers: vec![Vec::new(); VC_ACCUMULATOR_DEPTH + 1],
+            empty,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn enroll(&mut self, attr_commit: [u64; 6]) -> Result<usize, BlindVcError> {
+        if self.leaves.len() >= Self::CAPACITY {
+            return Err(BlindVcError::AccumulatorFull);
+        }
+        let idx = self.leaves.len();
+        self.leaves.push(attr_commit);
+        self.append_merkle_leaf(attr_commit);
+        secret_vec_push(&mut self.enrolled_tokens, None);
+        Ok(idx)
+    }
+
+    pub(super) fn enroll_issued(
+        &mut self,
+        session_id: [u8; 32],
+        attr_commit: [u64; 6],
+        issuance_token: [u8; 32],
+    ) -> Result<usize, BlindVcError> {
+        let token_index = issued_token_index(&attr_commit, &issuance_token);
+        if self.consumed_sessions.contains(&session_id) || self.issued_tokens.contains(&token_index)
+        {
+            return Err(BlindVcError::InvalidOprfEvaluation);
+        }
+        if self.leaves.len() >= Self::CAPACITY {
+            return Err(BlindVcError::AccumulatorFull);
+        }
+        let idx = self.leaves.len();
+        self.leaves.push(attr_commit);
+        self.append_merkle_leaf(attr_commit);
+        secret_vec_push(&mut self.enrolled_tokens, Some(issuance_token));
+        self.consumed_sessions.insert(session_id);
+        self.issued_tokens.insert(token_index);
+        Ok(idx)
+    }
+
+    pub fn root_tag(&self) -> [u8; 32] {
+        compute_accumulator_root_tag(&self.oprf_key.commitment(), self.issuer_epoch, &self.root())
+    }
+
+    /// Produce an authenticated [`IssuerRootAttestation`] over `(oprf_key, issuer_epoch, root())`
+    /// using an arbitrary FIPS 204 `ML-DSA` signer (single-party or threshold MPC).
+    pub fn attest_root<F>(
+        &self,
+        mldsa_level: MlDsaLevel,
+        issuer_mldsa_pk: Vec<u8>,
+        sign_fn: F,
+    ) -> Result<IssuerRootAttestation, BlindVcError>
+    where
+        F: FnOnce(&[u8], &[u8]) -> Result<Vec<u8>, BlindVcError>,
+    {
+        let issuer_pk_digest = self.oprf_key.commitment();
+        let accumulator_root = self.root();
+        let root_tag =
+            compute_accumulator_root_tag(&issuer_pk_digest, self.issuer_epoch, &accumulator_root);
+        let msg = IssuerRootAttestation::signing_message(
+            &issuer_pk_digest,
+            self.issuer_epoch,
+            &accumulator_root,
+            &root_tag,
+        );
+        let mldsa_signature = sign_fn(&msg, IssuerRootAttestation::SIGNING_CONTEXT)?;
+        let attestation = IssuerRootAttestation {
+            issuer_pk_digest,
+            mldsa_level,
+            issuer_mldsa_pk,
+            issuer_epoch: self.issuer_epoch,
+            accumulator_root,
+            root_tag,
+            mldsa_signature,
+        };
+        if !attestation.verify(&attestation.issuer_mldsa_pk, &self.oprf_key) {
+            return Err(BlindVcError::RootAttestationFailed);
+        }
+        Ok(attestation)
+    }
+
+    /// Convenience deterministic FIPS 204 `ML-DSA` attestation for single-key or test issuers.
+    pub fn attest_root_deterministic(
+        &self,
+        mldsa_level: MlDsaLevel,
+        issuer_mldsa_sk: &MlDsaSigningKey,
+        issuer_mldsa_pk: Vec<u8>,
+    ) -> Result<IssuerRootAttestation, BlindVcError> {
+        self.attest_root(mldsa_level, issuer_mldsa_pk, |msg, ctx| {
+            ml_dsa_sign_deterministic(issuer_mldsa_sk, msg, ctx)
+                .ok_or(BlindVcError::RootAttestationFailed)
+        })
+    }
+
+    // Only the new leaf's ancestors change. Cached layers also serve historical
+    // membership paths without rebuilding or cloning the complete tree.
+    fn append_merkle_leaf(&mut self, leaf: [u64; 6]) {
+        let mut index = self.layers[0].len();
+        self.layers[0].push(leaf);
+        for level in 0..VC_ACCUMULATOR_DEPTH {
+            let nodes = &self.layers[level];
+            let parent = merkle_hash_pair(
+                &nodes[index & !1],
+                nodes.get((index & !1) + 1).unwrap_or(&self.empty[level]),
+                self.issuer_epoch,
+                level as u32,
+            );
+            index >>= 1;
+            let next = &mut self.layers[level + 1];
+            if index == next.len() {
+                next.push(parent);
+            } else {
+                next[index] = parent;
+            }
+        }
+    }
+
+    pub fn root(&self) -> [u64; 6] {
+        self.layers[VC_ACCUMULATOR_DEPTH]
+            .first()
+            .copied()
+            .unwrap_or(self.empty[VC_ACCUMULATOR_DEPTH])
+    }
+
+    pub fn membership_witness(
+        &self,
+        leaf_index: usize,
+    ) -> Result<CredentialMembershipWitness, BlindVcError> {
+        Ok(CredentialMembershipWitness {
+            leaf_index,
+            siblings: self.merkle_path(leaf_index)?,
+            accumulator_root: self.root(),
+            issuer_epoch: self.issuer_epoch,
+            issuer_pk_digest: self.oprf_key.commitment(),
+            issuance_token: self.enrolled_tokens[leaf_index],
+        })
+    }
+
+    pub fn merkle_path(
+        &self,
+        leaf_index: usize,
+    ) -> Result<[[u64; 6]; VC_ACCUMULATOR_DEPTH], BlindVcError> {
+        if leaf_index >= self.leaves.len() {
+            return Err(BlindVcError::InvalidAccumulatorLeafIndex);
+        }
+        Ok(core::array::from_fn(|level| {
+            self.layers[level]
+                .get((leaf_index >> level) ^ 1)
+                .copied()
+                .unwrap_or(self.empty[level])
+        }))
+    }
+}
+
+/// Canonical input to the TOPRF, binding epoch, schema, blinded leaf, issuer key digest, and session.
+pub fn issuance_input(req: &BlindIssuanceRequest) -> [u8; 136] {
+    encode_issuance_message(
+        req.issuer_epoch,
+        req.schema_id,
+        &req.attr_commit,
+        &req.issuer_pk_digest,
+        &req.session_id,
+    )
+}
+/// Enroll an issuer-authorized request after obtaining its OPRF evaluation over
+/// authenticated server channels. The issuer's independently provisioned receipt
+/// key authenticates the evaluation before any accumulator mutation.
+pub fn threshold_issue_blind_vc(
+    accumulator: &mut IssuerCredentialAccumulator,
+    req: &BlindIssuanceRequest,
+    issuer_attested_attrs: &[u64],
+    evaluation: &Evaluation,
+    receipt_key: &crate::voprf::IssuanceReceiptKey,
+    expected_schema_id: u64,
+) -> Result<BlindVerifiableCredential, BlindVcError> {
+    threshold_issue_blind_vc_with_profile(
+        accumulator,
+        req,
+        issuer_attested_attrs,
+        evaluation,
+        receipt_key,
+        expected_schema_id,
+        ZkSoundnessProfile::Quantum128,
+    )
+}
+
+/// Use an explicit verifier-selected soundness budget.
+#[allow(clippy::too_many_arguments)]
+pub fn threshold_issue_blind_vc_with_profile(
+    accumulator: &mut IssuerCredentialAccumulator,
+    req: &BlindIssuanceRequest,
+    issuer_attested_attrs: &[u64],
+    evaluation: &Evaluation,
+    receipt_key: &crate::voprf::IssuanceReceiptKey,
+    expected_schema_id: u64,
+    profile: ZkSoundnessProfile,
+) -> Result<BlindVerifiableCredential, BlindVcError> {
+    if req.issuer_epoch != accumulator.issuer_epoch
+        || !ct_eq_bytes(&req.issuer_pk_digest, &accumulator.oprf_key.commitment())
+        || !verify_blind_issuance_request_with_profile(
+            req,
+            issuer_attested_attrs,
+            expected_schema_id,
+            profile,
+        )
+    {
+        return Err(BlindVcError::BlindIssuanceProofInvalid);
+    }
+    let issuance_token = evaluation
+        .authenticated_value_for(&accumulator.oprf_key, &issuance_input(req), receipt_key)
+        .ok_or(BlindVcError::InvalidOprfEvaluation)?;
+    if ct_eq_bytes(&issuance_token, &[0u8; 32]) {
+        return Err(BlindVcError::InvalidOprfEvaluation);
+    }
+    let accumulator_leaf_index =
+        accumulator.enroll_issued(req.session_id, req.attr_commit, issuance_token)?;
+    Ok(BlindVerifiableCredential {
+        issuer_epoch: accumulator.issuer_epoch,
+        schema_id: req.schema_id,
+        attr_commit: req.attr_commit,
+        issuance_token,
+        accumulator_leaf_index,
+    })
+}
