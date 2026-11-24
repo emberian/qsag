@@ -121,6 +121,40 @@ pub trait MpcTransport {
     ) -> Result<RoundInbox, MpcTransportError>;
 }
 
+/// Drive a sharing round on a session-bound, confidential authenticated wire mesh.
+impl<T: qsag_core::wire_transport::WireTransport> MpcTransport for T {
+    fn exchange(
+        &mut self,
+        info: RoundInfo,
+        private: Vec<Vec<u8>>,
+        broadcast: Vec<u8>,
+    ) -> Result<RoundInbox, MpcTransportError> {
+        let mut private = qsag_core::wipe::SecretBuffer(private);
+        // The round API ignores the caller's own private slot on every transport.
+        if let Some(local) = private.get_mut(self.party()) {
+            qsag_asm::wipe::wipe(local);
+            local.clear();
+        }
+        let broadcast = qsag_core::wipe::SecretBuffer(broadcast);
+        let mut marker = info.index.to_be_bytes().to_vec();
+        marker.extend_from_slice(&[info.phase, info.kind as u8]);
+        let views = self
+            .broadcast(0x4d504301, &marker)
+            .map_err(|_| MpcTransportError)?;
+        if views.iter().any(|view| view != &marker) {
+            return Err(MpcTransportError);
+        }
+        let mut inbox = RoundInbox::default();
+        inbox.private = self
+            .exchange_frames(0x4d504302, &private)
+            .map_err(|_| MpcTransportError)?;
+        inbox.broadcast = self
+            .broadcast(0x4d504303, &broadcast)
+            .map_err(|_| MpcTransportError)?;
+        Ok(inbox)
+    }
+}
+
 /// Failures of the sharing engine. All of them end the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MpcError {
