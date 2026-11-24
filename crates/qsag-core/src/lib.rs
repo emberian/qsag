@@ -105,3 +105,5 @@ pub mod anti_rollback;
 /// Atomic per-key ceremony resource journal.
 #[cfg(feature = "std")]
 pub mod ceremony_journal;
+
+pub mod wire_transport;
