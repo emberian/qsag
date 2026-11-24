@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Signature-key inventory and dealerless linear-module HD custody."
+description = "Committed signature-key inventories and distributed child-seed custody."
 
 [features]
 default = ["alloc"]

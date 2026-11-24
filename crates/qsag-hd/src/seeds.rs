@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use qsag_asm::wipe::{SecretBuffer, SecretBytes, wipe};
 
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes};
-use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256};
+use qsag_accel::keccak::cshake256_framed_32;
 
 use crate::inventory::{HdError, RekeyFault};
 
@@ -112,7 +112,7 @@ impl PartialOrd for CustodianSet {
     }
 }
 
-/// Field modulus of the linear module; evaluation points are nonzero residues.
+/// Exclusive upper bound for evaluation points in the inventory enrollment format.
 const POINT_MODULUS: u32 = 8_380_417;
 
 /// Public committee description: threshold, custodian identifiers in strictly
@@ -584,10 +584,6 @@ impl CustodianSeeds {
         self.config.members[self.position].0
     }
 
-    pub(crate) fn position(&self) -> usize {
-        self.position
-    }
-
     /// Public digest of the frozen ceremony transcript; identical at every custodian.
     pub fn ceremony_digest(&self) -> [u8; 32] {
         self.ceremony
@@ -637,24 +633,11 @@ impl CustodianSeeds {
         Some(SecretBytes::new(cshake256_framed_32(domain, &frames)))
     }
 
-    /// Streaming PRF output under the seed of `subset`.
-    pub(crate) fn prf_stream(
-        &self,
-        subset: CustodianSet,
-        domain: &[u8],
-        context: &[&[u8]],
-    ) -> Option<Shake256> {
-        let key = self.prf32(subset, domain, context)?;
-        let mut sponge = init_cshake256(b"", b"QSAG.HD.SEEDS.STREAM.V2");
-        sponge.absorb(&key[..]);
-        finalize_cshake256(&mut sponge, true);
-        Some(sponge)
-    }
-
     /// Key shared with the custodian at `other` and with no coalition of at most
     /// `t - 1` custodians that excludes both: it hashes every subset seed held by
     /// both, and one of those subsets avoids any such coalition when `t >= 2`.
     /// Returns `None` for `t = 1`, where every custodian holds every seed.
+    #[cfg(test)]
     pub(crate) fn pairwise_key(&self, other: usize, domain: &[u8]) -> Option<SecretBytes<32>> {
         if self.config.threshold < 2
             || other == self.position

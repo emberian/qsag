@@ -16,7 +16,7 @@ use qsag_addr::{AddrError, KeyIdentityKind, QsagAddress, WitnessSuiteTag};
 
 use crate::seeds::{CommitteeConfig, CustodianSeeds};
 
-/// Errors produced by `PiHdCommitInventory` or `PiHdLinearModule`.
+/// Inventory enrollment and recovery errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HdError {
     InvalidBatchSize,
@@ -24,23 +24,15 @@ pub enum HdError {
     InvalidInventoryProof,
     AddressCodecError(AddrError),
     InvalidThresholdParameters,
-    DuplicateOrZeroEvalPoint,
-    DerivationBudgetExceeded {
-        current: u16,
-        max: u16,
-    },
-    NormBoundExceeded,
     MacCheckFailed,
     EvaluationBudgetExceeded,
     /// The committee is outside the supported honest-majority model.
     UnsupportedCommittee,
     /// A dealerless ceremony detected a fault and stopped before releasing output.
     RekeyAborted(RekeyFault),
-    HardenedDerivationRequired,
     DurableBudgetRequired,
     BudgetStorageFailed,
     InvalidSignatureKey,
-    UnauthorizedProjection,
 }
 
 /// Why a dealerless ceremony stopped. Every variant is detected from messages
@@ -54,14 +46,6 @@ pub enum RekeyFault {
     CommitmentMismatch,
     /// Holders of one subset seed derived different seeds.
     SeedConfirmationMismatch,
-    /// Holders of one subset published different public images of its tweak.
-    PublicShareMismatch,
-    /// Broadcast shares do not lie on one polynomial of the required degree.
-    InconsistentDegree,
-    /// The child MAC sacrifice opened a nonzero value: a multiplication was faulted.
-    SacrificeNonZero,
-    /// The parent sharing does not satisfy its own MAC relation.
-    ParentAuthenticationFailed,
     /// Holders of one replicated component disagree.
     ReplicatedShareMismatch,
 }
@@ -332,8 +316,7 @@ pub fn enroll_child_signing_seed_quorum(
 /// `expected_child_pk`. Callers in production signing/recovery MUST use
 /// [`recover_child_signing_seed`] with `Some(&expected_child_pk)` or
 /// [`enroll_child_signing_seed_quorum`]. Absent from builds without `cfg(test)` or the
-/// `testing-ephemeral` feature (regression on
-/// [`crate::linear_module::DEALER_FREE_PUBLIC_API`]).
+/// `testing-ephemeral` feature.
 #[cfg(any(test, feature = "testing-ephemeral"))]
 pub fn recover_child_signing_seed_unchecked(
     config: &CommitteeConfig,
