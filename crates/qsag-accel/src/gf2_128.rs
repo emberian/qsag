@@ -8,14 +8,14 @@ use crate::AccelError;
 /// Irreducible pentanomial $x^{128} + x^7 + x^2 + x + 1$ (`0x87` low reduction polynomial).
 pub const GF2_128_POLY_LO: u128 = 0x87;
 
-/// Constant-time branchless multiplication in $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$
+/// Constant-time branchless multiplication in $\mathbb{F}_2\[x\]/(x^{128} + x^7 + x^2 + x + 1)$
 /// usable in `const` evaluation contexts (`0` lookup tables, `0` secret-dependent branches).
 #[inline]
 pub const fn gf2_128_mul_const(a: u128, b: u128) -> u128 {
     portable::poly128_mul_const(a, b)
 }
 
-/// Constant-time multiplication in $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$.
+/// Constant-time multiplication in $\mathbb{F}_2\[x\]/(x^{128} + x^7 + x^2 + x + 1)$.
 /// Dispatches through certified carry-less `PCLMULQDQ` / `VPCLMULQDQ` / `PMULL` kernels in
 /// `qsag_asm` (with `PSTATE.DIT` guard on `aarch64` and branchless portable fallback).
 #[inline]
@@ -27,7 +27,7 @@ pub fn gf2_128_mul(a: u128, b: u128) -> u128 {
     u128::from(acc[0]) | (u128::from(acc[1]) << 64)
 }
 
-/// Constant-time squaring in $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$.
+/// Constant-time squaring in $\mathbb{F}_2\[x\]/(x^{128} + x^7 + x^2 + x + 1)$.
 #[inline]
 pub const fn gf2_128_sq(a: u128) -> u128 {
     gf2_128_mul_const(a, a)
@@ -85,7 +85,7 @@ pub const fn tower_mul_bits(k: u32, a: u128, b: u128) -> u128 {
 
 /// 2-lane BDOZ GF($2^{128}$) inner product:
 /// Computes $\bigl(\bigoplus_i s_{i,0} \cdot w_{i,0},\; \bigoplus_i s_{i,1} \cdot w_{i,1}\bigr)$
-/// in 100% constant time over $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$.
+/// in 100% constant time over $\mathbb{F}_2\[x\]/(x^{128} + x^7 + x^2 + x + 1)$.
 pub fn bdoz_gf2_128_batch_dot_cpu(
     shares: &[(u128, u128)],
     weights: &[(u128, u128)],

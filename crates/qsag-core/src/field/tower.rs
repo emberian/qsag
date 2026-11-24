@@ -73,21 +73,27 @@ pub const fn tower_mul_bits(k: u32, a: u128, b: u128) -> u128 {
     let bm = b & mask;
     match k {
         0 => am & bm,
-        2 => ::qsag_verified::tower::gf16_mul(
-            ::qsag_verified::tower::Gf16(am as u8),
-            ::qsag_verified::tower::Gf16(bm as u8),
-        )
-        .0 as u128,
-        1 | 3 => ::qsag_verified::tower::gf256_mul(
-            ::qsag_verified::tower::Gf256(am as u8),
-            ::qsag_verified::tower::Gf256(bm as u8),
-        )
-        .0 as u128,
-        _ => ::qsag_verified::tower::tower128_mul(
-            ::qsag_verified::tower::Tower128(am),
-            ::qsag_verified::tower::Tower128(bm),
-        )
-        .0,
+        2 => {
+            ::qsag_verified::tower::gf16_mul(
+                ::qsag_verified::tower::Gf16(am as u8),
+                ::qsag_verified::tower::Gf16(bm as u8),
+            )
+            .0 as u128
+        }
+        1 | 3 => {
+            ::qsag_verified::tower::gf256_mul(
+                ::qsag_verified::tower::Gf256(am as u8),
+                ::qsag_verified::tower::Gf256(bm as u8),
+            )
+            .0 as u128
+        }
+        _ => {
+            ::qsag_verified::tower::tower128_mul(
+                ::qsag_verified::tower::Tower128(am),
+                ::qsag_verified::tower::Tower128(bm),
+            )
+            .0
+        }
     }
 }
 
@@ -184,12 +190,7 @@ impl TowerGf256 {
 
     #[inline]
     pub fn inv(self) -> Option<Self> {
-        let out = self.ct_inv();
-        if crate::wipe::ct_eq_u64(self.0 as u64, 0) {
-            None
-        } else {
-            Some(out)
-        }
+        qsag_verified::gf256_inv(qsag_verified::Gf256(self.0)).map(|x| Self(x.0))
     }
 }
 
@@ -209,9 +210,7 @@ impl Tower128 {
 
     #[inline]
     pub const fn embed_gf256(x: TowerGf256) -> Self {
-        Self(
-            ::qsag_verified::tower::embed_gf256_to_tower128(::qsag_verified::tower::Gf256(x.0)).0,
-        )
+        Self(::qsag_verified::tower::embed_gf256_to_tower128(::qsag_verified::tower::Gf256(x.0)).0)
     }
 
     #[inline]
@@ -293,6 +292,12 @@ pub use crate::wipe::{wipe_gf256_slice as wipe_gf256, wipe_tower128_slice as wip
 /// Evaluate polynomial `coeffs[0] + coeffs[1]*x + ...` over `TowerGf256`.
 #[inline]
 pub fn eval_poly_gf256(coeffs: &[TowerGf256], x: TowerGf256) -> TowerGf256 {
+    if let [a, b] = coeffs {
+        let linear = [qsag_verified::Gf256(a.0), qsag_verified::Gf256(b.0)];
+        return TowerGf256(
+            qsag_verified::shamir_eval_poly_gf256(&linear, qsag_verified::Gf256(x.0)).0,
+        );
+    }
     let mut acc = TowerGf256::ZERO;
     for &c in coeffs.iter().rev() {
         acc = acc.mul(x).add(c);
@@ -312,28 +317,12 @@ pub fn eval_poly_tower128_at_gf256(coeffs: &[Tower128], x: TowerGf256) -> Tower1
 
 /// Compute Lagrange interpolation weights at `0` for distinct non-zero points in `TowerGf256`.
 pub fn lagrange_weights_zero_gf256(pts: &[TowerGf256]) -> Option<Vec<TowerGf256>> {
-    let t = pts.len();
-    let mut weights = Vec::with_capacity(t);
-    for i in 0..t {
-        if pts[i] == TowerGf256::ZERO {
-            return None;
-        }
-        let mut num = TowerGf256::ONE;
-        let mut den = TowerGf256::ONE;
-        for j in 0..t {
-            if i == j {
-                continue;
-            }
-            let diff = pts[i].add(pts[j]);
-            if diff == TowerGf256::ZERO {
-                return None;
-            }
-            num = num.mul(pts[j]);
-            den = den.mul(diff);
-        }
-        weights.push(num.mul(den.inv()?));
-    }
-    Some(weights)
+    let points: Vec<_> = pts.iter().map(|p| qsag_verified::Gf256(p.0)).collect();
+    (0..points.len())
+        .map(|i| {
+            qsag_verified::shamir_lagrange_weight_zero_gf256(&points, i).map(|w| TowerGf256(w.0))
+        })
+        .collect()
 }
 
 /// Evaluate GHASH-style polynomial `((0 + c_0) * h + c_1) * h ...` over `Tower128`,

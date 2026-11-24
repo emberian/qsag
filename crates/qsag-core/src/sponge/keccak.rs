@@ -32,80 +32,9 @@ pub const FS_ABSORB_CUSTOMIZATION: &[u8] = b"QSAG.CRYPTO.FS.ABSORB/v1";
 pub const FS_SQUEEZE_CUSTOMIZATION: &[u8] = b"QSAG.CRYPTO.FS.SQUEEZE/v1";
 pub const FS_RATCHET_CUSTOMIZATION: &[u8] = b"QSAG.CRYPTO.FS.RATCHET/v1";
 
-const KECCAK_PI_SOURCE_FOR_TARGET: [(usize, u32); 25] = {
-    let mut out = [(0usize, 0u32); 25];
-    let mut src = 0usize;
-    while src < 25 {
-        let x = src % 5;
-        let y = src / 5;
-        let dst = y + 5 * ((2 * x + 3 * y) % 5);
-        out[dst] = (src, KECCAK_ROTATION_OFFSETS[src]);
-        src += 1;
-    }
-    out
+pub use qsag_accel::keccak::{
+    keccak_f1600, keccak_p1600_12, keccak_p1600_const, keccak_p1600_lanes,
 };
-
-/// Exact 24-round `Keccak-f[1600]` permutation over 25 little-endian 64-bit lanes.
-#[inline]
-pub const fn keccak_f1600(state: &mut [u64; 25]) {
-    let mut a = *state;
-    let mut round = 0;
-    while round < 24 {
-        let rc = KECCAK_ROUND_CONSTANTS[round];
-        round += 1;
-        // Theta
-        let c0 = a[0] ^ a[5] ^ a[10] ^ a[15] ^ a[20];
-        let c1 = a[1] ^ a[6] ^ a[11] ^ a[16] ^ a[21];
-        let c2 = a[2] ^ a[7] ^ a[12] ^ a[17] ^ a[22];
-        let c3 = a[3] ^ a[8] ^ a[13] ^ a[18] ^ a[23];
-        let c4 = a[4] ^ a[9] ^ a[14] ^ a[19] ^ a[24];
-
-        let d0 = c4 ^ c1.rotate_left(1);
-        let d1 = c0 ^ c2.rotate_left(1);
-        let d2 = c1 ^ c3.rotate_left(1);
-        let d3 = c2 ^ c4.rotate_left(1);
-        let d4 = c3 ^ c0.rotate_left(1);
-
-        let mut y = 0usize;
-        while y < 25 {
-            a[y] ^= d0;
-            a[y + 1] ^= d1;
-            a[y + 2] ^= d2;
-            a[y + 3] ^= d3;
-            a[y + 4] ^= d4;
-            y += 5;
-        }
-
-        // Rho + Pi (register-promoted, 0 `% 5` / `/ 5` divisions)
-        let mut b = [0u64; 25];
-        let mut dst = 0usize;
-        while dst < 25 {
-            let (src, rot) = KECCAK_PI_SOURCE_FOR_TARGET[dst];
-            b[dst] = a[src].rotate_left(rot);
-            dst += 1;
-        }
-
-        // Chi
-        let mut row = 0usize;
-        while row < 25 {
-            let b0 = b[row];
-            let b1 = b[row + 1];
-            let b2 = b[row + 2];
-            let b3 = b[row + 3];
-            let b4 = b[row + 4];
-            a[row] = b0 ^ ((!b1) & b2);
-            a[row + 1] = b1 ^ ((!b2) & b3);
-            a[row + 2] = b2 ^ ((!b3) & b4);
-            a[row + 3] = b3 ^ ((!b4) & b0);
-            a[row + 4] = b4 ^ ((!b0) & b1);
-            row += 5;
-        }
-
-        // Iota
-        a[0] ^= rc;
-    }
-    *state = a;
-}
 
 /// Public midstate for a nonempty static customization fitting in one rate block.
 /// Panics at compile time for empty tags or tags longer than 128 bytes.
@@ -138,7 +67,7 @@ pub const fn cshake256_static_midstate(tag: &[u8]) -> [u64; 25] {
         state[i / 8] |= (block[i] as u64) << (8 * (i % 8));
         i += 1;
     }
-    keccak_f1600(&mut state);
+    keccak_p1600_const::<0>(&mut state);
     state
 }
 

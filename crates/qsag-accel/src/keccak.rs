@@ -7,65 +7,156 @@ use crate::ct::{ct_zeroize_bytes, ct_zeroize_u64s};
 /// Standard 24-round `Keccak-f[1600]` iota round constants (FIPS 202).
 pub const KECCAK_RC: [u64; 24] = qsag_asm::KECCAK_ROUND_CONSTANTS;
 
-/// The $\rho$ rotations and $\pi$ destinations in the order of the single 24-lane cycle starting
-/// at lane 1, derived from the FIPS 202 offset table: the lane at `x + 5y` rotates by its offset
-/// and moves to `y + 5 * ((2x + 3y) mod 5)`.
-const KECCAK_RHO_PI: ([u32; 24], [usize; 24]) = {
-    let mut rho = [0u32; 24];
-    let mut pi = [0usize; 24];
-    let mut lane = 1usize;
-    let mut i = 0usize;
-    while i < 24 {
-        rho[i] = qsag_asm::KECCAK_ROTATION_OFFSETS[lane];
-        let (x, y) = (lane % 5, lane / 5);
-        lane = y + 5 * ((2 * x + 3 * y) % 5);
-        pi[i] = lane;
+pub use qsag_verified::keccak::keccak_f1600;
+use qsag_verified::keccak::keccak_f1600_round;
+
+/// `Keccak-p[1600,12]` uses the last twelve rounds of Keccak-f.
+pub fn keccak_p1600_12(state: &mut [u64; 25]) {
+    let mut i = 12;
+    while i < KECCAK_RC.len() {
+        keccak_f1600_round(state, KECCAK_RC[i]);
         i += 1;
     }
-    assert!(lane == 1);
-    (rho, pi)
-};
-const KECCAK_RHO: [u32; 24] = KECCAK_RHO_PI.0;
-const KECCAK_PI: [usize; 24] = KECCAK_RHO_PI.1;
+}
 
-/// In-place 24-round `Keccak-f[1600]` permutation (100% branchless, LUT-free).
-pub fn keccak_f1600(state: &mut [u64; 25]) {
-    let mut bc = [0u64; 5];
-    for &rc in &KECCAK_RC {
-        // Theta
-        for (i, value) in bc.iter_mut().enumerate() {
-            *value = state[i] ^ state[i + 5] ^ state[i + 10] ^ state[i + 15] ^ state[i + 20];
+/// Portable interleaved Keccak-p, specialized to 4/8 lanes for batch hashing.
+/// A single state also supports constant evaluation of public customization midstates.
+#[inline(always)]
+pub const fn keccak_p1600_lanes<const N: usize, const START: usize>(st: &mut [[u64; N]; 25]) {
+    #[inline(always)]
+    const fn xor<const N: usize>(a: [u64; N], b: [u64; N]) -> [u64; N] {
+        let mut out = [0; N];
+        let mut k = 0;
+        while k < N {
+            out[k] = a[k] ^ b[k];
+            k += 1;
         }
-        for i in 0..5 {
-            let t = bc[(i + 4) % 5] ^ bc[(i + 1) % 5].rotate_left(1);
-            state[i] ^= t;
-            state[i + 5] ^= t;
-            state[i + 10] ^= t;
-            state[i + 15] ^= t;
-            state[i + 20] ^= t;
-        }
-        // Rho + Pi
-        let mut t = state[1];
-        for (&j, &rotation) in KECCAK_PI.iter().zip(&KECCAK_RHO) {
-            let next = state[j];
-            state[j] = t.rotate_left(rotation);
-            t = next;
-        }
-        // Chi
-        for row in (0..25).step_by(5) {
-            bc[0] = state[row];
-            bc[1] = state[row + 1];
-            bc[2] = state[row + 2];
-            bc[3] = state[row + 3];
-            bc[4] = state[row + 4];
-            for i in 0..5 {
-                state[row + i] = bc[i] ^ ((!bc[(i + 1) % 5]) & bc[(i + 2) % 5]);
-            }
-        }
-        // Iota
-        state[0] ^= rc;
+        out
     }
-    ct_zeroize_u64s(&mut bc);
+    #[inline(always)]
+    const fn xor5<const N: usize>(
+        a: [u64; N],
+        b: [u64; N],
+        c: [u64; N],
+        d: [u64; N],
+        e: [u64; N],
+    ) -> [u64; N] {
+        let mut out = [0; N];
+        let mut k = 0;
+        while k < N {
+            out[k] = a[k] ^ b[k] ^ c[k] ^ d[k] ^ e[k];
+            k += 1;
+        }
+        out
+    }
+    #[inline(always)]
+    const fn rol<const N: usize, const R: u32>(a: [u64; N]) -> [u64; N] {
+        let mut out = [0; N];
+        let mut k = 0;
+        while k < N {
+            out[k] = a[k].rotate_left(R);
+            k += 1;
+        }
+        out
+    }
+    #[inline(always)]
+    const fn chi<const N: usize>(a: [u64; N], b: [u64; N], c: [u64; N]) -> [u64; N] {
+        let mut out = [0; N];
+        let mut k = 0;
+        while k < N {
+            out[k] = a[k] ^ ((!b[k]) & c[k]);
+            k += 1;
+        }
+        out
+    }
+
+    const { assert!(START <= 24) };
+    let mut round = START;
+    while round < 24 {
+        let rc = KECCAK_RC[round];
+        round += 1;
+        let c0 = xor5(st[0], st[5], st[10], st[15], st[20]);
+        let c1 = xor5(st[1], st[6], st[11], st[16], st[21]);
+        let c2 = xor5(st[2], st[7], st[12], st[17], st[22]);
+        let c3 = xor5(st[3], st[8], st[13], st[18], st[23]);
+        let c4 = xor5(st[4], st[9], st[14], st[19], st[24]);
+
+        let d0 = xor(c4, rol::<N, 1>(c1));
+        let d1 = xor(c0, rol::<N, 1>(c2));
+        let d2 = xor(c1, rol::<N, 1>(c3));
+        let d3 = xor(c2, rol::<N, 1>(c4));
+        let d4 = xor(c3, rol::<N, 1>(c0));
+
+        let mut row = 0;
+        while row < 25 {
+            st[row] = xor(st[row], d0);
+            st[row + 1] = xor(st[row + 1], d1);
+            st[row + 2] = xor(st[row + 2], d2);
+            st[row + 3] = xor(st[row + 3], d3);
+            st[row + 4] = xor(st[row + 4], d4);
+            row += 5;
+        }
+
+        let b0 = st[0];
+        let b1 = rol::<N, 44>(st[6]);
+        let b2 = rol::<N, 43>(st[12]);
+        let b3 = rol::<N, 21>(st[18]);
+        let b4 = rol::<N, 14>(st[24]);
+        let b5 = rol::<N, 28>(st[3]);
+        let b6 = rol::<N, 20>(st[9]);
+        let b7 = rol::<N, 3>(st[10]);
+        let b8 = rol::<N, 45>(st[16]);
+        let b9 = rol::<N, 61>(st[22]);
+        let b10 = rol::<N, 1>(st[1]);
+        let b11 = rol::<N, 6>(st[7]);
+        let b12 = rol::<N, 25>(st[13]);
+        let b13 = rol::<N, 8>(st[19]);
+        let b14 = rol::<N, 18>(st[20]);
+        let b15 = rol::<N, 27>(st[4]);
+        let b16 = rol::<N, 36>(st[5]);
+        let b17 = rol::<N, 10>(st[11]);
+        let b18 = rol::<N, 15>(st[17]);
+        let b19 = rol::<N, 56>(st[23]);
+        let b20 = rol::<N, 62>(st[2]);
+        let b21 = rol::<N, 55>(st[8]);
+        let b22 = rol::<N, 39>(st[14]);
+        let b23 = rol::<N, 41>(st[15]);
+        let b24 = rol::<N, 2>(st[21]);
+
+        let s0 = chi(b0, b1, b2);
+        st[0] = xor(s0, [rc; N]);
+        st[1] = chi(b1, b2, b3);
+        st[2] = chi(b2, b3, b4);
+        st[3] = chi(b3, b4, b0);
+        st[4] = chi(b4, b0, b1);
+        st[5] = chi(b5, b6, b7);
+        st[6] = chi(b6, b7, b8);
+        st[7] = chi(b7, b8, b9);
+        st[8] = chi(b8, b9, b5);
+        st[9] = chi(b9, b5, b6);
+        st[10] = chi(b10, b11, b12);
+        st[11] = chi(b11, b12, b13);
+        st[12] = chi(b12, b13, b14);
+        st[13] = chi(b13, b14, b10);
+        st[14] = chi(b14, b10, b11);
+        st[15] = chi(b15, b16, b17);
+        st[16] = chi(b16, b17, b18);
+        st[17] = chi(b17, b18, b19);
+        st[18] = chi(b18, b19, b15);
+        st[19] = chi(b19, b15, b16);
+        st[20] = chi(b20, b21, b22);
+        st[21] = chi(b21, b22, b23);
+        st[22] = chi(b22, b23, b24);
+        st[23] = chi(b23, b24, b20);
+        st[24] = chi(b24, b20, b21);
+    }
+}
+
+/// Const-evaluation adapter for public initial states. Ordinary scalar hashes use
+/// the extracted Keccak permutation above.
+pub const fn keccak_p1600_const<const START: usize>(state: &mut [u64; 25]) {
+    let (lanes, _) = state.as_chunks_mut::<1>();
+    keccak_p1600_lanes::<1, START>(lanes.first_chunk_mut::<25>().unwrap());
 }
 
 /// Generic stack-allocated Keccak sponge with volatile zeroization on `Drop`.
@@ -405,4 +496,27 @@ pub fn reduce_192_mod_p(bytes24: &[u8; 24]) -> u64 {
     ct_zeroize_bytes(&mut lo16);
     ct_zeroize_bytes(&mut hi8);
     gl_sub(r_lo, r_hi)
+}
+
+#[cfg(test)]
+mod permutation_tests {
+    use super::*;
+
+    #[test]
+    fn const_midstate_kernel_matches_extracted_rounds() {
+        for i in 0..25 {
+            let mut input = [0u64; 25];
+            input[i] = u64::MAX;
+            let mut scalar = input;
+            let mut midstate = input;
+            keccak_f1600(&mut scalar);
+            keccak_p1600_const::<0>(&mut midstate);
+            assert_eq!(midstate, scalar);
+            let mut scalar = input;
+            let mut midstate = input;
+            keccak_p1600_12(&mut scalar);
+            keccak_p1600_const::<12>(&mut midstate);
+            assert_eq!(midstate, scalar);
+        }
+    }
 }

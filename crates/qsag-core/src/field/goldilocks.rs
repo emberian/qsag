@@ -1,5 +1,5 @@
 //! Canonical 64-bit Goldilocks field ($\mathbb{F}_p, p = 2^{64} - 2^{32} + 1$) and
-//! 128-bit quadratic extension `GoldilocksExt2` ($\mathbb{F}_p[u]/(u^2 - 7)$).
+//! 128-bit quadratic extension `GoldilocksExt2` ($\mathbb{F}_p\[u\]/(u^2 - 7)$).
 //!
 //! Matches `lean/Qsag/Math/Goldilocks.lean` down to every reduction identity and non-aliasing guard.
 
@@ -343,7 +343,7 @@ impl MulAssign for Goldilocks {
     }
 }
 
-/// Quadratic extension $\mathbb{F}_{p^2} = \mathbb{F}_p[u]/(u^2 - 7)$ ($|\mathbb{F}_{p^2}| = p^2 > 2^{127}$).
+/// Quadratic extension $\mathbb{F}_{p^2} = \mathbb{F}_p\[u\]/(u^2 - 7)$ ($|\mathbb{F}_{p^2}| = p^2 > 2^{127}$).
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GoldilocksExt2 {
     pub c0: Goldilocks,
@@ -587,6 +587,12 @@ pub use crate::wipe::{wipe_ext2, wipe_goldilocks};
 /// Evaluate polynomial `coeffs[0] + coeffs[1]*x + ...` over `Goldilocks`.
 #[inline]
 pub fn eval_poly_goldilocks(coeffs: &[Goldilocks], x: Goldilocks) -> Goldilocks {
+    if let [a, b] = coeffs {
+        return Goldilocks::from_verified(qsag_verified::shamir_eval_poly_goldilocks(
+            &[a.to_verified(), b.to_verified()],
+            x.to_verified(),
+        ));
+    }
     let mut acc = Goldilocks::ZERO;
     for &c in coeffs.iter().rev() {
         acc = acc.const_mul(x).const_add(c);
@@ -617,28 +623,13 @@ pub fn eval_poly_ext2(coeffs: &[GoldilocksExt2], x: GoldilocksExt2) -> Goldilock
 
 /// Compute Lagrange interpolation weights at `0` for distinct non-zero `Goldilocks` points.
 pub fn lagrange_weights_zero_goldilocks(pts: &[Goldilocks]) -> Option<Vec<Goldilocks>> {
-    let t = pts.len();
-    let mut weights = Vec::with_capacity(t);
-    for i in 0..t {
-        if pts[i] == Goldilocks::ZERO {
-            return None;
-        }
-        let mut num = Goldilocks::ONE;
-        let mut den = Goldilocks::ONE;
-        for j in 0..t {
-            if i == j {
-                continue;
-            }
-            let diff = pts[j].const_sub(pts[i]);
-            if diff == Goldilocks::ZERO {
-                return None;
-            }
-            num = num.const_mul(pts[j]);
-            den = den.const_mul(diff);
-        }
-        weights.push(num.const_mul(den.checked_inv()?));
-    }
-    Some(weights)
+    let points: Vec<_> = pts.iter().map(|p| p.to_verified()).collect();
+    (0..points.len())
+        .map(|i| {
+            qsag_verified::shamir_lagrange_weight_zero_goldilocks(&points, i)
+                .map(Goldilocks::from_verified)
+        })
+        .collect()
 }
 
 impl core::error::Error for CanonicalLiftError {}

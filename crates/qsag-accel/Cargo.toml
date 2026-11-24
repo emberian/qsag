@@ -15,5 +15,7 @@ vulkan = ["std"]
 fault-injection-audit = ["std"]
 
 [dependencies]
+qsag-whir-verified = { path = "../../aeneas/qsag-whir-verified", default-features = false }
+qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
 # Strictly zero external crates.io dependencies.
 qsag-asm = { path = "../qsag-asm", default-features = false }

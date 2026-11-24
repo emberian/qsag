@@ -1,20 +1,14 @@
 //! Canonical constant-time Goldilocks field ($p = 2^{64} - 2^{32} + 1$), quadratic extension
-//! $\mathbb{F}_{p^2} = \mathbb{F}_p[u]/(u^2 - 7)$, injective 5-limb 56-bit digest framing,
+//! $\mathbb{F}_{p^2} = \mathbb{F}_p\[u\]/(u^2 - 7)$, injective 5-limb 56-bit digest framing,
 //! radix-2 NTT, and shifted-coset Reed-Solomon LDE over $\mathbb{F}_{p^2}$.
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use qsag_asm::portable::{
-    goldilocks_add_ct_portable, goldilocks_canonicalize_ct, goldilocks_mul_ct_portable,
-    goldilocks_reduce128_ct_portable, goldilocks_sub_ct_portable,
-};
+use qsag_verified::goldilocks::{self as verified, Goldilocks, GoldilocksExt2};
 
 use crate::AccelError;
 use crate::ct::{ct_eq_u64, ct_select_u64};
-
-// The scalar field lives in `qsag_asm::portable`; this module names it for the kernels here
-// and adds inversion, exponentiation, the quadratic extension, and the transforms.
 
 /// Canonical Goldilocks prime $p = 2^{64} - 2^{32} + 1$.
 pub const GOLDILOCKS_PRIME: u64 = qsag_asm::GOLDILOCKS_PRIME;
@@ -36,19 +30,19 @@ pub const fn gl_is_canonical(raw: u64) -> bool {
 /// Branchless canonicalization of any `u64` into $[0, p - 1]$.
 #[inline]
 pub const fn gl_reduce_u64(x: u64) -> u64 {
-    goldilocks_canonicalize_ct(x)
+    verified::goldilocks_canon(x).0
 }
 
 /// Branchless modular addition, canonical for every `u64` input pair.
 #[inline]
 pub const fn gl_add(a: u64, b: u64) -> u64 {
-    goldilocks_add_ct_portable(a, b)
+    verified::goldilocks_add(Goldilocks(a), Goldilocks(b)).0
 }
 
 /// Branchless modular subtraction, canonical for every `u64` input pair.
 #[inline]
 pub const fn gl_sub(a: u64, b: u64) -> u64 {
-    goldilocks_sub_ct_portable(a, b)
+    verified::goldilocks_sub(Goldilocks(a), Goldilocks(b)).0
 }
 
 /// Branchless negation `0 - a mod p`.
@@ -60,44 +54,25 @@ pub const fn gl_neg(a: u64) -> u64 {
 /// Branchless 128-to-64 Goldilocks reduction for arbitrary `u128`.
 #[inline]
 pub const fn gl_reduce128(x: u128) -> u64 {
-    goldilocks_reduce128_ct_portable(x)
+    verified::goldilocks_reduce128(x).0
 }
 
 /// Branchless modular multiplication `a * b mod p`, canonical for every `u64` input pair.
 #[inline]
 pub const fn gl_mul(a: u64, b: u64) -> u64 {
-    goldilocks_mul_ct_portable(a, b)
+    verified::goldilocks_mul(Goldilocks(a), Goldilocks(b)).0
 }
 
 /// Branchless squaring `a^2 mod p`.
 #[inline]
 pub const fn gl_sq(a: u64) -> u64 {
-    gl_mul(a, a)
+    verified::goldilocks_square(Goldilocks(a)).0
 }
 
-#[inline]
-const fn gl_exp_pow2(mut x: u64, mut k: u32) -> u64 {
-    while k > 0 {
-        x = gl_sq(x);
-        k -= 1;
-    }
-    x
-}
-
-/// Constant-time Fermat addition chain $a^{p - 2} \bmod p$ (`0` maps to `0` with zero secret branches).
+/// Fermat inversion with zero mapped to zero.
 #[inline]
 pub const fn gl_inv_or_zero(a: u64) -> u64 {
-    let x = gl_reduce_u64(a);
-    let t2 = gl_mul(gl_sq(x), x);
-    let t3 = gl_mul(gl_sq(t2), x);
-    let t6 = gl_mul(gl_exp_pow2(t3, 3), t3);
-    let t12 = gl_mul(gl_exp_pow2(t6, 6), t6);
-    let t24 = gl_mul(gl_exp_pow2(t12, 12), t12);
-    let t30 = gl_mul(gl_exp_pow2(t24, 6), t6);
-    let t31 = gl_mul(gl_sq(t30), x);
-    let t32 = gl_mul(gl_sq(t31), x);
-    let hi = gl_exp_pow2(t31, 33);
-    gl_mul(hi, t32)
+    verified::goldilocks_inv_or_zero(Goldilocks(a)).0
 }
 
 /// Public-exponent binary exponentiation $a^e \bmod p$.
@@ -135,32 +110,44 @@ pub const fn gl_pow_ct(a: u64, exp: u64) -> u64 {
 // Quadratic Extension Field F_{p^2} = F_p[u] / (u^2 - 7)
 // ============================================================================
 
+const fn verified_ext2([c0, c1]: [u64; 2]) -> GoldilocksExt2 {
+    GoldilocksExt2 {
+        c0: Goldilocks(c0),
+        c1: Goldilocks(c1),
+    }
+}
+
+const fn ext2_words(x: GoldilocksExt2) -> [u64; 2] {
+    [x.c0.0, x.c1.0]
+}
+
 #[inline]
 pub const fn ext2_add(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
-    [gl_add(a[0], b[0]), gl_add(a[1], b[1])]
+    ext2_words(verified::goldilocks_ext2_add(
+        verified_ext2(a),
+        verified_ext2(b),
+    ))
 }
 
 #[inline]
 pub const fn ext2_sub(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
-    [gl_sub(a[0], b[0]), gl_sub(a[1], b[1])]
+    ext2_words(verified::goldilocks_ext2_sub(
+        verified_ext2(a),
+        verified_ext2(b),
+    ))
 }
 
 #[inline]
 pub const fn ext2_neg(a: [u64; 2]) -> [u64; 2] {
-    [gl_neg(a[0]), gl_neg(a[1])]
+    ext2_words(verified::goldilocks_ext2_neg(verified_ext2(a)))
 }
 
 #[inline]
 pub const fn ext2_mul(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
-    let v0 = gl_mul(a[0], b[0]);
-    let v1 = gl_mul(a[1], b[1]);
-    let nr_v1 = gl_mul(GOLDILOCKS_GENERATOR, v1);
-    let c0 = gl_add(v0, nr_v1);
-    let c1 = gl_sub(
-        gl_mul(gl_add(a[0], a[1]), gl_add(b[0], b[1])),
-        gl_add(v0, v1),
-    );
-    [c0, c1]
+    ext2_words(verified::goldilocks_ext2_mul(
+        verified_ext2(a),
+        verified_ext2(b),
+    ))
 }
 
 #[inline]
@@ -180,12 +167,34 @@ pub const fn ext2_inv_or_zero(a: [u64; 2]) -> [u64; 2] {
 #[inline]
 pub fn ext2_ct_eq(a: [u64; 2], b: [u64; 2]) -> bool {
     ct_eq_u64(gl_reduce_u64(a[0]), gl_reduce_u64(b[0]))
-        && ct_eq_u64(gl_reduce_u64(a[1]), gl_reduce_u64(b[1]))
+        & ct_eq_u64(gl_reduce_u64(a[1]), gl_reduce_u64(b[1]))
 }
 
 // ============================================================================
 // Canonical 5-Limb 56-Bit Injective 32-Byte Digest Packing (Zero Mod-p Alias)
 // ============================================================================
+
+/// Extract one big-endian 56-bit word of the delimited byte encoding.
+const fn delimited_limb(msg: &[u8], start: usize) -> u64 {
+    let mut word = 0;
+    let mut offset = 0;
+    while offset < 7 {
+        let pos = start + offset;
+        let byte = if pos < msg.len() {
+            msg[pos]
+        } else {
+            (pos == msg.len()) as u8
+        };
+        word = (word << 8) | byte as u64;
+        offset += 1;
+    }
+    word
+}
+
+/// Append a one byte and zero-pad to a whole number of seven-byte words.
+pub fn delimited_limbs56(msg: &[u8]) -> impl ExactSizeIterator<Item = u64> + '_ {
+    (0..msg.len() / 7 + 1).map(|i| delimited_limb(msg, 7 * i))
+}
 
 /// Pack a 32-byte digest injectively into **5 canonical 56-bit Goldilocks limbs** (`< 2^56 < p`).
 ///
@@ -193,25 +202,11 @@ pub fn ext2_ct_eq(a: [u64; 2], b: [u64; 2]) -> bool {
 /// Eliminates the `[p, 2^64)` modulo-$p$ aliasing vulnerability completely.
 #[inline]
 pub const fn pack_bytes32_to_limbs56(digest: &[u8; 32]) -> [u64; 5] {
-    let mut marked = [0u8; 35];
-    let mut i = 0usize;
-    while i < 32 {
-        marked[i] = digest[i];
+    let mut out = [0; 5];
+    let mut i = 0;
+    while i < out.len() {
+        out[i] = delimited_limb(digest, 7 * i);
         i += 1;
-    }
-    marked[32] = 0x01;
-    let mut out = [0u64; 5];
-    let mut limb = 0usize;
-    while limb < 5 {
-        let base = limb * 7;
-        let mut acc = 0u64;
-        let mut j = 0usize;
-        while j < 7 {
-            acc = (acc << 8) | (marked[base + j] as u64);
-            j += 1;
-        }
-        out[limb] = acc;
-        limb += 1;
     }
     out
 }
@@ -250,28 +245,7 @@ pub const fn unpack_limbs56_to_bytes32(limbs: &[u64; 5]) -> Option<[u8; 32]> {
 /// matching `Qsag.bytesToLimbs56` bit-for-bit.
 #[cfg(feature = "alloc")]
 pub fn pack_slice_to_limbs56(msg: &[u8]) -> Vec<u64> {
-    let rem = (msg.len() + 1) % 7;
-    let pad_zeros = if rem == 0 { 0 } else { 7 - rem };
-    let total_bytes = msg.len() + 1 + pad_zeros;
-    let num_limbs = total_bytes / 7;
-    let mut out = Vec::with_capacity(num_limbs);
-    for limb_idx in 0..num_limbs {
-        let base = limb_idx * 7;
-        let mut acc = 0u64;
-        for j in 0..7 {
-            let pos = base + j;
-            let b = if pos < msg.len() {
-                msg[pos]
-            } else if pos == msg.len() {
-                0x01
-            } else {
-                0x00
-            };
-            acc = (acc << 8) | (b as u64);
-        }
-        out.push(acc);
-    }
-    out
+    delimited_limbs56(msg).collect()
 }
 
 // ============================================================================
@@ -607,7 +581,7 @@ pub(crate) fn coset_lde_shape(
 }
 
 /// Scratch-free (zero-allocation without `std`) shifted-coset Reed-Solomon Low-Degree Extension (LDE) over $\mathbb{F}_{p^2}$:
-/// Given `evals` of length $N = 2^k$ representing polynomial $P(X) \in \mathbb{F}_{p^2}[X]_{< N}$
+/// Given `evals` of length $N = 2^k$ representing polynomial $P(X) \in \mathbb{F}_{p^2}\[X\]_{< N}$
 /// evaluated on $\{1, \omega_N, \dots, \omega_N^{N-1}\}$, computes `out` of length $M = N \cdot \text{blowup}$
 /// containing $P(\text{shift} \cdot \omega_M^i)$ for $i \in [0, M)$ directly inside `out`!
 pub fn coset_lde_ext2_cpu(
@@ -647,9 +621,9 @@ pub fn coset_lde_ext2_cpu(
 // Quintic Extension Field F_{p^5} = F_p[X] / (X^5 - 3) & 4-Byte Kronecker
 // ============================================================================
 
-/// Non-residue $W = 3$ defining $\mathbb{F}_{p^5} = \mathbb{F}_p[X]/(X^5 - 3)$ (`gcd(5, p - 1) = 5`,
+/// Non-residue $W = 3$ defining $\mathbb{F}_{p^5} = \mathbb{F}_p\[X\]/(X^5 - 3)$ (`gcd(5, p - 1) = 5`,
 /// $3^{(p-1)/5} \ne 1 \pmod p$).
-pub const GOLDILOCKS_FP5_NONRESIDUE: u64 = 3;
+pub const GOLDILOCKS_FP5_NONRESIDUE: u64 = qsag_whir_verified::FP5_NONRESIDUE_W;
 
 /// Canonical `Fp5` multiplicative identity `[1, 0, 0, 0, 0]`.
 pub const FP5_ONE: [u64; 5] = [1, 0, 0, 0, 0];
@@ -657,99 +631,52 @@ pub const FP5_ONE: [u64; 5] = [1, 0, 0, 0, 0];
 pub const FP5_ZERO: [u64; 5] = [0, 0, 0, 0, 0];
 
 #[inline]
-pub const fn fp5_add(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
-    [
-        gl_add(a[0], b[0]),
-        gl_add(a[1], b[1]),
-        gl_add(a[2], b[2]),
-        gl_add(a[3], b[3]),
-        gl_add(a[4], b[4]),
-    ]
+fn verified_fp5([c0, c1, c2, c3, c4]: [u64; 5]) -> qsag_whir_verified::Fp5 {
+    qsag_whir_verified::Fp5 { c0, c1, c2, c3, c4 }
 }
 
 #[inline]
-pub const fn fp5_sub(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
-    [
-        gl_sub(a[0], b[0]),
-        gl_sub(a[1], b[1]),
-        gl_sub(a[2], b[2]),
-        gl_sub(a[3], b[3]),
-        gl_sub(a[4], b[4]),
-    ]
+fn fp5_words(x: qsag_whir_verified::Fp5) -> [u64; 5] {
+    [x.c0, x.c1, x.c2, x.c3, x.c4]
 }
 
 #[inline]
-pub const fn fp5_neg(a: [u64; 5]) -> [u64; 5] {
-    [
-        gl_neg(a[0]),
-        gl_neg(a[1]),
-        gl_neg(a[2]),
-        gl_neg(a[3]),
-        gl_neg(a[4]),
-    ]
+pub fn fp5_add(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
+    fp5_words(qsag_whir_verified::fp5_add(
+        verified_fp5(a),
+        verified_fp5(b),
+    ))
 }
 
 #[inline]
-pub const fn fp5_scale_base(a: [u64; 5], s: u64) -> [u64; 5] {
-    [
-        gl_mul(a[0], s),
-        gl_mul(a[1], s),
-        gl_mul(a[2], s),
-        gl_mul(a[3], s),
-        gl_mul(a[4], s),
-    ]
-}
-
-/// Constant-time schoolbook multiplication in $\mathbb{F}_p[X]/(X^5 - 3)$.
-#[inline]
-pub const fn fp5_mul(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
-    let w = GOLDILOCKS_FP5_NONRESIDUE;
-    let hi0 = gl_add(
-        gl_add(gl_mul(a[1], b[4]), gl_mul(a[2], b[3])),
-        gl_add(gl_mul(a[3], b[2]), gl_mul(a[4], b[1])),
-    );
-    let c0 = gl_add(gl_mul(a[0], b[0]), gl_mul(w, hi0));
-
-    let hi1 = gl_add(
-        gl_add(gl_mul(a[2], b[4]), gl_mul(a[3], b[3])),
-        gl_mul(a[4], b[2]),
-    );
-    let lo1 = gl_add(gl_mul(a[0], b[1]), gl_mul(a[1], b[0]));
-    let c1 = gl_add(lo1, gl_mul(w, hi1));
-
-    let hi2 = gl_add(gl_mul(a[3], b[4]), gl_mul(a[4], b[3]));
-    let lo2 = gl_add(
-        gl_add(gl_mul(a[0], b[2]), gl_mul(a[1], b[1])),
-        gl_mul(a[2], b[0]),
-    );
-    let c2 = gl_add(lo2, gl_mul(w, hi2));
-
-    let hi3 = gl_mul(a[4], b[4]);
-    let lo3 = gl_add(
-        gl_add(gl_mul(a[0], b[3]), gl_mul(a[1], b[2])),
-        gl_add(gl_mul(a[2], b[1]), gl_mul(a[3], b[0])),
-    );
-    let c3 = gl_add(lo3, gl_mul(w, hi3));
-
-    let c4 = gl_add(
-        gl_add(
-            gl_add(gl_mul(a[0], b[4]), gl_mul(a[1], b[3])),
-            gl_add(gl_mul(a[2], b[2]), gl_mul(a[3], b[1])),
-        ),
-        gl_mul(a[4], b[0]),
-    );
-    [c0, c1, c2, c3, c4]
+pub fn fp5_sub(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
+    fp5_words(qsag_whir_verified::fp5_sub(
+        verified_fp5(a),
+        verified_fp5(b),
+    ))
 }
 
 #[inline]
-pub const fn fp5_pow_pub(mut base: [u64; 5], mut exp: u64) -> [u64; 5] {
-    base = [
-        gl_reduce_u64(base[0]),
-        gl_reduce_u64(base[1]),
-        gl_reduce_u64(base[2]),
-        gl_reduce_u64(base[3]),
-        gl_reduce_u64(base[4]),
-    ];
+pub fn fp5_neg(a: [u64; 5]) -> [u64; 5] {
+    fp5_words(qsag_whir_verified::fp5_neg(verified_fp5(a)))
+}
+
+#[inline]
+pub fn fp5_scale_base(a: [u64; 5], s: u64) -> [u64; 5] {
+    fp5_words(qsag_whir_verified::fp5_scale(verified_fp5(a), s))
+}
+
+#[inline]
+pub fn fp5_mul(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
+    fp5_words(qsag_whir_verified::fp5_mul(
+        verified_fp5(a),
+        verified_fp5(b),
+    ))
+}
+
+#[inline]
+pub fn fp5_pow_pub(mut base: [u64; 5], mut exp: u64) -> [u64; 5] {
+    base = base.map(gl_reduce_u64);
     let mut acc = FP5_ONE;
     while exp > 0 {
         if (exp & 1) == 1 {
