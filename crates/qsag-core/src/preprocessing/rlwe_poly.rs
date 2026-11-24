@@ -483,3 +483,449 @@ pub(super) fn crs_mixed_session_id(crs_coin: &[u8; 32], session_id: &[u8; 32]) -
 /// First message of active-checked Ring-LWE 1-out-of-2 OT (`Receiver -> Sender`), carrying `pk0`
 /// and a constant-time OR-Sigma proof of short witness knowledge [`RlweReceiverZkPok`].
 #[derive(Clone, Debug)]
+pub struct RlweOtReceiverMsg {
+    pub pk0: RlwePoly,
+    pub pok: RlweReceiverZkPok,
+}
+
+/// Ephemeral receiver state for 1 FO-checked Ring-LWE base OT (`!Clone`, wiped on `Drop`).
+pub struct RlweOtReceiverSecret {
+    pub(super) crs_coin: [u8; 32],
+    pub(super) session_id: [u8; 32],
+    pub(super) sender_id: usize,
+    pub(super) receiver_id: usize,
+    pub(super) ot_idx: u32,
+    pub(super) pk0: RlwePoly,
+    pub(super) s_r: RlwePoly,
+    pub(super) choice_bit: bool,
+}
+
+impl fmt::Debug for RlweOtReceiverSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RlweOtReceiverSecret([REDACTED])")
+    }
+}
+
+impl Drop for RlweOtReceiverSecret {
+    fn drop(&mut self) {
+        wipe_u16s(&mut self.s_r.0);
+        self.choice_bit = false;
+        black_box(&mut self.choice_bit);
+    }
+}
+
+/// Second message of active-checked Ring-LWE 1-out-of-2 OT (`Sender -> Receiver`).
+#[derive(Clone, Debug)]
+pub struct RlweOtSenderMsg {
+    pub u0: RlwePoly,
+    pub v0: RlwePoly,
+    pub u1: RlwePoly,
+    pub v1: RlwePoly,
+}
+
+#[inline]
+fn encode_seed64_into_poly(seed: &[u8; 32], rho: &[u8; 32]) -> RlwePoly {
+    let mut coeffs = [0u16; RLWE_N];
+    for byte_idx in 0..32 {
+        let b_s = black_box(seed[byte_idx]);
+        let b_r = black_box(rho[byte_idx]);
+        for bit in 0..8 {
+            let bit_s = ((b_s >> bit) & 1) as u16;
+            let bit_r = ((b_r >> bit) & 1) as u16;
+            coeffs[8 * byte_idx + bit] = bit_s * RLWE_HALF_Q;
+            coeffs[256 + 8 * byte_idx + bit] = bit_r * RLWE_HALF_Q;
+        }
+    }
+    RlwePoly(coeffs)
+}
+
+#[inline]
+fn decode_seed64_from_poly_ct(noisy: &RlwePoly) -> ([u8; 32], [u8; 32]) {
+    let mut seed = [0u8; 32];
+    let mut rho = [0u8; 32];
+    for byte_idx in 0..32 {
+        let mut acc_s = 0u8;
+        let mut acc_r = 0u8;
+        for bit in 0..8 {
+            acc_s |= rlwe_decode_bit_ct(noisy.0[8 * byte_idx + bit]) << bit;
+            acc_r |= rlwe_decode_bit_ct(noisy.0[256 + 8 * byte_idx + bit]) << bit;
+        }
+        seed[byte_idx] = acc_s;
+        rho[byte_idx] = acc_r;
+    }
+    (seed, rho)
+}
+
+/// Deterministic Fujisaki–Okamoto branch encryptor: derives `(r_b, e2_b, e3_b)` from
+/// `Cshake256("QSAG.OT.RLWE.FO/v1", crs_coin || session_id || sender || receiver || ot_idx || branch || seed || rho)`
+/// and encrypts `(seed || rho)` (64 bytes = 512 bits <= 1024 coeffs).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the explicit statement, role, witness and randomness bindings in this protocol API"
+)]
+pub(super) fn rlwe_fo_encrypt_branch(
+    crs_coin: &[u8; 32],
+    session_id: &[u8; 32],
+    sender_id: usize,
+    receiver_id: usize,
+    ot_idx: u32,
+    branch: u8,
+    a_ntt: &RlwePolyNtt,
+    pk_branch: &RlwePoly,
+    seed: &[u8; 32],
+    rho: &[u8; 32],
+) -> (RlwePoly, RlwePoly) {
+    let mut label = [0u8; 120];
+    label[0..32].copy_from_slice(crs_coin);
+    label[32..64].copy_from_slice(session_id);
+    label[64..72].copy_from_slice(&(sender_id as u64).to_be_bytes());
+    label[72..80].copy_from_slice(&(receiver_id as u64).to_be_bytes());
+    label[80..84].copy_from_slice(&ot_idx.to_be_bytes());
+    label[84] = branch;
+    label[88..120].copy_from_slice(seed);
+    let mut fo_seed = cshake256_32_multi_frame(b"QSAG.OT.RLWE.FO/v2", &[&label, rho]);
+    wipe_bytes(&mut label);
+
+    let mut fo_rng = PartyPrivateRng::from_seed(fo_seed, b"QSAG.OT.RLWE.FO.STREAM/v2");
+    wipe_bytes32(&mut fo_seed);
+    let mut r_b = RlwePoly::sample_ternary_eta1(&mut fo_rng);
+    let mut e2_b = RlwePoly::sample_ternary_eta1(&mut fo_rng);
+    let mut e3_b = RlwePoly::sample_ternary_eta1(&mut fo_rng);
+    let mut m_poly = encode_seed64_into_poly(seed, rho);
+
+    let mut r_b_ntt = r_b.to_ntt();
+    let u_b = a_ntt.pointwise_mul_from_ntt(&r_b_ntt).add(&e2_b);
+    let v_b = pk_branch.mul_ntt(&r_b_ntt).add(&e3_b).add(&m_poly);
+
+    wipe_u16s(&mut r_b_ntt.0);
+    wipe_u16s(&mut r_b.0);
+    wipe_u16s(&mut e2_b.0);
+    wipe_u16s(&mut e3_b.0);
+    wipe_u16s(&mut m_poly.0);
+    (u_b, v_b)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the explicit statement, role, witness and randomness bindings in this protocol API"
+)]
+fn rlwe_ot_choose_with_crs(
+    crs_coin: &[u8; 32],
+    session_id: &[u8; 32],
+    sender_id: usize,
+    receiver_id: usize,
+    ot_idx: u32,
+    a_ntt: &RlwePolyNtt,
+    t_crs: &RlwePoly,
+    choice_bit: bool,
+    rng: &mut PartyPrivateRng,
+) -> (RlweOtReceiverSecret, RlweOtReceiverMsg) {
+    let (s_r, mut e1) = loop {
+        let mut s = RlwePoly::sample_ternary_eta1(rng);
+        let mut e = RlwePoly::sample_ternary_eta1(rng);
+        if black_box(bounded_ternary_witness(&s, &e)) {
+            break (s, e);
+        }
+        wipe_u16s(&mut s.0);
+        wipe_u16s(&mut e.0);
+    };
+    let rlwe_sample = s_r.mul_ntt(a_ntt).add(&e1);
+    let shifted = rlwe_sample.sub(t_crs);
+    let pk0 = RlwePoly::ct_select(choice_bit, &shifted, &rlwe_sample);
+    let pok = RlweReceiverZkPok::prove_ct(
+        crs_coin,
+        session_id,
+        sender_id,
+        receiver_id,
+        ot_idx,
+        a_ntt,
+        t_crs,
+        &pk0,
+        &s_r,
+        &e1,
+        choice_bit,
+        rng,
+    );
+    wipe_u16s(&mut e1.0);
+    (
+        RlweOtReceiverSecret {
+            crs_coin: *crs_coin,
+            session_id: *session_id,
+            sender_id,
+            receiver_id,
+            ot_idx,
+            pk0,
+            s_r,
+            choice_bit,
+        },
+        RlweOtReceiverMsg { pk0, pok },
+    )
+}
+
+/// Transparent CRS for the standalone base-OT API, bound to its protocol and roles.
+fn rlwe_session_crs(session_id: &[u8; 32], sender_id: usize, receiver_id: usize) -> [u8; 32] {
+    cshake256_32_multi_frame(
+        b"QSAG.OT.RLWE.CRS/v2",
+        &[
+            session_id,
+            &(sender_id as u64).to_be_bytes(),
+            &(receiver_id as u64).to_be_bytes(),
+            &(RLWE_N as u64).to_be_bytes(),
+            &RLWE_Q.to_be_bytes(),
+            &(RLWE_ZKPOK_REPS as u64).to_be_bytes(),
+        ],
+    )
+}
+
+/// Receiver Round-1: encode secret `choice_bit` into `pk0 = (a * s_R + e_1) - choice_bit * t_crs`
+/// and attach a constant-time OR-Sigma proof [`RlweReceiverZkPok`].
+pub fn rlwe_ot_choose(
+    session_id: &[u8; 32],
+    sender_id: usize,
+    receiver_id: usize,
+    ot_idx: u32,
+    choice_bit: bool,
+    rng: &mut PartyPrivateRng,
+) -> (RlweOtReceiverSecret, RlweOtReceiverMsg) {
+    let zero_coin = rlwe_session_crs(session_id, sender_id, receiver_id);
+    let a_ntt =
+        RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, ot_idx, 0)
+            .to_ntt();
+    let t_crs =
+        RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, ot_idx, 1);
+    rlwe_ot_choose_with_crs(
+        &zero_coin,
+        session_id,
+        sender_id,
+        receiver_id,
+        ot_idx,
+        &a_ntt,
+        &t_crs,
+        choice_bit,
+        rng,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the explicit statement, role, witness and randomness bindings in this protocol API"
+)]
+fn try_rlwe_ot_transfer_with_crs(
+    crs_coin: &[u8; 32],
+    session_id: &[u8; 32],
+    sender_id: usize,
+    receiver_id: usize,
+    ot_idx: u32,
+    a_ntt: &RlwePolyNtt,
+    t_crs: &RlwePoly,
+    req: &RlweOtReceiverMsg,
+    seed0: &[u8; 32],
+    seed1: &[u8; 32],
+    rng: &mut PartyPrivateRng,
+) -> Result<RlweOtSenderMsg, PreprocessError> {
+    if !req.pok.verify(
+        crs_coin,
+        session_id,
+        sender_id,
+        receiver_id,
+        ot_idx,
+        a_ntt,
+        t_crs,
+        &req.pk0,
+    ) {
+        return Err(PreprocessError::BaseOtReceiverProofFailed {
+            sender_id,
+            receiver_id,
+        });
+    }
+    let pk0 = req.pk0;
+    let pk1 = pk0.add(t_crs);
+    let mut rho0 = rng.next_bytes32();
+    let mut rho1 = rng.next_bytes32();
+    let (u0, v0) = rlwe_fo_encrypt_branch(
+        crs_coin,
+        session_id,
+        sender_id,
+        receiver_id,
+        ot_idx,
+        0,
+        a_ntt,
+        &pk0,
+        seed0,
+        &rho0,
+    );
+    let (u1, v1) = rlwe_fo_encrypt_branch(
+        crs_coin,
+        session_id,
+        sender_id,
+        receiver_id,
+        ot_idx,
+        1,
+        a_ntt,
+        &pk1,
+        seed1,
+        &rho1,
+    );
+    wipe_bytes32(&mut rho0);
+    wipe_bytes32(&mut rho1);
+    Ok(RlweOtSenderMsg { u0, v0, u1, v1 })
+}
+
+/// Fallible Sender Round-2: verifies Receiver's OR-Sigma ZKPoK **before** encrypting `(seed0, seed1)`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the explicit statement, role, witness and randomness bindings in this protocol API"
+)]
+pub fn try_rlwe_ot_transfer(
+    session_id: &[u8; 32],
+    sender_id: usize,
+    receiver_id: usize,
+    ot_idx: u32,
+    req: &RlweOtReceiverMsg,
+    seed0: &[u8; 32],
+    seed1: &[u8; 32],
+    rng: &mut PartyPrivateRng,
+) -> Result<RlweOtSenderMsg, PreprocessError> {
+    let zero_coin = rlwe_session_crs(session_id, sender_id, receiver_id);
+    let a_ntt =
+        RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, ot_idx, 0)
+            .to_ntt();
+    let t_crs =
+        RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, ot_idx, 1);
+    try_rlwe_ot_transfer_with_crs(
+        &zero_coin,
+        session_id,
+        sender_id,
+        receiver_id,
+        ot_idx,
+        &a_ntt,
+        &t_crs,
+        req,
+        seed0,
+        seed1,
+        rng,
+    )
+}
+
+/// Sender Round-2: verifies Receiver's OR-Sigma ZKPoK and Fujisaki–Okamoto encrypts 64-byte payloads
+/// `(seed_b || rho_b)` under `(pk0, pk0 + t_crs)` with worst-case noise $\le 2049 < 3072$ (`0` decryption error).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the explicit statement, role, witness and randomness bindings in this protocol API"
+)]
+pub fn rlwe_ot_transfer(
+    session_id: &[u8; 32],
+    sender_id: usize,
+    receiver_id: usize,
+    ot_idx: u32,
+    req: &RlweOtReceiverMsg,
+    seed0: &[u8; 32],
+    seed1: &[u8; 32],
+    rng: &mut PartyPrivateRng,
+) -> Result<RlweOtSenderMsg, PreprocessError> {
+    try_rlwe_ot_transfer(
+        session_id,
+        sender_id,
+        receiver_id,
+        ot_idx,
+        req,
+        seed0,
+        seed1,
+        rng,
+    )
+}
+
+pub(super) fn rlwe_ot_decrypt_ct_mask(
+    sec: &RlweOtReceiverSecret,
+    a_ntt: &RlwePolyNtt,
+    t_crs: &RlwePoly,
+    resp: &RlweOtSenderMsg,
+) -> Result<([u8; 32], u8), PreprocessError> {
+    if !resp.u0.is_canonical()
+        || !resp.v0.is_canonical()
+        || !resp.u1.is_canonical()
+        || !resp.v1.is_canonical()
+    {
+        return Err(PreprocessError::BaseOtFoCheckFailed {
+            sender_id: sec.sender_id,
+            receiver_id: sec.receiver_id,
+            ot_idx: sec.ot_idx,
+        });
+    }
+    let u_c = RlwePoly::ct_select(sec.choice_bit, &resp.u1, &resp.u0);
+    let v_c = RlwePoly::ct_select(sec.choice_bit, &resp.v1, &resp.v0);
+    let mut prod = u_c.mul_negacyclic(&sec.s_r);
+    let mut diff = v_c.sub(&prod);
+    let (mut seed_c, mut rho_c) = decode_seed64_from_poly_ct(&diff);
+    wipe_u16s(&mut prod.0);
+    wipe_u16s(&mut diff.0);
+
+    let pk1 = sec.pk0.add(t_crs);
+    let pk_c = RlwePoly::ct_select(sec.choice_bit, &pk1, &sec.pk0);
+    let branch = black_box(sec.choice_bit as u8);
+    let (u_exp, v_exp) = rlwe_fo_encrypt_branch(
+        &sec.crs_coin,
+        &sec.session_id,
+        sec.sender_id,
+        sec.receiver_id,
+        sec.ot_idx,
+        branch,
+        a_ntt,
+        &pk_c,
+        &seed_c,
+        &rho_c,
+    );
+    wipe_bytes32(&mut rho_c);
+    let ok_u = u_exp.ct_eq(&u_c) as u8;
+    let ok_v = v_exp.ct_eq(&v_c) as u8;
+    let ok = black_box(ok_u & ok_v);
+    let keep_mask = 0u8.wrapping_sub(ok);
+    for b in &mut seed_c {
+        *b &= keep_mask;
+    }
+    Ok((seed_c, ok))
+}
+
+fn rlwe_ot_decrypt_with_crs(
+    sec: &RlweOtReceiverSecret,
+    a_ntt: &RlwePolyNtt,
+    t_crs: &RlwePoly,
+    resp: &RlweOtSenderMsg,
+) -> Result<[u8; 32], PreprocessError> {
+    let (mut seed_c, ok) = rlwe_ot_decrypt_ct_mask(sec, a_ntt, t_crs, resp)?;
+    if black_box(ok) == 0 {
+        wipe_bytes32(&mut seed_c);
+        return Err(PreprocessError::BaseOtFoCheckFailed {
+            sender_id: sec.sender_id,
+            receiver_id: sec.receiver_id,
+            ot_idx: sec.ot_idx,
+        });
+    }
+    Ok(seed_c)
+}
+
+/// Receiver Round-3: branchlessly select `(u_c, v_c)`, recover `(seed_c, rho_c)`, and **actively
+/// re-encrypt `(u_c, v_c)` from `rho_c`** (`Err(BaseOtFoCheckFailed)` if the Sender deviated!).
+pub fn rlwe_ot_decrypt(
+    sec: &RlweOtReceiverSecret,
+    resp: &RlweOtSenderMsg,
+) -> Result<[u8; 32], PreprocessError> {
+    let a_ntt = RlwePoly::from_crs_xof_with_coin(
+        &sec.crs_coin,
+        &sec.session_id,
+        sec.sender_id,
+        sec.receiver_id,
+        sec.ot_idx,
+        0,
+    )
+    .to_ntt();
+    let t_crs = RlwePoly::from_crs_xof_with_coin(
+        &sec.crs_coin,
+        &sec.session_id,
+        sec.sender_id,
+        sec.receiver_id,
+        sec.ot_idx,
+        1,
+    );
+    rlwe_ot_decrypt_with_crs(sec, &a_ntt, &t_crs, resp)
+}
