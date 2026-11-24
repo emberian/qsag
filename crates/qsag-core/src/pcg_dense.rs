@@ -919,6 +919,18 @@ fn compute_spcot_check_tag(
     )
 }
 
+fn spcot_receiver_commitment(
+    session: &[u8; 32],
+    challenge: &[u8; 32],
+    nonce: &[u8; 32],
+    tag: &[u8; 32],
+) -> [u8; 32] {
+    cshake256_32_multi_frame(
+        b"QSAG.SPCOT.RECEIVER.COMMIT/v1",
+        &[session, challenge, nonce, tag],
+    )
+}
+
 /// Final receiver tag comparison after OT-branch parity verification.
 fn verify_spcot_receiver_tag(
     expected: &[u8; 32],
@@ -2991,6 +3003,17 @@ fn run_directed_spcot_setup(
         }
     }
 
+    // Fix the receiver's tag before the sender computes its response.
+    let receiver_tag = compute_spcot_check_tag(
+        session_id,
+        sender_id,
+        receiver_id,
+        &spcot_chal_coin,
+        &w_recv,
+    );
+    let nonce = SecretBuffer(party_rngs[receiver_id].next_bytes32());
+    let receiver_commitment =
+        spcot_receiver_commitment(session_id, &spcot_chal_coin, &nonce, &receiver_tag);
     let mut w_send: [Tower128; SPCOT_CHECK_REPS] =
         core::array::from_fn(|rep| vole_masks[rep].key_sender.add(x_chk[rep].mul(alpha_sender)));
     let mut sender_keys = if need_preview {
@@ -3041,25 +3064,24 @@ fn run_directed_spcot_setup(
         &spcot_chal_coin,
         &w_send,
     );
-    let receiver_tag = compute_spcot_check_tag(
-        session_id,
-        sender_id,
-        receiver_id,
-        &spcot_chal_coin,
-        &w_recv,
-    );
     wipe_tower128_slice(&mut w_send);
     wipe_tower128_slice(&mut w_recv);
     wipe_tower128_slice(&mut x_chk);
 
-    if verify_spcot_receiver_tag(&spcot_expected_tag, &receiver_tag, sender_id).is_err() {
+    let opening = spcot_receiver_commitment(session_id, &spcot_chal_coin, &nonce, &receiver_tag);
+    let verified = if !ct_eq_bytes32(&opening, &receiver_commitment) {
+        Err(PreprocessError::MacCheckFailed {
+            phase: "pcg_dense_spcot_opening",
+            accused_party: Some(receiver_id),
+        })
+    } else {
+        verify_spcot_receiver_tag(&spcot_expected_tag, &receiver_tag, sender_id)
+    };
+    if let Err(error) = verified {
         wipe_u128s(&mut sender_keys);
         wipe_u128s(&mut recv_mac_preview);
         wipe_u64s(&mut recv_choice_preview);
-        return Err(PreprocessError::MacCheckFailed {
-            phase: "pcg_dense_spcot_consistency",
-            accused_party: Some(sender_id),
-        });
+        return Err(error);
     }
 
     let (
@@ -3467,6 +3489,19 @@ mod tests {
             run_lhl_vole128_mask(&sid, 0, 1, 1, Tower128(alpha.0 ^ 1), &mut mesh, &mut rngs)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn spcot_receiver_opening_binds_the_session_challenge_and_tag() {
+        let commitment = spcot_receiver_commitment(&[1; 32], &[2; 32], &[3; 32], &[4; 32]);
+        for pos in 0..4 {
+            let mut fields = [[1; 32], [2; 32], [3; 32], [4; 32]];
+            fields[pos][0] ^= 1;
+            assert_ne!(
+                commitment,
+                spcot_receiver_commitment(&fields[0], &fields[1], &fields[2], &fields[3])
+            );
+        }
     }
 
     #[test]
