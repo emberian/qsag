@@ -941,3 +941,946 @@ fn rss_chi_rejects_mismatched_pairwise_mask_seed() {
 fn make_rngs3(tag: u8) -> [PartyPrivateRng; 3] {
     core::array::from_fn(|p| {
         PartyPrivateRng::from_seed([tag.wrapping_add(p as u8); 32], b"rss-test")
+    })
+}
+
+#[test]
+fn test_batch_active_mask_zero_shift_overflow_and_rss_64way_keccak_parity() {
+    assert_eq!(batch_active_mask(0), 0);
+    assert_eq!(batch_active_mask(1), 1);
+    assert_eq!(batch_active_mask(63), (1u64 << 63) - 1);
+    assert_eq!(batch_active_mask(64), u64::MAX);
+
+    let sid = [0x33; 32];
+    let mut rngs = make_rngs3(0x10);
+    let (keys, _) = run_dealerless_rss_dkg_2of3(sid, 16, &mut rngs).unwrap();
+
+    // Check all 64 parallel Keccak-f[1600] instances against native `keccak_f1600`!
+    let mut ref_states = [[0u64; 25]; 64];
+    let mut st_p = SecretBuffer([[0u64; 1600]; 3]);
+    let mut st_s = SecretBuffer([[0u64; 1600]; 3]);
+    let mut inst = 0;
+    while inst < 64 {
+        for lane in 0..25 {
+            let w =
+                ((inst as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_add(lane as u64 * 17);
+            ref_states[inst][lane] = w;
+            let s0 = rngs[0].next_u64() & (1u64 << inst);
+            let s1 = rngs[1].next_u64() & (1u64 << inst);
+            for z in 0..64 {
+                let bit = ((w >> z) & 1) << inst;
+                let s2 = bit ^ s0 ^ s1;
+                st_p[0][lane * 64 + z] |= s0;
+                st_s[0][lane * 64 + z] |= s1;
+                st_p[1][lane * 64 + z] |= s1;
+                st_s[1][lane * 64 + z] |= s2;
+                st_p[2][lane * 64 + z] |= s2;
+                st_s[2][lane * 64 + z] |= s0;
+            }
+        }
+        keccak_f1600(&mut ref_states[inst]);
+        inst += 1;
+    }
+
+    eval_rss_keccak_f1600_batch64(&sid, 0, 64, &mut st_p, &mut st_s, &keys, &mut rngs).unwrap();
+
+    let mut inst = 0;
+    while inst < 64 {
+        for lane in 0..25 {
+            let mut got = 0u64;
+            for z in 0..64 {
+                let b =
+                    ((st_p[0][lane * 64 + z] ^ st_p[1][lane * 64 + z] ^ st_p[2][lane * 64 + z])
+                        >> inst)
+                        & 1;
+                got |= b << z;
+            }
+            assert_eq!(got, ref_states[inst][lane]);
+        }
+        inst += 1;
+    }
+
+    // Active RSS share lie MUST emit `RssSlashingReceipt` with probability 1!
+    let mut bad_sec = [vec![st_s[0][0]], vec![st_s[1][0]], vec![st_s[2][0] ^ 1]];
+    let prim = [vec![st_p[0][0]], vec![st_p[1][0]], vec![st_p[2][0]]];
+    let latch = RssPoisonLatch::new();
+    assert_eq!(
+        rss_commit_and_open_u64_batch(&sid, "tamper", &prim, &bad_sec, &mut rngs, &latch)
+            .unwrap_err(),
+        KeccakMpcError::RssShareEqualityFailed(RssSlashingReceipt {
+            share_slot: 0,
+            primary_party: 0,
+            secondary_party: 2,
+        })
+    );
+    assert!(latch.is_set());
+    bad_sec[2][0] ^= 1;
+    let latch = RssPoisonLatch::new();
+    rss_commit_and_open_u64_batch(&sid, "honest", &prim, &bad_sec, &mut rngs, &latch).unwrap();
+    assert!(!latch.is_set());
+}
+
+#[test]
+#[ignore = "Full FIPS 205 production-height MPC soak; compact multilayer signatures and FIPS KATs run by default"]
+fn test_rss_slh_dsa_mpc_128f_exact_kat_parity_and_distributed_tsw() {
+    let sid = [0x51; 32];
+    let mut rngs = make_rngs3(0x20);
+    let (keys, _) = run_dealerless_rss_dkg_2of3(sid, 16, &mut rngs).unwrap();
+
+    // Verify distributed `SLH-DSA-SHAKE-128f` (`17,088 B` official NIST parameter set!)
+    let sk_seed: [u8; 16] = core::array::from_fn(|b| {
+        keys[0].sk_seed_primary[b] ^ keys[1].sk_seed_primary[b] ^ keys[2].sk_seed_primary[b]
+    });
+    let sk_prf: [u8; 16] = core::array::from_fn(|b| {
+        keys[0].sk_prf_primary[b] ^ keys[1].sk_prf_primary[b] ^ keys[2].sk_prf_primary[b]
+    });
+    let pk_seed_16 = &keys[0].pk_seed[..16].to_vec();
+    let p128f = Fips205Params::SLH_DSA_SHAKE_128F;
+    let (ref_sk, ref_pk) = slh_keygen_internal(&p128f, &sk_seed, &sk_prf, pk_seed_16).unwrap();
+
+    let mut cluster = RssSlhMpcCluster::new(sid, keys, rngs).unwrap();
+    let mpc_pk = slh_keygen_mpc(&p128f, &mut cluster, pk_seed_16).unwrap();
+    assert_eq!(mpc_pk, ref_pk);
+
+    let msg = b"distributed-threshold-slh-dsa-128f";
+    let ctx = b"qsag-mpc-ctx";
+    #[cfg(feature = "std")]
+    let sign_start = std::time::Instant::now();
+    let mpc_sig = slh_sign_mpc(&p128f, &mut cluster, msg, ctx, &mpc_pk, None).unwrap();
+    #[cfg(feature = "std")]
+    std::eprintln!("SLH-DSA-SHAKE-128f MPC sign: {:?}", sign_start.elapsed());
+    let ref_sig = crate::fips205::slh_sign(&p128f, msg, ctx, &ref_sk, None).unwrap();
+    assert_eq!(mpc_sig.len(), 17_088);
+    // Deterministic (`addrnd = None`) MPC signature MUST be 100% BIT-FOR-BIT IDENTICAL to FIPS 205!
+    assert_eq!(mpc_sig, ref_sig);
+    assert!(slh_verify(&p128f, msg, &mpc_sig, ctx, &mpc_pk));
+
+    // Also test distributed `DkgCachedSubtrees::build_distributed_rss` + `sign_stateless_tsw_rss_mpc`
+    let mut rngs32 = make_rngs3(0x40);
+    let (keys32, _) = run_dealerless_rss_dkg_2of3([0x52; 32], 32, &mut rngs32).unwrap();
+    // Reference-only reconstruction of the test fixture; the cluster keeps its shares.
+    let xor3 = |pick: fn(&RssKeyShare256) -> [u8; 32]| -> [u8; 32] {
+        let parts = [pick(&keys32[0]), pick(&keys32[1]), pick(&keys32[2])];
+        core::array::from_fn(|b| parts[0][b] ^ parts[1][b] ^ parts[2][b])
+    };
+    let tsw_sk = PqSecretKey {
+        sk_seed: xor3(|k| k.sk_seed_primary),
+        sk_prf: xor3(|k| k.sk_prf_primary),
+        pk_seed: keys32[0].pk_seed,
+    };
+    let mut cluster32 = RssSlhMpcCluster::new([0x52; 32], keys32, rngs32).unwrap();
+    let tsw_params = PqHashParams::COMPACT_GOLDEN;
+    let cached = DkgCachedSubtrees::build_distributed_rss(&tsw_params, &mut cluster32, 64).unwrap();
+    // The distributed public key is the reference key of the same seeds.
+    assert_eq!(
+        cached.pk,
+        derive_public_key(Cshake256Suite, &tsw_params, &tsw_sk)
+    );
+    let tsw_msg = b"distributed-corduroy-msg";
+    let tsw_sig =
+        sign_stateless_tsw_rss_mpc(&tsw_params, &mut cluster32, &cached.pk, tsw_msg, 100_000)
+            .unwrap();
+    assert!(verify_pq_hash_sig(
+        Cshake256Suite,
+        &tsw_params,
+        &cached.pk,
+        tsw_msg,
+        &tsw_sig
+    ));
+    // Given the same randomizer, the distributed signature equals the reference signature
+    // in every FORS opening, WOTS chain value, grind counter and authentication path.
+    let mu = th_pre_hash(
+        Cshake256Suite,
+        &cached.pk.pk_seed,
+        &cached.pk.pk_root,
+        tsw_msg,
+    );
+    let (leaf, fors_idxs) = derive_stateless_leaf_and_fors_indices(
+        Cshake256Suite,
+        &tsw_params,
+        &tsw_sig.r_rand,
+        &cached.pk.pk_seed,
+        &cached.pk.pk_root,
+        &mu,
+    )
+    .unwrap();
+    let reference_sig = sign_hypertree_core(
+        Cshake256Suite,
+        &tsw_params,
+        &tsw_sk,
+        &cached.pk,
+        &mu,
+        tsw_sig.r_rand,
+        leaf,
+        Some(&fors_idxs),
+        100_000,
+    )
+    .unwrap();
+    assert_eq!(tsw_sig, reference_sig);
+    let mut forged = tsw_sig;
+    forged.layer_sigs[0].wots_chains[0][0] ^= 1;
+    assert!(!verify_pq_hash_sig(
+        Cshake256Suite,
+        &tsw_params,
+        &cached.pk,
+        tsw_msg,
+        &forged
+    ));
+}
+
+#[test]
+fn tsw_rss_signer_randomizer_is_deterministic_and_bound_to_the_generated_key() {
+    // Smallest well-formed stateless profile: 2 layers of 2 leaves, 2 FORS trees of 2 leaves.
+    let params = PqHashParams {
+        w: 4,
+        ell1: 128,
+        subtree_height: 1,
+        num_layers: 2,
+        fors_trees: 2,
+        fors_height: 1,
+        max_sigs_log2: 2,
+        stateful: false,
+    };
+    assert!(params.is_well_formed());
+    let mut dkg_rngs = make_rngs3(0x71);
+    let (keys, _) = run_dealerless_rss_dkg_2of3([0x71; 32], 32, &mut dkg_rngs).unwrap();
+    let sk_prf: [u8; 32] = core::array::from_fn(|b| {
+        keys[0].sk_prf_primary[b] ^ keys[1].sk_prf_primary[b] ^ keys[2].sk_prf_primary[b]
+    });
+    let msg = b"one message, two sessions";
+    let untouched = |c: &RssSlhMpcCluster| (c.batch_ctr, c.lane_permutations());
+
+    // Shares that were never bound to a public key sign nothing.
+    let mut first = RssSlhMpcCluster::new([0xa1; 32], keys, make_rngs3(0x81)).unwrap();
+    let before = untouched(&first);
+    let unbound_pk = PqPublicKey {
+        pk_seed: first.keys[0].pk_seed,
+        pk_root: [7u8; 32],
+    };
+    assert_eq!(
+        sign_stateless_tsw_rss_mpc(&params, &mut first, &unbound_pk, msg, 100_000).unwrap_err(),
+        KeccakMpcError::KeyBindingMismatch
+    );
+    assert_eq!(untouched(&first), before);
+
+    let pk = DkgCachedSubtrees::build_distributed_rss(&params, &mut first, 64)
+        .unwrap()
+        .pk;
+
+    // A root or parameter set other than the generated one is refused before any
+    // evaluation or opening.
+    let before = untouched(&first);
+    let mut wrong_root = PqPublicKey {
+        pk_seed: pk.pk_seed,
+        pk_root: pk.pk_root,
+    };
+    wrong_root.pk_root[31] ^= 0x80;
+    assert_eq!(
+        sign_stateless_tsw_rss_mpc(&params, &mut first, &wrong_root, msg, 100_000).unwrap_err(),
+        KeccakMpcError::KeyBindingMismatch
+    );
+    let mut other_params = params;
+    other_params.fors_height = 2;
+    assert_eq!(
+        sign_stateless_tsw_rss_mpc(&other_params, &mut first, &pk, msg, 100_000).unwrap_err(),
+        KeccakMpcError::KeyBindingMismatch
+    );
+    // Shorter chains under the bound key would open interior chain values.
+    let short_chains = PqHashParams {
+        w: 2,
+        ell1: 256,
+        ..params
+    };
+    assert!(short_chains.is_well_formed());
+    assert_eq!(
+        DkgCachedSubtrees::build_distributed_rss(&short_chains, &mut first, 64).unwrap_err(),
+        KeccakMpcError::KeyBindingMismatch
+    );
+    assert_eq!(untouched(&first), before);
+    assert!(!first.is_poisoned());
+
+    let sig_first = sign_stateless_tsw_rss_mpc(&params, &mut first, &pk, msg, 100_000).unwrap();
+
+    // Second session on the same key shares: another session id, other party randomness.
+    let RssSlhMpcCluster { keys, .. } = first;
+    let mut second = RssSlhMpcCluster::new([0xa2; 32], keys, make_rngs3(0x91)).unwrap();
+    assert_ne!(second.mask_session.prim, [[0u8; 32]; 3]);
+    let sig_second = sign_stateless_tsw_rss_mpc(&params, &mut second, &pk, msg, 100_000).unwrap();
+    assert_eq!(sig_first.r_rand, sig_second.r_rand);
+    assert_eq!(sig_first, sig_second);
+    assert!(verify_pq_hash_sig(
+        Cshake256Suite,
+        &params,
+        &pk,
+        msg,
+        &sig_first
+    ));
+
+    // `R` is the PRF of the shared key on public inputs fixed by the key and message.
+    let mu = th_pre_hash(Cshake256Suite, &pk.pk_seed, &pk.pk_root, msg);
+    let expected_r = fips205_prf_msg(32, &sk_prf, &tsw_rss_opt_rand(&pk), &mu);
+    assert_eq!(sig_first.r_rand.as_slice(), expected_r.as_slice());
+}
+
+/// Test-only trusted dealer for authenticated SPDZ Shamir material: degree-`< t` shares over
+/// `TowerGf256` and matching 2-lane `Tower128` MAC shares under one global key. It replaces
+/// dealerless preprocessing in these tests, which exercise the online protocol only.
+pub(crate) struct SpdzTestDealer {
+    t: usize,
+    pts: Vec<TowerGf256>,
+    alpha: [Tower128; 2],
+    stream: Cshake256WordStream4,
+}
+
+impl SpdzTestDealer {
+    pub(crate) fn new(tag: &[u8], t: usize, pts: &[TowerGf256]) -> Self {
+        let mid = crate::sponge::keccak::cshake256_static_midstate(b"QSAG.TEST.SPDZ.DEALER/v1");
+        let mut dealer = Self {
+            t,
+            pts: pts.to_vec(),
+            alpha: [Tower128::ZERO; 2],
+            stream: Cshake256WordStream4::new(&mid, tag),
+        };
+        dealer.alpha = [dealer.tower(), dealer.tower()];
+        dealer
+    }
+
+    fn word(&mut self) -> u64 {
+        let mut w = [0u64; 1];
+        self.stream.fill_words(&mut w);
+        w[0]
+    }
+
+    fn tower(&mut self) -> Tower128 {
+        Tower128(u128::from(self.word()) | (u128::from(self.word()) << 64))
+    }
+
+    fn share_tower(&mut self, secret: Tower128) -> Vec<Tower128> {
+        let coeffs: Vec<Tower128> = (1..self.t).map(|_| self.tower()).collect();
+        self.pts
+            .iter()
+            .map(|&pt| {
+                let mut acc = secret;
+                let mut power = pt;
+                for c in &coeffs {
+                    acc = acc.add(c.mul_gf256(power));
+                    power = power.mul(pt);
+                }
+                acc
+            })
+            .collect()
+    }
+
+    fn alpha_shares(&mut self) -> Vec<[Tower128; 2]> {
+        let lanes = [
+            self.share_tower(self.alpha[0]),
+            self.share_tower(self.alpha[1]),
+        ];
+        (0..self.pts.len())
+            .map(|p| [lanes[0][p], lanes[1][p]])
+            .collect()
+    }
+
+    /// Authenticated sharing of 64 bits: per-party share word and MAC word.
+    fn auth_word(&mut self, bits: u64) -> (Vec<BitslicedGf256x64>, Vec<SpdzMacWord>) {
+        let n = self.pts.len();
+        let mut sh = vec![[0u64; 8]; n];
+        let mut mac = vec![[[Tower128::ZERO; 64]; 2]; n];
+        // Sample independent degree-(t-1) polynomials in plane layout. This
+        // test dealer must not dominate online circuit benchmarks with
+        // millions of scalar field operations and one-word PRG calls.
+        let mut coeffs = SecretBuffer(vec![[0u64; 8]; self.t]);
+        coeffs[0][0] = bits;
+        for coeff in &mut coeffs[1..] {
+            self.stream.fill_words(coeff);
+        }
+        let mut tags = SecretBuffer(vec![[[0u64; 4]; 64]; self.t]);
+        for bit in 0..64 {
+            for col in 0..4 {
+                let alpha_bit = (self.alpha[col / 2].0 >> (64 * (col % 2) + bit)) & 1;
+                tags[0][bit][col] = bits & 0u64.wrapping_sub(alpha_bit as u64);
+            }
+        }
+        for coeff in &mut tags[1..] {
+            self.stream.fill_words(coeff.as_flattened_mut());
+        }
+        for (p, &pt) in self.pts.iter().enumerate() {
+            let scale = crate::field::tower::PublicGf256Matrix::from_public_scalar(pt);
+            let mut value = coeffs[self.t - 1];
+            for coeff in coeffs[..self.t - 1].iter().rev() {
+                value = scale.scale_planes(&value);
+                bs_gf256_xor_assign(&mut value, coeff);
+            }
+            sh[p] = value;
+            let mut planes = SecretBuffer(tags[self.t - 1]);
+            for coeff in tags[..self.t - 1].iter().rev() {
+                for col in 0..4 {
+                    for byte in 0..8 {
+                        let block = core::array::from_fn(|bit| planes[8 * byte + bit][col]);
+                        let scaled = scale.scale_planes(&block);
+                        for bit in 0..8 {
+                            planes[8 * byte + bit][col] = scaled[bit] ^ coeff[8 * byte + bit][col];
+                        }
+                    }
+                }
+            }
+            qsag_asm::transpose64x256(&mut planes);
+            for i in 0..64 {
+                for ml in 0..2 {
+                    mac[p][ml][i] = Tower128(
+                        u128::from(planes[i][2 * ml]) | (u128::from(planes[i][2 * ml + 1]) << 64),
+                    );
+                }
+            }
+        }
+        (sh, mac)
+    }
+
+    pub(crate) fn vaults(&mut self, triples: usize) -> Vec<PreprocessedKeccakPartyVault> {
+        let n = self.pts.len();
+        let alpha_shares = self.alpha_shares();
+        let mut per_party: Vec<Vec<KeccakBitTripleShare64>> =
+            (0..n).map(|_| Vec::with_capacity(triples)).collect();
+        for _ in 0..triples {
+            let a = self.word();
+            let b = self.word();
+            let (a_sh, a_mac) = self.auth_word(a);
+            let (b_sh, b_mac) = self.auth_word(b);
+            let (c_sh, c_mac) = self.auth_word(a & b);
+            for p in 0..n {
+                per_party[p].push(KeccakBitTripleShare64 {
+                    a: a_sh[p],
+                    b: b_sh[p],
+                    c: c_sh[p],
+                    a_mac: a_mac[p],
+                    b_mac: b_mac[p],
+                    c_mac: c_mac[p],
+                });
+            }
+        }
+        per_party
+            .into_iter()
+            .enumerate()
+            .map(|(p, triples)| PreprocessedKeccakPartyVault {
+                party_id: p,
+                eval_point: self.pts[p],
+                mac_alpha_lanes: alpha_shares[p],
+                triples,
+                cursor: 0,
+                poisoned: false,
+            })
+            .collect()
+    }
+
+    pub(crate) fn key_shares(
+        &mut self,
+        key_len: usize,
+        pk_seed: [u8; 32],
+        sk_seed: &[u8; 32],
+        sk_prf: &[u8; 32],
+    ) -> Vec<SpdzAuthenticatedKeyShare> {
+        let n = self.pts.len();
+        let auth = |dealer: &mut Self, key: &[u8; 32]| {
+            let mut words = vec![[[0u64; 8]; 4]; n];
+            let mut macs = vec![[[[Tower128::ZERO; 64]; 2]; 4]; n];
+            for w in 0..4 {
+                let mut bits = u64::from_le_bytes(key[8 * w..8 * w + 8].try_into().unwrap());
+                if 8 * w >= key_len {
+                    bits = 0;
+                }
+                let (sh, mac) = dealer.auth_word(bits);
+                for p in 0..n {
+                    words[p][w] = sh[p];
+                    macs[p][w] = mac[p];
+                }
+            }
+            (words, macs)
+        };
+        let (seed_words, seed_macs) = auth(self, sk_seed);
+        let (prf_words, prf_macs) = auth(self, sk_prf);
+        (0..n)
+            .map(|p| SpdzAuthenticatedKeyShare {
+                party_id: p,
+                eval_point: self.pts[p],
+                key_len,
+                pk_seed,
+                sk_seed_words: seed_words[p],
+                sk_seed_macs: seed_macs[p],
+                sk_prf_words: prf_words[p],
+                sk_prf_macs: prf_macs[p],
+                slh_profile: SlhProfileLatch::new(),
+            })
+            .collect()
+    }
+}
+
+fn spdz_test_rngs(n: usize, tag: u8) -> Vec<PartyPrivateRng> {
+    (0..n)
+        .map(|p| PartyPrivateRng::from_seed([tag + p as u8; 32], b"spdz-k"))
+        .collect()
+}
+
+#[test]
+fn rss_secret_codec_preserves_slh_and_tsw_profile_locks() {
+    let mut rngs: [PartyPrivateRng; 3] = core::array::from_fn(|i| {
+        PartyPrivateRng::from_seed([0x18 + i as u8; 32], b"codec-profile")
+    });
+    let (mut shares, _) = run_dealerless_rss_dkg_2of3([0x38; 32], 32, &mut rngs).unwrap();
+    shares[0].slh_profile_digest =
+        Some(slh_profile_digest_u64x4(&Fips205Params::SLH_DSA_SHAKE_256F));
+    let encoded = shares[0].to_secret_bytes();
+    assert_eq!(encoded.len(), 300);
+    let mut restored = RssKeyShare256::from_secret_bytes(&encoded).unwrap();
+    assert_eq!(restored.slh_profile_digest, shares[0].slh_profile_digest);
+    assert!(restored.bind_scheme_identity(&[7; 32]).is_err());
+    assert!(RssKeyShare256::from_secret_bytes(&encoded[..268]).is_err());
+    shares[1].tsw_binding = Some(TswKeyBinding {
+        params_digest: [7; 32],
+        pk_root: [8; 32],
+    });
+    let encoded = shares[1].to_secret_bytes();
+    assert_eq!(encoded.len(), 332);
+    let restored = RssKeyShare256::from_secret_bytes(&encoded).unwrap();
+    assert!(restored.tsw_binding == shares[1].tsw_binding);
+}
+
+#[test]
+fn pending_mac_uses_retained_mesh_and_rejects_each_corrupt_lane() {
+    let sid = [0x57; 32];
+    let mut rngs = spdz_test_rngs(3, 0x3a);
+    let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+    let points = [TowerGf256(1), TowerGf256(2), TowerGf256(3)];
+    let opened = vec![[0u64; 8]];
+    let mut macs = vec![vec![[[Tower128::ZERO; 64]; 2]]; 3];
+    let alpha = [[Tower128(9), Tower128(11)]; 3];
+    verify_pending_spdz_mac_batch_with_mesh(
+        &sid,
+        "test_pending_blind",
+        2,
+        &points,
+        &opened,
+        &macs,
+        &alpha,
+        &mut rngs,
+        Some(&mut mesh),
+    )
+    .unwrap();
+    for lane in 0..2 {
+        macs[0][0][lane][0] = Tower128(1);
+        assert!(matches!(
+            verify_pending_spdz_mac_batch_with_mesh(
+                &sid,
+                "test_pending_blind",
+                2,
+                &points,
+                &opened,
+                &macs,
+                &alpha,
+                &mut rngs,
+                Some(&mut mesh)
+            ),
+            Err(PreprocessError::MacCheckFailed { .. })
+        ));
+        macs[0][0][lane][0] = Tower128::ZERO;
+    }
+    assert!(
+        verify_pending_spdz_mac_batch_with_mesh(
+            &sid,
+            "test_pending_blind",
+            4,
+            &points,
+            &opened,
+            &macs,
+            &alpha,
+            &mut rngs,
+            Some(&mut mesh)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn test_spdz_shamir_keccak_dishonest_majority_prf_msg_and_poison_abort() {
+    // Dishonest-majority 3-of-4 Shamir (`2t - 1 = 5 > 4`, up to `2` active Byzantine signers!)
+    let t = 3usize;
+    let n = 4usize;
+    let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
+    let mut rngs = spdz_test_rngs(n, 0x70);
+    let mut dealer = SpdzTestDealer::new(b"prf-msg", t, &pts);
+    let sk_seed = [0x5a; 32];
+    let sk_prf: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(29) ^ 0xc3);
+    let mut pk_seed = [0u8; 32];
+    pk_seed[..16].copy_from_slice(&[0x11; 16]);
+    let mut auth_keys = dealer.key_shares(16, pk_seed, &sk_seed, &sk_prf);
+    // 1200 triples = 2 Keccak-f[1600] blocks (`600` per permutation: 1 honest + 1 tamper test!)
+    let mut vaults = dealer.vaults(1200);
+
+    let opt_rand = [0xABu8; 16];
+    let m_prime = b"\x00\x04ctx!spdz-shamir-keccak-test";
+    let expected_r = fips205_prf_msg(16, &sk_prf[..16], &opt_rand, m_prime);
+
+    // 1. Honest `t = 3` quorum (`parties 0, 1, 2`) matches `fips205_prf_msg` bit-for-bit!
+    {
+        let mut cluster = SpdzSlhMpcCluster::new(
+            [0x67; 32],
+            t,
+            &auth_keys[..t],
+            &mut vaults[..t],
+            &mut rngs[..t],
+        )
+        .unwrap();
+        let (got_r, _tok) = cluster.eval_prf_msg_mpc(16, &opt_rand, m_prime).unwrap();
+        assert_eq!(got_r, expected_r);
+    }
+    assert!(
+        vaults[..t]
+            .iter()
+            .all(|v| !v.poisoned && v.remaining() == 600)
+    );
+
+    // 2. Dishonest-majority active share tamper (`parties 0 and 1` collude and forge `sk_prf_words`)
+    //    MUST be caught by SPDZ `MacCheck` BEFORE opening `R` AND permanently poison all vaults!
+    auth_keys[0].sk_prf_words[0][0] ^= 1;
+    auth_keys[0].sk_prf_words[0][1] ^= 1;
+    auth_keys[1].sk_prf_words[0][1] ^= 1;
+    {
+        let mut bad_cluster = SpdzSlhMpcCluster::new(
+            [0x68; 32],
+            t,
+            &auth_keys[..t],
+            &mut vaults[..t],
+            &mut rngs[..t],
+        )
+        .unwrap();
+        assert_eq!(
+            bad_cluster
+                .eval_prf_msg_mpc(16, &opt_rand, m_prime)
+                .unwrap_err(),
+            Fips205Error::MpcActiveTamperDetected
+        );
+    }
+    assert!(vaults[0].poisoned && vaults[1].poisoned && vaults[2].poisoned);
+    assert_eq!(vaults[2].mac_alpha_lanes, [Tower128::ZERO; 2]);
+}
+
+#[test]
+fn spdz_batch64_prf_and_masked_f_match_fips_and_cut_tamper_poisons() {
+    let _memory = crate::test_budget::reserve_mb(1700);
+    let t = 2usize;
+    let pts: Vec<TowerGf256> = (1..=2u8).map(TowerGf256).collect();
+    let mut rngs = spdz_test_rngs(2, 0x80);
+    let mut dealer = SpdzTestDealer::new(b"batch64", t, &pts);
+    let sk_seed: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(37) ^ 0x6d);
+    let sk_prf = [0x21; 32];
+    let mut pk_seed = [0u8; 32];
+    pk_seed[..16].copy_from_slice(&[0x33; 16]);
+    let keys = dealer.key_shares(16, pk_seed, &sk_seed, &sk_prf);
+    // Two 64-instance permutations: 24 rounds of 1600 triple words each.
+    let per_batch = 24 * SPDZ_BATCH_POSITIONS;
+    let mut vaults = dealer.vaults(2 * per_batch);
+    let mut cluster = SpdzSlhMpcCluster::new([0x69; 32], t, &keys, &mut vaults, &mut rngs).unwrap();
+
+    let prf_adrs: Vec<Fips205Adrs> = (0..64u32)
+        .map(|i| {
+            let mut a = Fips205Adrs::ZERO;
+            a.layer = i % 3;
+            a.adrs_type = Fips205AdrsType::WotsPrf;
+            a.key_pair = i / 7;
+            a.f5 = i;
+            a
+        })
+        .collect();
+    let step_adrs: Vec<Fips205Adrs> = prf_adrs
+        .iter()
+        .map(|a| {
+            let mut s = *a;
+            s.adrs_type = Fips205AdrsType::WotsHash;
+            s.f6 = 5;
+            s
+        })
+        .collect();
+    // Every third instance keeps its PRF value; the others take one F step.
+    let exec_mask = (0..64).fold(0u64, |m, i| if i % 3 == 0 { m } else { m | (1 << i) });
+
+    let (mut cur_sh, mut cur_mac) = cluster
+        .eval_prf_batch64_spdz(&pk_seed[..16], &prf_adrs)
+        .unwrap();
+    cluster
+        .eval_f_step_masked_batch64_spdz(
+            &pk_seed[..16],
+            &step_adrs,
+            exec_mask,
+            &mut cur_sh,
+            &mut cur_mac,
+        )
+        .unwrap();
+    assert!(cluster.vaults.iter().all(|v| v.remaining() == 0));
+
+    let (blocks, _tok) = cluster
+        .finalize_cut_batches_spdz("spdz_cut_batch64_test", &cur_sh, &cur_mac, &[64])
+        .unwrap();
+    assert_eq!(blocks.len(), 64);
+    for i in 0..64 {
+        let prf = crate::fips205::fips205_prf(16, &pk_seed[..16], &sk_seed[..16], &prf_adrs[i]);
+        let expected = if (exec_mask >> i) & 1 == 1 {
+            crate::fips205::fips205_f(16, &pk_seed[..16], &step_adrs[i], &prf)
+        } else {
+            prf
+        };
+        assert_eq!(blocks[i], expected, "instance {i}");
+    }
+
+    // A forged cut share (consistent polynomial, wrong value) fails the cut `MacCheck`.
+    cur_sh[0][5][0] ^= 1 << 9;
+    assert_eq!(
+        cluster
+            .finalize_cut_batches_spdz("spdz_cut_batch64_test", &cur_sh, &cur_mac, &[64])
+            .unwrap_err(),
+        Fips205Error::MpcActiveTamperDetected
+    );
+    assert!(cluster.vaults.iter().all(|v| v.poisoned));
+}
+
+#[test]
+fn spdz_batch64_aborts_and_poisons_on_corrupted_triple_and_exhaustion() {
+    let _memory = crate::test_budget::reserve_mb(1700);
+    let t = 2usize;
+    let pts: Vec<TowerGf256> = (1..=2u8).map(TowerGf256).collect();
+    let mut dealer = SpdzTestDealer::new(b"batch64-tamper", t, &pts);
+    let mut pk_seed = [0u8; 32];
+    pk_seed[..16].copy_from_slice(&[0x44; 16]);
+    let keys = dealer.key_shares(16, pk_seed, &[0x17; 32], &[0x18; 32]);
+    let adrs = [Fips205Adrs::ZERO; 3];
+    let per_batch = 24 * SPDZ_BATCH_POSITIONS;
+
+    // A wrong product bit in a first-round triple share reaches the Beaver openings of the
+    // next round, so the batched `MacCheck` inside the evaluation rejects it.
+    let mut vaults = dealer.vaults(per_batch);
+    vaults[1].triples[77].c[0] ^= 1 << 2;
+    let mut rngs = spdz_test_rngs(2, 0x90);
+    {
+        let mut cluster =
+            SpdzSlhMpcCluster::new([0x6a; 32], t, &keys, &mut vaults, &mut rngs).unwrap();
+        assert_eq!(
+            cluster
+                .eval_prf_batch64_spdz(&pk_seed[..16], &adrs)
+                .unwrap_err(),
+            Fips205Error::MpcActiveTamperDetected
+        );
+    }
+    assert!(vaults.iter().all(|v| v.poisoned));
+
+    // A wrong product bit in a last-round triple share of an output position is never
+    // opened inside the batch: the shares come back, and the cut `MacCheck` rejects them
+    // before anything is revealed.
+    let mut vaults = dealer.vaults(per_batch);
+    vaults[1].triples[23 * SPDZ_BATCH_POSITIONS + 5].c[0] ^= 1 << 1;
+    {
+        let mut cluster =
+            SpdzSlhMpcCluster::new([0x6c; 32], t, &keys, &mut vaults, &mut rngs).unwrap();
+        let (out_sh, out_mac) = cluster
+            .eval_prf_batch64_spdz(&pk_seed[..16], &adrs)
+            .unwrap();
+        assert_eq!(
+            cluster
+                .finalize_cut_batches_spdz("spdz_cut_batch64_test", &out_sh, &out_mac, &[3])
+                .unwrap_err(),
+            Fips205Error::MpcActiveTamperDetected
+        );
+    }
+    assert!(vaults.iter().all(|v| v.poisoned));
+
+    // Too few triples for a whole batch: abort and poison rather than a partial evaluation.
+    let mut short = dealer.vaults(SPDZ_BATCH_POSITIONS);
+    let mut cluster = SpdzSlhMpcCluster::new([0x6b; 32], t, &keys, &mut short, &mut rngs).unwrap();
+    assert_eq!(
+        cluster
+            .eval_prf_batch64_spdz(&pk_seed[..16], &adrs)
+            .unwrap_err(),
+        Fips205Error::MpcActiveTamperDetected
+    );
+    assert!(cluster.vaults.iter().all(|v| v.poisoned));
+}
+
+#[test]
+fn spdz_poisoned_quorum_refuses_every_later_evaluation_and_opening() {
+    let _memory = crate::test_budget::reserve_mb(1100);
+    let t = 2usize;
+    let pts: Vec<TowerGf256> = (1..=2u8).map(TowerGf256).collect();
+    let mut dealer = SpdzTestDealer::new(b"batch64-latch", t, &pts);
+    let mut pk_seed = [0u8; 32];
+    pk_seed[..16].copy_from_slice(&[0x55; 16]);
+    let keys = dealer.key_shares(16, pk_seed, &[0x27; 32], &[0x28; 32]);
+    let adrs = [Fips205Adrs::ZERO; 3];
+    let mut vaults = dealer.vaults(24 * SPDZ_BATCH_POSITIONS);
+    let mut rngs = spdz_test_rngs(2, 0xa0);
+    {
+        let mut cluster =
+            SpdzSlhMpcCluster::new([0x6d; 32], t, &keys, &mut vaults, &mut rngs).unwrap();
+        let (out_sh, out_mac) = cluster
+            .eval_prf_batch64_spdz(&pk_seed[..16], &adrs)
+            .unwrap();
+        let mut forged = out_sh.clone();
+        forged[0][5][0] ^= 1 << 1;
+        assert_eq!(
+            cluster
+                .finalize_cut_batches_spdz("spdz_latch_test", &forged, &out_mac, &[3])
+                .unwrap_err(),
+            Fips205Error::MpcActiveTamperDetected
+        );
+        assert!(cluster.vaults.iter().all(|v| v.poisoned));
+
+        // Poisoning zeroed the MAC key shares, so all-zero MAC shares now satisfy the MAC
+        // relation of the true cut shares. The opening must be refused all the same.
+        let zero_mac: Vec<Vec<SpdzMacWord>> = out_mac
+            .iter()
+            .map(|words| vec![[[Tower128::ZERO; 64]; 2]; words.len()])
+            .collect();
+        assert_eq!(
+            cluster
+                .finalize_cut_batches_spdz("spdz_latch_test", &out_sh, &zero_mac, &[3])
+                .unwrap_err(),
+            Fips205Error::MpcActiveTamperDetected
+        );
+        assert_eq!(
+            cluster
+                .finalize_cut_blocks_spdz("spdz_latch_test", &[], &zero_mac, &out_sh, &zero_mac)
+                .unwrap_err(),
+            Fips205Error::MpcActiveTamperDetected
+        );
+        let (mut cur_sh, mut cur_mac) = (out_sh.clone(), out_mac.clone());
+        for exec_mask in [0u64, 0b111] {
+            assert_eq!(
+                cluster
+                    .eval_f_step_masked_batch64_spdz(
+                        &pk_seed[..16],
+                        &adrs,
+                        exec_mask,
+                        &mut cur_sh,
+                        &mut cur_mac
+                    )
+                    .unwrap_err(),
+                Fips205Error::MpcActiveTamperDetected
+            );
+        }
+        assert_eq!(
+            cluster
+                .eval_prf_batch64_spdz(&pk_seed[..16], &adrs)
+                .unwrap_err(),
+            Fips205Error::MpcActiveTamperDetected
+        );
+        assert_eq!(
+            cluster.eval_prf_msg_mpc(16, &[0u8; 16], b"m").unwrap_err(),
+            Fips205Error::MpcActiveTamperDetected
+        );
+    }
+    // The poisoned vaults cannot be put behind a new cluster either.
+    assert!(matches!(
+        SpdzSlhMpcCluster::new([0x6e; 32], t, &keys, &mut vaults, &mut rngs),
+        Err(KeccakMpcError::Poisoned)
+    ));
+}
+
+#[test]
+fn test_spdz_key_share_profile_binding_persists_across_clusters() {
+    let t = 2usize;
+    let n = 3usize;
+    let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
+    let mut rngs = spdz_test_rngs(n, 0x91);
+    let mut dealer = SpdzTestDealer::new(b"spdz-bind", t, &pts);
+    let sk_seed = [0x42; 32];
+    let sk_prf = [0x24; 32];
+    let pk_seed = [0x11; 32];
+    let keys = dealer.key_shares(16, pk_seed, &sk_seed, &sk_prf);
+    let mut vaults = dealer.vaults(4);
+
+    let p_128s = Fips205Params::SLH_DSA_SHAKE_128S;
+    let p_128f = Fips205Params::SLH_DSA_SHAKE_128F;
+    {
+        let mut cluster =
+            SpdzSlhMpcCluster::new([0x01; 32], t, &keys, &mut vaults, &mut rngs).unwrap();
+        cluster.bind_key_params(&p_128s, &pk_seed[..16]).unwrap();
+        cluster.bind_key_params(&p_128s, &pk_seed[..16]).unwrap();
+        assert_eq!(
+            cluster.bind_key_params(&p_128f, &pk_seed[..16]),
+            Err(Fips205Error::InvalidParameterSet)
+        );
+    }
+    // Constructing a fresh cluster over the same key shares must still enforce `p_128s`.
+    let mut cluster2 =
+        SpdzSlhMpcCluster::new([0x02; 32], t, &keys, &mut vaults, &mut rngs).unwrap();
+    assert_eq!(
+        cluster2.bind_key_params(&p_128f, &pk_seed[..16]),
+        Err(Fips205Error::InvalidParameterSet)
+    );
+    cluster2.bind_key_params(&p_128s, &pk_seed[..16]).unwrap();
+}
+
+#[test]
+fn rss_key_share_256_secret_bytes_roundtrip_and_canonicality() {
+    let mut rngs = [
+        PartyPrivateRng::from_seed([0x11; 32], b"rss-ser-0"),
+        PartyPrivateRng::from_seed([0x22; 32], b"rss-ser-1"),
+        PartyPrivateRng::from_seed([0x33; 32], b"rss-ser-2"),
+    ];
+    let (mut shares, pk_seed) = run_dealerless_rss_dkg_2of3([0x44; 32], 32, &mut rngs).unwrap();
+    let scheme_id = [0xab; 32];
+    shares[0].bind_scheme_identity(&scheme_id).unwrap();
+
+    let encoded0 = shares[0].to_secret_bytes();
+    assert_eq!(encoded0.0.len(), 268);
+    assert_eq!(&encoded0.0[..8], b"QSRSSK01");
+    let decoded0 = RssKeyShare256::from_secret_bytes(&encoded0.0).unwrap();
+    assert_eq!(decoded0.party_id, 0);
+    assert_eq!(decoded0.key_len, 32);
+    assert_eq!(decoded0.pk_seed, pk_seed);
+    assert_eq!(decoded0.scheme_identity(), Some(&scheme_id));
+
+    let encoded1 = shares[1].to_secret_bytes();
+    let decoded1 = RssKeyShare256::from_secret_bytes(&encoded1.0).unwrap();
+    assert_eq!(decoded1.scheme_identity(), None);
+
+    // Non-zero trailing scheme_identity bytes when has_scheme_id == 0 must be rejected.
+    let mut bad = encoded1.0.clone();
+    bad[236] = 1;
+    assert_eq!(
+        RssKeyShare256::from_secret_bytes(&bad).unwrap_err(),
+        KeccakMpcError::InvalidParameters
+    );
+
+    // Bad reserved byte or out-of-range party_id must be rejected.
+    let mut bad_res = encoded1.0.clone();
+    bad_res[11] = 1;
+    assert!(RssKeyShare256::from_secret_bytes(&bad_res).is_err());
+    let mut bad_party = encoded1.0.clone();
+    bad_party[8] = 3;
+    assert!(RssKeyShare256::from_secret_bytes(&bad_party).is_err());
+
+    // Direct construction from replicated shares validates party_id and key_len.
+    let constructed = RssKeyShare256::from_replicated_shares(
+        2,
+        16,
+        [0x55; 32],
+        ([0x01; 32], [0x02; 32]),
+        ([0x03; 32], [0x04; 32]),
+        ([0x05; 32], [0x06; 32]),
+    )
+    .unwrap();
+    assert_eq!(constructed.party_id, 2);
+    assert_eq!(constructed.key_len, 16);
+    assert_eq!(constructed.pk_seed[16..], [0u8; 16]);
+    let rt = RssKeyShare256::from_secret_bytes(&constructed.to_secret_bytes().0).unwrap();
+    assert_eq!(rt.party_id, 2);
+    assert_eq!(rt.key_len, 16);
+    assert!(
+        RssKeyShare256::from_replicated_shares(
+            3,
+            32,
+            [0; 32],
+            ([0; 32], [0; 32]),
+            ([0; 32], [0; 32]),
+            ([0; 32], [0; 32]),
+        )
+        .is_err()
+    );
+}
