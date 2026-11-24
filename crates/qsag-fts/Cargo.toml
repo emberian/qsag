@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Post-quantum compact few-time hash signatures: constant-time bijective FrontierSumFts (Compact1122 1,122 B / Full256Bit 2,338 B profiles) and experimental height-independent 48-round bijective x^7 SPN MPC ParallelSeededFts."
+description = "Post-quantum compact few-time hash signatures: constant-time bijective FrontierSumFts (Compact1122 1,122 B / Full256Bit 2,338 B profiles)."
 
 [features]
 test-dealer = []
@@ -22,7 +22,3 @@ qsag-accel = { path = "../qsag-accel", default-features = false }
 
 [dev-dependencies]
 qsag-core = { path = "../qsag-core", features = ["testing-ephemeral"] }
-
-[[example]]
-name = "dealerless_bench"
-required-features = ["std"]

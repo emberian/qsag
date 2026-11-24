@@ -487,23 +487,6 @@ impl FsWalFtsEpochLatch {
         DurableBurnJournal::open_existing(path, key, mac_key).map(Self)
     }
 }
-impl super::LeafBurnPersistence for FsWalFtsEpochLatch {
-    fn burn_epoch_before_sign(
-        &mut self,
-        key: &[u8; 32],
-        party: u16,
-        epoch: u32,
-        count: u8,
-    ) -> Result<(), super::ParallelSeededError> {
-        if count != 1 {
-            return Err(super::ParallelSeededError::EpochUseBudgetExhausted);
-        }
-        self.0
-            .reserve(key, party, u64::from(epoch))
-            .map_err(|_| super::ParallelSeededError::PersistenceFailed)
-    }
-}
-
 impl super::frontier::FtsEpochWal for FsWalFtsEpochLatch {
     fn uses_completed(&self, key: &[u8; 32]) -> Result<u8, super::FrontierFtsError> {
         if self.0.failed || key != &self.0.key || self.0.check_identity().is_err() {

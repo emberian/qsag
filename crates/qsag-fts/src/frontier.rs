@@ -576,8 +576,6 @@ impl fmt::Debug for FrontierFtsSigningKey {
     }
 }
 
-
-
 /// Compact `FrontierSumFts` signature (size is determined by its profile).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrontierFtsSignature {
@@ -1078,7 +1076,7 @@ impl FrontierFtsSigningKey {
     }
 
     /// Identity binds the profile and complete public key to the use journal.
-    pub fn wal_key(&self) -> [u8; 32]{
+    pub fn wal_key(&self) -> [u8; 32] {
         self.pk.wal_key()
     }
     pub fn attach_wal(
