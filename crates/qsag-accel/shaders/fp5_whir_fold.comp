@@ -1,0 +1,349 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V compute kernel for `KernelSlot::Fp5WhirFold`.
+// Pure-quintic `Fp5 = F_p[X]/(X^5 - 3)` (`p = 2^64 - 2^32 + 1`) Kronecker table expansion,
+// batched point-kernel accumulation, `[CWYZ26]` / `[DKT26]` polynomial & kernel folding, and
+// multilinear sumcheck table folding:
+//   mode == 0: 4-byte Kronecker expansion (`tensor(point)` & `eq_table(point)` from 1024-entry table in `buf_c`).
+//   mode == 1: Batched `add_points` (`buf_b[gid] = (is_base != 0 ? 0 : buf_b[gid]) + sum_{t < batch} T_t(gid)`).
+//   mode == 2: WHIR kernel fold (`v[gid] = k_at(2*gid) + phi * k_at(2*gid + 1)`).
+//   mode == 3: `[CWYZ26]` polynomial affine fold (`next[gid]` for Base `F` when `is_base != 0` or `Fp5`).
+//   mode == 4: Stage-0 masked combination (`g[gid] = (gid < m ? poly[gid] : 0) + beta_r * mask[gid]`).
+//   mode == 5: Multilinear table fold (`sub_mode == 0`: `lo + r * (hi - lo)`, `sub_mode == 1`: `lo + hi`).
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer BufA {
+    uint64_t words[];
+} buf_a;
+
+layout(std430, set = 0, binding = 1) buffer BufB {
+    uint64_t words[];
+} buf_b;
+
+layout(std430, set = 0, binding = 2) readonly buffer BufC {
+    uint64_t words[];
+} buf_c;
+
+layout(push_constant) uniform PushConsts {
+    uint n;
+    uint m;
+    uint batch;
+    uint is_base;
+    uint param_off;
+    uint base_wg;
+    uint mode;
+    uint sub_mode;
+} pc;
+
+const uint64_t GL_P   = 0xFFFFFFFF00000001ul;
+const uint64_t GL_EPS = 0xFFFFFFFFul;
+
+struct Fp5 {
+    uint64_t c0;
+    uint64_t c1;
+    uint64_t c2;
+    uint64_t c3;
+    uint64_t c4;
+};
+
+uint64_t fp_reduce_u64(uint64_t x) {
+    return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
+}
+
+uint64_t fp_add(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t rem_p = GL_P - b_c;
+    uint64_t mask = 0ul - uint64_t(a_c < rem_p);
+    return ((a_c + b_c) & mask) | ((a_c - rem_p) & ~mask);
+}
+
+uint64_t fp_sub(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t diff = a_c - b_c;
+    return diff + (GL_P & (0ul - uint64_t(a_c < b_c)));
+}
+
+uint64_t fp_reduce128(uint64_t lo, uint64_t hi) {
+    uint64_t hi_lo = hi & GL_EPS;
+    uint64_t hi_hi = hi >> 32;
+    uint64_t mid = (hi_lo << 32) - hi_lo;
+    uint64_t lo_c = fp_reduce_u64(lo);
+    return fp_sub(fp_add(lo_c, mid), hi_hi);
+}
+
+uint64_t fp_mul(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t a_lo = a_c & 0xFFFFFFFFul;
+    uint64_t a_hi = a_c >> 32;
+    uint64_t b_lo = b_c & 0xFFFFFFFFul;
+    uint64_t b_hi = b_c >> 32;
+    uint64_t p0 = a_lo * b_lo;
+    uint64_t p1 = a_lo * b_hi;
+    uint64_t p2 = a_hi * b_lo;
+    uint64_t p3 = a_hi * b_hi;
+    uint64_t mid = (p0 >> 32) + (p1 & 0xFFFFFFFFul) + (p2 & 0xFFFFFFFFul);
+    uint64_t lo = (p0 & 0xFFFFFFFFul) | (mid << 32);
+    uint64_t hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+    return fp_reduce128(lo, hi);
+}
+
+uint64_t fp_mul3(uint64_t x) {
+    uint64_t x2 = fp_add(x, x);
+    return fp_add(x2, x);
+}
+
+Fp5 fp5_zero() {
+    return Fp5(0ul, 0ul, 0ul, 0ul, 0ul);
+}
+
+Fp5 fp5_from_base(uint64_t x) {
+    return Fp5(fp_reduce_u64(x), 0ul, 0ul, 0ul, 0ul);
+}
+
+Fp5 fp5_add(Fp5 a, Fp5 b) {
+    return Fp5(
+        fp_add(a.c0, b.c0),
+        fp_add(a.c1, b.c1),
+        fp_add(a.c2, b.c2),
+        fp_add(a.c3, b.c3),
+        fp_add(a.c4, b.c4)
+    );
+}
+
+Fp5 fp5_sub(Fp5 a, Fp5 b) {
+    return Fp5(
+        fp_sub(a.c0, b.c0),
+        fp_sub(a.c1, b.c1),
+        fp_sub(a.c2, b.c2),
+        fp_sub(a.c3, b.c3),
+        fp_sub(a.c4, b.c4)
+    );
+}
+
+Fp5 fp5_scale_base(Fp5 a, uint64_t s) {
+    return Fp5(
+        fp_mul(a.c0, s),
+        fp_mul(a.c1, s),
+        fp_mul(a.c2, s),
+        fp_mul(a.c3, s),
+        fp_mul(a.c4, s)
+    );
+}
+
+Fp5 fp5_mul(Fp5 a, Fp5 b) {
+    uint64_t hi0 = fp_add(
+        fp_add(fp_mul(a.c1, b.c4), fp_mul(a.c2, b.c3)),
+        fp_add(fp_mul(a.c3, b.c2), fp_mul(a.c4, b.c1))
+    );
+    uint64_t c0 = fp_add(fp_mul(a.c0, b.c0), fp_mul3(hi0));
+
+    uint64_t hi1 = fp_add(
+        fp_add(fp_mul(a.c2, b.c4), fp_mul(a.c3, b.c3)),
+        fp_mul(a.c4, b.c2)
+    );
+    uint64_t lo1 = fp_add(fp_mul(a.c0, b.c1), fp_mul(a.c1, b.c0));
+    uint64_t c1 = fp_add(lo1, fp_mul3(hi1));
+
+    uint64_t hi2 = fp_add(fp_mul(a.c3, b.c4), fp_mul(a.c4, b.c3));
+    uint64_t lo2 = fp_add(
+        fp_add(fp_mul(a.c0, b.c2), fp_mul(a.c1, b.c1)),
+        fp_mul(a.c2, b.c0)
+    );
+    uint64_t c2 = fp_add(lo2, fp_mul3(hi2));
+
+    uint64_t hi3 = fp_mul(a.c4, b.c4);
+    uint64_t lo3 = fp_add(
+        fp_add(fp_mul(a.c0, b.c3), fp_mul(a.c1, b.c2)),
+        fp_add(fp_mul(a.c2, b.c1), fp_mul(a.c3, b.c0))
+    );
+    uint64_t c3 = fp_add(lo3, fp_mul3(hi3));
+
+    uint64_t c4 = fp_add(
+        fp_add(
+            fp_add(fp_mul(a.c0, b.c4), fp_mul(a.c1, b.c3)),
+            fp_add(fp_mul(a.c2, b.c2), fp_mul(a.c3, b.c1))
+        ),
+        fp_mul(a.c4, b.c0)
+    );
+    return Fp5(c0, c1, c2, c3, c4);
+}
+
+Fp5 load_fp5_a(uint idx) {
+    uint b = idx * 5u;
+    return Fp5(
+        fp_reduce_u64(buf_a.words[b + 0u]),
+        fp_reduce_u64(buf_a.words[b + 1u]),
+        fp_reduce_u64(buf_a.words[b + 2u]),
+        fp_reduce_u64(buf_a.words[b + 3u]),
+        fp_reduce_u64(buf_a.words[b + 4u])
+    );
+}
+
+Fp5 load_fp5_b(uint idx) {
+    uint b = idx * 5u;
+    return Fp5(
+        fp_reduce_u64(buf_b.words[b + 0u]),
+        fp_reduce_u64(buf_b.words[b + 1u]),
+        fp_reduce_u64(buf_b.words[b + 2u]),
+        fp_reduce_u64(buf_b.words[b + 3u]),
+        fp_reduce_u64(buf_b.words[b + 4u])
+    );
+}
+
+Fp5 load_fp5_c_raw(uint word_off) {
+    return Fp5(
+        fp_reduce_u64(buf_c.words[word_off + 0u]),
+        fp_reduce_u64(buf_c.words[word_off + 1u]),
+        fp_reduce_u64(buf_c.words[word_off + 2u]),
+        fp_reduce_u64(buf_c.words[word_off + 3u]),
+        fp_reduce_u64(buf_c.words[word_off + 4u])
+    );
+}
+
+void store_fp5_b(uint idx, Fp5 v) {
+    uint b = idx * 5u;
+    buf_b.words[b + 0u] = v.c0;
+    buf_b.words[b + 1u] = v.c1;
+    buf_b.words[b + 2u] = v.c2;
+    buf_b.words[b + 3u] = v.c3;
+    buf_b.words[b + 4u] = v.c4;
+}
+
+Fp5 eval_kron_c(uint table_idx, uint gid) {
+    uint base = table_idx * 5120u;
+    uint b0 = gid & 0xFFu;
+    uint b1 = (gid >> 8u) & 0xFFu;
+    uint b2 = (gid >> 16u) & 0xFFu;
+    uint b3 = (gid >> 24u) & 0xFFu;
+    Fp5 p01 = fp5_mul(
+        load_fp5_c_raw(base + b0 * 5u),
+        load_fp5_c_raw(base + (256u + b1) * 5u)
+    );
+    Fp5 p23 = fp5_mul(
+        load_fp5_c_raw(base + (512u + b2) * 5u),
+        load_fp5_c_raw(base + (768u + b3) * 5u)
+    );
+    return fp5_mul(p01, p23);
+}
+
+Fp5 k_at_fold(uint idx) {
+    if (idx < pc.m) {
+        return load_fp5_a(idx);
+    }
+    uint tail_idx = idx - pc.m;
+    return load_fp5_c_raw(pc.param_off + (1u + tail_idx) * 5u);
+}
+
+Fp5 p_lift_fold(uint idx) {
+    if (idx >= pc.m) {
+        return fp5_zero();
+    }
+    if (pc.is_base != 0u) {
+        return fp5_from_base(buf_a.words[idx]);
+    }
+    return load_fp5_a(idx);
+}
+
+Fp5 p_scale_fold(uint idx, Fp5 e) {
+    if (idx >= pc.m) {
+        return fp5_zero();
+    }
+    if (pc.is_base != 0u) {
+        return fp5_scale_base(e, buf_a.words[idx]);
+    }
+    return fp5_mul(load_fp5_a(idx), e);
+}
+
+Fp5 h_at_fold(uint n_idx, Fp5 theta) {
+    return fp5_add(p_lift_fold(2u * n_idx), p_scale_fold(2u * n_idx + 1u, theta));
+}
+
+void main() {
+    uint wg  = pc.base_wg + gl_WorkGroupID.x;
+    uint gid = wg * 256u + gl_LocalInvocationID.x;
+    if (gid >= pc.n) {
+        return;
+    }
+
+    // A pair from opposite halves of the coset, for one CWYZ duet step.
+    if (pc.mode == 6u) {
+        Fp5 a = load_fp5_a(gid);
+        Fp5 b = load_fp5_a(gid + pc.n);
+        uint64_t inv_two = 0x7FFFFFFF80000001ul;
+        Fp5 even = fp5_scale_base(fp5_add(a, b), inv_two);
+        Fp5 odd = fp5_scale_base(fp5_sub(a, b), buf_c.words[15u + 2u * gid]);
+        Fp5 mixed = fp5_add(even, fp5_mul(load_fp5_c_raw(0u), odd));
+        Fp5 weight = fp5_add(load_fp5_c_raw(5u),
+            fp5_scale_base(load_fp5_c_raw(10u), buf_c.words[16u + 2u * gid]));
+        store_fp5_b(gid, fp5_add(odd, fp5_mul(weight, mixed)));
+        return;
+    }
+    if (pc.mode == 0u) {
+        store_fp5_b(gid, eval_kron_c(0u, gid));
+        return;
+    }
+
+    if (pc.mode == 1u) {
+        Fp5 acc = (pc.is_base != 0u) ? fp5_zero() : load_fp5_b(gid);
+        for (uint t = 0u; t < pc.batch; ++t) {
+            acc = fp5_add(acc, eval_kron_c(t, gid));
+        }
+        store_fp5_b(gid, acc);
+        return;
+    }
+
+    if (pc.mode == 2u) {
+        Fp5 phi = load_fp5_c_raw(pc.param_off);
+        Fp5 ke  = k_at_fold(2u * gid);
+        Fp5 ko  = k_at_fold(2u * gid + 1u);
+        store_fp5_b(gid, fp5_add(ke, fp5_mul(phi, ko)));
+        return;
+    }
+
+    if (pc.mode == 3u) {
+        uint p_off = pc.param_off;
+        Fp5 theta = load_fp5_c_raw(p_off + 0u);
+        Fp5 alpha = load_fp5_c_raw(p_off + 5u);
+        Fp5 beta  = load_fp5_c_raw(p_off + 10u);
+        uint half_m = (pc.m + 1u) >> 1u;
+        Fp5 acc = fp5_zero();
+        if (gid < half_m) {
+            acc = fp5_add(p_lift_fold(2u * gid + 1u), fp5_mul(alpha, h_at_fold(gid, theta)));
+        }
+        if (gid > 0u) {
+            acc = fp5_add(acc, fp5_mul(beta, h_at_fold(gid - 1u, theta)));
+        }
+        store_fp5_b(gid, acc);
+        return;
+    }
+
+    if (pc.mode == 4u) {
+        Fp5 beta_r = load_fp5_c_raw(pc.param_off);
+        Fp5 poly_v = (gid < pc.m) ? load_fp5_a(gid) : fp5_zero();
+        Fp5 mask_v = load_fp5_c_raw(gid * 5u);
+        store_fp5_b(gid, fp5_add(poly_v, fp5_mul(beta_r, mask_v)));
+        return;
+    }
+
+    if (pc.mode == 5u) {
+        if (pc.sub_mode == 1u) {
+            store_fp5_b(gid, fp5_add(load_fp5_a(2u * gid), load_fp5_a(2u * gid + 1u)));
+            return;
+        }
+        Fp5 r = load_fp5_c_raw(pc.param_off);
+        if (pc.is_base != 0u) {
+            uint64_t lo = fp_reduce_u64(buf_a.words[2u * gid]);
+            uint64_t hi = fp_reduce_u64(buf_a.words[2u * gid + 1u]);
+            store_fp5_b(gid, fp5_add(fp5_from_base(lo), fp5_scale_base(r, fp_sub(hi, lo))));
+        } else {
+            Fp5 lo = load_fp5_a(2u * gid);
+            Fp5 hi = load_fp5_a(2u * gid + 1u);
+            store_fp5_b(gid, fp5_add(lo, fp5_mul(r, fp5_sub(hi, lo))));
+        }
+    }
+}
