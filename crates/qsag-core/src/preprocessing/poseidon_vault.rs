@@ -815,3 +815,740 @@ where
     clippy::too_many_arguments,
     reason = "Preserve the public preprocessing API used by other protocol modules"
 )]
+pub fn run_dealerless_pi_pow7(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[Goldilocks],
+    num_pow7: usize,
+    num_extra_beaver: usize,
+    num_a2b_masks: usize,
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedPoseidonPartyVault>, PreprocessError> {
+    run_dealerless_pi_pow7_with_fault(
+        session_id,
+        t,
+        eval_points,
+        num_pow7,
+        num_extra_beaver,
+        num_a2b_masks,
+        ot_mesh,
+        party_rngs,
+        |_, _| {},
+    )
+}
+
+/// Fault-injectable entry point for adversarial unit tests of `Π_pow7`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the public preprocessing API used by other protocol modules"
+)]
+pub fn run_dealerless_pi_pow7_with_fault<F>(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[Goldilocks],
+    num_pow7: usize,
+    num_extra_beaver: usize,
+    num_a2b_masks: usize,
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+    fault_hook: F,
+) -> Result<Vec<PreprocessedPoseidonPartyVault>, PreprocessError>
+where
+    F: FnMut(usize, &mut [Goldilocks]),
+{
+    let n = eval_points.len();
+    if t == 0 || t > n || party_rngs.len() != n || ot_mesh.n != n {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    validate_all_eval_points_goldilocks(eval_points)?;
+
+    let (mut alpha_contribs, mut alpha_shamir) =
+        spdz_setup_alpha_goldilocks(&session_id, t, eval_points, party_rngs)?;
+    let res = run_dealerless_pi_pow7_with_alpha_and_fault(
+        session_id,
+        t,
+        eval_points,
+        num_pow7,
+        num_extra_beaver,
+        num_a2b_masks,
+        &alpha_contribs,
+        &alpha_shamir,
+        ot_mesh,
+        party_rngs,
+        fault_hook,
+    );
+    wipe_ext2(&mut alpha_contribs);
+    wipe_ext2(&mut alpha_shamir);
+    res
+}
+
+/// Run dealerless `Π_pow7` + Canonical `< p` A2B bound to an existing session SPDZ MAC key
+/// `(alpha_contribs, alpha_shamir)` (used when Poseidon2 key shares and `PreprocessedPoseidonPartyVault`
+/// share a single global `GoldilocksExt2` MAC key $\alpha$).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the public preprocessing API used by other protocol modules"
+)]
+pub fn run_dealerless_pi_pow7_with_alpha(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[Goldilocks],
+    num_pow7: usize,
+    num_extra_beaver: usize,
+    num_a2b_masks: usize,
+    alpha_contribs: &[GoldilocksExt2],
+    alpha_shamir: &[GoldilocksExt2],
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedPoseidonPartyVault>, PreprocessError> {
+    run_dealerless_pi_pow7_with_alpha_and_fault(
+        session_id,
+        t,
+        eval_points,
+        num_pow7,
+        num_extra_beaver,
+        num_a2b_masks,
+        alpha_contribs,
+        alpha_shamir,
+        ot_mesh,
+        party_rngs,
+        |_, _| {},
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the public preprocessing API used by other protocol modules"
+)]
+fn run_dealerless_pi_pow7_with_alpha_and_fault<F>(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[Goldilocks],
+    num_pow7: usize,
+    num_extra_beaver: usize,
+    num_a2b_masks: usize,
+    alpha_contribs: &[GoldilocksExt2],
+    alpha_shamir: &[GoldilocksExt2],
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+    mut fault_hook: F,
+) -> Result<Vec<PreprocessedPoseidonPartyVault>, PreprocessError>
+where
+    F: FnMut(usize, &mut [Goldilocks]),
+{
+    let n = eval_points.len();
+    if t == 0
+        || t > n
+        || party_rngs.len() != n
+        || ot_mesh.n != n
+        || alpha_contribs.len() != n
+        || alpha_shamir.len() != n
+    {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    validate_all_eval_points_goldilocks(eval_points)?;
+
+    let base_triples = 6 * num_pow7 + num_extra_beaver;
+    let (mut a_sh, mut b_sh, mut c_sh, mut a_mac, mut b_mac, mut c_mac) =
+        generate_verified_spdz_beaver_pool_goldilocks(
+            &session_id,
+            t,
+            eval_points,
+            ot_mesh,
+            alpha_contribs,
+            alpha_shamir,
+            base_triples,
+            party_rngs,
+            &mut fault_hook,
+        )?;
+
+    // Joint `Π_rand` + SPDZ `Π_MAC` + 3-Round Parallel Beaver Power-Tree (`evalPow7BeaverTree`)
+    let mut r1_sh = vec![vec![Goldilocks::ZERO; num_pow7]; n];
+    for party_rngs_i_item in party_rngs[..n].iter_mut() {
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows"
+        )]
+        for k in 0..num_pow7 {
+            let ri = (*party_rngs_i_item).next_goldilocks();
+            let s_ri = shamir_share_goldilocks(t, eval_points, ri, &mut *party_rngs_i_item);
+            for p in 0..n {
+                r1_sh[p][k] += s_ri[p];
+            }
+        }
+    }
+    let r1_mac = spdz_authenticate_goldilocks_batch_ext2(
+        &session_id,
+        t,
+        eval_points,
+        ot_mesh,
+        alpha_contribs,
+        alpha_shamir,
+        &r1_sh,
+        party_rngs,
+    )?;
+
+    let slice_spdz_triples = |a: &[Vec<Goldilocks>],
+                              b: &[Vec<Goldilocks>],
+                              c: &[Vec<Goldilocks>],
+                              am: &[Vec<GoldilocksExt2>],
+                              bm: &[Vec<GoldilocksExt2>],
+                              cm: &[Vec<GoldilocksExt2>],
+                              start: usize,
+                              len: usize| {
+        let ta: Vec<Vec<Goldilocks>> = (0..n).map(|p| a[p][start..start + len].to_vec()).collect();
+        let tb: Vec<Vec<Goldilocks>> = (0..n).map(|p| b[p][start..start + len].to_vec()).collect();
+        let tc: Vec<Vec<Goldilocks>> = (0..n).map(|p| c[p][start..start + len].to_vec()).collect();
+        let tam: Vec<Vec<GoldilocksExt2>> =
+            (0..n).map(|p| am[p][start..start + len].to_vec()).collect();
+        let tbm: Vec<Vec<GoldilocksExt2>> =
+            (0..n).map(|p| bm[p][start..start + len].to_vec()).collect();
+        let tcm: Vec<Vec<GoldilocksExt2>> =
+            (0..n).map(|p| cm[p][start..start + len].to_vec()).collect();
+        (ta, tb, tc, tam, tbm, tcm)
+    };
+
+    let (
+        (mut r2_sh, mut r2_mac),
+        (mut r3_sh, mut r3_mac),
+        (mut r4_sh, mut r4_mac),
+        (mut r5_sh, mut r5_mac),
+        (mut r6_sh, mut r6_mac),
+        (mut r7_sh, mut r7_mac),
+    ) = if num_pow7 > 0 {
+        let (t2a, t2b, t2c, t2am, t2bm, t2cm) =
+            slice_spdz_triples(&a_sh, &b_sh, &c_sh, &a_mac, &b_mac, &c_mac, 0, num_pow7);
+        let (t3a, t3b, t3c, t3am, t3bm, t3cm) = slice_spdz_triples(
+            &a_sh, &b_sh, &c_sh, &a_mac, &b_mac, &c_mac, num_pow7, num_pow7,
+        );
+        let (t4a, t4b, t4c, t4am, t4bm, t4cm) = slice_spdz_triples(
+            &a_sh,
+            &b_sh,
+            &c_sh,
+            &a_mac,
+            &b_mac,
+            &c_mac,
+            2 * num_pow7,
+            num_pow7,
+        );
+        let (t5a, t5b, t5c, t5am, t5bm, t5cm) = slice_spdz_triples(
+            &a_sh,
+            &b_sh,
+            &c_sh,
+            &a_mac,
+            &b_mac,
+            &c_mac,
+            3 * num_pow7,
+            num_pow7,
+        );
+        let (t6a, t6b, t6c, t6am, t6bm, t6cm) = slice_spdz_triples(
+            &a_sh,
+            &b_sh,
+            &c_sh,
+            &a_mac,
+            &b_mac,
+            &c_mac,
+            4 * num_pow7,
+            num_pow7,
+        );
+        let (t7a, t7b, t7c, t7am, t7bm, t7cm) = slice_spdz_triples(
+            &a_sh,
+            &b_sh,
+            &c_sh,
+            &a_mac,
+            &b_mac,
+            &c_mac,
+            5 * num_pow7,
+            num_pow7,
+        );
+
+        let (r2, r2m) = eval_spdz_shamir_beaver_batch_goldilocks(
+            &session_id,
+            t,
+            eval_points,
+            alpha_shamir,
+            &r1_sh,
+            &r1_mac,
+            &r1_sh,
+            &r1_mac,
+            &t2a,
+            &t2am,
+            &t2b,
+            &t2bm,
+            &t2c,
+            &t2cm,
+            "pow7_r2",
+            party_rngs,
+            ot_mesh,
+        )?;
+        let (r3, r3m) = eval_spdz_shamir_beaver_batch_goldilocks(
+            &session_id,
+            t,
+            eval_points,
+            alpha_shamir,
+            &r2,
+            &r2m,
+            &r1_sh,
+            &r1_mac,
+            &t3a,
+            &t3am,
+            &t3b,
+            &t3bm,
+            &t3c,
+            &t3cm,
+            "pow7_r3",
+            party_rngs,
+            ot_mesh,
+        )?;
+        let (r4, r4m) = eval_spdz_shamir_beaver_batch_goldilocks(
+            &session_id,
+            t,
+            eval_points,
+            alpha_shamir,
+            &r2,
+            &r2m,
+            &r2,
+            &r2m,
+            &t4a,
+            &t4am,
+            &t4b,
+            &t4bm,
+            &t4c,
+            &t4cm,
+            "pow7_r4",
+            party_rngs,
+            ot_mesh,
+        )?;
+        let (r5, r5m) = eval_spdz_shamir_beaver_batch_goldilocks(
+            &session_id,
+            t,
+            eval_points,
+            alpha_shamir,
+            &r4,
+            &r4m,
+            &r1_sh,
+            &r1_mac,
+            &t5a,
+            &t5am,
+            &t5b,
+            &t5bm,
+            &t5c,
+            &t5cm,
+            "pow7_r5",
+            party_rngs,
+            ot_mesh,
+        )?;
+        let (r6, r6m) = eval_spdz_shamir_beaver_batch_goldilocks(
+            &session_id,
+            t,
+            eval_points,
+            alpha_shamir,
+            &r4,
+            &r4m,
+            &r2,
+            &r2m,
+            &t6a,
+            &t6am,
+            &t6b,
+            &t6bm,
+            &t6c,
+            &t6cm,
+            "pow7_r6",
+            party_rngs,
+            ot_mesh,
+        )?;
+        let (r7, r7m) = eval_spdz_shamir_beaver_batch_goldilocks(
+            &session_id,
+            t,
+            eval_points,
+            alpha_shamir,
+            &r4,
+            &r4m,
+            &r3,
+            &r3m,
+            &t7a,
+            &t7am,
+            &t7b,
+            &t7bm,
+            &t7c,
+            &t7cm,
+            "pow7_r7",
+            party_rngs,
+            ot_mesh,
+        )?;
+        (
+            (r2, r2m),
+            (r3, r3m),
+            (r4, r4m),
+            (r5, r5m),
+            (r6, r6m),
+            (r7, r7m),
+        )
+    } else {
+        (
+            (vec![Vec::new(); n], vec![Vec::new(); n]),
+            (vec![Vec::new(); n], vec![Vec::new(); n]),
+            (vec![Vec::new(); n], vec![Vec::new(); n]),
+            (vec![Vec::new(); n], vec![Vec::new(); n]),
+            (vec![Vec::new(); n], vec![Vec::new(); n]),
+            (vec![Vec::new(); n], vec![Vec::new(); n]),
+        )
+    };
+
+    // Dealerless Canonical `< p` 64-Bit A2B Masks (`while` loop guarantees exact `num_a2b_masks`!)
+    let mut a2b_masks_per_party: Vec<Vec<CanonicalBitMask64Share>> =
+        (0..n).map(|_| Vec::with_capacity(num_a2b_masks)).collect();
+
+    while a2b_masks_per_party[0].len() < num_a2b_masks {
+        let need = num_a2b_masks - a2b_masks_per_party[0].len();
+        let batch_cands = need + 1;
+        let total_bits = 64 * batch_cands;
+
+        // Fold each party's private random bits via LHL-amplified `pairwise_gilboa_ole_goldilocks`
+        // (`B ^ c_i = B + c_i - 2 * B * c_i` — `0` un-combined OT choice bits!)
+        let mut cur_shares = vec![vec![Goldilocks::ZERO; total_bits]; n];
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows"
+        )]
+        for m in 0..total_bits {
+            let b0 = party_rngs[0].next_u64() & 1;
+            cur_shares[0][m] = Goldilocks::from_u64_reduced(b0);
+        }
+        for i in 1..n {
+            let mut u_party = vec![vec![Goldilocks::ZERO; total_bits]; n];
+            let mut v_party = vec![vec![Goldilocks::ZERO; total_bits]; n];
+            for m in 0..total_bits {
+                let ci = party_rngs[i].next_u64() & 1;
+                u_party[i][m] = Goldilocks::from_u64_reduced(ci);
+                for p in 0..n {
+                    v_party[p][m] = cur_shares[p][m];
+                }
+            }
+            let mut prod = pairwise_gilboa_ole_goldilocks(ot_mesh, &u_party, &v_party, party_rngs)?;
+            for m in 0..total_bits {
+                cur_shares[i][m] += u_party[i][m];
+                for p in 0..n {
+                    let two_prod = prod[p][m] + prod[p][m];
+                    cur_shares[p][m] -= two_prod;
+                }
+            }
+            for p in 0..n {
+                wipe_goldilocks(&mut u_party[p]);
+                wipe_goldilocks(&mut v_party[p]);
+                wipe_goldilocks(&mut prod[p]);
+            }
+        }
+
+        let mut b_shamir = vec![vec![Goldilocks::ZERO; total_bits]; n];
+        for i in 0..n {
+            for m in 0..total_bits {
+                let sb =
+                    shamir_share_goldilocks(t, eval_points, cur_shares[i][m], &mut party_rngs[i]);
+                for p in 0..n {
+                    b_shamir[p][m] += sb[p];
+                }
+            }
+            wipe_goldilocks(&mut cur_shares[i]);
+        }
+
+        let b_mac = spdz_authenticate_goldilocks_batch_ext2(
+            &session_id,
+            t,
+            eval_points,
+            ot_mesh,
+            alpha_contribs,
+            alpha_shamir,
+            &b_shamir,
+            party_rngs,
+        )?;
+
+        // Generate `127 * batch_cands` verified SPDZ Beaver triples:
+        // - `64 * batch_cands` to prove `b_m^2 - b_m == 0` under SPDZ `MacCheck`
+        // - `63 * batch_cands` to evaluate exact `is_ge_p == 0` under SPDZ `MacCheck`
+        let mut no_fault = |_: usize, _: &mut [Goldilocks]| {};
+        let (ba, bb, bc, bam, bbm, bcm) = generate_verified_spdz_beaver_pool_goldilocks(
+            &session_id,
+            t,
+            eval_points,
+            ot_mesh,
+            alpha_contribs,
+            alpha_shamir,
+            127 * batch_cands,
+            party_rngs,
+            &mut no_fault,
+        )?;
+
+        let (sq_a, sq_b, sq_c, sq_am, sq_bm, sq_cm) =
+            slice_spdz_triples(&ba, &bb, &bc, &bam, &bbm, &bcm, 0, total_bits);
+        let (bsq_sh, bsq_mac) = eval_spdz_shamir_beaver_batch_goldilocks(
+            &session_id,
+            t,
+            eval_points,
+            alpha_shamir,
+            &b_shamir,
+            &b_mac,
+            &b_shamir,
+            &b_mac,
+            &sq_a,
+            &sq_am,
+            &sq_b,
+            &sq_bm,
+            &sq_c,
+            &sq_cm,
+            "a2b_bit_sq",
+            party_rngs,
+            ot_mesh,
+        )?;
+        let diff_sh: Vec<Vec<Goldilocks>> = (0..n)
+            .map(|p| {
+                (0..total_bits)
+                    .map(|m| bsq_sh[p][m] - b_shamir[p][m])
+                    .collect()
+            })
+            .collect();
+        let diff_mac: Vec<Vec<GoldilocksExt2>> = (0..n)
+            .map(|p| {
+                (0..total_bits)
+                    .map(|m| bsq_mac[p][m] - b_mac[p][m])
+                    .collect()
+            })
+            .collect();
+        let diffs_opened = commit_and_open_spdz_goldilocks_batch_quorum_with_mesh(
+            &session_id,
+            "a2b_bool_diff",
+            t,
+            eval_points,
+            &diff_sh,
+            &diff_mac,
+            alpha_shamir,
+            party_rngs,
+            Some(ot_mesh),
+        )?;
+        for &dv in &diffs_opened {
+            if dv != Goldilocks::ZERO {
+                return Err(PreprocessError::NonBooleanBitDetected { phase: "a2b_bits" });
+            }
+        }
+
+        let mut t_off = total_bits;
+        for cand in 0..batch_cands {
+            if a2b_masks_per_party[0].len() == num_a2b_masks {
+                break;
+            }
+            let mut cur_nodes: Vec<Vec<Goldilocks>> = (0..n)
+                .map(|p| {
+                    let mut v = Vec::with_capacity(64);
+                    for k in 0..32 {
+                        v.push(Goldilocks::ONE - b_shamir[p][64 * cand + k]);
+                    }
+                    for k in 32..64 {
+                        v.push(b_shamir[p][64 * cand + k]);
+                    }
+                    v
+                })
+                .collect();
+            let mut cur_macs: Vec<Vec<GoldilocksExt2>> = (0..n)
+                .map(|p| {
+                    let mut v = Vec::with_capacity(64);
+                    for k in 0..32 {
+                        v.push(alpha_shamir[p] - b_mac[p][64 * cand + k]);
+                    }
+                    for k in 32..64 {
+                        v.push(b_mac[p][64 * cand + k]);
+                    }
+                    v
+                })
+                .collect();
+
+            for _ in 0..5 {
+                let pairs = cur_nodes[0].len() / 2;
+                let lhs: Vec<Vec<Goldilocks>> = (0..n)
+                    .map(|p| (0..pairs).map(|j| cur_nodes[p][2 * j]).collect())
+                    .collect();
+                let lhs_m: Vec<Vec<GoldilocksExt2>> = (0..n)
+                    .map(|p| (0..pairs).map(|j| cur_macs[p][2 * j]).collect())
+                    .collect();
+                let rhs: Vec<Vec<Goldilocks>> = (0..n)
+                    .map(|p| (0..pairs).map(|j| cur_nodes[p][2 * j + 1]).collect())
+                    .collect();
+                let rhs_m: Vec<Vec<GoldilocksExt2>> = (0..n)
+                    .map(|p| (0..pairs).map(|j| cur_macs[p][2 * j + 1]).collect())
+                    .collect();
+                let (ta, tb, tc, tam, tbm, tcm) =
+                    slice_spdz_triples(&ba, &bb, &bc, &bam, &bbm, &bcm, t_off, pairs);
+                t_off += pairs;
+                let (next_n, next_m) = eval_spdz_shamir_beaver_batch_goldilocks(
+                    &session_id,
+                    t,
+                    eval_points,
+                    alpha_shamir,
+                    &lhs,
+                    &lhs_m,
+                    &rhs,
+                    &rhs_m,
+                    &ta,
+                    &tam,
+                    &tb,
+                    &tbm,
+                    &tc,
+                    &tcm,
+                    "a2b_ge_p_tree",
+                    party_rngs,
+                    ot_mesh,
+                )?;
+                cur_nodes = next_n;
+                cur_macs = next_m;
+            }
+
+            let lhs: Vec<Vec<Goldilocks>> = (0..n).map(|p| alloc::vec![cur_nodes[p][1]]).collect();
+            let lhs_m: Vec<Vec<GoldilocksExt2>> =
+                (0..n).map(|p| alloc::vec![cur_macs[p][1]]).collect();
+            let rhs: Vec<Vec<Goldilocks>> = (0..n)
+                .map(|p| alloc::vec![Goldilocks::ONE - cur_nodes[p][0]])
+                .collect();
+            let rhs_m: Vec<Vec<GoldilocksExt2>> = (0..n)
+                .map(|p| alloc::vec![alpha_shamir[p] - cur_macs[p][0]])
+                .collect();
+            let (ta, tb, tc, tam, tbm, tcm) =
+                slice_spdz_triples(&ba, &bb, &bc, &bam, &bbm, &bcm, t_off, 1);
+            t_off += 1;
+            let (ge_p_vec, ge_p_mvec) = eval_spdz_shamir_beaver_batch_goldilocks(
+                &session_id,
+                t,
+                eval_points,
+                alpha_shamir,
+                &lhs,
+                &lhs_m,
+                &rhs,
+                &rhs_m,
+                &ta,
+                &tam,
+                &tb,
+                &tbm,
+                &tc,
+                &tcm,
+                "a2b_ge_p_final",
+                party_rngs,
+                ot_mesh,
+            )?;
+            let ge_p_sh: Vec<Goldilocks> = (0..n).map(|p| ge_p_vec[p][0]).collect();
+            let ge_p_mac: Vec<GoldilocksExt2> = (0..n).map(|p| ge_p_mvec[p][0]).collect();
+            let is_ge_p = commit_and_open_spdz_goldilocks_quorum(
+                &session_id,
+                "a2b_ge_p_open",
+                t,
+                eval_points,
+                &ge_p_sh,
+                &ge_p_mac,
+                alpha_shamir,
+                party_rngs,
+            )?;
+            if is_ge_p == Goldilocks::ZERO {
+                for p in 0..n {
+                    let mut bit_shares = [Goldilocks::ZERO; 64];
+                    let mut bit_macs = [GoldilocksExt2::ZERO; 64];
+                    let mut sum_sh = Goldilocks::ZERO;
+                    let mut sum_mac = GoldilocksExt2::ZERO;
+                    for k in 0..64 {
+                        let bk = b_shamir[p][64 * cand + k];
+                        let bmk = b_mac[p][64 * cand + k];
+                        let pow2 = Goldilocks::from_u64_reduced(1u64 << k);
+                        bit_shares[k] = bk;
+                        bit_macs[k] = bmk;
+                        sum_sh += pow2 * bk;
+                        sum_mac += bmk.mul_base(pow2);
+                    }
+                    a2b_masks_per_party[p].push(CanonicalBitMask64Share {
+                        bit_shares,
+                        field_sum_share: sum_sh,
+                        bit_macs,
+                        field_sum_mac: sum_mac,
+                    });
+                }
+            }
+        }
+        for b_shamir_p_item in b_shamir[..n].iter_mut() {
+            wipe_goldilocks(&mut *b_shamir_p_item);
+        }
+    }
+
+    // Package isolated per-party vaults and wipe all temporary vectors
+    let extra_start = 6 * num_pow7;
+    let mut vaults = Vec::with_capacity(n);
+    for p in 0..n {
+        let mut pow7_tuples = Vec::with_capacity(num_pow7);
+        for k in 0..num_pow7 {
+            let r1_m = r1_mac[p][k];
+            pow7_tuples.push(AuthenticatedPower7Share {
+                r_pows: [
+                    r1_sh[p][k],
+                    r2_sh[p][k],
+                    r3_sh[p][k],
+                    r4_sh[p][k],
+                    r5_sh[p][k],
+                    r6_sh[p][k],
+                    r7_sh[p][k],
+                ],
+                r_macs: [
+                    r1_m,
+                    r2_mac[p][k],
+                    r3_mac[p][k],
+                    r4_mac[p][k],
+                    r5_mac[p][k],
+                    r6_mac[p][k],
+                    r7_mac[p][k],
+                ],
+                r1_mac: r1_m,
+            });
+        }
+        wipe_goldilocks(&mut r1_sh[p]);
+        wipe_goldilocks(&mut r2_sh[p]);
+        wipe_goldilocks(&mut r3_sh[p]);
+        wipe_goldilocks(&mut r4_sh[p]);
+        wipe_goldilocks(&mut r5_sh[p]);
+        wipe_goldilocks(&mut r6_sh[p]);
+        wipe_goldilocks(&mut r7_sh[p]);
+        wipe_ext2(&mut r2_mac[p]);
+        wipe_ext2(&mut r3_mac[p]);
+        wipe_ext2(&mut r4_mac[p]);
+        wipe_ext2(&mut r5_mac[p]);
+        wipe_ext2(&mut r6_mac[p]);
+        wipe_ext2(&mut r7_mac[p]);
+
+        let mut beaver_triples = Vec::with_capacity(num_extra_beaver);
+        for k in 0..num_extra_beaver {
+            let idx = extra_start + k;
+            beaver_triples.push(GoldilocksBeaverShare {
+                a: a_sh[p][idx],
+                b: b_sh[p][idx],
+                c: c_sh[p][idx],
+                a_mac: a_mac[p][idx],
+                b_mac: b_mac[p][idx],
+                c_mac: c_mac[p][idx],
+            });
+        }
+        wipe_goldilocks(&mut a_sh[p]);
+        wipe_goldilocks(&mut b_sh[p]);
+        wipe_goldilocks(&mut c_sh[p]);
+        wipe_ext2(&mut a_mac[p]);
+        wipe_ext2(&mut b_mac[p]);
+        wipe_ext2(&mut c_mac[p]);
+
+        let alpha = alpha_shamir[p];
+        vaults.push(PreprocessedPoseidonPartyVault {
+            party_id: p,
+            eval_point: eval_points[p],
+            mac_alpha_share: alpha,
+            pow7_tuples,
+            pow7_cursor: 0,
+            beaver_triples,
+            beaver_cursor: 0,
+            a2b_masks: core::mem::take(&mut a2b_masks_per_party[p]),
+            a2b_cursor: 0,
+            poisoned: false,
+        });
+    }
+    Ok(vaults)
+}
