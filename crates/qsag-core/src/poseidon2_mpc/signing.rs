@@ -925,3 +925,374 @@ pub(super) fn reserve_authorised_epoch<L: StatefulEpochLatch>(
     clippy::too_many_arguments,
     reason = "One signing session: parameters, public key, committee latch certificate, quorum latches, message and per-party state"
 )]
+pub fn sign_jorts_poseidon2_mpc<L: StatefulEpochLatch>(
+    session_id: [u8; 32],
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    t: usize,
+    latch_cert: Option<&EpochLatchCertificate>,
+    latches: &mut [&mut L],
+    msg: &[u8],
+    max_grind: u32,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(u64, PqHashSig), Poseidon2MpcError> {
+    sign_jorts_poseidon2_mpc_cached(
+        session_id, params, pk, None, t, latch_cert, latches, msg, max_grind, key_shares, vaults,
+        party_rngs,
+    )
+}
+
+/// [`sign_jorts_poseidon2_mpc`] with an optional top-subtree leaf cache.
+///
+/// With `Some(cache)` the top layer's Merkle root and authentication path come from
+/// `cache.top_leaves`, and MPC evaluates only that layer's `ell1` signing chains. The signature is
+/// byte-identical to the uncached one. A cache that does not match `(params, pk)` is rejected with
+/// [`Poseidon2MpcError::CachedSubtreeMismatch`] before any epoch is latched.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "One signing session: parameters, public key, optional leaf cache, committee latch certificate, quorum latches, message and per-party state"
+)]
+pub fn sign_jorts_poseidon2_mpc_cached<L: StatefulEpochLatch>(
+    session_id: [u8; 32],
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    cache: Option<&DkgCachedSubtrees>,
+    t: usize,
+    latch_cert: Option<&EpochLatchCertificate>,
+    latches: &mut [&mut L],
+    msg: &[u8],
+    max_grind: u32,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(u64, PqHashSig), Poseidon2MpcError> {
+    if !params.is_well_formed() || !params.stateful {
+        return Err(Poseidon2MpcError::InvalidParams);
+    }
+    validate_top_subtree_cache(params, pk, cache)?;
+    if latches.len() != key_shares.len() {
+        return Err(Poseidon2MpcError::InvalidQuorum {
+            t,
+            n: latches.len(),
+        });
+    }
+    let (quorum_pk_seed, quorum_pts) = validate_quorum_slices(t, key_shares, vaults, party_rngs)?;
+    validate_enrolled_key_profile(params, pk, &quorum_pk_seed, key_shares)?;
+    let committee_size = key_shares[0].committee_size;
+    let mu = th_pre_hash(Poseidon2Suite, &pk.pk_seed, &pk.pk_root, msg);
+
+    let ep0 = {
+        let pinned_authority = resolve_enrolled_latch_authority(key_shares)?;
+        reserve_authorised_epoch(
+            params,
+            pk,
+            t,
+            committee_size,
+            pinned_authority,
+            latch_cert,
+            latches,
+            &mu,
+        )?
+    };
+    let leaf_global_idx = usize::try_from(ep0)
+        .map_err(|_| Poseidon2MpcError::EpochLatch(EpochLatchError::Exhausted))?;
+
+    let opt_domain = build_stateful_det_opt_domain(ep0, &pk.pk_seed);
+    let r_rand = eval_prf_msg_mpc_cut(
+        &session_id,
+        "pos2_stateful_r_rand",
+        t,
+        &quorum_pts,
+        &opt_domain,
+        &mu,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+
+    let sig = sign_hypertree_poseidon2_mpc_core(
+        &session_id,
+        params,
+        pk,
+        cache,
+        t,
+        &quorum_pts,
+        &mu,
+        r_rand,
+        leaf_global_idx,
+        None,
+        max_grind,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+    if !verify_pq_hash_sig(Poseidon2Suite, params, pk, msg, &sig) {
+        return Err(Poseidon2MpcError::SignatureSelfCheckFailed);
+    }
+    Ok((ep0, sig))
+}
+
+/// Safe crash-recovery retry for stateful `JortsPoseidon2` (`[P0-04]`):
+/// - Applies the same committee-wide latch gate as [`sign_jorts_poseidon2_mpc`] to
+///   `(epoch, mu)`: full attendance, or a certificate for exactly this key, epoch and message;
+/// - Verifies `latch.retry_latched_epoch(epoch, &mu)` across all quorum latches (refusing any
+///   unlatched epoch or equivocated message digest); no latch is advanced;
+/// - Re-derives the exact deterministic `r_rand` and bit-identical `PqHashSig`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "One retry session: parameters, public key, committee latch certificate, quorum latches, latched epoch, message and per-party state"
+)]
+pub fn retry_jorts_poseidon2_mpc<L: StatefulEpochLatch>(
+    session_id: [u8; 32],
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    t: usize,
+    latch_cert: Option<&EpochLatchCertificate>,
+    latches: &mut [&mut L],
+    epoch: u64,
+    msg: &[u8],
+    max_grind: u32,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<PqHashSig, Poseidon2MpcError> {
+    retry_jorts_poseidon2_mpc_cached(
+        session_id, params, pk, None, t, latch_cert, latches, epoch, msg, max_grind, key_shares,
+        vaults, party_rngs,
+    )
+}
+
+/// [`retry_jorts_poseidon2_mpc`] with an optional top-subtree leaf cache (same cache
+/// rules as [`sign_jorts_poseidon2_mpc_cached`]).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "One retry session: parameters, public key, optional leaf cache, committee latch certificate, quorum latches, latched epoch, message and per-party state"
+)]
+pub fn retry_jorts_poseidon2_mpc_cached<L: StatefulEpochLatch>(
+    session_id: [u8; 32],
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    cache: Option<&DkgCachedSubtrees>,
+    t: usize,
+    latch_cert: Option<&EpochLatchCertificate>,
+    latches: &mut [&mut L],
+    epoch: u64,
+    msg: &[u8],
+    max_grind: u32,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<PqHashSig, Poseidon2MpcError> {
+    if !params.is_well_formed() || !params.stateful {
+        return Err(Poseidon2MpcError::InvalidParams);
+    }
+    validate_top_subtree_cache(params, pk, cache)?;
+    if latches.len() != key_shares.len() {
+        return Err(Poseidon2MpcError::InvalidQuorum {
+            t,
+            n: latches.len(),
+        });
+    }
+    let (quorum_pk_seed, quorum_pts) = validate_quorum_slices(t, key_shares, vaults, party_rngs)?;
+    validate_enrolled_key_profile(params, pk, &quorum_pk_seed, key_shares)?;
+    let committee_size = key_shares[0].committee_size;
+    let mu = th_pre_hash(Poseidon2Suite, &pk.pk_seed, &pk.pk_root, msg);
+
+    {
+        let pinned_authority = resolve_enrolled_latch_authority(key_shares)?;
+        check_committee_latch_authorisation(
+            pk,
+            t,
+            committee_size,
+            latches.len(),
+            pinned_authority,
+            latch_cert,
+            epoch,
+            &mu,
+        )?;
+    }
+    for l in latches.iter_mut() {
+        let ep = l.retry_latched_epoch(epoch, &mu)?;
+        if ep != epoch {
+            return Err(Poseidon2MpcError::EpochLatch(
+                EpochLatchError::EquivocationRefused,
+            ));
+        }
+    }
+    let leaf_global_idx = usize::try_from(epoch)
+        .map_err(|_| Poseidon2MpcError::EpochLatch(EpochLatchError::Exhausted))?;
+    let opt_domain = build_stateful_det_opt_domain(epoch, &pk.pk_seed);
+    let r_rand = eval_prf_msg_mpc_cut(
+        &session_id,
+        "pos2_stateful_retry_r_rand",
+        t,
+        &quorum_pts,
+        &opt_domain,
+        &mu,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+
+    let sig = sign_hypertree_poseidon2_mpc_core(
+        &session_id,
+        params,
+        pk,
+        cache,
+        t,
+        &quorum_pts,
+        &mu,
+        r_rand,
+        leaf_global_idx,
+        None,
+        max_grind,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+    if !verify_pq_hash_sig(Poseidon2Suite, params, pk, msg, &sig) {
+        return Err(Poseidon2MpcError::SignatureSelfCheckFailed);
+    }
+    Ok(sig)
+}
+
+/// The stateless signers' randomiser `R = PRF_msg(SK.prf, build_stateless_det_opt_domain(pk_seed), mu)`,
+/// evaluated on shares and opened after its MAC check.
+///
+/// Every input other than the shared `SK.prf` is fixed by the key and the message digest, so no
+/// caller, signer or session contributes to `R`: aborting and retrying a session reproduces the
+/// same `R` and therefore the same hypertree leaf and FORS instance.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "One MPC phase: transcript context, quorum, public key, message digest and per-party state"
+)]
+pub(super) fn eval_stateless_r_rand_mpc(
+    session_id: &[u8; 32],
+    t: usize,
+    quorum_pts: &[Goldilocks],
+    pk: &PqPublicKey,
+    mu: &[u8; 32],
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<[u8; 32], Poseidon2MpcError> {
+    let transcript = crate::sponge::keccak::encode_multi_frame(&[session_id, mu]);
+    for rng in party_rngs.iter_mut() {
+        rng.hedge_transcript(&transcript);
+    }
+    let opt_domain = build_stateless_det_opt_domain(&pk.pk_seed);
+    eval_prf_msg_mpc_cut(
+        session_id,
+        "pos2_stateless_r_rand",
+        t,
+        quorum_pts,
+        &opt_domain,
+        mu,
+        key_shares,
+        vaults,
+        party_rngs,
+    )
+}
+
+/// Sign a message under stateless `Corduroy` / `Baggy` over `Poseidon2Suite` in SPDZ MPC.
+///
+/// The randomiser `R` is derived under MPC from `SK.prf` and the message digest alone (see
+/// [`build_stateless_det_opt_domain`]); there is no randomiser input. Signing the same message
+/// again, in any session and with any signing set, yields the same signature.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "One signing session: parameters, public key, message and per-party state"
+)]
+pub fn sign_stateless_tsw_poseidon2_mpc(
+    session_id: [u8; 32],
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    t: usize,
+    msg: &[u8],
+    max_grind: u32,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<PqHashSig, Poseidon2MpcError> {
+    sign_stateless_tsw_poseidon2_mpc_cached(
+        session_id, params, pk, None, t, msg, max_grind, key_shares, vaults, party_rngs,
+    )
+}
+
+/// [`sign_stateless_tsw_poseidon2_mpc`] with an optional top-subtree leaf cache (same cache rules
+/// as [`sign_jorts_poseidon2_mpc_cached`]; rejection happens before any MPC wire opens).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "One signing session: parameters, public key, optional leaf cache, message and per-party state"
+)]
+pub fn sign_stateless_tsw_poseidon2_mpc_cached(
+    session_id: [u8; 32],
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    cache: Option<&DkgCachedSubtrees>,
+    t: usize,
+    msg: &[u8],
+    max_grind: u32,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<PqHashSig, Poseidon2MpcError> {
+    if !params.is_well_formed() || params.stateful {
+        return Err(Poseidon2MpcError::InvalidParams);
+    }
+    validate_top_subtree_cache(params, pk, cache)?;
+    let (quorum_pk_seed, quorum_pts) = validate_quorum_slices(t, key_shares, vaults, party_rngs)?;
+    validate_enrolled_key_profile(params, pk, &quorum_pk_seed, key_shares)?;
+    let mu = th_pre_hash(Poseidon2Suite, &pk.pk_seed, &pk.pk_root, msg);
+
+    let r_rand = eval_stateless_r_rand_mpc(
+        &session_id,
+        t,
+        &quorum_pts,
+        pk,
+        &mu,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+    let (leaf_global_idx, fors_idxs) = derive_stateless_leaf_and_fors_indices(
+        Poseidon2Suite,
+        params,
+        &r_rand,
+        &pk.pk_seed,
+        &pk.pk_root,
+        &mu,
+    )
+    .ok_or(Poseidon2MpcError::InvalidParams)?;
+
+    let sig = sign_hypertree_poseidon2_mpc_core(
+        &session_id,
+        params,
+        pk,
+        cache,
+        t,
+        &quorum_pts,
+        &mu,
+        r_rand,
+        leaf_global_idx,
+        Some(&fors_idxs),
+        max_grind,
+        key_shares,
+        vaults,
+        party_rngs,
+    )?;
+    if !verify_pq_hash_sig(Poseidon2Suite, params, pk, msg, &sig) {
+        return Err(Poseidon2MpcError::SignatureSelfCheckFailed);
+    }
+    Ok(sig)
+}
+
+impl core::fmt::Display for Poseidon2MpcError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::error::Error for Poseidon2MpcError {}
