@@ -1,0 +1,473 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V compute kernel for `KernelSlot::Poseidon2Gl24Merkle`.
+// Width-24 Goldilocks `Poseidon2-GL-w24` (`(R_F, R_P) = (8, 44)`, `rate = 16, cap = 8`,
+// 7-limb 448-bit digest) Canopy / Octopus Merkle compression & Stage-0/Stage-i fiber leaf hashing:
+//   mode == 0: 2-to-1 Jive-weighted Merkle compression (`tweak = [tweak0, tweak1_base + idx * tweak1_stride]`).
+//   mode == 1: `hem_quintic::Gl24` Canopy fiber leaf (`poseidon2_gl24_hash56` on `QSAG.HEM.QUINTIC.TREE/v2`).
+//   mode == 2: `recursive_ivc` (`QSAGIVC1`) Stage-0 & Stage-i `Duplex::frame("IVC-LEAF-v1")` fiber leaf.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer BufA {
+    uint64_t words[];
+} buf_a;
+
+layout(std430, set = 0, binding = 1) buffer BufB {
+    uint64_t words[];
+} buf_b;
+
+layout(std430, set = 0, binding = 2) readonly buffer BufC {
+    uint64_t words[];
+} buf_c;
+
+layout(push_constant) uniform PushConsts {
+    uint64_t tweak0;
+    uint64_t tweak1_base;
+    uint64_t in_offset_u64;
+    uint64_t out_offset_u64;
+    uint     count;
+    uint     base_idx;
+    uint     tweak1_stride;
+    uint     stage;
+    uint     arity;
+    uint     fibers;
+    uint     is_base;
+    uint     mode;
+} pc;
+
+const uint64_t GL_P                = 0xFFFFFFFF00000001ul;
+const uint64_t GL_EPS              = 0xFFFFFFFFul;
+const uint64_t POSEIDON2_GL24_IV   = 0x504F5332474C3234ul;
+const uint64_t POSEIDON2_GL24_MTAG = 0x4D524B4C474C3234ul;
+const uint64_t HQM2_GL_DOMAIN      = 0x45455254324D5148ul;
+
+// Bank-conflict-free per-thread rate staging (`16` `u64` lanes x `64` threads = `8 KiB` LDS) so
+// `st[24]` is exclusively accessed via compile-time constant indices (`0` scratch bytes).
+shared uint s_rate[2][64 * 16];
+
+void rate_zero(uint lid) {
+    for (uint k = 0u; k < 16u; ++k) {
+        s_rate[0][k * 64u + lid] = 0u;
+        s_rate[1][k * 64u + lid] = 0u;
+    }
+}
+
+void rate_write(uint lid, uint pos, uint64_t v) {
+    s_rate[0][pos * 64u + lid] = uint(v);
+    s_rate[1][pos * 64u + lid] = uint(v >> 32u);
+}
+
+uint64_t rate_read(uint lid, uint pos) {
+    return uint64_t(s_rate[0][pos * 64u + lid]) | (uint64_t(s_rate[1][pos * 64u + lid]) << 32u);
+}
+
+uint64_t fp_reduce_u64(uint64_t x) {
+    return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
+}
+
+uint64_t fp_add(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t rem_p = GL_P - b_c;
+    uint64_t mask = 0ul - uint64_t(a_c < rem_p);
+    return ((a_c + b_c) & mask) | ((a_c - rem_p) & ~mask);
+}
+
+uint64_t fp_sub(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t diff = a_c - b_c;
+    return diff + (GL_P & (0ul - uint64_t(a_c < b_c)));
+}
+
+uint64_t fp_reduce128(uint64_t lo, uint64_t hi) {
+    uint64_t hi_lo = hi & GL_EPS;
+    uint64_t hi_hi = hi >> 32;
+    uint64_t mid = (hi_lo << 32) - hi_lo;
+    uint64_t lo_c = fp_reduce_u64(lo);
+    return fp_sub(fp_add(lo_c, mid), hi_hi);
+}
+
+uint64_t fp_mul(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t a_lo = a_c & 0xFFFFFFFFul;
+    uint64_t a_hi = a_c >> 32;
+    uint64_t b_lo = b_c & 0xFFFFFFFFul;
+    uint64_t b_hi = b_c >> 32;
+    uint64_t p0 = a_lo * b_lo;
+    uint64_t p1 = a_lo * b_hi;
+    uint64_t p2 = a_hi * b_lo;
+    uint64_t p3 = a_hi * b_hi;
+    uint64_t mid = (p0 >> 32) + (p1 & 0xFFFFFFFFul) + (p2 & 0xFFFFFFFFul);
+    uint64_t lo = (p0 & 0xFFFFFFFFul) | (mid << 32);
+    uint64_t hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+    return fp_reduce128(lo, hi);
+}
+
+uint64_t fp_sq(uint64_t a) {
+    return fp_mul(a, a);
+}
+
+uint64_t fp_shl_small(uint64_t x, uint shift) {
+    uint64_t r = fp_reduce_u64(x);
+    uint64_t z_lo = fp_reduce_u64(r << shift);
+    uint64_t z_mid = r >> (64u - shift);
+    uint64_t mid_term = (z_mid << 32u) - z_mid;
+    return fp_add(z_lo, mid_term);
+}
+
+uint64_t poseidon2_sbox7(uint64_t x) {
+    uint64_t x2 = fp_sq(x);
+    uint64_t x3 = fp_mul(x2, x);
+    uint64_t x4 = fp_sq(x2);
+    return fp_mul(x3, x4);
+}
+
+void poseidon2_apply_m4(inout uint64_t b0, inout uint64_t b1, inout uint64_t b2, inout uint64_t b3) {
+    uint64_t s = fp_add(fp_add(b0, b1), fp_add(b2, b3));
+    uint64_t r0 = fp_add(s, fp_add(b0, fp_add(b1, b1)));
+    uint64_t r1 = fp_add(s, fp_add(b1, fp_add(b2, b2)));
+    uint64_t r2 = fp_add(s, fp_add(b2, fp_add(b3, b3)));
+    uint64_t r3 = fp_add(s, fp_add(b3, fp_add(b0, b0)));
+    b0 = r0;
+    b1 = r1;
+    b2 = r2;
+    b3 = r3;
+}
+
+void poseidon2_gl24_apply_me(inout uint64_t st[24]) {
+    st[0]  = fp_reduce_u64(st[0]);  st[1]  = fp_reduce_u64(st[1]);
+    st[2]  = fp_reduce_u64(st[2]);  st[3]  = fp_reduce_u64(st[3]);
+    st[4]  = fp_reduce_u64(st[4]);  st[5]  = fp_reduce_u64(st[5]);
+    st[6]  = fp_reduce_u64(st[6]);  st[7]  = fp_reduce_u64(st[7]);
+    st[8]  = fp_reduce_u64(st[8]);  st[9]  = fp_reduce_u64(st[9]);
+    st[10] = fp_reduce_u64(st[10]); st[11] = fp_reduce_u64(st[11]);
+    st[12] = fp_reduce_u64(st[12]); st[13] = fp_reduce_u64(st[13]);
+    st[14] = fp_reduce_u64(st[14]); st[15] = fp_reduce_u64(st[15]);
+    st[16] = fp_reduce_u64(st[16]); st[17] = fp_reduce_u64(st[17]);
+    st[18] = fp_reduce_u64(st[18]); st[19] = fp_reduce_u64(st[19]);
+    st[20] = fp_reduce_u64(st[20]); st[21] = fp_reduce_u64(st[21]);
+    st[22] = fp_reduce_u64(st[22]); st[23] = fp_reduce_u64(st[23]);
+
+    poseidon2_apply_m4(st[0], st[6],  st[12], st[18]);
+    poseidon2_apply_m4(st[1], st[7],  st[13], st[19]);
+    poseidon2_apply_m4(st[2], st[8],  st[14], st[20]);
+    poseidon2_apply_m4(st[3], st[9],  st[15], st[21]);
+    poseidon2_apply_m4(st[4], st[10], st[16], st[22]);
+    poseidon2_apply_m4(st[5], st[11], st[17], st[23]);
+
+    uint64_t s0 = fp_add(fp_add(fp_add(st[0],  st[1]),  fp_add(st[2],  st[3])),  fp_add(st[4],  st[5]));
+    st[0]  = fp_add(st[0],  s0); st[1]  = fp_add(st[1],  s0); st[2]  = fp_add(st[2],  s0);
+    st[3]  = fp_add(st[3],  s0); st[4]  = fp_add(st[4],  s0); st[5]  = fp_add(st[5],  s0);
+
+    uint64_t s1 = fp_add(fp_add(fp_add(st[6],  st[7]),  fp_add(st[8],  st[9])),  fp_add(st[10], st[11]));
+    st[6]  = fp_add(st[6],  s1); st[7]  = fp_add(st[7],  s1); st[8]  = fp_add(st[8],  s1);
+    st[9]  = fp_add(st[9],  s1); st[10] = fp_add(st[10], s1); st[11] = fp_add(st[11], s1);
+
+    uint64_t s2 = fp_add(fp_add(fp_add(st[12], st[13]), fp_add(st[14], st[15])), fp_add(st[16], st[17]));
+    st[12] = fp_add(st[12], s2); st[13] = fp_add(st[13], s2); st[14] = fp_add(st[14], s2);
+    st[15] = fp_add(st[15], s2); st[16] = fp_add(st[16], s2); st[17] = fp_add(st[17], s2);
+
+    uint64_t s3 = fp_add(fp_add(fp_add(st[18], st[19]), fp_add(st[20], st[21])), fp_add(st[22], st[23]));
+    st[18] = fp_add(st[18], s3); st[19] = fp_add(st[19], s3); st[20] = fp_add(st[20], s3);
+    st[21] = fp_add(st[21], s3); st[22] = fp_add(st[22], s3); st[23] = fp_add(st[23], s3);
+}
+
+void poseidon2_gl24_apply_mi(inout uint64_t st[24]) {
+    uint64_t s = fp_add(
+        fp_add(
+            fp_add(
+                fp_add(fp_add(st[0], st[1]), fp_add(st[2], st[3])),
+                fp_add(fp_add(st[4], st[5]), fp_add(st[6], st[7]))
+            ),
+            fp_add(
+                fp_add(fp_add(st[8], st[9]), fp_add(st[10], st[11])),
+                fp_add(fp_add(st[12], st[13]), fp_add(st[14], st[15]))
+            )
+        ),
+        fp_add(
+            fp_add(fp_add(st[16], st[17]), fp_add(st[18], st[19])),
+            fp_add(fp_add(st[20], st[21]), fp_add(st[22], st[23]))
+        )
+    );
+    st[0]  = fp_sub(s, fp_shl_small(st[0], 23u));
+    st[1]  = fp_add(s, fp_reduce_u64(st[1]));
+    st[2]  = fp_add(s, fp_shl_small(st[2],  1u));
+    st[3]  = fp_add(s, fp_shl_small(st[3],  2u));
+    st[4]  = fp_add(s, fp_shl_small(st[4],  3u));
+    st[5]  = fp_add(s, fp_shl_small(st[5],  4u));
+    st[6]  = fp_add(s, fp_shl_small(st[6],  5u));
+    st[7]  = fp_add(s, fp_shl_small(st[7],  6u));
+    st[8]  = fp_add(s, fp_shl_small(st[8],  7u));
+    st[9]  = fp_add(s, fp_shl_small(st[9],  8u));
+    st[10] = fp_add(s, fp_shl_small(st[10], 9u));
+    st[11] = fp_add(s, fp_shl_small(st[11], 10u));
+    st[12] = fp_add(s, fp_shl_small(st[12], 11u));
+    st[13] = fp_add(s, fp_shl_small(st[13], 12u));
+    st[14] = fp_add(s, fp_shl_small(st[14], 13u));
+    st[15] = fp_add(s, fp_shl_small(st[15], 14u));
+    st[16] = fp_add(s, fp_shl_small(st[16], 15u));
+    st[17] = fp_add(s, fp_shl_small(st[17], 16u));
+    st[18] = fp_add(s, fp_shl_small(st[18], 17u));
+    st[19] = fp_add(s, fp_shl_small(st[19], 18u));
+    st[20] = fp_add(s, fp_shl_small(st[20], 19u));
+    st[21] = fp_add(s, fp_shl_small(st[21], 20u));
+    st[22] = fp_add(s, fp_shl_small(st[22], 21u));
+    st[23] = fp_add(s, fp_shl_small(st[23], 22u));
+}
+
+// The host uploads the canonical 236 round constants at binding 2.
+void poseidon2_gl24_perm(inout uint64_t st[24]) {
+    poseidon2_gl24_apply_me(st);
+    for (uint r = 0u; r < 52u; ++r) {
+        if (r >= 4u && r < 48u) {
+            st[0] = poseidon2_sbox7(fp_add(st[0], buf_c.words[92u + r]));
+            poseidon2_gl24_apply_mi(st);
+        } else {
+            uint base = r < 4u ? r * 24u : 140u + (r - 48u) * 24u;
+            for (uint j = 0u; j < 24u; ++j) {
+                st[j] = poseidon2_sbox7(fp_add(st[j], buf_c.words[base + j]));
+            }
+            poseidon2_gl24_apply_me(st);
+        }
+    }
+}
+
+void flush_rate_from_lds(inout uint64_t st[24], uint lid) {
+    st[0]  = fp_add(st[0],  rate_read(lid, 0u));
+    st[1]  = fp_add(st[1],  rate_read(lid, 1u));
+    st[2]  = fp_add(st[2],  rate_read(lid, 2u));
+    st[3]  = fp_add(st[3],  rate_read(lid, 3u));
+    st[4]  = fp_add(st[4],  rate_read(lid, 4u));
+    st[5]  = fp_add(st[5],  rate_read(lid, 5u));
+    st[6]  = fp_add(st[6],  rate_read(lid, 6u));
+    st[7]  = fp_add(st[7],  rate_read(lid, 7u));
+    st[8]  = fp_add(st[8],  rate_read(lid, 8u));
+    st[9]  = fp_add(st[9],  rate_read(lid, 9u));
+    st[10] = fp_add(st[10], rate_read(lid, 10u));
+    st[11] = fp_add(st[11], rate_read(lid, 11u));
+    st[12] = fp_add(st[12], rate_read(lid, 12u));
+    st[13] = fp_add(st[13], rate_read(lid, 13u));
+    st[14] = fp_add(st[14], rate_read(lid, 14u));
+    st[15] = fp_add(st[15], rate_read(lid, 15u));
+    poseidon2_gl24_perm(st);
+}
+
+uint hqm2_tree_byte(uint pos) {
+    // Exact 24-byte ASCII prefix `b"QSAG.HEM.QUINTIC.TREE/v2"`.
+    uint64_t w0 = 0x4D45482E47415351ul; // "QSAG.HEM"
+    uint64_t w1 = 0x4349544E4955512Eul; // ".QUINTIC"
+    uint64_t w2 = 0x32762F454552542Eul; // ".TREE/v2"
+    uint64_t w = (pos < 8u) ? w0 : ((pos < 16u) ? w1 : w2);
+    return uint((w >> (8u * (pos & 7u))) & 0xFFul);
+}
+
+uint hqm2_leaf_msg_byte(uint idx, uint pos) {
+    if (pos < 24u) {
+        return hqm2_tree_byte(pos);
+    }
+    if (pos == 24u) {
+        return 0u;
+    }
+    if (pos == 25u) {
+        return pc.stage & 0xFFu;
+    }
+    if (pos < 30u) {
+        return (idx >> (8u * (pos - 26u))) & 0xFFu;
+    }
+    uint s_off = pos - 30u;
+    uint word_idx = s_off >> 3u;
+    uint byte_idx = s_off & 7u;
+    uint64_t w;
+    if (pc.is_base != 0u) {
+        uint addr = idx + word_idx * pc.fibers;
+        w = fp_reduce_u64(buf_a.words[addr]);
+    } else {
+        uint t = word_idx / 5u;
+        uint l = word_idx - t * 5u;
+        uint addr = (idx + t * pc.fibers) * 5u + l;
+        w = fp_reduce_u64(buf_a.words[addr]);
+    }
+    return uint((w >> (8u * byte_idx)) & 0xFFul);
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint idx = pc.base_idx + gl_GlobalInvocationID.x;
+    if (idx >= pc.count) {
+        return;
+    }
+
+    uint64_t st[24];
+
+    if (pc.mode == 0u) {
+        uint c_base = uint(pc.in_offset_u64) + idx * 14u;
+        uint64_t l0 = fp_reduce_u64(buf_b.words[c_base + 0u]);
+        uint64_t l1 = fp_reduce_u64(buf_b.words[c_base + 1u]);
+        uint64_t l2 = fp_reduce_u64(buf_b.words[c_base + 2u]);
+        uint64_t l3 = fp_reduce_u64(buf_b.words[c_base + 3u]);
+        uint64_t l4 = fp_reduce_u64(buf_b.words[c_base + 4u]);
+        uint64_t l5 = fp_reduce_u64(buf_b.words[c_base + 5u]);
+        uint64_t l6 = fp_reduce_u64(buf_b.words[c_base + 6u]);
+        uint64_t r0 = fp_reduce_u64(buf_b.words[c_base + 7u]);
+        uint64_t r1 = fp_reduce_u64(buf_b.words[c_base + 8u]);
+        uint64_t r2 = fp_reduce_u64(buf_b.words[c_base + 9u]);
+        uint64_t r3 = fp_reduce_u64(buf_b.words[c_base + 10u]);
+        uint64_t r4 = fp_reduce_u64(buf_b.words[c_base + 11u]);
+        uint64_t r5 = fp_reduce_u64(buf_b.words[c_base + 12u]);
+        uint64_t r6 = fp_reduce_u64(buf_b.words[c_base + 13u]);
+
+        uint64_t tw0 = fp_reduce_u64(pc.tweak0);
+        uint64_t tw1 = fp_reduce_u64(pc.tweak1_base + uint64_t(idx) * uint64_t(pc.tweak1_stride));
+
+        st[0]  = l0;  st[1]  = l1;  st[2]  = l2;  st[3]  = l3;
+        st[4]  = l4;  st[5]  = l5;  st[6]  = l6;
+        st[7]  = r0;  st[8]  = r1;  st[9]  = r2;  st[10] = r3;
+        st[11] = r4;  st[12] = r5;  st[13] = r6;
+        st[14] = tw0; st[15] = tw1;
+        st[16] = 16ul;
+        st[17] = 8ul;
+        st[18] = 7ul;
+        st[19] = POSEIDON2_GL24_MTAG;
+        st[20] = 0ul; st[21] = 0ul; st[22] = 0ul;
+        st[23] = POSEIDON2_GL24_IV;
+
+        poseidon2_gl24_perm(st);
+
+        uint p_base = uint(pc.out_offset_u64) + idx * 7u;
+        buf_b.words[p_base + 0u] = fp_add(st[0], fp_add(l0, fp_add(fp_shl_small(r0, 1u), fp_shl_small(tw0, 2u))));
+        buf_b.words[p_base + 1u] = fp_add(st[1], fp_add(l1, fp_add(fp_shl_small(r1, 1u), fp_shl_small(tw1, 2u))));
+        buf_b.words[p_base + 2u] = fp_add(st[2], fp_add(l2, fp_shl_small(r2, 1u)));
+        buf_b.words[p_base + 3u] = fp_add(st[3], fp_add(l3, fp_shl_small(r3, 1u)));
+        buf_b.words[p_base + 4u] = fp_add(st[4], fp_add(l4, fp_shl_small(r4, 1u)));
+        buf_b.words[p_base + 5u] = fp_add(st[5], fp_add(l5, fp_shl_small(r5, 1u)));
+        buf_b.words[p_base + 6u] = fp_add(st[6], fp_add(l6, fp_shl_small(r6, 1u)));
+        return;
+    }
+
+    if (pc.mode == 1u) {
+        st[0]  = 0ul; st[1]  = 0ul; st[2]  = 0ul; st[3]  = 0ul;
+        st[4]  = 0ul; st[5]  = 0ul; st[6]  = 0ul; st[7]  = 0ul;
+        st[8]  = 0ul; st[9]  = 0ul; st[10] = 0ul; st[11] = 0ul;
+        st[12] = 0ul; st[13] = 0ul; st[14] = 0ul; st[15] = 0ul;
+        st[16] = 16ul;
+        st[17] = 8ul;
+        st[18] = 56ul;
+        st[19] = HQM2_GL_DOMAIN;
+        st[20] = 0ul; st[21] = 0ul; st[22] = 0ul;
+        st[23] = POSEIDON2_GL24_IV;
+
+        uint sym_bytes = pc.arity * ((pc.is_base != 0u) ? 8u : 40u);
+        uint msg_len   = 30u + sym_bytes;
+        uint rem       = (msg_len + 1u) % 7u;
+        uint pad_zeros = (rem == 0u) ? 0u : (7u - rem);
+        uint chunks    = (msg_len + 1u + pad_zeros) / 7u;
+
+        rate_zero(lid);
+        rate_write(lid, 0u, uint64_t(msg_len));
+        uint rate_pos = 1u;
+
+        for (uint c = 0u; c < chunks; ++c) {
+            uint base_pos = c * 7u;
+            uint64_t acc = 0ul;
+            for (uint j = 0u; j < 7u; ++j) {
+                uint pos = base_pos + j;
+                uint b = (pos < msg_len)
+                    ? hqm2_leaf_msg_byte(idx, pos)
+                    : ((pos == msg_len) ? 0x01u : 0x00u);
+                acc = (acc << 8u) | uint64_t(b);
+            }
+            rate_write(lid, rate_pos, acc);
+            rate_pos += 1u;
+            if (rate_pos == 16u) {
+                flush_rate_from_lds(st, lid);
+                rate_zero(lid);
+                rate_pos = 0u;
+            }
+        }
+
+        if (rate_pos == 15u) {
+            rate_write(lid, 15u, 0x0100000000000001ul);
+        } else {
+            rate_write(lid, rate_pos, 1ul);
+            rate_write(lid, 15u, 0x0100000000000000ul);
+        }
+        flush_rate_from_lds(st, lid);
+
+        uint out_base = uint(pc.out_offset_u64) + idx * 7u;
+        buf_b.words[out_base + 0u] = st[0];
+        buf_b.words[out_base + 1u] = st[1];
+        buf_b.words[out_base + 2u] = st[2];
+        buf_b.words[out_base + 3u] = st[3];
+        buf_b.words[out_base + 4u] = st[4];
+        buf_b.words[out_base + 5u] = st[5];
+        buf_b.words[out_base + 6u] = st[6];
+        return;
+    }
+
+    if (pc.mode == 2u) {
+        uint data_len = (pc.stage == 0u) ? (15u + pc.arity) : (2u + 5u * pc.arity);
+        st[0]  = 0ul; st[1]  = 0ul; st[2]  = 0ul; st[3]  = 0ul;
+        st[4]  = 0ul; st[5]  = 0ul; st[6]  = 0ul; st[7]  = 0ul;
+        st[8]  = 0ul; st[9]  = 0ul; st[10] = 0ul; st[11] = 0ul;
+        st[12] = 0ul; st[13] = 0ul; st[14] = 0ul; st[15] = 0ul;
+        st[16] = 0x0041454C2D435649ul; // "IVC-LEA"
+        st[17] = 0x0000000031762D46ul; // "F-v1"
+        st[18] = 0ul;
+        st[19] = 11ul;
+        st[20] = uint64_t(data_len);
+        st[21] = 0ul; st[22] = 0ul;
+        st[23] = POSEIDON2_GL24_IV;
+
+        rate_zero(lid);
+        uint rate_pos = 0u;
+        for (uint d = 0u; d < data_len; ++d) {
+            uint64_t val;
+            if (d == 0u) {
+                val = uint64_t(pc.stage);
+            } else if (d == 1u) {
+                val = uint64_t(idx);
+            } else if (pc.stage == 0u) {
+                if (d < 6u) {
+                    val = fp_reduce_u64(buf_c.words[236u + d - 2u]);
+                } else if (d < 10u) {
+                    val = fp_reduce_u64(buf_c.words[236u + 4u + idx * 4u + (d - 6u)]);
+                } else if (d < 15u) {
+                    uint r_base = 4u + pc.fibers * 4u + idx * 5u;
+                    val = fp_reduce_u64(buf_c.words[236u + r_base + (d - 10u)]);
+                } else {
+                    uint t = d - 15u;
+                    val = fp_reduce_u64(buf_a.words[idx + t * pc.fibers]);
+                }
+            } else {
+                uint k = d - 2u;
+                uint t = k / 5u;
+                uint l = k - t * 5u;
+                uint addr = (idx + t * pc.fibers) * 5u + l;
+                val = fp_reduce_u64(buf_a.words[addr]);
+            }
+            rate_write(lid, rate_pos, val);
+            rate_pos += 1u;
+            if (rate_pos == 16u) {
+                flush_rate_from_lds(st, lid);
+                rate_zero(lid);
+                rate_pos = 0u;
+            }
+        }
+        if (rate_pos != 0u) {
+            flush_rate_from_lds(st, lid);
+        }
+
+        uint out_base = uint(pc.out_offset_u64) + idx * 7u;
+        buf_b.words[out_base + 0u] = st[0];
+        buf_b.words[out_base + 1u] = st[1];
+        buf_b.words[out_base + 2u] = st[2];
+        buf_b.words[out_base + 3u] = st[3];
+        buf_b.words[out_base + 4u] = st[4];
+        buf_b.words[out_base + 5u] = st[5];
+        buf_b.words[out_base + 6u] = st[6];
+    }
+}

@@ -1,0 +1,364 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V compute kernel for `KernelSlot::TurboShake400Canopy`.
+// 400-bit (`50`-byte, stored as 7 `u64` words `[w0..w5, w6 & 0xFFFF]`) `TurboSHAKE256` (12-round,
+// suffix `0x07`) and `cSHAKE256` (24-round, suffix `0x04`) Canopy Merkle construction:
+//   mode == 0: Register-only 105-byte 2-to-1 Canopy internal node (`[node_tag] || node_idx_le4 || left[50] || right[50]`).
+//   mode == 1: `hem_quintic::Turbo` fiber leaf (`[0x00, stage] || idx_le4 || symbols`).
+//   mode == 2: `zk_hem::v2` fused Stage-0 `salt` + `leaf_stage0` (`[0x10, log2_arity] || idx_le4 || tree_nonce || salt || z || r`).
+//   mode == 3: `zk_hem::v2` Stage-i extension fiber `leaf_ext` (`[0x12, stage, log2_arity] || idx_le4 || vals`).
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer BufA {
+    uint64_t words[];
+} buf_a;
+
+layout(std430, set = 0, binding = 1) buffer BufB {
+    uint64_t words[];
+} buf_b;
+
+layout(std430, set = 0, binding = 2) readonly buffer BufC {
+    uint64_t words[];
+} buf_c;
+
+layout(push_constant) uniform PushConsts {
+    uint64_t in_offset_u64;
+    uint64_t out_offset_u64;
+    uint     count;
+    uint     base_idx;
+    uint     start_node_idx;
+    uint     node_tag;
+    uint     start_round;
+    uint     suffix;
+    uint     stage;
+    uint     arity;
+    uint     log2_arity;
+    uint     fibers;
+    uint     is_base;
+    uint     mode;
+} pc;
+
+const uint64_t GL_P = 0xFFFFFFFF00000001ul;
+
+const uint64_t KECCAK_RC[24] = uint64_t[24](
+    0x0000000000000001ul, 0x0000000000008082ul, 0x800000000000808aul, 0x8000000080008000ul,
+    0x000000000000808bul, 0x0000000080000001ul, 0x8000000080008081ul, 0x8000000000008009ul,
+    0x000000000000008aul, 0x0000000000000088ul, 0x0000000080008009ul, 0x000000008000000aul,
+    0x000000008000808bul, 0x800000000000008bul, 0x8000000000008089ul, 0x8000000000008003ul,
+    0x8000000000008002ul, 0x8000000000000080ul, 0x000000000000800aul, 0x800000008000000aul,
+    0x8000000080008081ul, 0x8000000000008080ul, 0x0000000080000001ul, 0x8000000080008008ul
+);
+
+const uint KECCAK_RHO[24] = uint[24](
+    1u, 3u, 6u, 10u, 15u, 21u, 28u, 36u, 45u, 55u, 2u, 14u,
+    27u, 41u, 56u, 8u, 25u, 43u, 62u, 18u, 39u, 61u, 20u, 44u
+);
+
+const uint KECCAK_PI[24] = uint[24](
+    10u, 7u, 11u, 17u, 18u, 3u, 5u, 16u, 8u, 21u, 24u, 4u,
+    15u, 23u, 19u, 13u, 12u, 2u, 20u, 14u, 22u, 9u, 6u, 1u
+);
+
+// Bank-conflict-free 17-word Keccak rate staging (`8.5 KiB` LDS) for multi-block leaves.
+shared uint s_rate[2][64 * 17];
+
+void s_rate_zero(uint lid) {
+    for (uint k = 0u; k < 17u; ++k) {
+        s_rate[0][k * 64u + lid] = 0u;
+        s_rate[1][k * 64u + lid] = 0u;
+    }
+}
+
+void s_rate_write(uint lid, uint pos, uint64_t v) {
+    s_rate[0][pos * 64u + lid] = uint(v);
+    s_rate[1][pos * 64u + lid] = uint(v >> 32u);
+}
+
+void s_rate_xor_hi(uint lid, uint pos, uint hi_mask) {
+    s_rate[1][pos * 64u + lid] ^= hi_mask;
+}
+
+uint64_t s_rate_read(uint lid, uint pos) {
+    return uint64_t(s_rate[0][pos * 64u + lid]) | (uint64_t(s_rate[1][pos * 64u + lid]) << 32u);
+}
+
+uint64_t fp_reduce_u64(uint64_t x) {
+    return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
+}
+
+uint64_t rotl64(uint64_t x, uint r) {
+    return (x << r) | (x >> (64u - r));
+}
+
+void keccak_round(inout uint64_t st[25], uint64_t rc) {
+    uint64_t bc[5];
+    for (uint i = 0u; i < 5u; ++i) {
+        bc[i] = st[i] ^ st[i + 5u] ^ st[i + 10u] ^ st[i + 15u] ^ st[i + 20u];
+    }
+    for (uint i = 0u; i < 5u; ++i) {
+        uint64_t t = bc[(i + 4u) % 5u] ^ rotl64(bc[(i + 1u) % 5u], 1u);
+        st[i]       ^= t;
+        st[i + 5u]  ^= t;
+        st[i + 10u] ^= t;
+        st[i + 15u] ^= t;
+        st[i + 20u] ^= t;
+    }
+    uint64_t t = st[1];
+    for (uint k = 0u; k < 24u; ++k) {
+        uint j = KECCAK_PI[k];
+        uint64_t next = st[j];
+        st[j] = rotl64(t, KECCAK_RHO[k]);
+        t = next;
+    }
+    for (uint row = 0u; row < 25u; row += 5u) {
+        bc[0] = st[row + 0u];
+        bc[1] = st[row + 1u];
+        bc[2] = st[row + 2u];
+        bc[3] = st[row + 3u];
+        bc[4] = st[row + 4u];
+        st[row + 0u] = bc[0] ^ ((~bc[1]) & bc[2]);
+        st[row + 1u] = bc[1] ^ ((~bc[2]) & bc[3]);
+        st[row + 2u] = bc[2] ^ ((~bc[3]) & bc[4]);
+        st[row + 3u] = bc[3] ^ ((~bc[4]) & bc[0]);
+        st[row + 4u] = bc[4] ^ ((~bc[0]) & bc[1]);
+    }
+    st[0] ^= rc;
+}
+
+void keccak_perm(inout uint64_t st[25], uint start_round) {
+    if (start_round == 0u) {
+        for (uint r = 0u; r < 12u; ++r) {
+            keccak_round(st, KECCAK_RC[r]);
+        }
+    }
+    for (uint r = 12u; r < 24u; ++r) {
+        keccak_round(st, KECCAK_RC[r]);
+    }
+}
+
+void load_midstate(out uint64_t st[25]) {
+    for (uint i = 0u; i < 25u; ++i) {
+        st[i] = buf_c.words[i];
+    }
+}
+
+void flush_keccak_from_lds(inout uint64_t st[25], uint lid, uint start_round) {
+    st[0]  ^= s_rate_read(lid, 0u);
+    st[1]  ^= s_rate_read(lid, 1u);
+    st[2]  ^= s_rate_read(lid, 2u);
+    st[3]  ^= s_rate_read(lid, 3u);
+    st[4]  ^= s_rate_read(lid, 4u);
+    st[5]  ^= s_rate_read(lid, 5u);
+    st[6]  ^= s_rate_read(lid, 6u);
+    st[7]  ^= s_rate_read(lid, 7u);
+    st[8]  ^= s_rate_read(lid, 8u);
+    st[9]  ^= s_rate_read(lid, 9u);
+    st[10] ^= s_rate_read(lid, 10u);
+    st[11] ^= s_rate_read(lid, 11u);
+    st[12] ^= s_rate_read(lid, 12u);
+    st[13] ^= s_rate_read(lid, 13u);
+    st[14] ^= s_rate_read(lid, 14u);
+    st[15] ^= s_rate_read(lid, 15u);
+    st[16] ^= s_rate_read(lid, 16u);
+    keccak_perm(st, start_round);
+}
+
+void absorb_u64_unaligned(
+    inout uint64_t st[25],
+    uint lid,
+    inout uint64_t cur_lane,
+    inout uint byte_in_lane,
+    inout uint lane_pos,
+    uint64_t word,
+    uint start_round
+) {
+    if (byte_in_lane == 0u) {
+        s_rate_write(lid, lane_pos, word);
+        lane_pos += 1u;
+        if (lane_pos == 17u) {
+            flush_keccak_from_lds(st, lid, start_round);
+            s_rate_zero(lid);
+            lane_pos = 0u;
+        }
+    } else {
+        uint sh = 8u * byte_in_lane;
+        cur_lane |= word << sh;
+        s_rate_write(lid, lane_pos, cur_lane);
+        cur_lane = word >> (64u - sh);
+        lane_pos += 1u;
+        if (lane_pos == 17u) {
+            flush_keccak_from_lds(st, lid, start_round);
+            s_rate_zero(lid);
+            lane_pos = 0u;
+        }
+    }
+}
+
+void finalize_keccak_from_lds(
+    inout uint64_t st[25],
+    uint lid,
+    uint64_t cur_lane,
+    uint byte_in_lane,
+    uint lane_pos,
+    uint suffix,
+    uint start_round
+) {
+    uint64_t padded = cur_lane ^ (uint64_t(suffix & 0xFFu) << (8u * byte_in_lane));
+    s_rate_write(lid, lane_pos, padded);
+    s_rate_xor_hi(lid, 16u, 0x80000000u);
+    flush_keccak_from_lds(st, lid, start_round);
+}
+
+void store_digest50(uint out_base, uint64_t st[25]) {
+    buf_b.words[out_base + 0u] = st[0];
+    buf_b.words[out_base + 1u] = st[1];
+    buf_b.words[out_base + 2u] = st[2];
+    buf_b.words[out_base + 3u] = st[3];
+    buf_b.words[out_base + 4u] = st[4];
+    buf_b.words[out_base + 5u] = st[5];
+    buf_b.words[out_base + 6u] = st[6] & 0xFFFFul;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint idx = pc.base_idx + gl_GlobalInvocationID.x;
+    if (idx >= pc.count) {
+        return;
+    }
+
+    uint64_t st[25];
+    load_midstate(st);
+
+    if (pc.mode == 0u) {
+        uint node_idx = pc.start_node_idx + idx;
+        uint c_base = uint(pc.in_offset_u64) + idx * 14u;
+        uint64_t l0 = buf_b.words[c_base + 0u];
+        uint64_t l1 = buf_b.words[c_base + 1u];
+        uint64_t l2 = buf_b.words[c_base + 2u];
+        uint64_t l3 = buf_b.words[c_base + 3u];
+        uint64_t l4 = buf_b.words[c_base + 4u];
+        uint64_t l5 = buf_b.words[c_base + 5u];
+        uint64_t l6 = buf_b.words[c_base + 6u] & 0xFFFFul;
+        uint64_t r0 = buf_b.words[c_base + 7u];
+        uint64_t r1 = buf_b.words[c_base + 8u];
+        uint64_t r2 = buf_b.words[c_base + 9u];
+        uint64_t r3 = buf_b.words[c_base + 10u];
+        uint64_t r4 = buf_b.words[c_base + 11u];
+        uint64_t r5 = buf_b.words[c_base + 12u];
+        uint64_t r6 = buf_b.words[c_base + 13u] & 0xFFFFul;
+
+        uint64_t hdr5 = uint64_t(pc.node_tag & 0xFFu) | (uint64_t(node_idx) << 8u);
+        st[0]  ^= hdr5 | (l0 << 40u);
+        st[1]  ^= (l0 >> 24u) | (l1 << 40u);
+        st[2]  ^= (l1 >> 24u) | (l2 << 40u);
+        st[3]  ^= (l2 >> 24u) | (l3 << 40u);
+        st[4]  ^= (l3 >> 24u) | (l4 << 40u);
+        st[5]  ^= (l4 >> 24u) | (l5 << 40u);
+        st[6]  ^= (l5 >> 24u) | (l6 << 40u) | (r0 << 56u);
+        st[7]  ^= (r0 >> 8u)  | (r1 << 56u);
+        st[8]  ^= (r1 >> 8u)  | (r2 << 56u);
+        st[9]  ^= (r2 >> 8u)  | (r3 << 56u);
+        st[10] ^= (r3 >> 8u)  | (r4 << 56u);
+        st[11] ^= (r4 >> 8u)  | (r5 << 56u);
+        st[12] ^= (r5 >> 8u)  | ((r6 & 0xFFul) << 56u);
+        st[13] ^= ((r6 >> 8u) & 0xFFul) | (uint64_t(pc.suffix & 0xFFu) << 8u);
+        st[16] ^= 0x8000000000000000ul;
+
+        keccak_perm(st, pc.start_round);
+        store_digest50(uint(pc.out_offset_u64) + idx * 7u, st);
+        return;
+    }
+
+    if (pc.mode == 1u) {
+        s_rate_zero(lid);
+        uint64_t cur_lane = (uint64_t(pc.stage & 0xFFu) << 8u) | (uint64_t(idx) << 16u);
+        uint byte_in_lane = 6u;
+        uint lane_pos = 0u;
+        if (pc.is_base != 0u) {
+            for (uint t = 0u; t < pc.arity; ++t) {
+                uint64_t w = fp_reduce_u64(buf_a.words[idx + t * pc.fibers]);
+                absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, w, pc.start_round);
+            }
+        } else {
+            for (uint t = 0u; t < pc.arity; ++t) {
+                uint base_a = (idx + t * pc.fibers) * 5u;
+                for (uint l = 0u; l < 5u; ++l) {
+                    uint64_t w = fp_reduce_u64(buf_a.words[base_a + l]);
+                    absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, w, pc.start_round);
+                }
+            }
+        }
+        finalize_keccak_from_lds(st, lid, cur_lane, byte_in_lane, lane_pos, pc.suffix, pc.start_round);
+        store_digest50(uint(pc.out_offset_u64) + idx * 7u, st);
+        return;
+    }
+
+    if (pc.mode == 2u) {
+        // 1. Derive 32-byte per-leaf `salt` (`[0x02] || salt_seed[32] || idx_le4`).
+        uint64_t ss0 = buf_c.words[25];
+        uint64_t ss1 = buf_c.words[26];
+        uint64_t ss2 = buf_c.words[27];
+        uint64_t ss3 = buf_c.words[28];
+        uint64_t st_salt[25];
+        for (uint i = 0u; i < 25u; ++i) {
+            st_salt[i] = st[i];
+        }
+        st_salt[0]  ^= 0x02ul | (ss0 << 8u);
+        st_salt[1]  ^= (ss0 >> 56u) | (ss1 << 8u);
+        st_salt[2]  ^= (ss1 >> 56u) | (ss2 << 8u);
+        st_salt[3]  ^= (ss2 >> 56u) | (ss3 << 8u);
+        st_salt[4]  ^= (ss3 >> 56u) | (uint64_t(idx) << 8u) | (uint64_t(pc.suffix & 0xFFu) << 40u);
+        st_salt[16] ^= 0x8000000000000000ul;
+        keccak_perm(st_salt, pc.start_round);
+        uint64_t salt0 = st_salt[0];
+        uint64_t salt1 = st_salt[1];
+        uint64_t salt2 = st_salt[2];
+        uint64_t salt3 = st_salt[3];
+
+        // 2. Hash Stage-0 leaf (`[0x10, log2_arity] || idx_le4 || tree_nonce[32] || salt[32] || z_fiber || r_code[idx]`).
+        s_rate_zero(lid);
+        uint64_t cur_lane = 0x10ul | (uint64_t(pc.log2_arity & 0xFFu) << 8u) | (uint64_t(idx) << 16u);
+        uint byte_in_lane = 6u;
+        uint lane_pos = 0u;
+        for (uint k = 0u; k < 4u; ++k) {
+            absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, buf_c.words[29u + k], pc.start_round);
+        }
+        absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, salt0, pc.start_round);
+        absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, salt1, pc.start_round);
+        absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, salt2, pc.start_round);
+        absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, salt3, pc.start_round);
+        for (uint t = 0u; t < pc.arity; ++t) {
+            uint64_t zw = fp_reduce_u64(buf_a.words[idx + t * pc.fibers]);
+            absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, zw, pc.start_round);
+        }
+        uint r_base = 33u + idx * 5u;
+        for (uint l = 0u; l < 5u; ++l) {
+            uint64_t rw = fp_reduce_u64(buf_c.words[r_base + l]);
+            absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, rw, pc.start_round);
+        }
+        finalize_keccak_from_lds(st, lid, cur_lane, byte_in_lane, lane_pos, pc.suffix, pc.start_round);
+        store_digest50(uint(pc.out_offset_u64) + idx * 7u, st);
+        return;
+    }
+
+    if (pc.mode == 3u) {
+        s_rate_zero(lid);
+        uint64_t cur_lane = 0x12ul
+            | (uint64_t(pc.stage & 0xFFu) << 8u)
+            | (uint64_t(pc.log2_arity & 0xFFu) << 16u)
+            | (uint64_t(idx) << 24u);
+        uint byte_in_lane = 7u;
+        uint lane_pos = 0u;
+        for (uint t = 0u; t < pc.arity; ++t) {
+            uint base_a = (idx + t * pc.fibers) * 5u;
+            for (uint l = 0u; l < 5u; ++l) {
+                uint64_t w = fp_reduce_u64(buf_a.words[base_a + l]);
+                absorb_u64_unaligned(st, lid, cur_lane, byte_in_lane, lane_pos, w, pc.start_round);
+            }
+        }
+        finalize_keccak_from_lds(st, lid, cur_lane, byte_in_lane, lane_pos, pc.suffix, pc.start_round);
+        store_digest50(uint(pc.out_offset_u64) + idx * 7u, st);
+    }
+}
