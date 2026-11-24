@@ -23,8 +23,8 @@ pub use qsag_accel::poseidon2::{
 
 /// `poseidon2ConstAt`: round constant reduced modulo $p$.
 #[inline]
-pub const fn poseidon2_const_at(tag: u64, round: u64, lane: u64) -> Goldilocks {
-    Goldilocks::from_u64_reduced(poseidon2_const_word(tag, round, lane))
+pub const fn poseidon2_const_at(tag: u64, round: u64, index: u64) -> Goldilocks {
+    Goldilocks::from_u64_reduced(qsag_accel::poseidon2::poseidon2_const_at(tag, round, index))
 }
 
 /// Width-12 sponge state: lanes `0..8` are the rate, lanes `8..12` are the 256-bit capacity.
@@ -33,57 +33,25 @@ pub type Poseidon2State12 = [Goldilocks; 12];
 /// Monomial S-box $x \mapsto x^7 \bmod p$ via 4 modular multiplications (`gcd(7, p - 1) = 1`).
 #[inline]
 pub const fn poseidon2_sbox7(x: Goldilocks) -> Goldilocks {
-    let x2 = x.const_mul(x);
-    let x3 = x2.const_mul(x);
-    let x4 = x2.const_mul(x2);
-    x3.const_mul(x4)
+    Goldilocks::from_u64_reduced(qsag_accel::poseidon2::poseidon2_sbox7(x.to_canonical_u64()))
 }
 
-/// `applyM4`: MDS circulant $\text{circ}(2, 3, 1, 1)$ on one 4-lane block.
 #[inline]
-fn poseidon2_apply_m4(b: [Goldilocks; 4]) -> [Goldilocks; 4] {
-    let s = (b[0] + b[1]) + (b[2] + b[3]);
-    [
-        s + (b[0] + Goldilocks::TWO * b[1]),
-        s + (b[1] + Goldilocks::TWO * b[2]),
-        s + (b[2] + Goldilocks::TWO * b[3]),
-        s + (b[3] + Goldilocks::TWO * b[0]),
-    ]
+fn apply_words<const N: usize>(state: &mut [Goldilocks; N], layer: impl FnOnce(&mut [u64; N])) {
+    let mut words = state.map(Goldilocks::to_canonical_u64);
+    layer(&mut words);
+    *state = words.map(Goldilocks::from_u64_reduced);
+    qsag_asm::volatile_fill(&mut words, 0);
 }
 
 /// External diffusion layer $M_E = M_4 \otimes P_3$.
 pub fn poseidon2_apply_me(st: &mut Poseidon2State12) {
-    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
-    *st = [
-        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
-    ];
-    let y0 = poseidon2_apply_m4([st[0], st[1], st[2], st[3]]);
-    let y1 = poseidon2_apply_m4([st[4], st[5], st[6], st[7]]);
-    let y2 = poseidon2_apply_m4([st[8], st[9], st[10], st[11]]);
-    for i in 0..4 {
-        let s = (y0[i] + y1[i]) + y2[i];
-        st[i] = y0[i] + s;
-        st[4 + i] = y1[i] + s;
-        st[8 + i] = y2[i] + s;
-    }
-    *st = [
-        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
-    ];
+    apply_words(st, qsag_accel::poseidon2::poseidon2_apply_me);
 }
 
 /// Internal diffusion layer $M_I = \mathbf{1}\mathbf{1}^T + \text{diag}(-64, 1, 2, 4, \dots, 1024)$.
 pub fn poseidon2_apply_mi(st: &mut Poseidon2State12) {
-    let mut s = Goldilocks::ZERO;
-    for x in st.iter() {
-        s += *x;
-    }
-    st[0] = (Goldilocks::from_u64_reduced(64) * st[0]).const_neg() + s;
-    st[1] += s;
-    let mut d = Goldilocks::TWO;
-    for x in st.iter_mut().skip(2) {
-        *x = d * *x + s;
-        d = d + d;
-    }
+    apply_words(st, qsag_accel::poseidon2::poseidon2_apply_mi);
 }
 
 /// External round: add 12 round constants, apply $x^7$ to every lane, then apply $M_E$.
@@ -103,38 +71,16 @@ pub fn poseidon2_internal_round(round: u64, st: &mut Poseidon2State12) {
 /// Width-12 `Poseidon2` permutation: initial $M_E$, 4 external rounds (`tag = 0`), 22 internal
 /// rounds (`tag = 1`), 4 external rounds (`tag = 2`).
 pub fn poseidon2_perm12(st: &mut Poseidon2State12) {
-    poseidon2_apply_me(st);
-    for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {
-        poseidon2_external_round(0, r, st);
-    }
-    for r in 0..POSEIDON2_INTERNAL_ROUNDS {
-        poseidon2_internal_round(r, st);
-    }
-    for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {
-        poseidon2_external_round(2, r, st);
-    }
+    apply_words(st, qsag_accel::poseidon2::poseidon2_perm12);
 }
 
 /// Pack arbitrary byte slice into `< 2^56` Goldilocks limbs (`0x01` delimiter + zero pad to 7-byte
 /// boundary), matching `Qsag.bytesToLimbs56`, with zero heap reallocation and deterministic wipe
 /// of temporary byte buffers (`[P1-09]`).
 pub fn bytes_to_limbs56(msg: &[u8]) -> Vec<Goldilocks> {
-    let num_limbs = (msg.len() + 1).div_ceil(7);
-    let mut marked: Vec<u8> = Vec::with_capacity(num_limbs * 7);
-    marked.extend_from_slice(msg);
-    marked.push(0x01);
-    while !marked.len().is_multiple_of(7) {
-        marked.push(0x00);
-    }
-    // Reserve +9 extra limbs so `poseidon2_pad` never reallocates `limbs` on the heap!
-    let mut out = Vec::with_capacity(num_limbs + 9);
-    for chunk in marked.as_chunks::<7>().0 {
-        let v = chunk
-            .iter()
-            .fold(0u64, |acc, &byte| (acc << 8) | (byte as u64));
-        out.push(Goldilocks::from_u64_reduced(v));
-    }
-    crate::wipe::wipe_bytes(&mut marked);
+    let words = qsag_accel::goldilocks::delimited_limbs56(msg);
+    let mut out = Vec::with_capacity(words.len() + 9);
+    out.extend(words.map(Goldilocks::from_u64_reduced));
     out
 }
 
@@ -142,19 +88,7 @@ pub fn bytes_to_limbs56(msg: &[u8]) -> Vec<Goldilocks> {
 /// on the stack (`0` heap allocations, `0` modulo-$p$ wraparound collisions `[P1-02]`).
 #[inline]
 pub fn pack_bytes32_to_limbs56_canonical(digest: &[u8; 32]) -> [Goldilocks; 5] {
-    let mut buf = [0u8; 35];
-    buf[0..32].copy_from_slice(digest);
-    buf[32] = 0x01;
-    let mut out = [Goldilocks::ZERO; 5];
-    for i in 0..5 {
-        let mut v = 0u64;
-        for b in 0..7 {
-            v = (v << 8) | (buf[7 * i + b] as u64);
-        }
-        out[i] = Goldilocks::from_u64_reduced(v);
-    }
-    crate::wipe::wipe_bytes(&mut buf);
-    out
+    qsag_accel::goldilocks::pack_bytes32_to_limbs56(digest).map(Goldilocks::from_u64_reduced)
 }
 
 /// Multi-rate `10*1` sponge padding (`rate = 8`), matching `Qsag.poseidon2Pad`.
@@ -183,22 +117,29 @@ pub const POSEIDON2_INIT_STATE: Poseidon2State12 = {
 /// 256-bit algebraic Goldilocks `Poseidon2` sponge hash matching `Qsag.poseidon2Hash32`,
 /// deterministically wiping intermediate rate limbs and sponge state before returning (`[P1-09]`).
 pub fn poseidon2_hash32(msg: &[u8]) -> [u8; 32] {
-    let mut limbs = bytes_to_limbs56(msg);
-    poseidon2_pad(&mut limbs);
-    let mut st = POSEIDON2_INIT_STATE;
-    for block in limbs.as_chunks::<8>().0 {
-        for (lane, limb) in block.iter().enumerate() {
-            st[lane] += *limb;
-        }
-        poseidon2_perm12(&mut st);
+    let mut sponge = qsag_accel::poseidon2::Poseidon2Sponge::new_with_domain(32);
+    sponge.absorb_delimited_bytes(msg);
+    let mut words = sponge.finalize_digest4();
+    let mut out = [0; 32];
+    for (bytes, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(&words) {
+        *bytes = word.to_be_bytes();
     }
-    crate::wipe::wipe_goldilocks(&mut limbs);
-    let mut out = [0u8; 32];
-    for lane in 0..4 {
-        out[8 * lane..8 * lane + 8].copy_from_slice(&st[lane].to_be_bytes());
-    }
-    crate::wipe::wipe_goldilocks(&mut st);
+    qsag_asm::volatile_fill(&mut words, 0);
     out
+}
+
+/// Absorb the domain, input length and field words into an explicit capacity.
+pub fn poseidon2_sponge_hash_limbs(
+    domain_tag: u64,
+    init_cap: [Goldilocks; 4],
+    limbs: &[Goldilocks],
+) -> [Goldilocks; 4] {
+    qsag_accel::poseidon2::poseidon2_sponge_hash_words(
+        domain_tag,
+        init_cap.map(Goldilocks::to_canonical_u64),
+        limbs.iter().copied().map(Goldilocks::to_canonical_u64),
+    )
+    .map(Goldilocks::from_u64_reduced)
 }
 
 #[cfg(test)]
@@ -265,55 +206,18 @@ pub const fn goldilocks_shl_small(x: Goldilocks, shift: u32) -> Goldilocks {
 /// Kronecker-swapped Width-24 external diffusion layer $M_E = M_4 \otimes P_6$ (`0` field muls;
 /// immune to `ePrint 2026/306` subfield/subspace trail skipping).
 pub fn poseidon2_gl24_apply_me(st: &mut Poseidon2State24) {
-    let mut y = [[Goldilocks::ZERO; 4]; 6];
-    for c in 0..6 {
-        y[c] = poseidon2_apply_m4([st[c], st[6 + c], st[12 + c], st[18 + c]]);
-    }
-    for g in 0..4 {
-        let s = ((y[0][g] + y[1][g]) + (y[2][g] + y[3][g])) + (y[4][g] + y[5][g]);
-        for c in 0..6 {
-            st[6 * g + c] = y[c][g] + s;
-        }
-    }
+    apply_words(st, qsag_accel::poseidon2::poseidon2_gl24_apply_me);
 }
 
 /// Shift-only Width-24 internal diffusion layer $M_I = J_{24} + \mathrm{diag}(-2^{23}, 1, 2, \dots, 2^{22})$
 /// (`0` field multiplications, Rabin-irreducible degree-24 charpoly over Goldilocks, nonzero-sum branch number `25`).
 pub fn poseidon2_gl24_apply_mi(st: &mut Poseidon2State24) {
-    let mut s = Goldilocks::ZERO;
-    for x in st.iter() {
-        s += *x;
-    }
-    st[0] = s - goldilocks_shl_small(st[0], 23);
-    st[1] += s;
-    for (j, x) in st.iter_mut().enumerate().skip(2) {
-        *x = s + goldilocks_shl_small(*x, (j - 1) as u32);
-    }
+    apply_words(st, qsag_accel::poseidon2::poseidon2_gl24_apply_mi);
 }
 
 /// Width-24 `Poseidon2-GL-w24` permutation (`(R_F, R_P) = (8, 44)`, `236` Grain constants).
 pub fn poseidon2_gl24_perm(st: &mut Poseidon2State24) {
-    poseidon2_gl24_apply_me(st);
-    for r in 0..POSEIDON2_GL24_HALF_EXTERNAL_ROUNDS {
-        let base = 24 * r;
-        for lane in 0..24 {
-            st[lane] =
-                poseidon2_sbox7(st[lane] + Goldilocks::from_u64_reduced(POSEIDON2_GL24_RC[base + lane]));
-        }
-        poseidon2_gl24_apply_me(st);
-    }
-    for r in 0..POSEIDON2_GL24_INTERNAL_ROUNDS {
-        st[0] = poseidon2_sbox7(st[0] + Goldilocks::from_u64_reduced(POSEIDON2_GL24_RC[96 + r]));
-        poseidon2_gl24_apply_mi(st);
-    }
-    for r in 0..POSEIDON2_GL24_HALF_EXTERNAL_ROUNDS {
-        let base = 140 + 24 * r;
-        for lane in 0..24 {
-            st[lane] =
-                poseidon2_sbox7(st[lane] + Goldilocks::from_u64_reduced(POSEIDON2_GL24_RC[base + lane]));
-        }
-        poseidon2_gl24_apply_me(st);
-    }
+    apply_words(st, qsag_accel::poseidon2::poseidon2_gl24_perm);
 }
 
 /// 1-call 2-to-1 Merkle compression of two 7-limb (56-byte) digests + 2 tweak limbs (`7 + 7 + 2 = 16`

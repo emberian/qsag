@@ -1,5 +1,5 @@
 //! Hem field layer. The base field `Goldilocks` ($\mathbb{F}_p, p = 2^{64} - 2^{32} + 1$) and the
-//! quadratic extension `GoldilocksExt2` ($\mathbb{F}_p[u]/(u^2 - 7)$) are the `qsag-core` types,
+//! quadratic extension `GoldilocksExt2` ($\mathbb{F}_p\[u\]/(u^2 - 7)$) are the `qsag-core` types,
 //! re-exported here. This module adds what only the aggregation prover needs on top of them:
 //! shift/fold helpers, batch inversion, 2-adic roots of unity, and Radix-2 / Radix-4
 //! Cooley–Tukey NTT/INTT and coset Reed–Solomon encoding (paired with Quintic `Fp5` in
@@ -656,7 +656,6 @@ fn encode_rs_coset_goldilocks_cpu_inner(
     ntt_goldilocks_cpu(&mut buf);
     buf
 }
-
 
 #[cfg(test)]
 mod tests {

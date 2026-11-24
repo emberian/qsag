@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use crate::field::{Goldilocks, GoldilocksOps as _};
+use crate::field::Goldilocks;
 
 // ============================================================================
 // 1. Self-Delimiting LEB128 Multi-Field Framing (`encode_multi_frame`)
@@ -24,170 +24,11 @@ pub use qsag_core::sponge::encode_multi_frame;
 // 2. Full 24-Round `Keccak-f[1600]`, `SHAKE256`, and `cSHAKE256`
 // ============================================================================
 
-use qsag_core::sponge::KECCAK_ROUND_CONSTANTS as KECCAK_RC;
+use qsag_core::sponge::keccak::keccak_p1600_lanes;
 
 const SHAKE256_RATE: usize = 136;
 
-/// Full 24-round `Keccak-f[1600]` permutation (usable in both `const` evaluation and runtime).
-/// This is the unrolled kernel behind the Merkle and transcript hashing of the prover;
-/// `qsag_core::sponge::keccak_f1600` is the specification it is tested against.
-#[inline(always)]
-pub const fn keccak_f1600(state: &mut [u64; 25]) {
-    let mut s0 = state[0];
-    let mut s1 = state[1];
-    let mut s2 = state[2];
-    let mut s3 = state[3];
-    let mut s4 = state[4];
-    let mut s5 = state[5];
-    let mut s6 = state[6];
-    let mut s7 = state[7];
-    let mut s8 = state[8];
-    let mut s9 = state[9];
-    let mut s10 = state[10];
-    let mut s11 = state[11];
-    let mut s12 = state[12];
-    let mut s13 = state[13];
-    let mut s14 = state[14];
-    let mut s15 = state[15];
-    let mut s16 = state[16];
-    let mut s17 = state[17];
-    let mut s18 = state[18];
-    let mut s19 = state[19];
-    let mut s20 = state[20];
-    let mut s21 = state[21];
-    let mut s22 = state[22];
-    let mut s23 = state[23];
-    let mut s24 = state[24];
-
-    let mut r = 0usize;
-    while r < 24 {
-        let c0 = s0 ^ s5 ^ s10 ^ s15 ^ s20;
-        let c1 = s1 ^ s6 ^ s11 ^ s16 ^ s21;
-        let c2 = s2 ^ s7 ^ s12 ^ s17 ^ s22;
-        let c3 = s3 ^ s8 ^ s13 ^ s18 ^ s23;
-        let c4 = s4 ^ s9 ^ s14 ^ s19 ^ s24;
-
-        let d0 = c4 ^ c1.rotate_left(1);
-        let d1 = c0 ^ c2.rotate_left(1);
-        let d2 = c1 ^ c3.rotate_left(1);
-        let d3 = c2 ^ c4.rotate_left(1);
-        let d4 = c3 ^ c0.rotate_left(1);
-
-        s0 ^= d0;
-        s5 ^= d0;
-        s10 ^= d0;
-        s15 ^= d0;
-        s20 ^= d0;
-        s1 ^= d1;
-        s6 ^= d1;
-        s11 ^= d1;
-        s16 ^= d1;
-        s21 ^= d1;
-        s2 ^= d2;
-        s7 ^= d2;
-        s12 ^= d2;
-        s17 ^= d2;
-        s22 ^= d2;
-        s3 ^= d3;
-        s8 ^= d3;
-        s13 ^= d3;
-        s18 ^= d3;
-        s23 ^= d3;
-        s4 ^= d4;
-        s9 ^= d4;
-        s14 ^= d4;
-        s19 ^= d4;
-        s24 ^= d4;
-
-        let b0 = s0;
-        let b1 = s6.rotate_left(44);
-        let b2 = s12.rotate_left(43);
-        let b3 = s18.rotate_left(21);
-        let b4 = s24.rotate_left(14);
-
-        let b5 = s3.rotate_left(28);
-        let b6 = s9.rotate_left(20);
-        let b7 = s10.rotate_left(3);
-        let b8 = s16.rotate_left(45);
-        let b9 = s22.rotate_left(61);
-
-        let b10 = s1.rotate_left(1);
-        let b11 = s7.rotate_left(6);
-        let b12 = s13.rotate_left(25);
-        let b13 = s19.rotate_left(8);
-        let b14 = s20.rotate_left(18);
-
-        let b15 = s4.rotate_left(27);
-        let b16 = s5.rotate_left(36);
-        let b17 = s11.rotate_left(10);
-        let b18 = s17.rotate_left(15);
-        let b19 = s23.rotate_left(56);
-
-        let b20 = s2.rotate_left(62);
-        let b21 = s8.rotate_left(55);
-        let b22 = s14.rotate_left(39);
-        let b23 = s15.rotate_left(41);
-        let b24 = s21.rotate_left(2);
-
-        s0 = (b0 ^ ((!b1) & b2)) ^ KECCAK_RC[r];
-        s1 = b1 ^ ((!b2) & b3);
-        s2 = b2 ^ ((!b3) & b4);
-        s3 = b3 ^ ((!b4) & b0);
-        s4 = b4 ^ ((!b0) & b1);
-
-        s5 = b5 ^ ((!b6) & b7);
-        s6 = b6 ^ ((!b7) & b8);
-        s7 = b7 ^ ((!b8) & b9);
-        s8 = b8 ^ ((!b9) & b5);
-        s9 = b9 ^ ((!b5) & b6);
-
-        s10 = b10 ^ ((!b11) & b12);
-        s11 = b11 ^ ((!b12) & b13);
-        s12 = b12 ^ ((!b13) & b14);
-        s13 = b13 ^ ((!b14) & b10);
-        s14 = b14 ^ ((!b10) & b11);
-
-        s15 = b15 ^ ((!b16) & b17);
-        s16 = b16 ^ ((!b17) & b18);
-        s17 = b17 ^ ((!b18) & b19);
-        s18 = b18 ^ ((!b19) & b15);
-        s19 = b19 ^ ((!b15) & b16);
-
-        s20 = b20 ^ ((!b21) & b22);
-        s21 = b21 ^ ((!b22) & b23);
-        s22 = b22 ^ ((!b23) & b24);
-        s23 = b23 ^ ((!b24) & b20);
-        s24 = b24 ^ ((!b20) & b21);
-
-        r += 1;
-    }
-
-    state[0] = s0;
-    state[1] = s1;
-    state[2] = s2;
-    state[3] = s3;
-    state[4] = s4;
-    state[5] = s5;
-    state[6] = s6;
-    state[7] = s7;
-    state[8] = s8;
-    state[9] = s9;
-    state[10] = s10;
-    state[11] = s11;
-    state[12] = s12;
-    state[13] = s13;
-    state[14] = s14;
-    state[15] = s15;
-    state[16] = s16;
-    state[17] = s17;
-    state[18] = s18;
-    state[19] = s19;
-    state[20] = s20;
-    state[21] = s21;
-    state[22] = s22;
-    state[23] = s23;
-    state[24] = s24;
-}
+pub use qsag_core::sponge::keccak::{keccak_f1600, keccak_p1600_12};
 
 /// Post-prefix sponge state of `cSHAKE256("", input, L, customization)` for a customization
 /// of `1..=128` bytes, evaluated at compile time; bit-identical to [`cshake256_into`].
@@ -202,269 +43,6 @@ pub const CANOPY_MIDSTATE: [u64; 25] = cshake256_static_midstate(CANOPY_CUSTOM);
 pub const POW_CUSTOM: &[u8] = b"QSAG.PCS.POW2/v1";
 /// Precomputed compile-time `cSHAKE256` midstate for [`POW_CUSTOM`].
 pub const POW_MIDSTATE: [u64; 25] = cshake256_static_midstate(POW_CUSTOM);
-
-/// RFC 9861 12-round `Keccak-p[1600, 12]` permutation (rounds `12..24` of `KECCAK_RC`).
-/// Used by 400-bit `TurboSHAKE256` Canopy commitments and transcripts (`zk_hem::v2` and
-/// `hem_quintic`, zero AIR constraints); see [`crate::zk_hem::v2::bounds`] for query budgets.
-/// It uses half the rounds of Keccak-f[1600]; throughput depends on the workload.
-#[inline(always)]
-pub const fn keccak_p1600_12(state: &mut [u64; 25]) {
-    let mut s0 = state[0];
-    let mut s1 = state[1];
-    let mut s2 = state[2];
-    let mut s3 = state[3];
-    let mut s4 = state[4];
-    let mut s5 = state[5];
-    let mut s6 = state[6];
-    let mut s7 = state[7];
-    let mut s8 = state[8];
-    let mut s9 = state[9];
-    let mut s10 = state[10];
-    let mut s11 = state[11];
-    let mut s12 = state[12];
-    let mut s13 = state[13];
-    let mut s14 = state[14];
-    let mut s15 = state[15];
-    let mut s16 = state[16];
-    let mut s17 = state[17];
-    let mut s18 = state[18];
-    let mut s19 = state[19];
-    let mut s20 = state[20];
-    let mut s21 = state[21];
-    let mut s22 = state[22];
-    let mut s23 = state[23];
-    let mut s24 = state[24];
-
-    let mut r = 12usize;
-    while r < 24 {
-        let c0 = s0 ^ s5 ^ s10 ^ s15 ^ s20;
-        let c1 = s1 ^ s6 ^ s11 ^ s16 ^ s21;
-        let c2 = s2 ^ s7 ^ s12 ^ s17 ^ s22;
-        let c3 = s3 ^ s8 ^ s13 ^ s18 ^ s23;
-        let c4 = s4 ^ s9 ^ s14 ^ s19 ^ s24;
-
-        let d0 = c4 ^ c1.rotate_left(1);
-        let d1 = c0 ^ c2.rotate_left(1);
-        let d2 = c1 ^ c3.rotate_left(1);
-        let d3 = c2 ^ c4.rotate_left(1);
-        let d4 = c3 ^ c0.rotate_left(1);
-
-        s0 ^= d0;
-        s5 ^= d0;
-        s10 ^= d0;
-        s15 ^= d0;
-        s20 ^= d0;
-        s1 ^= d1;
-        s6 ^= d1;
-        s11 ^= d1;
-        s16 ^= d1;
-        s21 ^= d1;
-        s2 ^= d2;
-        s7 ^= d2;
-        s12 ^= d2;
-        s17 ^= d2;
-        s22 ^= d2;
-        s3 ^= d3;
-        s8 ^= d3;
-        s13 ^= d3;
-        s18 ^= d3;
-        s23 ^= d3;
-        s4 ^= d4;
-        s9 ^= d4;
-        s14 ^= d4;
-        s19 ^= d4;
-        s24 ^= d4;
-
-        let b0 = s0;
-        let b1 = s6.rotate_left(44);
-        let b2 = s12.rotate_left(43);
-        let b3 = s18.rotate_left(21);
-        let b4 = s24.rotate_left(14);
-        let b5 = s3.rotate_left(28);
-        let b6 = s9.rotate_left(20);
-        let b7 = s10.rotate_left(3);
-        let b8 = s16.rotate_left(45);
-        let b9 = s22.rotate_left(61);
-        let b10 = s1.rotate_left(1);
-        let b11 = s7.rotate_left(6);
-        let b12 = s13.rotate_left(25);
-        let b13 = s19.rotate_left(8);
-        let b14 = s20.rotate_left(18);
-        let b15 = s4.rotate_left(27);
-        let b16 = s5.rotate_left(36);
-        let b17 = s11.rotate_left(10);
-        let b18 = s17.rotate_left(15);
-        let b19 = s23.rotate_left(56);
-        let b20 = s2.rotate_left(62);
-        let b21 = s8.rotate_left(55);
-        let b22 = s14.rotate_left(39);
-        let b23 = s15.rotate_left(41);
-        let b24 = s21.rotate_left(2);
-
-        s0 = (b0 ^ ((!b1) & b2)) ^ KECCAK_RC[r];
-        s1 = b1 ^ ((!b2) & b3);
-        s2 = b2 ^ ((!b3) & b4);
-        s3 = b3 ^ ((!b4) & b0);
-        s4 = b4 ^ ((!b0) & b1);
-        s5 = b5 ^ ((!b6) & b7);
-        s6 = b6 ^ ((!b7) & b8);
-        s7 = b7 ^ ((!b8) & b9);
-        s8 = b8 ^ ((!b9) & b5);
-        s9 = b9 ^ ((!b5) & b6);
-        s10 = b10 ^ ((!b11) & b12);
-        s11 = b11 ^ ((!b12) & b13);
-        s12 = b12 ^ ((!b13) & b14);
-        s13 = b13 ^ ((!b14) & b10);
-        s14 = b14 ^ ((!b10) & b11);
-        s15 = b15 ^ ((!b16) & b17);
-        s16 = b16 ^ ((!b17) & b18);
-        s17 = b17 ^ ((!b18) & b19);
-        s18 = b18 ^ ((!b19) & b15);
-        s19 = b19 ^ ((!b15) & b16);
-        s20 = b20 ^ ((!b21) & b22);
-        s21 = b21 ^ ((!b22) & b23);
-        s22 = b22 ^ ((!b23) & b24);
-        s23 = b23 ^ ((!b24) & b20);
-        s24 = b24 ^ ((!b20) & b21);
-        r += 1;
-    }
-
-    state[0] = s0;
-    state[1] = s1;
-    state[2] = s2;
-    state[3] = s3;
-    state[4] = s4;
-    state[5] = s5;
-    state[6] = s6;
-    state[7] = s7;
-    state[8] = s8;
-    state[9] = s9;
-    state[10] = s10;
-    state[11] = s11;
-    state[12] = s12;
-    state[13] = s13;
-    state[14] = s14;
-    state[15] = s15;
-    state[16] = s16;
-    state[17] = s17;
-    state[18] = s18;
-    state[19] = s19;
-    state[20] = s20;
-    state[21] = s21;
-    state[22] = s22;
-    state[23] = s23;
-    state[24] = s24;
-}
-
-/// Vectorized `N`-way (`N = 4` AVX2/NEON or `N = 8` AVX-512 ZMM) 12-round `Keccak-p[1600, 12]`.
-#[inline(always)]
-fn keccak_p1600_12_lanes<const N: usize>(st: &mut [[u64; N]; 25]) {
-    #[inline(always)]
-    fn xor<const N: usize>(a: [u64; N], b: [u64; N]) -> [u64; N] {
-        core::array::from_fn(|k| a[k] ^ b[k])
-    }
-    #[inline(always)]
-    fn xor5<const N: usize>(
-        a: [u64; N],
-        b: [u64; N],
-        c: [u64; N],
-        d: [u64; N],
-        e: [u64; N],
-    ) -> [u64; N] {
-        core::array::from_fn(|k| a[k] ^ b[k] ^ c[k] ^ d[k] ^ e[k])
-    }
-    #[inline(always)]
-    fn rol<const N: usize, const R: u32>(a: [u64; N]) -> [u64; N] {
-        core::array::from_fn(|k| a[k].rotate_left(R))
-    }
-    #[inline(always)]
-    fn chi<const N: usize>(a: [u64; N], b: [u64; N], c: [u64; N]) -> [u64; N] {
-        core::array::from_fn(|k| a[k] ^ ((!b[k]) & c[k]))
-    }
-
-    for &rc in &KECCAK_RC[12..24] {
-        let c0 = xor5(st[0], st[5], st[10], st[15], st[20]);
-        let c1 = xor5(st[1], st[6], st[11], st[16], st[21]);
-        let c2 = xor5(st[2], st[7], st[12], st[17], st[22]);
-        let c3 = xor5(st[3], st[8], st[13], st[18], st[23]);
-        let c4 = xor5(st[4], st[9], st[14], st[19], st[24]);
-
-        let d0 = xor(c4, rol::<N, 1>(c1));
-        let d1 = xor(c0, rol::<N, 1>(c2));
-        let d2 = xor(c1, rol::<N, 1>(c3));
-        let d3 = xor(c2, rol::<N, 1>(c4));
-        let d4 = xor(c3, rol::<N, 1>(c0));
-
-        for row in [0, 5, 10, 15, 20] {
-            st[row] = xor(st[row], d0);
-        }
-        for row in [1, 6, 11, 16, 21] {
-            st[row] = xor(st[row], d1);
-        }
-        for row in [2, 7, 12, 17, 22] {
-            st[row] = xor(st[row], d2);
-        }
-        for row in [3, 8, 13, 18, 23] {
-            st[row] = xor(st[row], d3);
-        }
-        for row in [4, 9, 14, 19, 24] {
-            st[row] = xor(st[row], d4);
-        }
-
-        let b0 = st[0];
-        let b1 = rol::<N, 44>(st[6]);
-        let b2 = rol::<N, 43>(st[12]);
-        let b3 = rol::<N, 21>(st[18]);
-        let b4 = rol::<N, 14>(st[24]);
-        let b5 = rol::<N, 28>(st[3]);
-        let b6 = rol::<N, 20>(st[9]);
-        let b7 = rol::<N, 3>(st[10]);
-        let b8 = rol::<N, 45>(st[16]);
-        let b9 = rol::<N, 61>(st[22]);
-        let b10 = rol::<N, 1>(st[1]);
-        let b11 = rol::<N, 6>(st[7]);
-        let b12 = rol::<N, 25>(st[13]);
-        let b13 = rol::<N, 8>(st[19]);
-        let b14 = rol::<N, 18>(st[20]);
-        let b15 = rol::<N, 27>(st[4]);
-        let b16 = rol::<N, 36>(st[5]);
-        let b17 = rol::<N, 10>(st[11]);
-        let b18 = rol::<N, 15>(st[17]);
-        let b19 = rol::<N, 56>(st[23]);
-        let b20 = rol::<N, 62>(st[2]);
-        let b21 = rol::<N, 55>(st[8]);
-        let b22 = rol::<N, 39>(st[14]);
-        let b23 = rol::<N, 41>(st[15]);
-        let b24 = rol::<N, 2>(st[21]);
-
-        let s0 = chi(b0, b1, b2);
-        st[0] = core::array::from_fn(|k| s0[k] ^ rc);
-        st[1] = chi(b1, b2, b3);
-        st[2] = chi(b2, b3, b4);
-        st[3] = chi(b3, b4, b0);
-        st[4] = chi(b4, b0, b1);
-        st[5] = chi(b5, b6, b7);
-        st[6] = chi(b6, b7, b8);
-        st[7] = chi(b7, b8, b9);
-        st[8] = chi(b8, b9, b5);
-        st[9] = chi(b9, b5, b6);
-        st[10] = chi(b10, b11, b12);
-        st[11] = chi(b11, b12, b13);
-        st[12] = chi(b12, b13, b14);
-        st[13] = chi(b13, b14, b10);
-        st[14] = chi(b14, b10, b11);
-        st[15] = chi(b15, b16, b17);
-        st[16] = chi(b16, b17, b18);
-        st[17] = chi(b17, b18, b19);
-        st[18] = chi(b18, b19, b15);
-        st[19] = chi(b19, b15, b16);
-        st[20] = chi(b20, b21, b22);
-        st[21] = chi(b21, b22, b23);
-        st[22] = chi(b22, b23, b24);
-        st[23] = chi(b23, b24, b20);
-        st[24] = chi(b24, b20, b21);
-    }
-}
 
 /// Precompute a compile-time 12-round `TurboSHAKE256` customization midstate (`1..=128` byte customization).
 pub const fn turboshake256_static_midstate(custom: &[u8]) -> [u64; 25] {
@@ -503,7 +81,7 @@ pub const fn turboshake256_static_midstate(custom: &[u8]) -> [u64; 25] {
         state[lane] = u64::from_le_bytes(word);
         lane += 1;
     }
-    keccak_p1600_12(&mut state);
+    qsag_core::sponge::keccak::keccak_p1600_const::<12>(&mut state);
     state
 }
 
@@ -591,7 +169,7 @@ fn turboshake256_from_midstate_32_lanes<const N: usize>(
                 *dst ^= u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
             }
         }
-        keccak_p1600_12_lanes(&mut st);
+        keccak_p1600_lanes::<_, 12>(&mut st);
         off += SHAKE256_RATE;
     }
     if !same_len {
@@ -632,7 +210,7 @@ fn turboshake256_from_midstate_32_lanes<const N: usize>(
             *dst ^= u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
         }
     }
-    keccak_p1600_12_lanes(&mut st);
+    keccak_p1600_lanes::<_, 12>(&mut st);
     let mut out = [[0u8; 32]; N];
     for (lane, st_lane) in st.iter().enumerate().take(4) {
         for (dst, &word) in out.iter_mut().zip(st_lane.iter()) {
@@ -742,7 +320,7 @@ fn turboshake256_pow_lanes<const N: usize>(
     for dst in &mut st[16] {
         *dst ^= 0x8000_0000_0000_0000;
     }
-    keccak_p1600_12_lanes(&mut st);
+    keccak_p1600_lanes::<_, 12>(&mut st);
     st[0]
 }
 
@@ -1168,346 +746,27 @@ pub fn cshake256_32(customization: &[u8], input: &[u8]) -> [u8; 32] {
 // 3. Width-12 `Poseidon2` over `Goldilocks` and `GoldilocksExt2`
 // ============================================================================
 
-use qsag_core::sponge::poseidon2_const_at as poseidon2_const_compute;
-pub use qsag_core::sponge::{POSEIDON2_CONST_IV, poseidon2_rc_bijection, poseidon2_sbox7};
-
-pub const POSEIDON2_HALF_EXT_ROUNDS: usize = 4;
-pub const POSEIDON2_INT_ROUNDS: usize = 22;
-const _: () = assert!(
-    POSEIDON2_HALF_EXT_ROUNDS as u64 == qsag_core::sponge::POSEIDON2_HALF_EXTERNAL_ROUNDS
-        && POSEIDON2_INT_ROUNDS as u64 == qsag_core::sponge::POSEIDON2_INTERNAL_ROUNDS
-);
-
-const POSEIDON2_RC_EXT0: [[Goldilocks; 12]; POSEIDON2_HALF_EXT_ROUNDS] = {
-    let mut tbl = [[Goldilocks::ZERO; 12]; POSEIDON2_HALF_EXT_ROUNDS];
-    let mut r = 0;
-    while r < POSEIDON2_HALF_EXT_ROUNDS {
-        let mut l = 0;
-        while l < 12 {
-            tbl[r][l] = poseidon2_const_compute(0, r as u64, l as u64);
-            l += 1;
-        }
-        r += 1;
-    }
-    tbl
+pub use qsag_core::sponge::{
+    POSEIDON2_CONST_IV, poseidon2_apply_me, poseidon2_apply_mi, poseidon2_const_at,
+    poseidon2_perm12, poseidon2_rc_bijection, poseidon2_sbox7,
 };
 
-const POSEIDON2_RC_INT: [Goldilocks; POSEIDON2_INT_ROUNDS] = {
-    let mut tbl = [Goldilocks::ZERO; POSEIDON2_INT_ROUNDS];
-    let mut r = 0;
-    while r < POSEIDON2_INT_ROUNDS {
-        tbl[r] = poseidon2_const_compute(1, r as u64, 0);
-        r += 1;
-    }
-    tbl
-};
+pub const POSEIDON2_HALF_EXT_ROUNDS: usize =
+    qsag_core::sponge::POSEIDON2_HALF_EXTERNAL_ROUNDS as usize;
+pub const POSEIDON2_INT_ROUNDS: usize = qsag_core::sponge::POSEIDON2_INTERNAL_ROUNDS as usize;
 
-const POSEIDON2_RC_EXT2: [[Goldilocks; 12]; POSEIDON2_HALF_EXT_ROUNDS] = {
-    let mut tbl = [[Goldilocks::ZERO; 12]; POSEIDON2_HALF_EXT_ROUNDS];
-    let mut r = 0;
-    while r < POSEIDON2_HALF_EXT_ROUNDS {
-        let mut l = 0;
-        while l < 12 {
-            tbl[r][l] = poseidon2_const_compute(2, r as u64, l as u64);
-            l += 1;
-        }
-        r += 1;
-    }
-    tbl
-};
-
-#[inline(always)]
-pub const fn poseidon2_const_at(tag: u64, round: u64, lane: u64) -> Goldilocks {
-    match tag {
-        0 if (round as usize) < POSEIDON2_HALF_EXT_ROUNDS && (lane as usize) < 12 => {
-            POSEIDON2_RC_EXT0[round as usize][lane as usize]
-        }
-        1 if (round as usize) < POSEIDON2_INT_ROUNDS && lane == 0 => {
-            POSEIDON2_RC_INT[round as usize]
-        }
-        2 if (round as usize) < POSEIDON2_HALF_EXT_ROUNDS && (lane as usize) < 12 => {
-            POSEIDON2_RC_EXT2[round as usize][lane as usize]
-        }
-        _ => poseidon2_const_compute(tag, round, lane),
-    }
-}
-
-/// Unrolled 4-lane butterfly for `M_4 = circ(2, 3, 1, 1)` over `Goldilocks` (`9` adds, `0` muls).
-#[inline(always)]
-fn apply_m4_base(b: [Goldilocks; 4]) -> [Goldilocks; 4] {
-    let t01 = b[0] + b[1];
-    let t23 = b[2] + b[3];
-    let t0123 = t01 + t23;
-    let t01123 = t0123 + b[1];
-    let t01233 = t0123 + b[3];
-    [
-        t01123 + t01,
-        t01123 + b[2].shl_small::<1>(),
-        t01233 + t23,
-        t01233 + b[0].shl_small::<1>(),
-    ]
-}
-
-#[inline(always)]
-pub fn poseidon2_apply_me(st: &mut [Goldilocks; 12]) {
-    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
-    *st = [
-        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
-    ];
-    let y0 = apply_m4_base([st[0], st[1], st[2], st[3]]);
-    let y1 = apply_m4_base([st[4], st[5], st[6], st[7]]);
-    let y2 = apply_m4_base([st[8], st[9], st[10], st[11]]);
-    let s0 = (y0[0] + y1[0]) + y2[0];
-    let s1 = (y0[1] + y1[1]) + y2[1];
-    let s2 = (y0[2] + y1[2]) + y2[2];
-    let s3 = (y0[3] + y1[3]) + y2[3];
-    st[0] = y0[0] + s0;
-    st[1] = y0[1] + s1;
-    st[2] = y0[2] + s2;
-    st[3] = y0[3] + s3;
-    st[4] = y1[0] + s0;
-    st[5] = y1[1] + s1;
-    st[6] = y1[2] + s2;
-    st[7] = y1[3] + s3;
-    st[8] = y2[0] + s0;
-    st[9] = y2[1] + s1;
-    st[10] = y2[2] + s2;
-    st[11] = y2[3] + s3;
-    *st = [
-        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
-    ];
-}
-
-/// Unrolled internal diffusion `M_I = I + diag(-3, 0, 1, 3, ..., 1023) + 1*1^T` (`0` muls:
-/// diagonal entries on lanes `0..12` are `-64, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024`).
-#[inline(always)]
-pub fn poseidon2_apply_mi(st: &mut [Goldilocks; 12]) {
-    let s = (((st[0] + st[1]) + (st[2] + st[3])) + ((st[4] + st[5]) + (st[6] + st[7])))
-        + ((st[8] + st[9]) + (st[10] + st[11]));
-    st[0] = s - st[0].shl_small::<6>();
-    st[1] += s;
-    st[2] = st[2].shl_small::<1>() + s;
-    st[3] = st[3].shl_small::<2>() + s;
-    st[4] = st[4].shl_small::<3>() + s;
-    st[5] = st[5].shl_small::<4>() + s;
-    st[6] = st[6].shl_small::<5>() + s;
-    st[7] = st[7].shl_small::<6>() + s;
-    st[8] = st[8].shl_small::<7>() + s;
-    st[9] = st[9].shl_small::<8>() + s;
-    st[10] = st[10].shl_small::<9>() + s;
-    st[11] = st[11].shl_small::<10>() + s;
-}
-
-/// Raw-word kernel of [`poseidon2_perm12`].
-///
-/// Between layers a lane is any `u64` representative modulo `p`. Each linear layer is
-/// accumulated exactly in `u128` (every accumulator stays below `2^75`) together with the next
-/// round constants and reduced once per lane; only the final state is canonicalized. The
-/// layer-by-layer functions above remain the readable definition, and the tests compare this
-/// kernel against them and against the `qsag-core` specification.
-mod perm_kernel {
-    use super::{POSEIDON2_RC_EXT0, POSEIDON2_RC_EXT2, POSEIDON2_RC_INT};
-    use crate::field::GOLDILOCKS_PRIME;
-
-    const EPS: u64 = 0xFFFF_FFFF;
-    const ZERO_RC: [u64; 12] = [0; 12];
-
-    const fn words(rc: &[crate::field::Goldilocks; 12]) -> [u64; 12] {
-        let mut out = [0u64; 12];
-        let mut i = 0;
-        while i < 12 {
-            out[i] = rc[i].to_canonical_u64();
-            i += 1;
-        }
-        out
-    }
-
-    const RC_EXT0: [[u64; 12]; 4] = [
-        words(&POSEIDON2_RC_EXT0[0]),
-        words(&POSEIDON2_RC_EXT0[1]),
-        words(&POSEIDON2_RC_EXT0[2]),
-        words(&POSEIDON2_RC_EXT0[3]),
-    ];
-    const RC_EXT2: [[u64; 12]; 4] = [
-        words(&POSEIDON2_RC_EXT2[0]),
-        words(&POSEIDON2_RC_EXT2[1]),
-        words(&POSEIDON2_RC_EXT2[2]),
-        words(&POSEIDON2_RC_EXT2[3]),
-    ];
-    const RC_INT: [u64; 22] = {
-        let mut out = [0u64; 22];
-        let mut i = 0;
-        while i < 22 {
-            out[i] = POSEIDON2_RC_INT[i].to_canonical_u64();
-            i += 1;
-        }
-        out
-    };
-
-    /// `x mod p` as some `u64` representative, for `x < 2^96`
-    /// (`2^64 = 2^32 - 1 (mod p)`; a carry out of the fold leaves room for one more `EPS`).
-    #[inline(always)]
-    pub(super) const fn reduce_wide(x: u128) -> u64 {
-        let lo = x as u64;
-        let hi = (x >> 64) as u64;
-        debug_assert!(hi <= EPS);
-        let (s, carry) = lo.overflowing_add(hi * EPS);
-        s.wrapping_add(EPS & 0u64.wrapping_sub(carry as u64))
-    }
-
-    /// `a * b mod p` as some `u64` representative, for arbitrary `u64` representatives
-    /// (`2^96 = -1 (mod p)`).
-    #[inline(always)]
-    const fn mul(a: u64, b: u64) -> u64 {
-        let x = (a as u128) * (b as u128);
-        let lo = x as u64;
-        let hi = (x >> 64) as u64;
-        let (t0, borrow) = lo.overflowing_sub(hi >> 32);
-        let t0 = t0.wrapping_sub(EPS & 0u64.wrapping_sub(borrow as u64));
-        let (r, carry) = t0.overflowing_add((hi & EPS) * EPS);
-        r.wrapping_add(EPS & 0u64.wrapping_sub(carry as u64))
-    }
-
-    #[inline(always)]
-    const fn sbox7(x: u64) -> u64 {
-        let x2 = mul(x, x);
-        let x3 = mul(x2, x);
-        let x4 = mul(x2, x2);
-        mul(x3, x4)
-    }
-
-    /// `circ(2, 3, 1, 1)` on one block, exact in `u128` (coefficient sum 7).
-    #[inline(always)]
-    const fn m4(b0: u64, b1: u64, b2: u64, b3: u64) -> [u128; 4] {
-        let (b0, b1, b2, b3) = (b0 as u128, b1 as u128, b2 as u128, b3 as u128);
-        let t01 = b0 + b1;
-        let t23 = b2 + b3;
-        let t0123 = t01 + t23;
-        let t01123 = t0123 + b1;
-        let t01233 = t0123 + b3;
-        [
-            t01123 + t01,
-            t01123 + (b2 << 1),
-            t01233 + t23,
-            t01233 + (b0 << 1),
-        ]
-    }
-
-    /// `M_E = M_4 (x) P_3` in the flattened lane order, plus `rc` (coefficient sum 28).
-    #[inline(always)]
-    const fn external_layer(st: &[u64; 12], rc: &[u64; 12]) -> [u64; 12] {
-        let y0 = m4(st[0], st[3], st[6], st[9]);
-        let y1 = m4(st[1], st[4], st[7], st[10]);
-        let y2 = m4(st[2], st[5], st[8], st[11]);
-        let mut out = [0u64; 12];
-        let mut i = 0;
-        while i < 4 {
-            let s = y0[i] + y1[i] + y2[i];
-            out[3 * i] = reduce_wide(y0[i] + s + rc[3 * i] as u128);
-            out[3 * i + 1] = reduce_wide(y1[i] + s + rc[3 * i + 1] as u128);
-            out[3 * i + 2] = reduce_wide(y2[i] + s + rc[3 * i + 2] as u128);
-            i += 1;
-        }
-        out
-    }
-
-    /// `M_I = J + diag(-64, 1, 2, 4, ..., 1024)`, plus `rc0` on lane 0.
-    #[inline(always)]
-    const fn internal_layer(st: &[u64; 12], rc0: u64) -> [u64; 12] {
-        let mut s = 0u128;
-        let mut i = 0;
-        while i < 12 {
-            s += st[i] as u128;
-            i += 1;
-        }
-        let mut out = [0u64; 12];
-        // `-64 x = 64 (2p - x) (mod p)`, and `x <= 2^64 - 1 < 2p`.
-        let neg = ((2 * GOLDILOCKS_PRIME as u128) - st[0] as u128) << 6;
-        out[0] = reduce_wide(s + neg + rc0 as u128);
-        out[1] = reduce_wide(s + st[1] as u128);
-        let mut i = 2;
-        while i < 12 {
-            out[i] = reduce_wide(s + ((st[i] as u128) << (i - 1)));
-            i += 1;
-        }
-        out
-    }
-
-    #[inline(always)]
-    pub(super) const fn permute(input: &[u64; 12]) -> [u64; 12] {
-        let mut st = external_layer(input, &RC_EXT0[0]);
-        let mut r = 0;
-        while r < 4 {
-            let mut i = 0;
-            while i < 12 {
-                st[i] = sbox7(st[i]);
-                i += 1;
-            }
-            st = if r < 3 {
-                external_layer(&st, &RC_EXT0[r + 1])
-            } else {
-                let mut rc = ZERO_RC;
-                rc[0] = RC_INT[0];
-                external_layer(&st, &rc)
-            };
-            r += 1;
-        }
-        let mut r = 0;
-        while r < 22 {
-            st[0] = sbox7(st[0]);
-            if r < 21 {
-                st = internal_layer(&st, RC_INT[r + 1]);
-            } else {
-                st = internal_layer(&st, 0);
-                let mut i = 0;
-                while i < 12 {
-                    st[i] = reduce_wide(st[i] as u128 + RC_EXT2[0][i] as u128);
-                    i += 1;
-                }
-            }
-            r += 1;
-        }
-        let mut r = 0;
-        while r < 4 {
-            let mut i = 0;
-            while i < 12 {
-                st[i] = sbox7(st[i]);
-                i += 1;
-            }
-            st = external_layer(&st, if r < 3 { &RC_EXT2[r + 1] } else { &ZERO_RC });
-            r += 1;
-        }
-        st
-    }
-}
-
-/// Full 30-round Width-12 `Poseidon2` permutation (`4` ext + `22` int + `4` ext),
-/// matching `lean/Qsag/Oracle/Poseidon2.lean` and `qsag-core` bit-for-bit.
-#[inline]
-pub fn poseidon2_perm12(st: &mut [Goldilocks; 12]) {
-    let out = perm_kernel::permute(&st.map(Goldilocks::to_canonical_u64));
-    *st = out.map(Goldilocks::from_u64_reduced);
-}
-
-/// The same permutation composed from the individual layers; the reference for the kernel.
 #[cfg(test)]
 fn poseidon2_perm12_layered(st: &mut [Goldilocks; 12]) {
+    use qsag_core::sponge::poseidon2::{poseidon2_external_round, poseidon2_internal_round};
     poseidon2_apply_me(st);
-    for round_consts in &POSEIDON2_RC_EXT0 {
-        for (x, &rc) in st.iter_mut().zip(round_consts) {
-            *x = poseidon2_sbox7(*x + rc);
-        }
-        poseidon2_apply_me(st);
+    for r in 0..POSEIDON2_HALF_EXT_ROUNDS {
+        poseidon2_external_round(0, r as u64, st);
     }
-    for &rc in &POSEIDON2_RC_INT {
-        st[0] = poseidon2_sbox7(st[0] + rc);
-        poseidon2_apply_mi(st);
+    for r in 0..POSEIDON2_INT_ROUNDS {
+        poseidon2_internal_round(r as u64, st);
     }
-    for round_consts in &POSEIDON2_RC_EXT2 {
-        for (x, &rc) in st.iter_mut().zip(round_consts) {
-            *x = poseidon2_sbox7(*x + rc);
-        }
-        poseidon2_apply_me(st);
+    for r in 0..POSEIDON2_HALF_EXT_ROUNDS {
+        poseidon2_external_round(2, r as u64, st);
     }
 }
 
@@ -1538,17 +797,10 @@ pub fn poseidon2_compress12_ff(
         in0[0], in0[1], in0[2], in0[3], in1[0], in1[1], in1[2], in1[3], tweak[0], tweak[1],
         tweak[2], tweak[3],
     ];
-    let mut perm = perm_kernel::permute(&st.map(Goldilocks::to_canonical_u64));
-    // `perm.b0 + in0 + 2 in1 + 4 tweak`, exact in `u128` (below `2^67`) and reduced once.
-    let out: [Goldilocks; 4] = core::array::from_fn(|i| {
-        Goldilocks::from_u64_reduced(perm_kernel::reduce_wide(
-            perm[i] as u128
-                + in0[i].to_canonical_u64() as u128
-                + ((in1[i].to_canonical_u64() as u128) << 1)
-                + ((tweak[i].to_canonical_u64() as u128) << 2),
-        ))
+    poseidon2_perm12(&mut st);
+    let out = core::array::from_fn(|i| {
+        st[i] + in0[i] + in1[i] * Goldilocks::TWO + tweak[i] * Goldilocks::from_u64_reduced(4)
     });
-    qsag_asm::volatile_fill(&mut perm, 0u64);
     qsag_asm::volatile_fill(&mut st, Goldilocks::ZERO);
     qsag_asm::volatile_fill(&mut in0, Goldilocks::ZERO);
     out
@@ -1640,48 +892,7 @@ pub fn pack_bytes_7_limbs(bytes: &[u8]) -> Vec<Goldilocks> {
 /// Initializes capacity `st[8..12] = init_cap` and absorbs the self-delimiting stream
 /// `[Goldilocks(domain_tag), Goldilocks(limbs.len())] ++ limbs` in 8-limb rate blocks (zero-padded
 /// in the final block), running `poseidon2_perm12` after each block and returning `st[0..4]`.
-#[inline]
-pub fn poseidon2_sponge_hash_limbs(
-    domain_tag: u64,
-    init_cap: [Goldilocks; 4],
-    limbs: &[Goldilocks],
-) -> [Goldilocks; 4] {
-    // Raw-word sponge: lanes stay arbitrary `u64` representatives between blocks and are
-    // canonicalized once at the end.
-    let mut st = [0u64; 12];
-    for (dst, cap) in st[8..].iter_mut().zip(init_cap) {
-        *dst = cap.to_canonical_u64();
-    }
-    let absorb = |st: &mut [u64; 12], block: &[u64; 8]| {
-        for (lane, &val) in st[..8].iter_mut().zip(block) {
-            *lane = perm_kernel::reduce_wide(*lane as u128 + val as u128);
-        }
-        *st = perm_kernel::permute(st);
-    };
-
-    // First block: the two-limb frame header followed by up to six payload limbs.
-    let mut block = [0u64; 8];
-    block[0] = Goldilocks::from_u64_reduced(domain_tag).to_canonical_u64();
-    block[1] = Goldilocks::from_u64_reduced(limbs.len() as u64).to_canonical_u64();
-    let head = limbs.len().min(6);
-    for (dst, limb) in block[2..2 + head].iter_mut().zip(limbs) {
-        *dst = limb.to_canonical_u64();
-    }
-    absorb(&mut st, &block);
-
-    let (full, tail) = limbs[head..].as_chunks::<8>();
-    for chunk in full {
-        absorb(&mut st, &chunk.map(Goldilocks::to_canonical_u64));
-    }
-    if !tail.is_empty() {
-        let mut block = [0u64; 8];
-        for (dst, limb) in block.iter_mut().zip(tail) {
-            *dst = limb.to_canonical_u64();
-        }
-        absorb(&mut st, &block);
-    }
-    core::array::from_fn(|i| Goldilocks::from_u64_reduced(st[i]))
-}
+pub use qsag_core::sponge::poseidon2::poseidon2_sponge_hash_limbs;
 
 /// Derive the per-tree salted capacity key `tree_key` binding a 256-bit `4`-limb `tree_salt`
 /// to `(stage_idx, log_leaves)`.
@@ -1770,11 +981,7 @@ mod internal_matrix_tests {
             poseidon2_apply_mi(&mut base);
             for (row, actual) in base.iter().enumerate() {
                 let entry = expected_entry(row, col);
-                assert_eq!(
-                    actual.to_canonical_u64(),
-                    entry,
-                    "row {row}, column {col}"
-                );
+                assert_eq!(actual.to_canonical_u64(), entry, "row {row}, column {col}");
             }
         }
     }
