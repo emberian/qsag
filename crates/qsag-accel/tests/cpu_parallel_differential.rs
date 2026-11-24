@@ -187,16 +187,32 @@ fn canonical_spirv_pin_digests_are_frozen() {
             "9e98cc9840271daaccd678d32f1125edc381c83c7aace90d71b3a17f16ea908a",
         ),
         (
-            KernelSlot::CosetLdeExt2,
-            "bc42c559f07ff189beb41ebde1a6155367db174e5350401f90a5f73e47929efb",
-        ),
-        (
             KernelSlot::MerkleLayerPoseidon2,
             "2c0b53d67a739eb4aed21d4337957128af2215df9fb9f3be5e157eff37da1c19",
         ),
         (
             KernelSlot::BdozGf2128BatchDot,
             "3c8f480f2970dbbd83e25af4936ba675739bb4b6e4075a138ed4ab6d636d0c43",
+        ),
+        (
+            KernelSlot::Fp5CosetLde,
+            "494c5f72f957128c24e735059fb7fd2638fe021ca0a4abeeeef5b0e1ff3543a7",
+        ),
+        (
+            KernelSlot::Fp5WhirFold,
+            "52026954352e7e0d0354a36ad7a93cf5c8371d36c07bbebec2da15b2e1d99bc7",
+        ),
+        (
+            KernelSlot::Fp5SumcheckReduce,
+            "1dff4336f9fa08fda79ddb1ff27770f176ef16777416b70105cb2e864b16a315",
+        ),
+        (
+            KernelSlot::Poseidon2Gl24Merkle,
+            "7e5b7c44a4a5613487c6dd87a8f31ff6627a7e031f1bcc33ef378974cea9b3b0",
+        ),
+        (
+            KernelSlot::TurboShake400Canopy,
+            "feff3877ef07db9deb22b8d693066aaa9c82c29f222a4755140fe513a6ef9a6a",
         ),
     ];
     assert_eq!(kernels.map(|(slot, _)| slot), KernelSlot::ALL);

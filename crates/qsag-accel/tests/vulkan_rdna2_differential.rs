@@ -10,8 +10,8 @@ use qsag_accel::goldilocks::{GOLDILOCKS_PRIME, gl_reduce_u64, precompute_goldilo
 use qsag_accel::spirv_kernels::{shader_source_filename, spirv_kernel_bytes};
 use qsag_accel::vulkan::{
     batch_keccak_f1600_with_receipt, batch_poseidon2_perm12_with_receipt,
-    bdoz_gf2_128_batch_dot_with_receipt, coset_lde_ext2_with_receipt, goldilocks_ntt_input_digest,
-    goldilocks_ntt_output_digest, goldilocks_ntt_with_receipt, merkle_layer_poseidon2_with_receipt,
+    bdoz_gf2_128_batch_dot_with_receipt, goldilocks_ntt_input_digest, goldilocks_ntt_output_digest,
+    goldilocks_ntt_with_receipt, merkle_layer_poseidon2_with_receipt,
 };
 use qsag_accel::{
     AccelError, AcceleratorBackend, BackendAttestationKey, CertifiedBackend, CertifiedKernelPin,
@@ -47,7 +47,7 @@ fn test_spirv_shaders_reproducible_from_comp_sources() {
     let kernels =
         KernelSlot::ALL.map(|slot| (shader_source_filename(slot), spirv_kernel_bytes(slot)));
     for (comp_name, embedded) in kernels {
-        let spv_path = out_dir.join(format!("{comp_name}.spv"));
+        let spv_path = out_dir.join("recompiled.spv");
         let output = Command::new(validator)
             .args(["-V", "--target-env", "vulkan1.2"])
             .arg(shaders_dir.join(comp_name))
@@ -143,7 +143,7 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
     );
 
     let mut bad_pins = measured_pins;
-    bad_pins[KernelSlot::GoldilocksNtt as usize] = CertifiedKernelPin::from_kernel_artifact(
+    bad_pins[KernelSlot::GoldilocksNtt.index()] = CertifiedKernelPin::from_kernel_artifact(
         KernelSlot::GoldilocksNtt,
         KernelTargetArch::SpirV15,
         b"CORRUPTED_SPIRV_BINARY",
@@ -338,51 +338,6 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
                 "NTT roundtrip mismatch at N=2^{log2_n} idx={idx}"
             );
         }
-    }
-
-    // -------------------------------------------------------------------------
-    // Kernel 4: CosetLdeExt2 (`(1, 4)`, `(2^10, 4)`, `(2^14, 4)`, `(2^18, 4 -> 2^20)`)
-    // -------------------------------------------------------------------------
-    for &(log2_n, blowup, shift) in &[(0u32, 4usize, 7u64), (10, 4, 7), (14, 4, 42), (18, 4, 7)] {
-        let n = 1usize << log2_n;
-        let m = n * blowup;
-        let evals: Vec<[u64; 2]> = (0..n)
-            .map(|_| [splitmix64(&mut rng), splitmix64(&mut rng)])
-            .collect();
-        let mut gpu_out = vec![[0u64; 2]; m];
-        let mut cpu_out = vec![[0u64; 2]; m];
-
-        let subs_before = certified_gpu.inner().gpu_submission_count();
-        let r_lde_gpu = coset_lde_ext2_with_receipt(
-            &certified_gpu,
-            &gpu_key,
-            &evals,
-            blowup,
-            shift,
-            anchor,
-            &mut gpu_out,
-        )
-        .unwrap();
-        let r_lde_cpu = coset_lde_ext2_with_receipt(
-            &cpu,
-            &cpu_key,
-            &evals,
-            blowup,
-            shift,
-            anchor,
-            &mut cpu_out,
-        )
-        .unwrap();
-        assert_eq!(
-            certified_gpu.inner().gpu_submission_count(),
-            subs_before + 1
-        );
-        assert_eq!(
-            gpu_out, cpu_out,
-            "CosetLdeExt2 mismatch at N=2^{log2_n}, blowup={blowup}"
-        );
-        assert_eq!(r_lde_gpu.output_digest, r_lde_cpu.output_digest);
-        assert_eq!(registry.verify_keyed_receipt(&r_lde_gpu, &gpu_key), Ok(()));
     }
 
     // -------------------------------------------------------------------------

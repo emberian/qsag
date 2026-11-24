@@ -297,8 +297,9 @@ fn test_poseidon2_2block_canopy_and_fixed_tweak_gpu_parity_and_speedup() {
             16_384,
         ),
     ] {
-        let children: Vec<NodeDigest> =
-            (0..2 * num_parents).map(|_| rand_digest(&mut rng)).collect();
+        let children: Vec<NodeDigest> = (0..2 * num_parents)
+            .map(|_| rand_digest(&mut rng))
+            .collect();
         let addr = Poseidon2Merkle2BlockAddr {
             layer,
             tree_idx,
@@ -459,8 +460,9 @@ fn test_poseidon2_2block_canopy_and_fixed_tweak_gpu_parity_and_speedup() {
     {
         let tweak = [0x5A4B_4845_4D5F_4D54u64, 0, 0, 0];
         let num_parents = 32_768usize;
-        let children: Vec<NodeDigest> =
-            (0..2 * num_parents).map(|_| rand_digest(&mut rng)).collect();
+        let children: Vec<NodeDigest> = (0..2 * num_parents)
+            .map(|_| rand_digest(&mut rng))
+            .collect();
         let mut gpu_out = vec![[0u64; 4]; num_parents];
         let mut cpu_out = vec![[0u64; 4]; num_parents];
 
