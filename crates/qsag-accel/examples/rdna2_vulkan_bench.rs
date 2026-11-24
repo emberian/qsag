@@ -88,7 +88,7 @@ fn main() {
         .expect("register measured SPIR-V pins");
 
     for slot in KernelSlot::ALL {
-        let pin = measured_pins[slot as usize];
+        let pin = measured_pins[slot.index()];
         println!(
             "  Pin {:<22} sha256={}.. p2[0]=0x{:016x}",
             format!("{slot:?}"),
@@ -191,37 +191,6 @@ fn main() {
         dt_ntt_gpu * 1e3,
         dt_ntt_cpu * 1e3,
         dt_ntt_cpu / dt_ntt_gpu
-    );
-
-    // -------------------------------------------------------------------------
-    // 4. Shifted-Coset Ext2 Reed-Solomon LDE (`N = 2^18 -> M = 2^20`)
-    // -------------------------------------------------------------------------
-    let lde_n = 1usize << 18;
-    let blowup = 4usize;
-    let lde_m = lde_n * blowup;
-    let lde_in: Vec<[u64; 2]> = (0..lde_n)
-        .map(|_| [splitmix64(&mut rng), splitmix64(&mut rng)])
-        .collect();
-    let mut lde_gpu = vec![[0u64; 2]; lde_m];
-    gpu.coset_lde_ext2(&lde_in, blowup, 7, &mut lde_gpu)
-        .unwrap();
-
-    let t0 = Instant::now();
-    gpu.coset_lde_ext2(&lde_in, blowup, 7, &mut lde_gpu)
-        .unwrap();
-    let dt_lde_gpu = t0.elapsed().as_secs_f64();
-
-    let mut lde_cpu = vec![[0u64; 2]; lde_m];
-    let t0 = Instant::now();
-    cpu.coset_lde_ext2(&lde_in, blowup, 7, &mut lde_cpu)
-        .unwrap();
-    let dt_lde_cpu = t0.elapsed().as_secs_f64();
-    assert_eq!(lde_gpu, lde_cpu);
-    println!(
-        "  [4] CosetLdeExt2 (2^18 -> 2^20)  | GPU: {:>7.2} ms                  | CPU: {:>8.2} ms                 | {:>5.1}x",
-        dt_lde_gpu * 1e3,
-        dt_lde_cpu * 1e3,
-        dt_lde_cpu / dt_lde_gpu
     );
 
     // -------------------------------------------------------------------------

@@ -8,8 +8,8 @@
 //! 2. Pins each kernel artifact (`CertifiedKernelPin`) and registers the approved profile.
 //! 3. Shows that an unmeasured backend and a tampered artifact are both rejected, while
 //!    loader-measured pins that match the registry are accepted.
-//! 4. Runs a Merkle layer through the backend, spot-checks it on the CPU, and issues a keyed
-//!    execution receipt that only the holder of the backend's attestation key could have made.
+//! 4. Demonstrates hardware receipt refusal without executable telemetry, then verifies a
+//!    keyed receipt for the CPU reference execution.
 //! 5. Shows the typed error a kernel returns for a malformed job instead of panicking.
 
 use qsag_accel::{
@@ -47,7 +47,7 @@ impl AcceleratorBackend for SimulatedSpirvBackend {
     }
 
     fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
-        self.pins[slot as usize]
+        self.pins[slot.index()]
     }
 
     fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]) {
@@ -105,14 +105,7 @@ impl AcceleratorBackend for SimulatedSpirvBackend {
 }
 
 fn main() {
-    let approved_shaders: [&[u8]; KernelSlot::COUNT] = [
-        b"SPIRV16::qsag_keccak_f1600_v1.spv",
-        b"SPIRV16::qsag_poseidon2_perm12_v1.spv",
-        b"SPIRV16::qsag_goldilocks_ntt_v1.spv",
-        b"SPIRV16::qsag_coset_lde_ext2_v1.spv",
-        b"SPIRV16::qsag_merkle_poseidon2_v1.spv",
-        b"SPIRV16::qsag_bdoz_gf2_128_dot_v1.spv",
-    ];
+    let approved_shaders = KernelSlot::ALL.map(qsag_accel::spirv_kernels::spirv_kernel_bytes);
 
     // 1. Register approved shader pins in `VerifiedKernelDigestRegistry`.
     let approved_pins: [CertifiedKernelPin; KernelSlot::COUNT] = core::array::from_fn(|i| {
@@ -139,11 +132,11 @@ fn main() {
     );
 
     let mut tampered_loader_pins = approved_pins;
-    tampered_loader_pins[KernelSlot::MerkleLayerPoseidon2 as usize] =
+    tampered_loader_pins[KernelSlot::MerkleLayerPoseidon2.index()] =
         CertifiedKernelPin::from_kernel_artifact(
             KernelSlot::MerkleLayerPoseidon2,
             KernelTargetArch::SpirV15,
-            b"SPIRV16::TAMPERED_MERKLE_SHADER.spv",
+            b"altered Merkle shader",
         );
     let rogue = CertifiedBackend::try_new_measured(
         SimulatedSpirvBackend::from_shader_binaries(approved_shaders),
@@ -177,8 +170,23 @@ fn main() {
 
     // 4. The host that operates the device holds the attestation key; the device never does.
     let attestation_key = BackendAttestationKey::derive(&[0xC3; 32], b"rack-7/gpu-2");
-    let receipt = CpuReferenceBackend::merkle_layer_poseidon2_with_receipt(
+    let hardware_receipt = CpuReferenceBackend::merkle_layer_poseidon2_with_receipt(
         &certified,
+        &attestation_key,
+        &children,
+        &pk_seed,
+        layer,
+        transcript_anchor,
+        &mut parents,
+    );
+    assert_eq!(
+        hardware_receipt,
+        Err(AccelError::SecretSlotUnaudited {
+            slot: KernelSlot::MerkleLayerPoseidon2,
+        })
+    );
+    let receipt = CpuReferenceBackend::merkle_layer_poseidon2_with_receipt(
+        &CpuReferenceBackend::new(),
         &attestation_key,
         &children,
         &pk_seed,
