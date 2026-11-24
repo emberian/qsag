@@ -5,7 +5,7 @@
 //! / `libMoltenVK.dylib` via `VK_KHR_portability_enumeration` + `VK_KHR_portability_subset`) with
 //! `feature = "std"`, `VulkanSpirvBackend` dynamically loads the runtime Vulkan library, selects a
 //! hardware GPU supporting native 64-bit integer shaders (`shaderInt64`), allocates `DEVICE_LOCAL`
-//! VRAM storage buffers, compiles all 6 deterministic SPIR-V compute kernels,
+//! VRAM storage buffers, compiles the deterministic SPIR-V compute kernels,
 //! and pins their SHA-256 and Width-12 Goldilocks Poseidon2 digests.
 //!
 //! On other targets, 32-bit targets, or `#![no_std]` builds without `std`, `try_new()` cleanly
@@ -32,7 +32,7 @@
 ))]
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::goldilocks::{check_goldilocks_twiddles, coset_lde_shape, ntt_log2_len};
+use crate::goldilocks::{check_goldilocks_twiddles, ntt_log2_len};
 use crate::keccak::{cshake256_framed_32, finalize_cshake256, init_cshake256};
 use crate::poseidon2::{Poseidon2Merkle2BlockAddr, merkle_layer_2block_shape, merkle_layer_shape};
 use crate::spirv_kernels::{canonical_spirv_pin, canonical_spirv_pins};
@@ -159,7 +159,7 @@ pub struct PipelineTelemetry {
     pub sgprs: Option<u64>,
     pub lds_bytes: Option<u64>,
     /// Spilled registers. RADV reports both counters for every pipeline (observed as zero for
-    /// all six kernels on the RX 6750 XT); a driver that omits them fails [`Self::audit`].
+    /// the kernels on the RX 6750 XT); a driver that omits them fails [`Self::audit`].
     pub spilled_vgprs: Option<u64>,
     pub spilled_sgprs: Option<u64>,
 }
@@ -620,21 +620,38 @@ impl VulkanSpirvBackend {
         }
     }
 
-    /// Require driver-confirmed Wave32 and zero scratch for every executable
-    /// ([`VulkanDeviceInfo::secret_slot_audit`]). As with `try_new`, unavailable telemetry is an
-    /// error. This checks compiler reports, not a formal constant-time or physical
-    /// side-channel proof.
+    /// Install a test module and update the measured identity of the loaded pipeline.
+    ///
+    /// # Safety
+    /// The module must be valid Vulkan 1.2 SPIR-V, use the slot's descriptor and
+    /// dispatch ABI, and access only the memory ranges reserved for that slot.
     #[cfg(all(
         feature = "fault-injection-audit",
         any(target_os = "linux", target_os = "macos"),
         target_pointer_width = "64"
     ))]
     #[doc(hidden)]
-    pub fn audit_replace_kernel_spirv(&self, slot: KernelSlot, spv: &[u32]) -> Result<(), VulkanError> {
-        let mut eng = self.engine.lock().map_err(|_| VulkanError::WorkspacePoisoned)?;
-        eng.replace_kernel_pipeline_for_audit(slot, spv)
+    #[allow(unsafe_code)] // The audit-only interface transfers the module validity obligation to its caller.
+    pub unsafe fn audit_replace_kernel_spirv(
+        &mut self,
+        slot: KernelSlot,
+        spv: &[u32],
+    ) -> Result<(), VulkanError> {
+        let mut eng = self
+            .engine
+            .lock()
+            .map_err(|_| VulkanError::WorkspacePoisoned)?;
+        let bytes: alloc::vec::Vec<_> = spv.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let pin = CertifiedKernelPin::from_kernel_artifact(slot, KernelTargetArch::SpirV15, &bytes);
+        self.info.pipelines[slot.index()] = eng.replace_kernel_pipeline_for_audit(slot, spv)?;
+        self.pins[slot.index()] = pin;
+        Ok(())
     }
 
+    /// Require driver-confirmed Wave32 and zero scratch for every executable
+    /// ([`VulkanDeviceInfo::secret_slot_audit`]). As with `try_new`, unavailable telemetry is an
+    /// error. This checks compiler reports, not a formal constant-time or physical
+    /// side-channel proof.
     pub fn try_new_audited() -> Result<Self, VulkanError> {
         let backend = Self::try_new()?;
         backend.device_info().secret_slot_audit()?;
@@ -772,12 +789,12 @@ impl VulkanSpirvBackend {
         canonical_spirv_pin(slot)
     }
 
-    /// Canonical `KernelTargetArch::SpirV15` pins for all 6 [`KernelSlot`]s.
+    /// Canonical `KernelTargetArch::SpirV15` pins for all [`KernelSlot`]s.
     pub fn canonical_pins() -> [CertifiedKernelPin; KernelSlot::COUNT] {
         canonical_spirv_pins()
     }
 
-    /// Pins of the 6 embedded SPIR-V binaries the engine loads, for
+    /// Pins of the embedded SPIR-V binaries the engine loads, for
     /// `CertifiedBackend::try_new_measured`. The modules are compiled in, so these equal
     /// [`Self::canonical_pins`].
     pub fn measure_embedded_spirv_pins() -> [CertifiedKernelPin; KernelSlot::COUNT] {
@@ -1200,12 +1217,15 @@ impl VulkanSpirvBackend {
             match self._uninhabited {}
         }
     }
-
 }
 
 impl AcceleratorBackend for VulkanSpirvBackend {
     fn hardware_audit_digest(&self) -> [u8; 32] {
-        self.device_info().audit_evidence_digest()
+        if self.secret_slots_audited() {
+            self.device_info().audit_evidence_digest()
+        } else {
+            [0; 32]
+        }
     }
 
     fn target_arch(&self) -> KernelTargetArch {
@@ -1223,7 +1243,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
             target_pointer_width = "64"
         ))]
         {
-            self.pins[slot as usize]
+            self.pins[slot.index()]
         }
         #[cfg(not(all(
             feature = "std",
@@ -1253,7 +1273,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         ))]
         {
             self.try_batch_keccak_f1600(states).map_err(accel_error)?;
-            Ok(self.pins[KernelSlot::BatchKeccakF1600 as usize])
+            Ok(self.pins[KernelSlot::BatchKeccakF1600.index()])
         }
         #[cfg(not(all(
             feature = "std",
@@ -1284,7 +1304,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         {
             self.try_batch_poseidon2_perm12(states)
                 .map_err(accel_error)?;
-            Ok(self.pins[KernelSlot::BatchPoseidon2Perm12 as usize])
+            Ok(self.pins[KernelSlot::BatchPoseidon2Perm12.index()])
         }
         #[cfg(not(all(
             feature = "std",
@@ -1344,34 +1364,8 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         shift: u64,
         out: &mut [[u64; 2]],
     ) -> Result<(), AccelError> {
-        coset_lde_shape(evals.len(), blowup, out.len())?;
-        #[cfg(all(
-            feature = "std",
-            any(target_os = "linux", target_os = "macos"),
-            target_pointer_width = "64"
-        ))]
-        {
-            public_slot_gate(
-                self.secret_slots_audited,
-                self.portability_public_enabled,
-                KernelSlot::CosetLdeExt2,
-            )?;
-            let mut guard = self.engine.lock().map_err(|_| AccelError::BackendFailure)?;
-            guard
-                .exec_coset_lde_ext2(evals, blowup, shift, out)
-                .map_err(accel_error)?;
-            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-        #[cfg(not(all(
-            feature = "std",
-            any(target_os = "linux", target_os = "macos"),
-            target_pointer_width = "64"
-        )))]
-        {
-            let _ = shift;
-            match self._uninhabited {}
-        }
+        let _ = (evals, blowup, shift, out);
+        Err(AccelError::UnsupportedOperation)
     }
 
     fn try_merkle_layer_poseidon2_at(
@@ -1640,6 +1634,17 @@ fn hash_bdoz_inputs(shares: &[(u128, u128)], weights: &[(u128, u128)]) -> [u8; 3
     out
 }
 
+fn receipt_evidence(
+    backend: &impl AcceleratorBackend,
+    slot: KernelSlot,
+) -> Result<[u8; 32], AccelError> {
+    let evidence = backend.hardware_audit_digest();
+    if backend.target_arch() == KernelTargetArch::SpirV15 && evidence == [0; 32] {
+        return Err(AccelError::SecretSlotUnaudited { slot });
+    }
+    Ok(evidence)
+}
+
 /// Execute `batch_keccak_f1600` on `backend` via [`AcceleratorBackend::try_batch_keccak_f1600_pinned`]
 /// (failing closed on hardware execution error rather than stamping a hardware pin onto a CPU
 /// fallback) and issue a keyed [`ExecutionReceipt`].
@@ -1649,6 +1654,7 @@ pub fn batch_keccak_f1600_with_receipt<B: AcceleratorBackend>(
     states: &mut [[u64; 25]],
     transcript_anchor: [u8; 32],
 ) -> Result<ExecutionReceipt, AccelError> {
+    let evidence = receipt_evidence(backend, KernelSlot::BatchKeccakF1600)?;
     let input_digest = hash_u64_rows(b"QSAG.ACCEL.KECCAK_IN.V1", states);
     let pin = backend.try_batch_keccak_f1600_pinned(states)?;
     let output_digest = hash_u64_rows(b"QSAG.ACCEL.KECCAK_OUT.V1", states);
@@ -1662,7 +1668,7 @@ pub fn batch_keccak_f1600_with_receipt<B: AcceleratorBackend>(
         transcript_anchor,
         input_digest,
         output_digest,
-        backend.hardware_audit_digest(),
+        evidence,
     )
 }
 
@@ -1676,6 +1682,7 @@ pub fn batch_poseidon2_perm12_with_receipt<B: AcceleratorBackend>(
     states: &mut [[u64; 12]],
     transcript_anchor: [u8; 32],
 ) -> Result<ExecutionReceipt, AccelError> {
+    let evidence = receipt_evidence(backend, KernelSlot::BatchPoseidon2Perm12)?;
     let input_digest = hash_u64_rows(b"QSAG.ACCEL.P2_PERM_IN.V1", states);
     let pin = backend.try_batch_poseidon2_perm12_pinned(states)?;
     let output_digest = hash_u64_rows(b"QSAG.ACCEL.P2_PERM_OUT.V1", states);
@@ -1689,7 +1696,7 @@ pub fn batch_poseidon2_perm12_with_receipt<B: AcceleratorBackend>(
         transcript_anchor,
         input_digest,
         output_digest,
-        backend.hardware_audit_digest(),
+        evidence,
     )
 }
 
@@ -1703,6 +1710,7 @@ pub fn goldilocks_ntt_with_receipt<B: AcceleratorBackend>(
     inverse: bool,
     transcript_anchor: [u8; 32],
 ) -> Result<ExecutionReceipt, AccelError> {
+    let evidence = receipt_evidence(backend, KernelSlot::GoldilocksNtt)?;
     #[cfg(all(test, feature = "std"))]
     let start = std::time::Instant::now();
     let input_digest = goldilocks_ntt_input_digest(buf, twiddles);
@@ -1734,37 +1742,7 @@ pub fn goldilocks_ntt_with_receipt<B: AcceleratorBackend>(
         transcript_anchor,
         input_digest,
         output_digest,
-        backend.hardware_audit_digest(),
-    )
-}
-
-/// Execute `coset_lde_ext2` on `backend` and issue a keyed [`ExecutionReceipt`].
-pub fn coset_lde_ext2_with_receipt<B: AcceleratorBackend>(
-    backend: &B,
-    key: &BackendAttestationKey,
-    evals: &[[u64; 2]],
-    blowup: usize,
-    shift: u64,
-    transcript_anchor: [u8; 32],
-    out: &mut [[u64; 2]],
-) -> Result<ExecutionReceipt, AccelError> {
-    let input_digest = hash_u64_rows(b"QSAG.ACCEL.LDE_IN.V1", evals);
-    backend.coset_lde_ext2(evals, blowup, shift, out)?;
-    let output_digest = hash_u64_rows(b"QSAG.ACCEL.LDE_OUT.V1", out);
-    let pin = backend.kernel_pin(KernelSlot::CosetLdeExt2);
-    let desc = BatchJobDescriptor::CosetLdeExt2 {
-        domain_len: evals.len(),
-        blowup,
-        shift,
-    };
-    ExecutionReceipt::compute_audited(
-        key,
-        &pin,
-        desc,
-        transcript_anchor,
-        input_digest,
-        output_digest,
-        backend.hardware_audit_digest(),
+        evidence,
     )
 }
 
@@ -1778,6 +1756,7 @@ pub fn merkle_layer_poseidon2_with_receipt<B: AcceleratorBackend>(
     transcript_anchor: [u8; 32],
     out_parents: &mut [[u64; 4]],
 ) -> Result<ExecutionReceipt, AccelError> {
+    let evidence = receipt_evidence(backend, KernelSlot::MerkleLayerPoseidon2)?;
     let input_digest = merkle_layer_input_digest(children);
     backend.try_merkle_layer_poseidon2(children, pk_seed, layer, out_parents)?;
     let output_digest = merkle_layer_output_digest(out_parents);
@@ -1794,7 +1773,7 @@ pub fn merkle_layer_poseidon2_with_receipt<B: AcceleratorBackend>(
         transcript_anchor,
         input_digest,
         output_digest,
-        backend.hardware_audit_digest(),
+        evidence,
     )
 }
 
@@ -1806,6 +1785,7 @@ pub fn bdoz_gf2_128_batch_dot_with_receipt<B: AcceleratorBackend>(
     weights: &[(u128, u128)],
     transcript_anchor: [u8; 32],
 ) -> Result<((u128, u128), ExecutionReceipt), AccelError> {
+    let evidence = receipt_evidence(backend, KernelSlot::BdozGf2128BatchDot)?;
     let input_digest = hash_bdoz_inputs(shares, weights);
     let (lane0, lane1) = backend.bdoz_gf2_128_batch_dot(shares, weights)?;
     let output_digest = cshake256_framed_32(
@@ -1823,7 +1803,7 @@ pub fn bdoz_gf2_128_batch_dot_with_receipt<B: AcceleratorBackend>(
         transcript_anchor,
         input_digest,
         output_digest,
-        backend.hardware_audit_digest(),
+        evidence,
     )?;
     Ok(((lane0, lane1), receipt))
 }
@@ -1897,7 +1877,7 @@ mod tests {
             assert_eq!(pin.target_arch, KernelTargetArch::SpirV15);
 
             let mut tampered = spirv_pins;
-            tampered[slot as usize].poseidon2_digest[0] ^= 1;
+            tampered[slot.index()].poseidon2_digest[0] ^= 1;
             assert_eq!(
                 reg.verify_loaded_profile(KernelTargetArch::SpirV15, &tampered),
                 Err(KernelRegistryError::PinMismatch { slot })
@@ -2224,6 +2204,7 @@ mod tests {
 
         // Inject missing audit status to exercise dispatch gates independently of construction.
         gpu.secret_slots_audited = false;
+        assert_eq!(gpu.hardware_audit_digest(), [0; 32]);
         assert_eq!(
             gpu.bdoz_gf2_128_batch_dot(&shares, &weights),
             Err(AccelError::SecretSlotUnaudited { slot })
@@ -2345,6 +2326,7 @@ mod tests {
         };
         // Exercise the MoltenVK policy on the live device without fabricating telemetry.
         gpu.secret_slots_audited = false;
+        assert_eq!(gpu.hardware_audit_digest(), [0; 32]);
         gpu.portability_public_enabled = true;
         let key = BackendAttestationKey::derive(&[7; 32], b"portability-gate-test");
         assert!(matches!(
@@ -2409,8 +2391,11 @@ mod tests {
 
     #[test]
     fn failed_hardware_dispatch_never_stamps_spirv_pin_on_cpu_fallback() {
-        struct FailingGpuMock;
+        struct FailingGpuMock([u8; 32]);
         impl AcceleratorBackend for FailingGpuMock {
+            fn hardware_audit_digest(&self) -> [u8; 32] {
+                self.0
+            }
             fn target_arch(&self) -> KernelTargetArch {
                 KernelTargetArch::SpirV15
             }
@@ -2475,11 +2460,27 @@ mod tests {
         let mut k_states = [[0u64; 25]; 2];
         let mut p_states = [[0u64; 12]; 2];
         assert_eq!(
-            batch_keccak_f1600_with_receipt(&FailingGpuMock, &key, &mut k_states, [0u8; 32]),
+            batch_keccak_f1600_with_receipt(&FailingGpuMock([0; 32]), &key, &mut k_states, [0; 32]),
+            Err(AccelError::SecretSlotUnaudited {
+                slot: KernelSlot::BatchKeccakF1600
+            })
+        );
+        assert_eq!(
+            batch_keccak_f1600_with_receipt(
+                &FailingGpuMock([1; 32]),
+                &key,
+                &mut k_states,
+                [0u8; 32]
+            ),
             Err(AccelError::LengthOverflow)
         );
         assert_eq!(
-            batch_poseidon2_perm12_with_receipt(&FailingGpuMock, &key, &mut p_states, [0u8; 32]),
+            batch_poseidon2_perm12_with_receipt(
+                &FailingGpuMock([1; 32]),
+                &key,
+                &mut p_states,
+                [0u8; 32]
+            ),
             Err(AccelError::LengthOverflow)
         );
     }
@@ -2501,3 +2502,14 @@ mod tests {
         ));
     }
 }
+
+#[cfg(feature = "std")]
+mod fp5;
+#[cfg(all(
+    feature = "std",
+    any(target_os = "macos", target_os = "linux"),
+    target_pointer_width = "64"
+))]
+pub(crate) use fp5::ComputePass;
+#[cfg(feature = "std")]
+pub use fp5::{CanopyProfile, VulkanFp5Session};

@@ -37,10 +37,10 @@ use core::ffi::{c_char, c_void};
 use core::mem::{MaybeUninit, size_of};
 use core::ptr::{null, null_mut};
 
+use crate::KernelSlot;
 use crate::goldilocks::{gl_inv_or_zero, gl_neg, gl_reduce_u64, goldilocks_primitive_root};
 use crate::spirv_kernels::spirv_kernel_words;
 use crate::vulkan::{VulkanDeviceInfo, VulkanError};
-use crate::KernelSlot;
 
 const RTLD_NOW: i32 = 2;
 const RTLD_LOCAL: i32 = 0;
@@ -533,19 +533,6 @@ struct NttPushConsts {
     _pad: u32,
 }
 const _: () = assert!(size_of::<NttPushConsts>() == 32);
-
-#[repr(C)]
-struct CosetLdePushConsts {
-    w_step: u64,
-    shift_c: u64,
-    len: u32,
-    aux_n: u32,
-    log2_len: u32,
-    stage: u32,
-    mode: u32,
-    base_wg: u32,
-}
-const _: () = assert!(size_of::<CosetLdePushConsts>() == 40);
 
 #[repr(C)]
 struct MerklePushConsts {
@@ -2307,7 +2294,7 @@ impl RawVulkanEngine {
                     reported: sg,
                 });
             }
-            self.telemetry[slot as usize] = crate::vulkan::PipelineTelemetry {
+            self.telemetry[slot.index()] = crate::vulkan::PipelineTelemetry {
                 subgroup_size: Some(32),
                 ..Default::default()
             };
@@ -2321,8 +2308,9 @@ impl RawVulkanEngine {
                 reported: subgroup_size,
             });
         }
-        self.telemetry[slot as usize] = tel;
-        tel.audit()
+        tel.audit()?;
+        self.telemetry[slot.index()] = tel;
+        Ok(())
     }
 
     unsafe fn create_dsl(&self, num_bindings: u32) -> Result<VkDescriptorSetLayout, VulkanError> {
@@ -2355,34 +2343,44 @@ impl RawVulkanEngine {
         &mut self,
         slot: KernelSlot,
         spv: &[u32],
-    ) -> Result<(), VulkanError> {
-        let (dsl, pc_size) = match slot {
-            KernelSlot::BatchKeccakF1600 | KernelSlot::BatchPoseidon2Perm12 => {
-                (self.dsl_1buf, size_of::<BatchStatesPushConsts>() as u32)
-            }
-            KernelSlot::GoldilocksNtt => (self.dsl_1buf, size_of::<NttPushConsts>() as u32),
-            KernelSlot::CosetLdeExt2 => (self.dsl_1buf, size_of::<CosetLdePushConsts>() as u32),
-            KernelSlot::MerkleLayerPoseidon2 => (self.dsl_2buf, size_of::<MerklePushConsts>() as u32),
-            KernelSlot::BdozGf2128BatchDot => (self.dsl_3buf, size_of::<BdozDotPushConsts>() as u32),
-        };
+    ) -> Result<crate::vulkan::PipelineTelemetry, VulkanError> {
+        let (dsl, pc_size) = self.kernel_layout(slot);
         let (kp, rc) = unsafe { self.build_one_pipeline(spv, dsl, pc_size)? };
-        if let Err(e) = check_vk("vkCreateComputePipelines(audit)", rc) {
+        if let Err(e) = check_vk("vkCreateComputePipelines(audit)", rc)
+            .and_then(|()| {
+                check_vk("vkDeviceWaitIdle(audit)", unsafe {
+                    (self.fns.device_wait_idle)(self.device)
+                })
+            })
+            .and_then(|()| unsafe { self.collect_telemetry(slot, kp.pipeline) })
+        {
             unsafe {
-                if kp.pipeline != 0 { (self.fns.destroy_pipeline)(self.device, kp.pipeline, null()); }
-                if kp.pipeline_layout != 0 { (self.fns.destroy_pipeline_layout)(self.device, kp.pipeline_layout, null()); }
-                if kp.shader_module != 0 { (self.fns.destroy_shader_module)(self.device, kp.shader_module, null()); }
+                if kp.pipeline != 0 {
+                    (self.fns.destroy_pipeline)(self.device, kp.pipeline, null());
+                }
+                if kp.pipeline_layout != 0 {
+                    (self.fns.destroy_pipeline_layout)(self.device, kp.pipeline_layout, null());
+                }
+                if kp.shader_module != 0 {
+                    (self.fns.destroy_shader_module)(self.device, kp.shader_module, null());
+                }
             }
             return Err(e);
         }
-        let old = self.pipelines[slot as usize];
-        self.pipelines[slot as usize] = kp;
+        let old = self.pipelines[slot.index()];
+        self.pipelines[slot.index()] = kp;
         unsafe {
-            (self.fns.device_wait_idle)(self.device);
-            if old.pipeline != 0 { (self.fns.destroy_pipeline)(self.device, old.pipeline, null()); }
-            if old.pipeline_layout != 0 { (self.fns.destroy_pipeline_layout)(self.device, old.pipeline_layout, null()); }
-            if old.shader_module != 0 { (self.fns.destroy_shader_module)(self.device, old.shader_module, null()); }
+            if old.pipeline != 0 {
+                (self.fns.destroy_pipeline)(self.device, old.pipeline, null());
+            }
+            if old.pipeline_layout != 0 {
+                (self.fns.destroy_pipeline_layout)(self.device, old.pipeline_layout, null());
+            }
+            if old.shader_module != 0 {
+                (self.fns.destroy_shader_module)(self.device, old.shader_module, null());
+            }
         }
-        Ok(())
+        Ok(self.telemetry[slot.index()])
     }
 
     unsafe fn build_one_pipeline(
@@ -2471,48 +2469,36 @@ impl RawVulkanEngine {
         ))
     }
 
+    fn kernel_layout(&self, slot: KernelSlot) -> (VkDescriptorSetLayout, u32) {
+        match slot {
+            KernelSlot::BatchKeccakF1600 | KernelSlot::BatchPoseidon2Perm12 => {
+                (self.dsl_1buf, size_of::<BatchStatesPushConsts>() as u32)
+            }
+            KernelSlot::GoldilocksNtt => (self.dsl_1buf, size_of::<NttPushConsts>() as u32),
+            KernelSlot::Fp5CosetLde | KernelSlot::Fp5SumcheckReduce => (self.dsl_3buf, 40),
+            KernelSlot::Fp5WhirFold => (self.dsl_3buf, 32),
+            KernelSlot::Poseidon2Gl24Merkle | KernelSlot::TurboShake400Canopy => {
+                (self.dsl_3buf, 64)
+            }
+            KernelSlot::MerkleLayerPoseidon2 => {
+                (self.dsl_2buf, size_of::<MerklePushConsts>() as u32)
+            }
+            KernelSlot::BdozGf2128BatchDot => {
+                (self.dsl_3buf, size_of::<BdozDotPushConsts>() as u32)
+            }
+        }
+    }
+
     unsafe fn build_pipelines_and_pools(&mut self, qf_idx: u32) -> Result<(), VulkanError> {
         self.dsl_1buf = unsafe { self.create_dsl(1)? };
         self.dsl_2buf = unsafe { self.create_dsl(2)? };
         self.dsl_3buf = unsafe { self.create_dsl(3)? };
 
-        let specs: [(KernelSlot, VkDescriptorSetLayout, u32); KernelSlot::COUNT] = [
-            (
-                KernelSlot::BatchKeccakF1600,
-                self.dsl_1buf,
-                size_of::<BatchStatesPushConsts>() as u32,
-            ),
-            (
-                KernelSlot::BatchPoseidon2Perm12,
-                self.dsl_1buf,
-                size_of::<BatchStatesPushConsts>() as u32,
-            ),
-            (
-                KernelSlot::GoldilocksNtt,
-                self.dsl_1buf,
-                size_of::<NttPushConsts>() as u32,
-            ),
-            (
-                KernelSlot::CosetLdeExt2,
-                self.dsl_1buf,
-                size_of::<CosetLdePushConsts>() as u32,
-            ),
-            (
-                KernelSlot::MerkleLayerPoseidon2,
-                self.dsl_2buf,
-                size_of::<MerklePushConsts>() as u32,
-            ),
-            (
-                KernelSlot::BdozGf2128BatchDot,
-                self.dsl_3buf,
-                size_of::<BdozDotPushConsts>() as u32,
-            ),
-        ];
-
-        for (slot, dsl, pc_size) in specs {
+        for slot in KernelSlot::ALL {
+            let (dsl, pc_size) = self.kernel_layout(slot);
             let spv = spirv_kernel_words(slot);
             let (kp, rc) = unsafe { self.build_one_pipeline(spv, dsl, pc_size)? };
-            self.pipelines[slot as usize] = kp;
+            self.pipelines[slot.index()] = kp;
             check_vk("vkCreateComputePipelines", rc)?;
             unsafe {
                 self.collect_telemetry(slot, kp.pipeline)?;
@@ -3360,7 +3346,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
 
-            let kp = self.pipelines[slot as usize];
+            let kp = self.pipelines[slot.index()];
             (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
             (self.fns.cmd_bind_descriptor_sets)(
                 self.cmd_buf,
@@ -3512,7 +3498,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
 
-            let kp = self.pipelines[KernelSlot::GoldilocksNtt as usize];
+            let kp = self.pipelines[KernelSlot::GoldilocksNtt.index()];
             (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
             (self.fns.cmd_bind_descriptor_sets)(
                 self.cmd_buf,
@@ -3682,12 +3668,7 @@ impl RawVulkanEngine {
                 len: n,
             }));
         }
-        let log2_n = n.trailing_zeros();
         let (n32, byte_len) = self.kernel_extent(n, WORD_BYTES)?;
-        let stage_root = |s: u32| -> Result<u64, VulkanError> {
-            let r = goldilocks_primitive_root(s).map_err(VulkanError::Accel)?;
-            Ok(if inverse { gl_inv_or_zero(r) } else { r })
-        };
 
         unsafe {
             self.reserve_job_staging(byte_len)?;
@@ -3715,7 +3696,43 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
 
-            let kp = self.pipelines[KernelSlot::GoldilocksNtt as usize];
+            self.record_canonical_ntt(n32, inverse)?;
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.vram_a.buffer,
+                self.staging.buffer,
+                1,
+                &copy,
+            );
+            self.cmd_scrub_vram(&[(self.vram_a.buffer, byte_len)]);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+            self.read_staging_u64s(0, buf);
+        }
+        Ok(())
+    }
+
+    // Buffer A contains n (power-of-two) words. The caller owns the enclosing
+    // upload, inter-pass dependency and readback.
+    unsafe fn record_canonical_ntt(&self, n32: u32, inverse: bool) -> Result<(), VulkanError> {
+        let log2_n = n32.trailing_zeros();
+        let stage_root = |s: u32| -> Result<u64, VulkanError> {
+            let r = goldilocks_primitive_root(s).map_err(VulkanError::Accel)?;
+            Ok(if inverse { gl_inv_or_zero(r) } else { r })
+        };
+        unsafe {
+            let kp = self.pipelines[KernelSlot::GoldilocksNtt.index()];
             (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
             (self.fns.cmd_bind_descriptor_sets)(
                 self.cmd_buf,
@@ -3743,7 +3760,7 @@ impl RawVulkanEngine {
                 },
             );
 
-            if n > 1 {
+            if n32 > 1 {
                 let start_stage = if log2_n >= 9 {
                     let w9 = stage_root(9)?;
                     self.cmd_barrier(
@@ -3805,7 +3822,7 @@ impl RawVulkanEngine {
                         kp.pipeline_layout,
                         wg_full,
                         NttPushConsts {
-                            w_step: gl_inv_or_zero(n as u64),
+                            w_step: gl_inv_or_zero(n32.into()),
                             n: n32,
                             log2_n,
                             stage: 0,
@@ -3816,281 +3833,6 @@ impl RawVulkanEngine {
                     );
                 }
             }
-
-            self.cmd_barrier(
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_ACCESS_SHADER_WRITE_BIT,
-                VK_ACCESS_TRANSFER_READ_BIT,
-            );
-            (self.fns.cmd_copy_buffer)(
-                self.cmd_buf,
-                self.vram_a.buffer,
-                self.staging.buffer,
-                1,
-                &copy,
-            );
-            self.cmd_scrub_vram(&[(self.vram_a.buffer, byte_len)]);
-            self.cmd_barrier(
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_HOST_BIT,
-                VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_ACCESS_HOST_READ_BIT,
-            );
-            self.submit_and_wait()?;
-            self.read_staging_u64s(0, buf);
-        }
-        Ok(())
-    }
-
-    unsafe fn dispatch_lde_mode(
-        &self,
-        pl: VkPipelineLayout,
-        total_wg: u32,
-        mut pc: CosetLdePushConsts,
-    ) {
-        let mut wg_done = 0u32;
-        while wg_done < total_wg {
-            let chunk = (total_wg - wg_done).min(self.max_wg_x);
-            pc.base_wg = wg_done;
-            unsafe {
-                (self.fns.cmd_push_constants)(
-                    self.cmd_buf,
-                    pl,
-                    VK_SHADER_STAGE_COMPUTE_BIT,
-                    0,
-                    size_of::<CosetLdePushConsts>() as u32,
-                    (&pc as *const CosetLdePushConsts).cast::<c_void>(),
-                );
-                (self.fns.cmd_dispatch)(self.cmd_buf, chunk, 1, 1);
-            }
-            wg_done += chunk;
-        }
-    }
-
-    unsafe fn record_ext2_ntt_stages(
-        &self,
-        pl: VkPipelineLayout,
-        len: u32,
-        inverse: bool,
-    ) -> Result<(), VulkanError> {
-        let log2_len = len.trailing_zeros();
-        let wg_full = len.div_ceil(256);
-        unsafe {
-            self.dispatch_lde_mode(
-                pl,
-                wg_full,
-                CosetLdePushConsts {
-                    w_step: 0,
-                    shift_c: 0,
-                    len,
-                    aux_n: 0,
-                    log2_len,
-                    stage: 0,
-                    mode: 0,
-                    base_wg: 0,
-                },
-            );
-        }
-        if len <= 1 {
-            return Ok(());
-        }
-
-        let start_stage = if log2_len >= 9 {
-            let r9 = goldilocks_primitive_root(9).map_err(VulkanError::Accel)?;
-            let w9 = if inverse { gl_inv_or_zero(r9) } else { r9 };
-            unsafe {
-                self.cmd_barrier(
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_SHADER_WRITE_BIT,
-                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                );
-                self.dispatch_lde_mode(
-                    pl,
-                    len >> 9,
-                    CosetLdePushConsts {
-                        w_step: w9,
-                        shift_c: 0,
-                        len,
-                        aux_n: 0,
-                        log2_len,
-                        stage: 9,
-                        mode: 1,
-                        base_wg: 0,
-                    },
-                );
-            }
-            10u32
-        } else {
-            1u32
-        };
-
-        let wg_half = (len >> 1).div_ceil(256);
-        for s in start_stage..=log2_len {
-            let root = goldilocks_primitive_root(s).map_err(VulkanError::Accel)?;
-            let w_step = if inverse { gl_inv_or_zero(root) } else { root };
-            unsafe {
-                self.cmd_barrier(
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_SHADER_WRITE_BIT,
-                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                );
-                self.dispatch_lde_mode(
-                    pl,
-                    wg_half,
-                    CosetLdePushConsts {
-                        w_step,
-                        shift_c: 0,
-                        len,
-                        aux_n: 0,
-                        log2_len,
-                        stage: s,
-                        mode: 2,
-                        base_wg: 0,
-                    },
-                );
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn exec_coset_lde_ext2(
-        &mut self,
-        evals: &[[u64; 2]],
-        blowup: usize,
-        shift: u64,
-        out: &mut [[u64; 2]],
-    ) -> Result<(), VulkanError> {
-        self.run_job(|engine| engine.job_coset_lde_ext2(evals, blowup, shift, out))
-    }
-
-    fn job_coset_lde_ext2(
-        &mut self,
-        evals: &[[u64; 2]],
-        blowup: usize,
-        shift: u64,
-        out: &mut [[u64; 2]],
-    ) -> Result<(), VulkanError> {
-        unsafe {
-            self.ensure_ready()?;
-        }
-        let n = evals.len();
-        let m = n
-            .checked_mul(blowup)
-            .ok_or(crate::AccelError::LengthOverflow)?;
-        if !n.is_power_of_two() || !blowup.is_power_of_two() || out.len() != m {
-            return Err(VulkanError::Accel(crate::AccelError::LengthOverflow));
-        }
-        let (m32, out_bytes) = self.kernel_extent(m, 2 * WORD_BYTES)?;
-        let (n32, in_bytes) = self.kernel_extent(n, 2 * WORD_BYTES)?;
-
-        unsafe {
-            self.reserve_job_staging(out_bytes)?;
-            self.ensure_vram_buffers(out_bytes, 0, 0)?;
-            self.kernel_buffers_fit(out_bytes, 0, 0)?;
-
-            let flat_in = core::slice::from_raw_parts(evals.as_ptr().cast::<u64>(), n * 2);
-            self.write_staging_u64s(0, flat_in);
-
-            self.begin_cmd()?;
-            let copy_in = VkBufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size: in_bytes,
-            };
-            (self.fns.cmd_copy_buffer)(
-                self.cmd_buf,
-                self.staging.buffer,
-                self.vram_a.buffer,
-                1,
-                &copy_in,
-            );
-            self.cmd_barrier(
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-            );
-
-            let kp = self.pipelines[KernelSlot::CosetLdeExt2 as usize];
-            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
-            (self.fns.cmd_bind_descriptor_sets)(
-                self.cmd_buf,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                kp.pipeline_layout,
-                0,
-                1,
-                &self.ds_1buf_a,
-                0,
-                null(),
-            );
-
-            // 1. Inverse NTT of length `n` on both coordinates in VRAM.
-            self.record_ext2_ntt_stages(kp.pipeline_layout, n32, true)?;
-
-            // 2. Multiply `[0..n)` by `inv_n * shift^j` and zero-pad `[n..m)` in VRAM.
-            self.cmd_barrier(
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_WRITE_BIT,
-                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-            );
-            let wg_m = m32.div_ceil(256);
-            self.dispatch_lde_mode(
-                kp.pipeline_layout,
-                wg_m,
-                CosetLdePushConsts {
-                    w_step: gl_inv_or_zero(n as u64),
-                    shift_c: gl_reduce_u64(shift),
-                    len: m32,
-                    aux_n: n32,
-                    log2_len: m.trailing_zeros(),
-                    stage: 0,
-                    mode: 3,
-                    base_wg: 0,
-                },
-            );
-
-            // 3. Forward NTT of length `m` on both coordinates in VRAM.
-            self.cmd_barrier(
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_WRITE_BIT,
-                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-            );
-            self.record_ext2_ntt_stages(kp.pipeline_layout, m32, false)?;
-
-            let copy_out = VkBufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size: out_bytes,
-            };
-            self.cmd_barrier(
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_ACCESS_SHADER_WRITE_BIT,
-                VK_ACCESS_TRANSFER_READ_BIT,
-            );
-            (self.fns.cmd_copy_buffer)(
-                self.cmd_buf,
-                self.vram_a.buffer,
-                self.staging.buffer,
-                1,
-                &copy_out,
-            );
-            self.cmd_scrub_vram(&[(self.vram_a.buffer, out_bytes)]);
-            self.cmd_barrier(
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_HOST_BIT,
-                VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_ACCESS_HOST_READ_BIT,
-            );
-            self.submit_and_wait()?;
-
-            let flat_out = core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u64>(), m * 2);
-            self.read_staging_u64s(0, flat_out);
         }
         Ok(())
     }
@@ -4258,7 +4000,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
 
-            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2.index()];
             (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
             self.dispatch_merkle_layer_cmd(
                 kp.pipeline_layout,
@@ -4376,7 +4118,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
 
-            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2.index()];
             (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
 
             for lvl in 0..height {
@@ -4535,7 +4277,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
 
-            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2.index()];
             (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
             self.dispatch_merkle_layer_cmd_ext(
                 kp.pipeline_layout,
@@ -4673,7 +4415,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
 
-            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2.index()];
             (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
 
             for lvl in 0..height {
@@ -4839,7 +4581,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
 
-            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2.index()];
             (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
 
             for depth in (0..log_leaves).rev() {
@@ -4994,7 +4736,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
 
-            let kp = self.pipelines[KernelSlot::BdozGf2128BatchDot as usize];
+            let kp = self.pipelines[KernelSlot::BdozGf2128BatchDot.index()];
             (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
             (self.fns.cmd_bind_descriptor_sets)(
                 self.cmd_buf,
@@ -5535,7 +5277,6 @@ mod tests {
         too_big(engine.exec_batch_poseidon2(&mut [[0u64; 12]; 2]));
         too_big(engine.exec_goldilocks_ntt_canonical(&mut [0u64; 16], false));
         too_big(engine.exec_goldilocks_ntt(&mut [0u64; 16], &[1u64; 8], false));
-        too_big(engine.exec_coset_lde_ext2(&[[0u64; 2]; 4], 2, 7, &mut [[0u64; 2]; 8]));
         too_big(engine.exec_merkle_layer(&leaves, &seed, 0, 0, &mut [[0u64; 4]; 2]));
         too_big(engine.exec_merkle_full_tree(&leaves, &seed, 0).map(|_| ()));
         too_big(
@@ -5558,8 +5299,6 @@ mod tests {
         shape(engine.exec_goldilocks_ntt_canonical(&mut [], false));
         shape(engine.exec_goldilocks_ntt_canonical(&mut [0u64; 12], false));
         shape(engine.exec_goldilocks_ntt(&mut [0u64; 8], &[1u64; 3], false));
-        shape(engine.exec_coset_lde_ext2(&[[0u64; 2]; 3], 2, 7, &mut [[0u64; 2]; 6]));
-        shape(engine.exec_coset_lde_ext2(&[[0u64; 2]; 4], 2, 7, &mut [[0u64; 2]; 4]));
         shape(engine.exec_merkle_layer(&leaves, &seed, 0, 0, &mut [[0u64; 4]; 1]));
         shape(engine.exec_merkle_layer(
             &leaves,
@@ -5649,7 +5388,6 @@ mod tests {
             engine.settle_staging();
         }
         assert_eq!(engine.staging_residue_bytes, 0);
-
     }
 
     #[test]
@@ -5702,3 +5440,5 @@ mod tests {
         assert!(!is_accepted_gpu_device_type(0, true));
     }
 }
+
+mod fp5;
