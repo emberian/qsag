@@ -225,7 +225,13 @@ impl Preprocessing {
         }
         hash.absorb(&(self.triples.len() as u64).to_le_bytes());
         hash.absorb(&(self.randoms.len() as u64).to_le_bytes());
-        for share in self.triples.iter().take(limit).flatten().chain(self.randoms.iter().take(limit)) {
+        for share in self
+            .triples
+            .iter()
+            .take(limit)
+            .flatten()
+            .chain(self.randoms.iter().take(limit))
+        {
             for word in [&share.v, &share.m[0], &share.m[1]] {
                 hash.absorb(&word.to_le_bytes());
             }
@@ -289,7 +295,6 @@ pub struct Stats {
 const COIN_DOMAIN: &[u8] = b"QSAG.COLLAB.MAC.COINS/v2";
 const COMMIT_DOMAIN: &[u8] = b"QSAG.COLLAB.MAC.COMMIT/v2";
 const ECHO_DOMAIN: &[u8] = b"QSAG.COLLAB.ECHO/v2";
-#[cfg(any(feature = "std", test))]
 const LOCAL_DOMAIN: &[u8] = b"QSAG.COLLAB.LOCAL/v2";
 const TAPE_ID_DOMAIN: &[u8] = b"QSAG.COLLAB.TAPE.ID/v1";
 #[cfg(feature = "std")]
@@ -357,11 +362,9 @@ fn get_ext(bytes: &[u8]) -> Option<Vec<E>> {
 }
 
 impl<T: Transport> Engine<T> {
-    /// Construct an unanchored unit-test engine. With `std`, burn `prep.tape_id()`
-    /// in-process before round 1. Sealed to `#[cfg(test)]`: every public collaborative
-    /// MPC session MUST be constructed via [`Engine::new_anchored`].
-    #[cfg(test)]
-    pub(crate) fn try_new(
+    /// Construct an explicitly ephemeral engine. With `std`, burn `prep.tape_id()`
+    /// in-process before round 1. Persistent stores require a durable burn by the caller.
+    pub fn new_ephemeral(
         net: T,
         prep: Preprocessing,
         session: &[u8; 32],
@@ -387,10 +390,12 @@ impl<T: Transport> Engine<T> {
         expected_prev_gen: Option<u64>,
     ) -> Result<Self, MpcError> {
         let tape_id = prep.tape_id();
-        let tag_for = |id: &[u8; 32]| qsag_accel::keccak::cshake256_framed_32(
-            TAPE_BURN_DOMAIN,
-            &[session, id, &(net.me() as u64).to_le_bytes()],
-        );
+        let tag_for = |id: &[u8; 32]| {
+            qsag_accel::keccak::cshake256_framed_32(
+                TAPE_BURN_DOMAIN,
+                &[session, id, &(net.me() as u64).to_le_bytes()],
+            )
+        };
         let burn_tag = tag_for(&tape_id);
         let prev = anchor.load().map_err(|_| MpcError::AntiRollback)?;
         if prev.map(|cp| cp.generation) != expected_prev_gen {
@@ -416,10 +421,15 @@ impl<T: Transport> Engine<T> {
 
     /// `local_seed` is this party's private randomness; it must be uniform and never
     /// reused across runs. With `std`, panics if this process already burned `prep`.
-    /// Sealed to `#[cfg(test)]`: production callers MUST use [`Engine::new_anchored`].
+    /// Test convenience for an ephemeral engine with an infallible fixture setup.
     #[cfg(test)]
-    pub(crate) fn new(net: T, prep: Preprocessing, session: &[u8; 32], local_seed: &[u8; 32]) -> Self {
-        Self::try_new(net, prep, session, local_seed)
+    pub(crate) fn new(
+        net: T,
+        prep: Preprocessing,
+        session: &[u8; 32],
+        local_seed: &[u8; 32],
+    ) -> Self {
+        Self::new_ephemeral(net, prep, session, local_seed)
             .expect("preprocessing tape / MAC key share must never be reused across sessions")
     }
 
@@ -433,7 +443,6 @@ impl<T: Transport> Engine<T> {
         Self::build_unchecked(net, prep, session, local_seed)
     }
 
-    #[cfg(any(feature = "std", test))]
     fn build_unchecked(
         net: T,
         prep: Preprocessing,
@@ -492,27 +501,19 @@ impl<T: Transport> Engine<T> {
         self.exchange_guarded(payload).map(SecretBuffer::into_inner)
     }
 
-    pub(super) fn exchange_guarded(&mut self, payload: Vec<u8>) -> Result<SecretBuffer<Vec<Vec<u8>>>, MpcError> {
+    pub(super) fn exchange_guarded(
+        &mut self,
+        payload: Vec<u8>,
+    ) -> Result<SecretBuffer<Vec<Vec<u8>>>, MpcError> {
         let payload = SecretBuffer(payload);
         if self.failed {
             return Err(MpcError::MacCheck);
         }
         self.failed = true;
-        let (me, n) = (self.me(), self.parties());
-        for p in (0..n).filter(|&p| p != me) {
-            self.net.send(p, &payload)?;
-        }
-        self.stats.bytes_sent += (payload.len() * (n - 1)) as u64;
+        let bytes = payload.len();
+        let all = super::net::exchange(&mut self.net, payload, super::net::MAX_MESSAGE_BYTES)?;
+        self.stats.bytes_sent += (bytes * (self.parties() - 1)) as u64;
         self.stats.rounds += 1;
-        let mut all = SecretBuffer(Vec::with_capacity(n));
-        for p in 0..n {
-            if p == me {
-                all.push(Vec::new());
-            } else {
-                all.push(self.net.recv(p)?);
-            }
-        }
-        all[me] = payload.into_inner();
         let mut chain = self.echo.to_vec();
         for msg in all.iter() {
             chain.extend_from_slice(&(msg.len() as u64).to_le_bytes());
@@ -543,7 +544,9 @@ impl<T: Transport> Engine<T> {
 
     /// The next preprocessed uniform value.
     pub fn random(&mut self) -> Result<Sb, MpcError> {
-        if self.failed { return Err(MpcError::MacCheck); }
+        if self.failed {
+            return Err(MpcError::MacCheck);
+        }
         let r = *self
             .prep
             .randoms
@@ -601,13 +604,13 @@ impl<T: Transport> Engine<T> {
         let opened = self.sum_opened(payload, shares.len(), F::ZERO, |word| {
             F::from_canonical_u64(u64::from_le_bytes(word))
         })?;
-        self.pending
-            .extend(opened.iter().zip(shares).map(|(&x, s)| {
-                Sh {
-                    v: E::from_base(x),
-                    m: [E::from_base(s.m[0]), E::from_base(s.m[1])],
-                }
-            }));
+        self.pending.reserve(shares.len());
+        for (&x, s) in opened.iter().zip(shares) {
+            self.pending.push(Sh {
+                v: E::from_base(x),
+                m: [E::from_base(s.m[0]), E::from_base(s.m[1])],
+            });
+        }
         Ok(opened)
     }
 
@@ -618,8 +621,10 @@ impl<T: Transport> Engine<T> {
             put_ext(&mut payload, s.v);
         }
         let opened = self.sum_opened(payload, shares.len(), E::ZERO, E::from_le_bytes_canonical)?;
-        self.pending
-            .extend(opened.iter().zip(shares).map(|(&x, s)| Sh { v: x, m: s.m }));
+        self.pending.reserve(shares.len());
+        for (&x, s) in opened.iter().zip(shares) {
+            self.pending.push(Sh { v: x, m: s.m });
+        }
         Ok(opened)
     }
 
@@ -640,10 +645,11 @@ impl<T: Transport> Engine<T> {
         let mut sigma = Sh::ZERO;
         for &Sh { v: x, m } in &self.pending {
             let r = coins.next_fp5();
-            for k in 0..2 {
-                sigma.m[k] += r * (m[k] - x.mul_base(self.prep.key[k]));
+            for (k, mac) in m.into_iter().enumerate() {
+                sigma.m[k] += r * (mac - x.mul_base(self.prep.key[k]));
             }
         }
+        self.pending.secret_wipe();
         self.pending.clear();
         let mut opening = SecretBuffer(Vec::with_capacity(CHECK_OPENING_BYTES));
         put_ext(&mut opening, sigma.m[0]);
@@ -670,7 +676,10 @@ impl<T: Transport> Engine<T> {
             total[0] += parts[0];
             total[1] += parts[1];
         }
-        let difference = total.iter().flat_map(|v| v.to_limbs()).fold(0, |acc, x| acc | x.to_canonical_u64());
+        let difference = total
+            .iter()
+            .flat_map(|v| v.to_limbs())
+            .fold(0, |acc, x| acc | x.to_canonical_u64());
         if !qsag_accel::ct::ct_eq_u64(difference, 0) {
             return Err(MpcError::MacCheck);
         }
@@ -696,7 +705,9 @@ impl<T: Transport> Engine<T> {
         ys: &[Sb],
         opens: &[Sb],
     ) -> Result<(Vec<Sb>, Vec<F>), MpcError> {
-        if self.failed { return Err(MpcError::MacCheck); }
+        if self.failed {
+            return Err(MpcError::MacCheck);
+        }
         assert_eq!(xs.len(), ys.len());
         let n = xs.len();
         if self.prep.triples.len() - self.t_used < n {
@@ -727,10 +738,7 @@ impl<T: Transport> Engine<T> {
             let t = self.prep.triples[start + k];
             out.push(t[2] + t[1].scale(d) + t[0].scale(e) + self.public(d * e));
         }
-        qsag_asm::volatile_fill(
-            &mut self.prep.triples[start..self.t_used],
-            [Sb::ZERO; 3],
-        );
+        qsag_asm::volatile_fill(&mut self.prep.triples[start..self.t_used], [Sb::ZERO; 3]);
         Ok((out, plain))
     }
 
@@ -738,7 +746,9 @@ impl<T: Transport> Engine<T> {
     /// `{0, 1, -1, 2, -2, 3, -3, 4, inf}` modulo `u^5 - 3` (`9` base-field Beaver triples
     /// per product, batched into a single broadcast round).
     pub fn mul_ext(&mut self, xs: &[Sh], ys: &[Sh]) -> Result<Vec<Sh>, MpcError> {
-        if self.failed { return Err(MpcError::MacCheck); }
+        if self.failed {
+            return Err(MpcError::MacCheck);
+        }
         assert_eq!(xs.len(), ys.len());
         if xs.is_empty() {
             return Ok(Vec::new());
@@ -836,65 +846,126 @@ impl<T: Transport> Engine<T> {
             .collect())
     }
 
-    /// Party `owner` contributes private base-field values; every party gets shares of
-    /// them. `values` is `Some` for the owner and `None` for everyone else. One
-    /// preprocessed random per value.
+    /// Commit and open independent party coins. The transcript binds the challenge
+    /// to every preceding broadcast, including its position in this session.
+    pub(super) fn public_coins(&mut self, domain: &'static [u8]) -> Result<SeedStream, MpcError> {
+        let nonce = SecretBuffer(self.local_ext().to_le_bytes());
+        let commitments = self.exchange(cshake256_32(domain, &nonce[..]).to_vec())?;
+        let openings = self.exchange_guarded(nonce.to_vec())?;
+        for (from, (com, opened)) in commitments.iter().zip(openings.iter()).enumerate() {
+            if opened.len() != EXT_BYTES
+                || !qsag_asm::ct_eq_bytes(com, &cshake256_32(domain, opened))
+            {
+                self.poison();
+                return Err(MpcError::BadCommitment { from });
+            }
+        }
+        Ok(SeedStream::new(domain, &self.echo))
+    }
+
+    /// Privately reconstruct the input masks at the owner, authenticate one blinded
+    /// combination, then broadcast the masked inputs. Consumes count + LIMBS randoms.
     pub fn input(
         &mut self,
         owner: usize,
         values: Option<&[F]>,
         count: usize,
     ) -> Result<Vec<Sb>, MpcError> {
-        let (me, n) = (self.me(), self.parties());
-        if self.failed {
-            return Err(MpcError::MacCheck);
+        let result = self.input_inner(owner, values, count);
+        if result.is_err() {
+            self.poison();
+        }
+        result
+    }
+
+    fn input_inner(
+        &mut self,
+        owner: usize,
+        values: Option<&[F]>,
+        count: usize,
+    ) -> Result<Vec<Sb>, MpcError> {
+        let me = self.me();
+        if owner >= self.parties() || (me == owner && values.map(<[F]>::len) != Some(count)) {
+            return Err(MpcError::Malformed { from: owner });
         }
         let masks: SecretScratch<Sb> = (0..count)
             .map(|_| self.random())
             .collect::<Result<_, _>>()?;
-        self.failed = true;
-        if me != owner {
-            let mut payload = SecretScratch::with_capacity(8 * count);
-            for mask in &masks {
-                payload.extend_from_slice(&mask.v.to_le_bytes());
+        let blind = SecretBuffer(self.random_ext()?);
+        let mut clear: SecretScratch<F> = masks
+            .iter()
+            .map(|s| s.v)
+            .chain(blind.v.to_limbs())
+            .collect();
+        let encode = |xs: &[F]| {
+            let mut data = SecretBuffer(Vec::with_capacity(8 * xs.len()));
+            for &x in xs {
+                put_base(&mut data, x);
             }
+            data
+        };
+        let mut commitment = Vec::new();
+        if me == owner {
+            for peer in (0..self.parties()).filter(|&p| p != me) {
+                let raw = SecretBuffer(self.net.recv(peer)?);
+                let shares = get_base(&raw)
+                    .filter(|xs| xs.len() == clear.len())
+                    .ok_or(MpcError::Malformed { from: peer })?;
+                for (x, y) in clear.iter_mut().zip(&shares) {
+                    *x += *y;
+                }
+            }
+            commitment = cshake256_32(b"COLLAB-INPUT-MASK-COMMIT", &encode(&clear)).to_vec();
+        } else {
+            let payload = encode(&clear);
             self.net.send(owner, &payload)?;
             self.stats.bytes_sent += payload.len() as u64;
-            let received = SecretBuffer(self.net.recv(owner)?);
-            let eps = get_base(&received)
-                .filter(|e| e.len() == count)
-                .ok_or(MpcError::Malformed { from: owner })?;
-            self.failed = false;
-            return Ok(masks
-                .iter()
-                .zip(eps)
-                .map(|(&mask, e)| mask + self.public(e))
-                .collect());
         }
-        let values = values
-            .filter(|v| v.len() == count)
-            .expect("the owner's values");
-        let mut clear: SecretScratch<F> = masks.iter().map(|mask| mask.v).collect();
-        for p in (0..n).filter(|&p| p != me) {
-            let received = SecretBuffer(self.net.recv(p)?);
-            let part = get_base(&received)
-                .filter(|e| e.len() == count)
-                .ok_or(MpcError::Malformed { from: p })?;
-            for (c, s) in clear.iter_mut().zip(part) {
-                *c += s;
+        let commits = self.exchange(commitment)?;
+        if commits[owner].len() != 32 {
+            return Err(MpcError::Malformed { from: owner });
+        }
+        let chi = self
+            .public_coins(b"COLLAB-INPUT-MASK-CHALLENGE")?
+            .next_fp5();
+        let mut power = chi;
+        let mut combination = SecretBuffer(*blind);
+        let mut sigma = SecretBuffer(E::from_limbs(core::array::from_fn(|j| clear[count + j])));
+        for (mask, &r) in masks.iter().zip(&clear) {
+            *combination += mask.scale_ext(power);
+            *sigma += power.mul_base(r);
+            power *= chi;
+        }
+        let claimed = self.exchange(if me == owner {
+            sigma.to_le_bytes().to_vec()
+        } else {
+            Vec::new()
+        })?;
+        let claimed = E::from_le_bytes_canonical(
+            claimed[owner]
+                .as_slice()
+                .try_into()
+                .map_err(|_| MpcError::Malformed { from: owner })?,
+        )
+        .ok_or(MpcError::Malformed { from: owner })?;
+        self.pending.push(Sh {
+            v: claimed,
+            m: combination.m,
+        });
+        self.check()?;
+
+        let mut delta = Vec::new();
+        if let Some(xs) = values.filter(|_| me == owner) {
+            delta.reserve_exact(count * 8);
+            for (&x, &r) in xs.iter().zip(&clear) {
+                put_base(&mut delta, x - r);
             }
         }
-        let eps: Vec<F> = values.iter().zip(&clear).map(|(&x, &r)| x - r).collect();
-        qsag_asm::volatile_fill(&mut clear, F::ZERO);
-        let mut payload = SecretScratch::with_capacity(8 * count);
-        for &e in &eps {
-            payload.extend_from_slice(&e.to_le_bytes());
-        }
-        for p in (0..n).filter(|&p| p != me) {
-            self.net.send(p, &payload)?;
-        }
-        self.stats.bytes_sent += (payload.len() * (n - 1)) as u64;
-        self.failed = false;
+        let deltas = self.exchange_guarded(delta)?;
+        let eps = get_base(&deltas[owner])
+            .filter(|xs| xs.len() == count)
+            .ok_or(MpcError::Malformed { from: owner })?;
+        self.check()?;
         Ok(masks
             .iter()
             .zip(eps)
@@ -1064,8 +1135,8 @@ pub(super) mod tests {
             let (sx, sy) = (dealer.share(x), dealer.share(y));
             let s_full_a: [Vec<Sb>; 5] = core::array::from_fn(|j| dealer.share(full_a.0[j]));
             let s_full_b: [Vec<Sb>; 5] = core::array::from_fn(|j| dealer.share(full_b.0[j]));
-            // 1 base mul + 3 Fp5 muls = 1 + 27 = 28 triples; 1 random_ext + 1 input = 6 randoms.
-            let preps = dealer.preprocessing(28, 6);
+            // 1 base mul + 3 Fp5 muls = 1 + 27 = 28 triples; 1 random_ext + 1 authenticated input = 11 randoms.
+            let preps = dealer.preprocessing(28, 11);
             let secret = f(77);
             let out = run_parties(preps, |mut e| {
                 let me = e.me();
@@ -1091,7 +1162,7 @@ pub(super) mod tests {
                 assert_eq!(opened_ext[1], opened_ext[3].square());
                 assert_eq!(opened_ext[2], full_a * full_b);
                 assert_eq!(stats.triples_used, 1 + 3 * EXT_MUL_TRIPLES as u64);
-                assert_eq!(stats.randoms_used, 6);
+                assert_eq!(stats.randoms_used, 11);
             }
         }
     }
@@ -1112,18 +1183,27 @@ pub(super) mod tests {
     fn failed_send_burns_the_reserved_triples_before_retry() {
         struct Closed;
         impl Transport for Closed {
-            fn me(&self) -> usize { 0 }
-            fn parties(&self) -> usize { 2 }
+            fn me(&self) -> usize {
+                0
+            }
+            fn parties(&self) -> usize {
+                2
+            }
             fn send(&mut self, peer: usize, _: &[u8]) -> Result<(), NetError> {
                 Err(NetError::Closed { peer })
             }
-            fn recv(&mut self, _: usize) -> Result<Vec<u8>, NetError> { unreachable!() }
+            fn recv(&mut self, _: usize) -> Result<Vec<u8>, NetError> {
+                unreachable!()
+            }
         }
         let mut dealer = Dealer::new(2, &[79; 32]);
         let prep = dealer.preprocessing(2, 0).remove(0);
         let mut e = Engine::new(Closed, prep, &[3; 32], &[4; 32]);
         let share = e.public(F::ONE);
-        assert_eq!(e.mul(&[share], &[share]), Err(MpcError::Net(NetError::Closed { peer: 1 })));
+        assert_eq!(
+            e.mul(&[share], &[share]),
+            Err(MpcError::Net(NetError::Closed { peer: 1 }))
+        );
         assert_eq!(e.prep.triples[0], [Sb::ZERO; 3]);
         assert_eq!(e.mul(&[share], &[share]), Err(MpcError::MacCheck));
         assert_eq!(e.remaining(), (1, 0));

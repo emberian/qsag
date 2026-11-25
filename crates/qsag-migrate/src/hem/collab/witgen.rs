@@ -15,11 +15,11 @@
 //!   `[b] = ([a] / sqrt(a^2) + 1) / 2` for the fixed square root. This is the random-bit
 //!   protocol of SPDZ preprocessing (Damgård, Keller, Larraia, Pastro, Scholl, Smart,
 //!   "Practical covertly secure MPC for dishonest majority", ESORICS 2013, Section 5,
-//!   as restated in `paperbin/2020-edabits-mixed-arithmetic-binary-338`, Section 2); `a^2`
-//!   is uniform over the squares whatever `b` is.
+//!   as restated in `[EGK+20]`, *edaBits*, Escudero et al., CRYPTO 2020, ePrint 2020/338,
+//!   Section 2); `a^2` is uniform over the squares whatever `b` is.
 //! * **Bit decomposition** of a shared `x < 2^m` ([`Witgen::decompose`]). The mask is a
 //!   value whose bits are shared random bits, which is what an edaBit is
-//!   (`2020-edabits-mixed-arithmetic-binary-338`, Section 3; here both halves live in the
+//!   (`[EGK+20]`, Section 3; here both halves live in the
 //!   one field, so no cut-and-choose between domains is needed). Two cases:
 //!   * `m <= 22`: `r` of `m + 40` bits, open `c = x + r` (no wrap), and the low `m` bits of
 //!     `c - r` by a borrow chain with one product per bit. `c` is within `2^-40` of
@@ -30,14 +30,14 @@
 //!     `D = c - r mod 2^64` come from one 64-step borrow chain, and
 //!     `x = D + beta - 2^32 beta` because `p = 2^64 - 2^32 + 1`: one more chain. This is
 //!     the comparison-with-a-public-value step of
-//!     `paperbin/2021-rabbit-efficient-comparison-119` (Section 4.1, "LTC"), specialised to
-//!     this prime; no slack, so it is exact for every `x < p`.
+//!     `[MWP21]` (*Rabbit*, Makri, Wafo-Tapa, Patrina, FC 2021, ePrint 2021/119, Section 4.1,
+//!     "LTC"), specialised to this prime; no slack, so it is exact for every `x < p`.
 //! * **Integers.** An integer is a polynomial in `2^8` whose coefficients are shares with
-//!   public intervals. [`Witgen::normalize`] turns it into bits by a carry chain, one
+//!   public intervals. `Witgen::normalize` turns it into bits by a carry chain, one
 //!   decomposition per coefficient. Products of two such integers are computed at as many
 //!   points as the product has coefficients and interpolated ([`Witgen::poly_mul`]), one
 //!   secure product per coefficient.
-//! * **Reduction modulo a public prime** `q` ([`Witgen::canonical`]): bits of the integer
+//! * **Reduction modulo a public prime** `q` (`Witgen::canonical`): bits of the integer
 //!   (plus a public multiple of `q` that makes it non-negative), then the bits above the
 //!   limbs of `q` are folded down with the public constants `2^i mod q` and normalized
 //!   again until that stops shortening the value, then conditional subtractions of
@@ -75,15 +75,11 @@
 //!
 //! Beaver openings; `a^2` of random-bit generation; the top-bits product of an exact
 //! mask; `x + r` of a decomposition; `den r` of a field ratio; the integer
-//! `den rho + q S + K q` of a division. The first four are functions of fresh
-//! preprocessed values alone or are masked by one. The last two are masked only when the
-//! shared value behind them is the one the protocol defines, so [`Backend::check`] (the
-//! batch MAC check) runs before the round that carries one of them: a custodian that
-//! sent a wrong share in any earlier round is caught there, before a value that its
-//! error could have steered is opened. The other requests of that same round do no
-//! harm: a shared value is fixed by the rounds before the one that opens it, so a
-//! custodian that sends last in a round can change what is reconstructed in that round
-//! and nothing that is opened in it. That ordering is this module's own argument; the engine's guarantee it rests on
+//! `den rho + q S + K q` of a division. Before opening a statistical mask or a
+//! masked denominator, [`Backend::check`] authenticates all preceding openings.
+//! This also covers input-independent random-bit and mask-generation rounds.
+//! Products computed in the current round only feed subsequent rounds. The
+//! authentication guarantee that this ordering relies on
 //! (an opening that differs from the shared value fails the check except with probability
 //! `2^-126`) is SPDZ's.
 //!
@@ -102,7 +98,7 @@
 //!   Taproot tweak). The points share `x` when they are equal, which is one scalar per
 //!   multiplication, and for a variable point when `P = [k] G`. A custodian of a key
 //!   chosen by someone else cannot rule those out, so this case is computed, not
-//!   aborted: [`Source::Slope`] carries the tangent, and [`Witgen::slope`] tests the
+//!   aborted: [`Source::Slope`] carries the tangent, and `Witgen::slope` tests the
 //!   denominator for zero on shares (its canonical residue, then the product of the
 //!   complements of its bits) and selects numerator and denominator before the masked
 //!   division. Nothing depends on which case holds: the same triples, the same
@@ -149,7 +145,7 @@
 //!   three products per position in `2 log2 n` rounds. The 22-position chains of the
 //!   statistically masked decompositions stay ripple: there are about 12,000 of them
 //!   and the prefix form saves 13 rounds on some 70 sequential stages.
-//! * [`Witgen::normalize`] decomposes every coefficient on its own, in the same rounds,
+//! * `Witgen::normalize` decomposes every coefficient on its own, in the same rounds,
 //!   then brings the overlapping bits of neighbouring coefficients down to two per
 //!   position with full adders (two products and two rounds a layer) and adds the two
 //!   rows with one prefix chain. The form before it carried from limb to limb, one
@@ -906,7 +902,7 @@ impl<'a, B: Backend> Witgen<'a, B> {
                 .map(|_| self.random())
                 .collect::<Result<_, _>>()?;
             let squares = SecretScratch::from(self.mul(&a, &a).await?);
-            let opened = self.open(&squares, false).await?;
+            let opened = self.open(&squares, true).await?;
             for (&a, &v) in a.iter().zip(&opened) {
                 if self.counting {
                     out.push(a);
@@ -1039,7 +1035,7 @@ impl<'a, B: Backend> Witgen<'a, B> {
                     level.chunks_exact(2).map(|p| (p[0], p[1])).unzip();
                 level = self.mul(&xs, &ys).await?;
             }
-            let all_ones = self.open(&level, false).await?[0];
+            let all_ones = self.open(&level, true).await?[0];
             if self.counting || all_ones == F::ZERO {
                 return Ok(bits);
             }
@@ -1054,9 +1050,15 @@ impl<'a, B: Backend> Witgen<'a, B> {
             .collect();
         let (bits, masks) = join2(self.fresh_bits(bits), join_all(futures)).await;
         let bits = bits.map(SecretBuffer);
-        let guarded: Vec<_> = masks.into_iter().map(|result| result.map(SecretBuffer)).collect();
+        let guarded: Vec<_> = masks
+            .into_iter()
+            .map(|result| result.map(SecretBuffer))
+            .collect();
         let masks = guarded.into_iter().collect::<Result<Vec<_>, _>>()?;
-        *self.pool.borrow_mut() = (bits?, SecretBuffer(masks.into_iter().map(SecretBuffer::into_inner).collect()));
+        *self.pool.borrow_mut() = (
+            bits?,
+            SecretBuffer(masks.into_iter().map(SecretBuffer::into_inner).collect()),
+        );
         Ok(())
     }
 
@@ -1103,11 +1105,11 @@ impl<'a, B: Backend> Witgen<'a, B> {
         };
         if m as u32 <= STAT_MAX {
             let r = self.random_bits(m + SIGMA as usize).await?;
-            let c = self.open(&[pack(&r)], false).await?[0].to_canonical_u64();
+            let c = self.open(&[pack(&r)], true).await?[0].to_canonical_u64();
             return Ok(self.sub_from_public(c, &r, m, true).await?.0);
         }
         let r = self.exact_mask().await?;
-        let c = self.open(&[pack(&r)], false).await?[0].to_canonical_u64();
+        let c = self.open(&[pack(&r)], true).await?[0].to_canonical_u64();
         let (d, beta) = self.sub_from_public(c, &r, 64, false).await?;
         // x = D + beta - 2^32 beta: a carry `beta` into the low 32 bits, then a borrow of
         // `beta` minus the carry out of them into the bits above.
@@ -2142,7 +2144,8 @@ impl<'a, B: Backend> Witgen<'a, B> {
             self.wait(self.fill_pool(bits, masks))?;
         }
         // Multiplicities: the sum over the lookups of the indicator of each one's row.
-        let mut counts = SecretScratch::from(vec![self.zero; lookups.map_or(0, |l| l.num_table_rows)]);
+        let mut counts =
+            SecretScratch::from(vec![self.zero; lookups.map_or(0, |l| l.num_table_rows)]);
         let mut uncounted = lookups.map_or(0, |l| l.num_lookups);
         if let (Some(l), 0) = (lookups, uncounted) {
             for (r, &count) in counts.iter().enumerate() {
@@ -2183,7 +2186,9 @@ impl<'a, B: Backend> Witgen<'a, B> {
                     };
                     let mut task = task.ok_or(unsupported(unit))?;
                     match task.as_mut().poll(&mut cx) {
-                        Poll::Ready(values) => finished.push((unit as u32, SecretScratch::from(values?))),
+                        Poll::Ready(values) => {
+                            finished.push((unit as u32, SecretScratch::from(values?)))
+                        }
                         Poll::Pending => active.push((unit as u32, task)),
                     }
                 }
@@ -2368,7 +2373,9 @@ pub(super) mod tests {
     }
 
     impl SecretWipe for Clear {
-        fn secret_wipe(&mut self) { self.0.secret_wipe(); }
+        fn secret_wipe(&mut self) {
+            self.0.secret_wipe();
+        }
     }
 
     impl Backend for Plain {
@@ -3344,14 +3351,9 @@ pub(super) mod tests {
                                     &session,
                                     &[p as u8 + 50; 32],
                                 );
-                                let res = generate(
-                                    &mut e,
-                                    shape,
-                                    defs,
-                                    publics,
-                                    &[inputs[p].clone()],
-                                )
-                                .map(|_| ());
+                                let res =
+                                    generate(&mut e, shape, defs, publics, &[inputs[p].clone()])
+                                        .map(|_| ());
                                 (res, e.stats.rounds)
                             })
                         })

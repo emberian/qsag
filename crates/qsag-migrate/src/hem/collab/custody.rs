@@ -22,8 +22,9 @@ use qsag_core::field::tower::{TowerGf256, lagrange_weights_zero_gf256};
 
 use qsag_core::wipe::{SecretBuffer, SecretScratch};
 
-use super::engine::{Engine, MpcError, Sb};
+use super::engine::{EXT_MUL_TRIPLES, Engine, MpcError, Sb, Sh};
 use super::net::Transport;
+use qsag_agg::zk_hem::v2::{field5::Fp5, params::LIMBS};
 
 type F = Goldilocks;
 
@@ -61,10 +62,16 @@ pub fn xor_share_from_shamir(quorum: &[usize], party: usize, share: &[u8]) -> Op
 
 /// Triples and uniform values one custodian consumes in [`input_secret_bits`].
 pub const fn input_demand(parties: usize, bytes: usize) -> (usize, usize) {
+    if parties == 0 {
+        return (0, 0);
+    }
     let bits = 8usize.saturating_mul(bytes);
     (
-        bits.saturating_mul(2usize.saturating_mul(parties).saturating_sub(1)),
-        bits.saturating_mul(parties),
+        bits.saturating_mul(2usize.saturating_mul(parties).saturating_sub(1))
+            .saturating_add(EXT_MUL_TRIPLES),
+        bits.saturating_add(LIMBS)
+            .saturating_mul(parties)
+            .saturating_add(LIMBS),
     )
 }
 
@@ -85,17 +92,8 @@ pub fn input_secret_bits<T: Transport>(
     }
     drop(mine);
 
-    // Every input is a bit: `b (b - 1) = 0`, opened after the MAC check.
     let flat: SecretScratch<Sb> = inputs.iter().flatten().copied().collect();
-    let minus_one = e.public(F::ZERO - F::ONE);
-    let shifted: SecretScratch<Sb> = flat.iter().map(|&b| b + minus_one).collect();
-    let products = SecretScratch::from(e.mul(&flat, &shifted)?);
-    e.check()?;
-    let opened = e.open(&products)?;
-    e.check()?;
-    if opened.iter().any(|&v| v != F::ZERO) {
-        return Err(InputError::NotBits);
-    }
+    verify_bits(e, &flat)?;
 
     let mut acc = SecretBuffer(core::mem::take(&mut inputs[0]));
     for next in &inputs[1..] {
@@ -105,6 +103,30 @@ pub fn input_secret_bits<T: Transport>(
         }
     }
     Ok(acc.into_inner())
+}
+
+fn verify_bits<T: Transport>(e: &mut Engine<T>, bits: &[Sb]) -> Result<(), InputError> {
+    let minus_one = e.public(F::ZERO - F::ONE);
+    let shifted: SecretScratch<Sb> = bits.iter().map(|&b| b + minus_one).collect();
+    let products = SecretScratch::from(e.mul(bits, &shifted)?);
+    e.check()?;
+    let mut coins = e.public_coins(b"COLLAB-INPUT-BIT-CHECK")?;
+    let sum = SecretBuffer(
+        products
+            .iter()
+            .fold(Sh::ZERO, |s, &p| s + p.scale_ext(coins.next_fp5())),
+    );
+    let rho = SecretBuffer(e.random_ext()?);
+    let blinded =
+        SecretScratch::from(e.mul_ext(core::slice::from_ref(&*sum), core::slice::from_ref(&*rho))?);
+    e.check()?;
+    let opened = e.open_ext(&blinded)?;
+    e.check()?;
+    if opened[0] != Fp5::ZERO {
+        e.poison();
+        return Err(InputError::NotBits);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -182,6 +204,26 @@ pub(super) mod tests {
         }
     }
 
+    #[test]
+    fn invalid_mask_share_fails_before_the_owner_broadcasts_input() {
+        for byte in [0, 0xff] {
+            let mut dealer = Dealer::new(2, &[0xa8 ^ byte; 32]);
+            let (t, r) = input_demand(2, 1);
+            let mut tapes = dealer.preprocessing(t, r);
+            tapes[1].randoms[0].v -= F::ONE;
+            let out = run_parties(tapes, |mut e| {
+                let result = input_secret_bits(&mut e, &[byte]);
+                assert_eq!(e.stats.triples_used, 0);
+                assert_eq!(e.stats.mac_checks, 1);
+                result
+            });
+            assert!(
+                out.iter()
+                    .all(|r| *r == Err(InputError::Mpc(MpcError::MacCheck)))
+            );
+        }
+    }
+
     /// A custodian whose input is not a bit is caught before the bits are combined.
     #[test]
     fn an_input_that_is_not_a_bit_is_refused() {
@@ -196,17 +238,7 @@ pub(super) mod tests {
                 let mut inputs = alloc::vec![e.input(0, None, 8).unwrap()];
                 inputs.push(e.input(1, Some(&values), 8).unwrap());
                 let flat: Vec<Sb> = inputs.iter().flatten().copied().collect();
-                let minus_one = e.public(F::ZERO - F::ONE);
-                let shifted: Vec<Sb> = flat.iter().map(|&b| b + minus_one).collect();
-                let products = e.mul(&flat, &shifted).unwrap();
-                e.check().unwrap();
-                let opened = e.open(&products).unwrap();
-                e.check().unwrap();
-                return Err(if opened.iter().any(|&v| v != F::ZERO) {
-                    InputError::NotBits
-                } else {
-                    InputError::Mpc(MpcError::MacCheck)
-                });
+                return verify_bits(&mut e, &flat);
             }
             input_secret_bits(&mut e, &[0x3c]).map(|_| ())
         });
@@ -218,7 +250,7 @@ pub(super) mod tests {
     fn tooth_input_demand_zero_parties_does_not_underflow() {
         // `#tooth`: `input_demand(0, 32)` previously panicked with `2 * 0 - 1` underflow.
         assert_eq!(input_demand(0, 32), (0, 0));
-        assert_eq!(input_demand(1, 4), (32, 32));
-        assert_eq!(input_demand(3, 4), (160, 96));
+        assert_eq!(input_demand(1, 4), (41, 42));
+        assert_eq!(input_demand(3, 4), (169, 116));
     }
 }
