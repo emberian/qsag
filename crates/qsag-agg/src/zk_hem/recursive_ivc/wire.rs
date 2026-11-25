@@ -116,7 +116,20 @@ impl SuccinctIvcProof {
     }
 
     pub fn from_bytes_canonical(bytes: &[u8]) -> Option<Self> {
-        Self::decode_with_cfg(&tree::profile(), PRODUCTION_TAG, bytes)
+        Self::from_bytes_for_config(&tree::profile(), bytes)
+    }
+
+    /// Encode a proof for the agreed DKT26 geometry.
+    pub fn to_bytes_for_config(&self, cfg: &IvcStepConfig) -> Option<Vec<u8>> {
+        (cfg.is_dkt26() && self.0.fits(cfg)).then(|| self.encode_with_tag(PRODUCTION_TAG))
+    }
+
+    /// Decode with a caller-supplied DKT26 geometry and canonical field limbs.
+    pub fn from_bytes_for_config(cfg: &IvcStepConfig, bytes: &[u8]) -> Option<Self> {
+        if !cfg.is_dkt26() {
+            return None;
+        }
+        Self::decode_with_cfg(cfg, PRODUCTION_TAG, bytes)
     }
 
     fn encode_with_tag(&self, tag: u8) -> Vec<u8> {

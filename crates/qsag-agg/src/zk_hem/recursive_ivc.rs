@@ -1,6 +1,6 @@
 //! Binary proof-carrying data over Goldilocks with quintic `[DKT26]` WHIR challenges.
 //!
-//! [`prove_ivc_tree`] proves a power-of-two run of contiguous Jorts shards.
+//! [`prove_ivc_tree`] proves ordered contiguous shards, combining overlapping signer groups within each shard.
 //! [`verify_ivc_tree`] accepts the subtree statement and its canonical `[DKT26]` `< 2^{-128}`
 //! QROM root proof (`QSAGIVC1\x00`, `639,673` bytes).
 //! [`SuccinctIvcStep`] also accepts two previously encoded internal proofs.
@@ -13,18 +13,21 @@
 //! the number of shards and linear in the fixed relation description.
 //!
 //! [`SuccinctIvcProof`] exclusively uses the `[DKT26]` `< 2^{-128}` QROM query schedule
-//! (`IvcStepConfig::dkt26(23)`), with zero wire-level profile polymorphism.
-//! The public row sumchecks expose witness evaluations. A composed QROM
-//! knowledge-extraction analysis for this recursive transcript is open.
+//! (`IvcStepConfig::dkt26(23)`), with zero wire-level profile polymorphism; custom geometries
+//! are agreed out of band. Internal PCD exposes row, column, and matrix evaluations; zero
+//! knowledge requires a ZK outer layer. `Qsag.Protocol.Aggregation.RecursiveIvcPublicRowQrom`
+//! proves public-round mass `< 2^-160` and a spine budget `< 2^-128` for `d ≤ 64, Q ≤ 2^64`.
+//! Quorum-forgery extraction assumes selected-node and collision bounds. The whole-tree budget
+//! clears 128 bits for `d ≤ 7, Q ≤ 2^64` or `d ≤ 20, Q ≤ 2^57`.
 mod gadgets;
+#[cfg(test)]
+use super::v2::params::StageSpec;
 use super::v2::{
     field5::Fp5 as E,
     hash::Channel,
     params::{self, Schedule},
     pcs::{self, StageDims},
 };
-#[cfg(test)]
-use super::v2::params::StageSpec;
 use crate::field::{Goldilocks as F, GoldilocksOps as _};
 use alloc::{vec, vec::Vec};
 use arithmetic::{Duplex, Quint, Wide, compress};
@@ -45,24 +48,41 @@ pub use tree::{
 pub type IvcCommitment = [F; 7];
 type Digest = IvcCommitment;
 
+/// Fixed-width signer bitmap for a shard with up to 256 validators.
+pub const IVC_BITMAP_BYTES: usize = 32;
+const STATEMENT_WORDS: usize = 31;
+const STEP_WORDS: usize = STATEMENT_WORDS + 7;
+
 /// The half-open shard interval and its authenticated public context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IvcSubtreeStatement {
     pub policy_registry_root: [u8; 32],
     pub shard_lo: u64,
     pub shard_hi: u64,
-    pub total_quorums: u64,
+    /// Unique signers counted per shard, summed across the interval.
+    pub total_signers: u64,
+    /// Authenticated policy threshold on a single shard, zero across shards.
+    pub shard_threshold: u32,
+    /// Member i occupies bit i % 8 of byte i / 8. Multi-shard intervals use all zeroes.
+    pub signer_bitmap: [u8; IVC_BITMAP_BYTES],
     pub message_digest: [u8; 32],
 }
 impl IvcSubtreeStatement {
+    /// Width of the authenticated half-open interval.
+    pub fn completed_shards(&self) -> u64 {
+        self.shard_hi.saturating_sub(self.shard_lo)
+    }
+
     /// Eight u32 limbs per digest and two per u64, all in little-endian order.
-    pub fn public_inputs(&self) -> [F; 22] {
-        let mut bytes = [0u8; 88];
+    pub fn public_inputs(&self) -> [F; STATEMENT_WORDS] {
+        let mut bytes = [0u8; STATEMENT_WORDS * 4];
         bytes[..32].copy_from_slice(&self.policy_registry_root);
         bytes[32..40].copy_from_slice(&self.shard_lo.to_le_bytes());
         bytes[40..48].copy_from_slice(&self.shard_hi.to_le_bytes());
-        bytes[48..56].copy_from_slice(&self.total_quorums.to_le_bytes());
-        bytes[56..].copy_from_slice(&self.message_digest);
+        bytes[48..56].copy_from_slice(&self.total_signers.to_le_bytes());
+        bytes[56..60].copy_from_slice(&self.shard_threshold.to_le_bytes());
+        bytes[60..92].copy_from_slice(&self.signer_bitmap);
+        bytes[92..].copy_from_slice(&self.message_digest);
         core::array::from_fn(|i| f(u32::from_le_bytes(bytes.as_chunks::<4>().0[i]) as u64))
     }
 }
@@ -73,6 +93,14 @@ pub struct IvcStepConfig {
     schedule: Schedule,
 }
 impl IvcStepConfig {
+    pub fn log_cells(&self) -> usize {
+        self.log_cells
+    }
+
+    fn is_dkt26(&self) -> bool {
+        Self::dkt26(self.log_cells).as_ref() == Some(self)
+    }
+
     /// Query counts from the quintic DKT26 parameter calculator. The calculator
     /// bounds the v2 IOP. Instantiating its transcript with Poseidon2 is an
     /// additional cryptographic assumption.
@@ -348,6 +376,21 @@ impl Oracle {
             words,
         }
     }
+    #[cfg(feature = "vulkan")]
+    fn from_heap(words: Vec<Vec<F>>, heap: Vec<[u64; 7]>) -> Self {
+        let mut tree = Vec::new();
+        let mut n = heap.len() / 2;
+        while n > 0 {
+            tree.push(
+                heap[n..2 * n]
+                    .iter()
+                    .map(|d| d.map(F::from_u64_reduced))
+                    .collect(),
+            );
+            n /= 2;
+        }
+        Self { words, tree }
+    }
     fn root(&self) -> Digest {
         self.tree.last().unwrap()[0]
     }
@@ -404,34 +447,85 @@ impl Drop for IvcTableCommitment {
 }
 impl IvcTableCommitment {
     pub fn commit(cfg: &IvcStepConfig, table: &[F], seed: &[u8; 32]) -> Option<Self> {
+        Self::commit_inner(
+            cfg,
+            table,
+            seed,
+            #[cfg(feature = "vulkan")]
+            None,
+        )
+    }
+    fn commit_inner(
+        cfg: &IvcStepConfig,
+        table: &[F],
+        seed: &[u8; 32],
+        #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
+    ) -> Option<Self> {
+        use qsag_core::wipe::SecretBuffer;
         if table.len() != 1 << cfg.log_cells {
             return None;
         }
         let d = cfg.dims()[0];
-        let coeffs = crate::pcs::hypercube_to_monomial_coeffs(table);
+        let coeffs = SecretBuffer::new(crate::pcs::hypercube_to_monomial_coeffs(table));
         let mut stream = super::SeedStream::new(b"IVC-W24-MASK-v1", seed);
         let nonce = core::array::from_fn(|_| stream.next_base());
         let mask: Vec<_> = (0..pcs::mask_len(cfg.log_cells, d.step_vars))
             .map(|_| E(core::array::from_fn(|_| stream.next_base())))
             .collect();
-        let mut z = pcs::encode_base(&coeffs, d.log_domain);
-        let mut r = pcs::encode_ext_folded(&mask, d.log_domain, d.step_vars);
-        let words = (0..d.fibers)
+        let mask = SecretBuffer::new(mask);
+        let cpu_encode = || {
+            (
+                SecretBuffer::new(pcs::encode_base(&coeffs, d.log_domain)),
+                SecretBuffer::new(pcs::encode_ext_folded(&mask, d.log_domain, d.step_vars)),
+            )
+        };
+        #[cfg(feature = "vulkan")]
+        let (z, r) = if let Some(gpu) = gpu {
+            crate::vulkan::encode_stage0(gpu, &coeffs, &mask, d.log_domain, d.step_vars).ok()?
+        } else {
+            cpu_encode()
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let (z, r) = cpu_encode();
+        let words: Vec<Vec<F>> = (0..d.fibers)
             .map(|j| {
-                let mut words: Vec<_> = (0..4).map(|_| stream.next_base()).collect();
+                let mut words = Vec::with_capacity(9 + d.arity());
+                words.extend((0..4).map(|_| stream.next_base()));
                 words.extend(r[j].0);
                 words.extend(pcs::fiber(&z, &d, j));
                 words
             })
             .collect();
-        qsag_asm::volatile_fill(&mut z, F::ZERO);
-        qsag_asm::volatile_fill(&mut r, E::ZERO);
+        #[cfg(feature = "vulkan")]
+        let oracle = if let Some(gpu) = gpu {
+            let words = SecretBuffer::new(words);
+            let salts = qsag_core::wipe::SecretBuffer::new(
+                words
+                    .iter()
+                    .map(|v| core::array::from_fn(|j| v[j].to_canonical_u64()))
+                    .collect::<Vec<_>>(),
+            );
+            let mask = crate::vulkan::ext_words(&r);
+            let profile = qsag_accel::vulkan::CanopyProfile::IvcStage0 {
+                nonce: nonce.map(F::to_canonical_u64),
+                salts: &salts,
+                mask_code: &mask,
+            };
+            let heap = gpu
+                .canopy(profile, 0, d.arity(), &crate::vulkan::base_words(&z))
+                .ok()?;
+            Oracle::from_heap(words.into_inner(), heap)
+        } else {
+            Oracle::new(0, words, nonce)
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let oracle = Oracle::new(0, words, nonce);
         Some(Self {
             cfg: cfg.clone(),
-            coeffs,
-            mask,
+            coeffs: coeffs.into_inner(),
+            mask: mask.into_inner(),
             nonce,
-            oracle: Oracle::new(0, words, nonce),
+            oracle,
         })
     }
     pub fn root(&self) -> Digest {
@@ -441,6 +535,20 @@ impl IvcTableCommitment {
         self.nonce
     }
     pub fn open(&self, context: &[F], point: &[E]) -> Option<(E, FixedPathWhirW24)> {
+        self.open_inner(
+            context,
+            point,
+            #[cfg(feature = "vulkan")]
+            None,
+        )
+    }
+    fn open_inner(
+        &self,
+        context: &[F],
+        point: &[E],
+        #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
+    ) -> Option<(E, FixedPathWhirW24)> {
+        use qsag_core::wipe::SecretBuffer;
         let cfg = &self.cfg;
         if point.len() != cfg.log_cells {
             return None;
@@ -490,11 +598,19 @@ impl IvcTableCommitment {
         proof.stages[0].ood = red.mask_evals;
         proof.stages[0].folds = red.folds;
         proof.mask_claim = red.mask_claim;
-        let (mut poly, mut st, mut chals) = (red.g, red.st, red.chals);
+        let (mut poly, mut st, mut chals) = (SecretBuffer::new(red.g), red.st, red.chals);
         let mut prev = None;
         for (i, d) in dims.iter().copied().enumerate().skip(1) {
-            let mut code = pcs::encode_ext(&poly, d.log_domain);
-            let words = (0..d.fibers)
+            #[cfg(feature = "vulkan")]
+            let code = if let Some(gpu) = gpu {
+                crate::vulkan::encode_ext(gpu, &poly, d.log_domain, F::NON_RESIDUE).ok()?
+            } else {
+                pcs::encode_ext(&poly, d.log_domain)
+            };
+            #[cfg(not(feature = "vulkan"))]
+            let code = pcs::encode_ext(&poly, d.log_domain);
+            let code = SecretBuffer::new(code);
+            let words: Vec<Vec<F>> = (0..d.fibers)
                 .map(|j| {
                     pcs::fiber(&code, &d, j)
                         .into_iter()
@@ -502,8 +618,24 @@ impl IvcTableCommitment {
                         .collect()
                 })
                 .collect();
-            qsag_asm::volatile_fill(&mut code, E::ZERO);
+            #[cfg(feature = "vulkan")]
+            let oracle = if let Some(gpu) = gpu {
+                let words = SecretBuffer::new(words);
+                let heap = gpu
+                    .canopy(
+                        qsag_accel::vulkan::CanopyProfile::IvcExtension,
+                        i as u8,
+                        d.arity(),
+                        &crate::vulkan::ext_words(&code),
+                    )
+                    .ok()?;
+                Oracle::from_heap(words.into_inner(), heap)
+            } else {
+                Oracle::new(i, words, self.nonce)
+            };
+            #[cfg(not(feature = "vulkan"))]
             let oracle = Oracle::new(i, words, self.nonce);
+            drop(code);
             proof.stages[i].root = oracle.root();
             tr.frame(&mut Native::default(), b"STAGE_ROOT", &oracle.root());
             let xs = core::array::from_fn(|_| tr.squeeze_fp5(b"OOD_POINT"));
@@ -525,8 +657,7 @@ impl IvcTableCommitment {
             chals.clear();
             for j in 0..d.step_vars {
                 let (next, wire, c) = pcs::prove_fold(&poly, &mut st, 0, &mut tr).ok()?;
-                qsag_asm::volatile_fill(&mut poly, E::ZERO);
-                poly = next;
+                poly = SecretBuffer::new(next);
                 proof.stages[i].folds[j] = wire;
                 chals.push(c);
             }
@@ -542,7 +673,7 @@ impl IvcTableCommitment {
             &chals,
             red.beta_r,
         );
-        proof.final_coeffs = poly;
+        proof.final_coeffs = poly.into_inner();
         Some((value, proof))
     }
 }

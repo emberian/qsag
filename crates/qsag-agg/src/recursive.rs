@@ -11,7 +11,7 @@
 //!    sumchecks inside every internal step circuit.
 
 pub use crate::zk_hem::recursive_ivc::{
-    FixedPathWhirW24, IvcPolicyRegistry, IvcRowCensus, IvcShard, IvcStepConfig,
+    FixedPathWhirW24, IVC_BITMAP_BYTES, IvcPolicyRegistry, IvcRowCensus, IvcShard, IvcStepConfig,
     IvcSubtreeStatement, IvcTableCommitment, IvcTreeStepRelation, SuccinctIvcProof,
     SuccinctIvcStep, ivc_signing_message, prove_ivc_tree, verify_ivc_tree,
 };
@@ -546,6 +546,8 @@ fn root_commitment_from_digests(policy_registry_root: &[u8; 32], digests: &[[u8;
 
 fn map_hem_quintic_err(err: crate::hem_quintic::Error) -> HemAggError {
     match err {
+        #[cfg(feature = "vulkan")]
+        crate::hem_quintic::Error::Vulkan(e) => HemAggError::Vulkan(e),
         crate::hem_quintic::Error::Statement => HemAggError::DuplicateValidatorOrProfileMismatch,
         crate::hem_quintic::Error::Geometry => HemAggError::InvalidShardConfig,
         crate::hem_quintic::Error::Signature => HemAggError::InvalidIndividualSignature,
@@ -815,6 +817,7 @@ fn verify_hierarchical_hem_with_roots(
                 message,
             );
             verify_hem_quintic_128(
+                expected_profile,
                 &p.quorum_keys,
                 &SigningMode::SharedMessage(&region_msg),
                 &s.proof,

@@ -56,7 +56,9 @@ fn fixtures() -> &'static IvcW24Fixtures {
                 policy_registry_root: [0x33; 32],
                 shard_lo: 0,
                 shard_hi: 2,
-                total_quorums: 2,
+                total_signers: 2,
+                shard_threshold: 0,
+                signer_bitmap: [0; 32],
                 message_digest: [0x77; 32],
             },
         }
