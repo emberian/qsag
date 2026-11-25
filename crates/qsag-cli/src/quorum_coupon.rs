@@ -9,18 +9,24 @@
 const COUPON_HELP: &str = "\
 qsag quorum coupon <keygen|session|verify> [options]
 
-Volatile coupons: a dealerless 2-of-3 Baggy root key certifies one-time WOTS+C coupons that
+Volatile coupons: a single-host 2-of-3 Baggy root key certifies one-time WOTS+C coupons that
 are minted into locked memory. A coupon signs one message; the result verifies against the
-root public key alone, with no state, until the coupon expires. 64-bit Linux only.
+root public key alone, with no state, until the coupon expires. Key generation and minting require 64-bit Linux.
 
 subcommands:
   keygen   generate the Baggy root key shares (--vault-dir) and write --public-out
   session  mint a batch of coupons, then sign the requests arriving on standard input
   verify   verify a coupon signature against --public and --in
+Local ceremonies hold all shares in one process. For separated custody see qsag quorum wire, quorum daemon, or migrate collab.
 ";
 
 #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
 pub fn run(raw: &[String]) -> Result<(), crate::cli::CliError> {
+    if let Some((sub, args)) = raw.split_first()
+        && sub == "verify"
+    {
+        return verify(args);
+    }
     if matches!(
         raw.first().map(String::as_str),
         Some("--help" | "-h" | "help")
@@ -29,7 +35,7 @@ pub fn run(raw: &[String]) -> Result<(), crate::cli::CliError> {
         return Ok(());
     }
     Err(crate::cli::CliError::usage(
-        "quorum coupon requires 64-bit Linux (locked, fork-wiped memory for coupon shares)",
+        "coupon key generation and minting require 64-bit Linux for locked, fork-wiped memory",
     ))
 }
 
@@ -51,24 +57,24 @@ mod linux {
         AuthenticatedWaistband, MintPlan, PendingCouponBatch,
     };
     use qsag_quorum::volatile_coupon::{
-        BaggySig, CertifiedCoupon, CouponError, CouponPool, InitiatorKey, LockedBytes,
-        ProtectedMintProcess, SHARE_BYTES, SignRequest, baggy_verify, combine,
+        CertifiedCoupon, CouponError, CouponPool, InitiatorKey, LockedBytes, ProtectedMintProcess,
+        SHARE_BYTES, SignRequest, baggy_verify, combine,
     };
 
-    use super::COUPON_HELP;
+    use super::{
+        COUPON_HELP, ROOT_PUBLIC_FORMAT, SCHEME_NAME, SIG_FORMAT, coupon_error, params_by_name,
+        verify,
+    };
     use crate::cli::{
-        Args, CliError, MAX_MSG_BYTES, MAX_SIG_PROOF_BYTES, Secret32, ZeroizingBuf, exit,
-        os_random_32, private_dir, read_bounded_file, read_input, read_text, write_new,
+        Args, CliError, MAX_MSG_BYTES, Secret32, ZeroizingBuf, exit, private_dir,
+        read_bounded_file, read_text, write_new,
     };
     use crate::codec::{Json, from_hex_exact, to_hex, to_hex_zeroizing};
     use crate::quorum::ensure_absent;
     use crate::vault::Vault;
 
-    const SCHEME_NAME: &str = "baggy-volatile-coupon";
-    const ROOT_PUBLIC_FORMAT: &str = "qsag-quorum-coupon-root-v1";
     const ROOT_PARTY_FORMAT: &str = "qsag-quorum-coupon-root-party-v1";
     const SESSION_FORMAT: &str = "qsag-quorum-coupon-session-v1";
-    const SIG_FORMAT: &str = "qsag-quorum-coupon-signature-v1";
     const DEFAULT_PARAMS: &str = "sha3-128f";
     const DKG_RNG_LABEL: &[u8] = b"QSAG.CLI.QUORUM.COUPON.ROOT.DKG.RNG.V1";
     const ENGINE_RNG_LABEL: &[u8] = b"QSAG.CLI.QUORUM.COUPON.ROOT.ENGINE.RNG.V1";
@@ -78,6 +84,13 @@ mod linux {
     const WAISTBAND_ENTRIES: usize = 1024;
     const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
     const MAX_DISCARD_TAIL_BYTES: usize = 16 * MAX_REQUEST_LINE_BYTES;
+
+    fn os_random_32() -> Result<[u8; 32], CliError> {
+        let mut bytes = Secret32::zeroed();
+        qsag_accel::fill_os_random(&mut bytes.0)
+            .map_err(|e| CliError::io("drawing coupon entropy", e))?;
+        Ok(bytes.0)
+    }
 
     /// Read one request frame, buffering at most `MAX_REQUEST_LINE_BYTES + 2` bytes of it.
     fn read_request_line(input: &mut impl BufRead, line: &mut Vec<u8>) -> std::io::Result<usize> {
@@ -120,7 +133,7 @@ mod linux {
     const KEYGEN_HELP: &str = "\
 qsag quorum coupon keygen --vault-dir <dir> --public-out <path> [options]
 
-Run a dealerless 2-of-3 RSS key generation for a Baggy root key. The root key is stateless:
+Run a single-host 2-of-3 RSS key generation for a Baggy root key. The root key is stateless:
 it certifies coupons in every later session and nothing about it is updated on disk.
 
   --vault-dir <dir>     private 0700 directory for coupon-root-party-{0,1,2}.sk
@@ -158,14 +171,6 @@ second request for it is refused, whatever the message. A refused request does n
 session; the exit code is that of the first refusal (4 for a spent or expired coupon).
 ";
 
-    const VERIFY_HELP: &str = "\
-qsag quorum coupon verify --public <path> --in <file|-> --sig <path> [--json]
-
-Verify a coupon signature against the root public key: the root certificate, the expiry and
-the one-time opening on the message. Exits 0 when valid and 2 when verification fails; a
-signature stops verifying when its coupon expires.
-";
-
     pub fn run(raw: &[String]) -> Result<(), CliError> {
         let Some((sub, rest)) = raw.split_first() else {
             eprint!("{COUPON_HELP}");
@@ -185,31 +190,6 @@ signature stops verifying when its coupon expires.
                 "unknown quorum coupon subcommand '{other}' (try 'qsag quorum coupon --help')"
             ))),
         }
-    }
-
-    fn params_by_name(name: &str) -> Result<BaggyParams, CliError> {
-        match name {
-            "sha3-128f" => Ok(BaggyParams::SHA3_128F),
-            other => Err(CliError::usage(format!(
-                "unknown coupon root parameters '{other}' (expected sha3-128f)"
-            ))),
-        }
-    }
-
-    fn coupon_error(what: &str, err: CouponError) -> CliError {
-        let code = match err {
-            CouponError::InvalidParameters | CouponError::InvalidCodeword => exit::USAGE,
-            CouponError::MemoryProtection | CouponError::Entropy | CouponError::Clock => exit::IO,
-            CouponError::Forked
-            | CouponError::Authentication
-            | CouponError::Certificate
-            | CouponError::Expired
-            | CouponError::AlreadyInstalled
-            | CouponError::MissingOrSpent
-            | CouponError::InvalidOpenings
-            | CouponError::Staging => exit::STATE_CONFLICT,
-        };
-        CliError::new(code, format!("{what}: {err}"))
     }
 
     fn protect() -> Result<ProtectedMintProcess, CliError> {
@@ -248,7 +228,7 @@ signature stops verifying when its coupon expires.
         let mut dkg_rngs: [PartyPrivateRng; 3] =
             std::array::from_fn(|p| PartyPrivateRng::from_seed(seeds[p].0, DKG_RNG_LABEL));
         let (shares, pk_seed) = run_dealerless_rss_dkg_2of3(dkg_session_id, 32, &mut dkg_rngs)
-            .map_err(|e| CliError::state(format!("dealerless 2-of-3 root DKG failed: {e}")))?;
+            .map_err(|e| CliError::state(format!("local 2-of-3 root DKG failed: {e}")))?;
         Ok((engine_from_shares(shares)?, pk_seed))
     }
 
@@ -256,7 +236,7 @@ signature stops verifying when its coupon expires.
         Json::object(vec![
             ("format", Json::str(ROOT_PUBLIC_FORMAT)),
             ("scheme", Json::str(SCHEME_NAME)),
-            ("custody_model", Json::str("dealerless-2of3-rss-baggy-root")),
+            ("custody_model", Json::str(crate::cli::SINGLE_HOST_CUSTODY)),
             ("params", Json::str(params_name)),
             ("pk_seed", Json::hex(&pk.pk_seed)),
             ("pk_root", Json::hex(&pk.pk_root)),
@@ -807,92 +787,6 @@ signature stops verifying when its coupon expires.
         }
     }
 
-    fn verify(raw: &[String]) -> Result<(), CliError> {
-        let args = Args::parse(raw, &["public", "in", "message", "sig"], &["json", "help"])?;
-        if args.flag("help") {
-            print!("{VERIFY_HELP}");
-            return Ok(());
-        }
-        args.no_positionals()?;
-        if args.get("in").is_some() && args.get("message").is_some() {
-            return Err(CliError::usage("pass either --message or --in, not both"));
-        }
-        let public_path = args.require("public")?;
-        let sig_path = args.require("sig")?;
-        let message_arg = args
-            .get("message")
-            .or_else(|| args.get("in"))
-            .ok_or_else(|| CliError::usage("missing required option --in (or --message)"))?;
-        let message = read_input(message_arg)?;
-
-        let public = Json::parse(&read_text(public_path)?)?;
-        if public.field_str("format")? != ROOT_PUBLIC_FORMAT
-            || public.field_str("scheme")? != SCHEME_NAME
-        {
-            return Err(CliError::input("unexpected coupon root public key format"));
-        }
-        let params_name = public.field_str("params")?;
-        let params = params_by_name(params_name)?;
-        let parent = BaggyPublicKey {
-            pk_seed: from_hex_exact(public.field_str("pk_seed")?, "pk_seed")?,
-            pk_root: from_hex_exact(public.field_str("pk_root")?, "pk_root")?,
-        };
-
-        let sig_raw = read_bounded_file(sig_path, MAX_SIG_PROOF_BYTES)?;
-        let sig_text = std::str::from_utf8(&sig_raw)
-            .map_err(|_| CliError::input(format!("{sig_path} is not UTF-8 text")))?;
-        let sig_json = Json::parse(sig_text)?;
-        if sig_json.field_str("format")? != SIG_FORMAT
-            || sig_json.field_str("scheme")? != SCHEME_NAME
-        {
-            return Err(CliError::input("unexpected coupon signature format"));
-        }
-        if sig_json.field_str("params")? != params_name {
-            return Err(CliError::verify(
-                "coupon signature parameters differ from the root key",
-            ));
-        }
-        let wire = sig_json.field_hex("signature")?;
-        let signature = BaggySig::from_wire_bytes(&parent, &params, &wire).map_err(|e| {
-            CliError::verify(format!(
-                "coupon signature is not one this root key certified ({e})"
-            ))
-        })?;
-        if !baggy_verify(&parent, &params, &message, &signature) {
-            return Err(CliError::verify(
-                "coupon signature verification failed (wrong message, or the coupon expired)",
-            ));
-        }
-
-        let descriptor = signature.coupon.descriptor();
-        let coupon_id = descriptor
-            .id()
-            .map_err(|e| coupon_error("coupon descriptor", e))?;
-        if args.flag("json") {
-            let report = Json::object(vec![
-                ("valid", Json::Bool(true)),
-                ("scheme", Json::str(SCHEME_NAME)),
-                ("params", Json::str(params_name)),
-                ("coupon_id", Json::hex(&coupon_id)),
-                ("threshold", Json::num(descriptor.threshold)),
-                ("parties", Json::num(descriptor.parties)),
-                (
-                    "members",
-                    Json::Array(descriptor.members.iter().map(Json::num).collect()),
-                ),
-                ("expires_at", Json::num(descriptor.expires_at)),
-            ]);
-            print!("{}", report.to_pretty());
-        } else {
-            println!(
-                "VALID ({SCHEME_NAME} {params_name}, coupon {}, expires_at {})",
-                to_hex(&coupon_id),
-                descriptor.expires_at
-            );
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -969,4 +863,131 @@ signature stops verifying when its coupon expires.
             std::fs::remove_dir_all(dir).unwrap();
         }
     }
+}
+
+use crate::cli::{
+    Args, CliError, MAX_SIG_PROOF_BYTES, exit, read_bounded_file, read_input, read_text,
+};
+use crate::codec::{Json, from_hex_exact, to_hex};
+use qsag_core::baggy::{BaggyParams, BaggyPublicKey};
+use qsag_quorum::volatile_coupon::{BaggySig, CouponError, baggy_verify};
+const VERIFY_HELP: &str = "\
+qsag quorum coupon verify --public <path> --in <file|-> --sig <path> [--json]
+
+Verify a coupon signature against the root public key: the root certificate, the expiry and
+the one-time opening on the message. Exits 0 when valid and 2 when verification fails; a
+signature stops verifying when its coupon expires.
+";
+
+fn params_by_name(name: &str) -> Result<BaggyParams, CliError> {
+    match name {
+        "sha3-128f" => Ok(BaggyParams::SHA3_128F),
+        other => Err(CliError::usage(format!(
+            "unknown coupon root parameters '{other}' (expected sha3-128f)"
+        ))),
+    }
+}
+
+fn coupon_error(what: &str, err: CouponError) -> CliError {
+    let code = match err {
+        CouponError::InvalidParameters | CouponError::InvalidCodeword => exit::USAGE,
+        CouponError::MemoryProtection | CouponError::Entropy | CouponError::Clock => exit::IO,
+        CouponError::Forked
+        | CouponError::Authentication
+        | CouponError::Certificate
+        | CouponError::Expired
+        | CouponError::AlreadyInstalled
+        | CouponError::MissingOrSpent
+        | CouponError::InvalidOpenings
+        | CouponError::Staging => exit::STATE_CONFLICT,
+    };
+    CliError::new(code, format!("{what}: {err}"))
+}
+
+const SCHEME_NAME: &str = "baggy-volatile-coupon";
+const SIG_FORMAT: &str = "qsag-quorum-coupon-signature-v1";
+const ROOT_PUBLIC_FORMAT: &str = "qsag-quorum-coupon-root-v1";
+
+fn verify(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(raw, &["public", "in", "message", "sig"], &["json", "help"])?;
+    if args.flag("help") {
+        print!("{VERIFY_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    if args.get("in").is_some() && args.get("message").is_some() {
+        return Err(CliError::usage("pass either --message or --in, not both"));
+    }
+    let public_path = args.require("public")?;
+    let sig_path = args.require("sig")?;
+    let message_arg = args
+        .get("message")
+        .or_else(|| args.get("in"))
+        .ok_or_else(|| CliError::usage("missing required option --in (or --message)"))?;
+    let message = read_input(message_arg)?;
+
+    let public = Json::parse(&read_text(public_path)?)?;
+    if public.field_str("format")? != ROOT_PUBLIC_FORMAT
+        || public.field_str("scheme")? != SCHEME_NAME
+    {
+        return Err(CliError::input("unexpected coupon root public key format"));
+    }
+    let params_name = public.field_str("params")?;
+    let params = params_by_name(params_name)?;
+    let parent = BaggyPublicKey {
+        pk_seed: from_hex_exact(public.field_str("pk_seed")?, "pk_seed")?,
+        pk_root: from_hex_exact(public.field_str("pk_root")?, "pk_root")?,
+    };
+
+    let sig_raw = read_bounded_file(sig_path, MAX_SIG_PROOF_BYTES)?;
+    let sig_text = std::str::from_utf8(&sig_raw)
+        .map_err(|_| CliError::input(format!("{sig_path} is not UTF-8 text")))?;
+    let sig_json = Json::parse(sig_text)?;
+    if sig_json.field_str("format")? != SIG_FORMAT || sig_json.field_str("scheme")? != SCHEME_NAME {
+        return Err(CliError::input("unexpected coupon signature format"));
+    }
+    if sig_json.field_str("params")? != params_name {
+        return Err(CliError::verify(
+            "coupon signature parameters differ from the root key",
+        ));
+    }
+    let wire = sig_json.field_hex("signature")?;
+    let signature = BaggySig::from_wire_bytes(&parent, &params, &wire).map_err(|e| {
+        CliError::verify(format!(
+            "coupon signature is not one this root key certified ({e})"
+        ))
+    })?;
+    if !baggy_verify(&parent, &params, &message, &signature) {
+        return Err(CliError::verify(
+            "coupon signature verification failed (wrong message, or the coupon expired)",
+        ));
+    }
+
+    let descriptor = signature.coupon.descriptor();
+    let coupon_id = descriptor
+        .id()
+        .map_err(|e| coupon_error("coupon descriptor", e))?;
+    if args.flag("json") {
+        let report = Json::object(vec![
+            ("valid", Json::Bool(true)),
+            ("scheme", Json::str(SCHEME_NAME)),
+            ("params", Json::str(params_name)),
+            ("coupon_id", Json::hex(&coupon_id)),
+            ("threshold", Json::num(descriptor.threshold)),
+            ("parties", Json::num(descriptor.parties)),
+            (
+                "members",
+                Json::Array(descriptor.members.iter().map(Json::num).collect()),
+            ),
+            ("expires_at", Json::num(descriptor.expires_at)),
+        ]);
+        print!("{}", report.to_pretty());
+    } else {
+        println!(
+            "VALID ({SCHEME_NAME} {params_name}, coupon {}, expires_at {})",
+            to_hex(&coupon_id),
+            descriptor.expires_at
+        );
+    }
+    Ok(())
 }

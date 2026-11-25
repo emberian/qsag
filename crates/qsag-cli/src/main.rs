@@ -9,7 +9,6 @@ mod anchor;
 mod cli;
 mod codec;
 mod cred;
-// Trusted-dealer builds provision `fts-threshold` without the dealerless FTS ceremony.
 #[cfg_attr(any(test, feature = "test-dealer"), allow(dead_code))]
 mod dealerless_ceremony;
 mod envelope;
@@ -39,14 +38,14 @@ usage: qsag <command> [options]        (every command accepts --help)
 
 commands:
   info              list schemes with their security level and key, signature, and proof sizes
-  keygen            generate a key pair (SLH-DSA, few-time, threshold few-time, or a committee)
+  keygen            generate a key pair (SLH-DSA, few-time, or a committee)
   sign              sign a message file
   verify            verify a signature
   addr              encode or decode addresses; derive a hybrid classical + post-quantum identity
   quorum            dealerless threshold signing & (t, n) -> (t', n') quorum-switching (sign/reshare/refresh)
   aggregate         untrusted public or committee signature aggregation (`QSAGHQM2` Quintic Fp5)
   verify-aggregate  verify an aggregate proof (alias: verify-agg)
-  cred              dealerless Poseidon2 TOPRF (replicated or Shamir-SPDZ) & threshold FIPS 204 ML-DSA ceremonies
+  cred              dealerless Shamir-SPDZ Poseidon2 TOPRF & threshold FIPS 204 ML-DSA ceremonies
   hd                dealerless post-quantum HD inventory & 0-round watch-only child derivation
   migrate           prove that a legacy key (Bitcoin, Ethereum, Ed25519, BIP-32) authorises a
                     post-quantum address; verify; one-way migration registry
