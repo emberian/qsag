@@ -65,7 +65,7 @@ def main() -> int:
     if sys.platform != "linux":
         parser.error("Comparator replay must run on a designated Linux build host")
     package = args.package.resolve(strict=True)
-    with tempfile.TemporaryDirectory(prefix="qsag-comparator-", dir="/tmp") as scratch:
+    with tempfile.TemporaryDirectory(prefix="qsag-comparator-") as scratch:
         snapshot = Path(scratch) / "project"
         fingerprint = prepare_snapshot(package, snapshot)
         print(f"MIR comparator source SHA-256: {fingerprint}", flush=True)
