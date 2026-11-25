@@ -4,41 +4,47 @@
 use crate::cli::CliError;
 
 pub fn to_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0F) as usize] as char);
-    }
-    out
+    let mut encoded = to_hex_zeroizing(bytes);
+    // Transfer this allocation to the caller (Json wipes its strings on Drop).
+    String::from_utf8(core::mem::take(&mut encoded.0)).expect("hex digits are ASCII")
 }
 
 /// Lowercase hex of secret bytes, as ASCII in a wiping buffer allocated once at its final size.
 pub fn to_hex_zeroizing(bytes: &[u8]) -> crate::cli::ZeroizingBuf {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = crate::cli::ZeroizingBuf::new(Vec::with_capacity(bytes.len() * 2));
-    for &b in bytes {
-        out.0.push(HEX[(b >> 4) as usize]);
-        out.0.push(HEX[(b & 0x0F) as usize]);
+    fn digit(n: u8) -> u8 {
+        b'0' + n + (39 & core::hint::black_box(u8::from(n > 9).wrapping_neg()))
+    }
+    let mut out = crate::cli::ZeroizingBuf::new(vec![0; bytes.len() * 2]);
+    for (pair, &b) in out.0.as_chunks_mut::<2>().0.iter_mut().zip(bytes) {
+        *pair = [digit(b >> 4), digit(b & 15)];
     }
     out
 }
 
-/// Strict hex: even length, `[0-9a-fA-F]` only. Surrounding ASCII whitespace is ignored.
+/// Strict hex: even length, `[0-9a-fA-F]` only. Surrounding whitespace is ignored.
 pub fn from_hex(text: &str) -> Result<crate::cli::ZeroizingBuf, CliError> {
     let text = text.trim();
     if !text.len().is_multiple_of(2) {
         return Err(CliError::input("hex string has odd length"));
     }
-    let nibble = |c: u8| match c {
-        b'0'..=b'9' => Ok(c - b'0'),
-        b'a'..=b'f' => Ok(c - b'a' + 10),
-        b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(CliError::input("hex string contains a non-hex character")),
-    };
-    let mut decoded = crate::cli::ZeroizingBuf::new(Vec::with_capacity(text.len() / 2));
-    for pair in text.as_bytes().as_chunks::<2>().0 {
-        decoded.0.push(nibble(pair[0])? << 4 | nibble(pair[1])?);
+    // Invalid bytes set bit 7. Fold that bit over the entire input before
+    // reporting failure, so the error position cannot short-circuit decoding.
+    fn nibble(c: u8) -> u8 {
+        let d = c.wrapping_sub(b'0');
+        let a = (c | 0x20).wrapping_sub(b'a');
+        let decimal = core::hint::black_box(u8::from(d < 10).wrapping_neg());
+        let alpha = core::hint::black_box(u8::from(a < 6).wrapping_neg());
+        (d & decimal) | (a.wrapping_add(10) & alpha) | (0x80 & !(decimal | alpha))
+    }
+    let mut decoded = crate::cli::ZeroizingBuf::new(vec![0; text.len() / 2]);
+    let mut invalid = 0;
+    for (out, &[hi, lo]) in decoded.0.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
+        let (hi, lo) = (nibble(hi), nibble(lo));
+        invalid |= hi | lo;
+        *out = hi << 4 | lo;
+    }
+    if invalid & 0x80 != 0 {
+        return Err(CliError::input("hex string contains a non-hex character"));
     }
     Ok(decoded)
 }
@@ -547,6 +553,15 @@ mod tests {
         let hex = to_hex_zeroizing(&[0, 255, 0xA5]);
         assert_eq!(&hex[..], b"00ffa5");
         assert_eq!(hex.0.capacity(), 6);
+        let bytes: Vec<u8> = (0..=255).collect();
+        let encoded = to_hex(&bytes);
+        assert_eq!(from_hex(&encoded).unwrap().0, bytes);
+        assert_eq!(from_hex(&encoded.to_ascii_uppercase()).unwrap().0, bytes);
+        for c in 0..=127u8 {
+            // Interior placement keeps whitespace inside the payload.
+            let input = format!("0{}00", char::from(c));
+            assert_eq!(from_hex(&input).is_ok(), c.is_ascii_hexdigit(), "{c}");
+        }
     }
 
     #[test]

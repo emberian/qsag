@@ -126,7 +126,7 @@ fn three_of_five_evaluates_from_three_remaining_share_files() {
     for party in 0..5 {
         let bundle = std::fs::read_to_string(share(party)).unwrap();
         assert!(bundle.contains("qsag-cred-voprf-spdz-share-v1"));
-        assert!(bundle.contains("cshake256-iterated-v1"));
+        assert!(bundle.contains("cshake256-balloon-v2"));
     }
 
     let eval = |counter: &str, out: &str, signers: Option<&str>| {

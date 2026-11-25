@@ -80,13 +80,13 @@ fn mldsa_selected_encrypted_bundles_survive_absent_custodians() {
         &vault,
         "--public-out",
         &public,
-        "--deterministic",
+        "--deterministic-test-only",
         "--passphrase-env",
         "QSAG_CUSTODY_TEST_PASS",
     ]);
     for party in 0..5 {
         let bundle = std::fs::read_to_string(format!("{vault}/mldsa-party-{party}.share")).unwrap();
-        assert!(bundle.contains("cshake256-iterated-v1"));
+        assert!(bundle.contains("cshake256-balloon-v2"));
         assert!(!PathBuf::from(format!("{vault}/mldsa-party-{party}.seed")).exists());
         assert!(!PathBuf::from(format!("{vault}/mldsa-burn-{party}.mac")).exists());
     }
@@ -114,7 +114,7 @@ fn mldsa_selected_encrypted_bundles_survive_absent_custodians() {
         &message,
         "--out",
         &signature,
-        "--deterministic",
+        "--deterministic-test-only",
         "--passphrase-env",
         "QSAG_CUSTODY_TEST_PASS",
     ];
@@ -192,7 +192,6 @@ fn anchored_mldsa_enforces_open_at_least_and_rejects_snapshot_rollback() {
         "--anchor-dir",
         anchor_s,
         "--allow-single-disk-anchor",
-        "--deterministic",
         "--passphrase-env",
         "QSAG_CUSTODY_TEST_PASS",
     ]);
@@ -216,7 +215,6 @@ fn anchored_mldsa_enforces_open_at_least_and_rejects_snapshot_rollback() {
         "--anchor-dir",
         anchor_s,
         "--allow-single-disk-anchor",
-        "--deterministic",
         "--passphrase-env",
         "QSAG_CUSTODY_TEST_PASS",
     ]);
@@ -301,7 +299,7 @@ fn mldsa_seventeen_custodians_sign_from_three_shamir_share_files() {
             out,
             "--public-out",
             &public,
-            "--deterministic",
+            "--deterministic-test-only",
             "--passphrase-env",
             "QSAG_CUSTODY_TEST_PASS",
         ];
@@ -320,7 +318,7 @@ fn mldsa_seventeen_custodians_sign_from_three_shamir_share_files() {
     for party in 0..17 {
         let bundle = std::fs::read_to_string(format!("{vault}/mldsa-party-{party}.share")).unwrap();
         assert!(bundle.contains("qsag-cred-mldsa-shamir-share-v1"));
-        assert!(bundle.contains("cshake256-iterated-v1"));
+        assert!(bundle.contains("cshake256-balloon-v2"));
     }
     // Only custodians 3, 9 and 16 keep their files.
     for party in (0..17).filter(|party| ![3, 9, 16].contains(party)) {
@@ -348,7 +346,7 @@ fn mldsa_seventeen_custodians_sign_from_three_shamir_share_files() {
                 &message,
                 "--out",
                 out,
-                "--deterministic",
+                "--deterministic-test-only",
                 "--passphrase-env",
                 "QSAG_CUSTODY_TEST_PASS",
             ],

@@ -1,12 +1,12 @@
-//! Versioned passphrase sealing. Fixed-cost iterated cSHAKE256 KDF; no external dependencies.
-//! The KDF is deliberately iterated, not a claim of Argon2-style memory hardness.
+//! Versioned passphrase sealing with a 32 MiB data-independent Balloon KDF.
 
-use crate::cli::{Args, CliError, Secret32, ZeroizingBuf, os_random_32, read_bounded_file};
-use crate::codec::{Json, from_hex_exact, from_hex_secret32};
+use crate::cli::{Args, CliError, Secret32, ZeroizingBuf, read_bounded_file};
+use crate::codec::Json;
 use crate::vault::set;
 use qsag_accel::keccak::cshake256_framed_xof;
 
-const FORMAT: &str = "cshake256-iterated-v1";
+const FORMAT: &str = "cshake256-balloon-v2";
+const LEGACY_FORMAT: &str = "cshake256-iterated-v1";
 pub const KDF_ROUNDS: u32 = 100_000;
 
 pub fn passphrase(args: &Args) -> Result<Option<ZeroizingBuf>, CliError> {
@@ -72,7 +72,7 @@ fn immutable_header_bytes(json: &Json, secret_field: &str) -> ZeroizingBuf {
     crate::persist::authenticated_bytes(json, &excluded)
 }
 
-fn derive(pass: &[u8], salt: &[u8; 32], scheme: &str) -> (Secret32, Secret32) {
+pub(crate) fn derive_v1(pass: &[u8], salt: &[u8; 32], scheme: &str) -> (Secret32, Secret32) {
     let mut state = Secret32::new([0u8; 32]);
     cshake256_framed_xof(
         b"QSAG.ENVELOPE.KDF.V1",
@@ -103,6 +103,70 @@ fn derive(pass: &[u8], salt: &[u8; 32], scheme: &str) -> (Secret32, Secret32) {
     (enc, mac)
 }
 
+// Balloon's expand/mix/extract graph, using 64-byte cSHAKE256 digests.
+// The public salt selects three independent dependencies for every block in
+// each of three passes. The operation counter distinguishes every node.
+// The format identifier fixes all parameters and the little-endian encoding.
+pub(crate) fn derive_v2(pass: &[u8], salt: &[u8; 32], scheme: &str) -> (Secret32, Secret32) {
+    use qsag_core::sponge::keccak::Cshake256Xof;
+    use qsag_core::wipe::{SecretBytes, SecretVec};
+
+    const BLOCKS: usize = 1 << 19;
+    const PASSES: usize = 3;
+    let mut memory = SecretVec::new(vec![[0u8; 64]; BLOCKS]);
+    cshake256_framed_xof(
+        b"QSAG.ENVELOPE.BALLOON.INIT.V2",
+        &[pass, salt, scheme.as_bytes()],
+        &mut memory[0],
+    );
+    let domain = Cshake256Xof::new(b"QSAG.ENVELOPE.BALLOON.BLOCK.V2");
+    let mut counter = 0u32;
+    let mut scratch = SecretBytes::<64>::zeroed();
+    let mut compress = |a: &[u8; 64], b: &[u8]| {
+        let mut h = domain.clone();
+        h.absorb(&counter.to_le_bytes());
+        h.absorb(a);
+        h.absorb(b);
+        h.squeeze(&mut scratch.0);
+        counter += 1;
+        // Install the digest via the caller, including when inputs alias a destination.
+        scratch.0
+    };
+    for i in 1..BLOCKS {
+        memory[i] = compress(&memory[i - 1], &[]);
+    }
+
+    let mut schedule = Cshake256Xof::new(b"QSAG.ENVELOPE.BALLOON.INDICES.V2");
+    schedule.absorb(salt);
+    for _ in 0..PASSES {
+        for i in 0..BLOCKS {
+            let previous = i.wrapping_sub(1) & (BLOCKS - 1);
+            memory[i] = compress(&memory[previous], &memory[i]);
+            let mut indices = [0u8; 12];
+            schedule.squeeze(&mut indices);
+            for &word in indices.as_chunks::<4>().0 {
+                let j = u32::from_le_bytes(word) as usize & (BLOCKS - 1);
+                memory[i] = compress(&memory[i], &memory[j]);
+            }
+        }
+    }
+
+    let root = &memory[BLOCKS - 1];
+    let mut enc = Secret32::zeroed();
+    let mut mac = Secret32::zeroed();
+    cshake256_framed_xof(
+        b"QSAG.ENVELOPE.ENC.V2",
+        &[root, salt, scheme.as_bytes()],
+        &mut enc.0,
+    );
+    cshake256_framed_xof(
+        b"QSAG.ENVELOPE.MAC.V2",
+        &[root, salt, scheme.as_bytes()],
+        &mut mac.0,
+    );
+    (enc, mac)
+}
+
 fn crypt(bytes: &mut [u8], enc_key: &Secret32, salt: &[u8; 32], scheme: &str, field: &str) {
     for (i, block) in bytes.chunks_mut(32).enumerate() {
         let mut stream = Secret32::new([0u8; 32]);
@@ -124,6 +188,7 @@ fn crypt(bytes: &mut [u8], enc_key: &Secret32, salt: &[u8; 32], scheme: &str, fi
 }
 
 fn tag(
+    format: &str,
     json: &Json,
     scheme: &str,
     field: &str,
@@ -137,7 +202,7 @@ fn tag(
         b"QSAG.ENVELOPE.TAG.V1",
         &[
             &mac_key.0,
-            FORMAT.as_bytes(),
+            format.as_bytes(),
             scheme.as_bytes(),
             field.as_bytes(),
             salt,
@@ -147,6 +212,62 @@ fn tag(
         &mut out.0,
     );
     out
+}
+
+/// Lowercase hex of secret bytes, as ASCII in a wiping buffer allocated once at its final size.
+fn encode_hex(bytes: &[u8]) -> ZeroizingBuf {
+    fn digit(n: u8) -> u8 {
+        b'0' + n + (39 & core::hint::black_box(u8::from(n > 9).wrapping_neg()))
+    }
+    let mut out = ZeroizingBuf::new(vec![0; bytes.len() * 2]);
+    for (pair, &b) in out.0.as_chunks_mut::<2>().0.iter_mut().zip(bytes) {
+        *pair = [digit(b >> 4), digit(b & 15)];
+    }
+    out
+}
+
+/// Strict hex: even length, `[0-9a-fA-F]` only. Surrounding whitespace is ignored.
+fn decode_hex(text: &str) -> Result<ZeroizingBuf, CliError> {
+    let text = text.trim();
+    if !text.len().is_multiple_of(2) {
+        return Err(CliError::input("hex string has odd length"));
+    }
+    // Invalid bytes set bit 7. Fold that bit over the entire input before
+    // reporting failure, so the error position cannot short-circuit decoding.
+    fn nibble(c: u8) -> u8 {
+        let d = c.wrapping_sub(b'0');
+        let a = (c | 0x20).wrapping_sub(b'a');
+        let decimal = core::hint::black_box(u8::from(d < 10).wrapping_neg());
+        let alpha = core::hint::black_box(u8::from(a < 6).wrapping_neg());
+        (d & decimal) | (a.wrapping_add(10) & alpha) | (0x80 & !(decimal | alpha))
+    }
+    let mut decoded = ZeroizingBuf::new(vec![0; text.len() / 2]);
+    let mut invalid = 0;
+    for (out, &[hi, lo]) in decoded.0.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
+        let (hi, lo) = (nibble(hi), nibble(lo));
+        invalid |= hi | lo;
+        *out = hi << 4 | lo;
+    }
+    if invalid & 0x80 != 0 {
+        return Err(CliError::input("hex string contains a non-hex character"));
+    }
+    Ok(decoded)
+}
+
+fn hex_field(json: &Json, field: &str) -> Result<ZeroizingBuf, CliError> {
+    decode_hex(json.field_str(field)?)
+}
+
+fn hex_field32(json: &Json, field: &str) -> Result<[u8; 32], CliError> {
+    hex_field(json, field)?
+        .as_slice()
+        .try_into()
+        .map_err(|_| CliError::input(format!("{field} must be exactly 32 bytes of hex")))
+}
+
+fn hex_json(bytes: &[u8]) -> Json {
+    let mut text = encode_hex(bytes);
+    Json::Str(String::from_utf8(core::mem::take(&mut text.0)).expect("hex digits are ASCII"))
 }
 
 pub fn seal(json: &mut Json, pass: &[u8]) -> Result<(), CliError> {
@@ -161,15 +282,16 @@ pub fn seal(json: &mut Json, pass: &[u8]) -> Result<(), CliError> {
     }
     let scheme = json.field_str("scheme")?.to_owned();
     let field = secret_field_name(json)?;
-    let mut bytes = json.field_hex(field)?;
-    let salt = os_random_32()?;
-    let (enc, mac) = derive(pass, &salt, &scheme);
+    let mut bytes = hex_field(json, field)?;
+    let mut salt = [0; 32];
+    qsag_accel::fill_os_random(&mut salt).map_err(|e| CliError::io("drawing envelope salt", e))?;
+    let (enc, mac) = derive_v2(pass, &salt, &scheme);
     crypt(&mut bytes.0, &enc, &salt, &scheme, field);
-    let auth = tag(json, &scheme, field, &salt, &bytes, &mac);
-    set(json, field, Json::hex(&bytes));
+    let auth = tag(FORMAT, json, &scheme, field, &salt, &bytes, &mac);
+    set(json, field, hex_json(&bytes));
     set(json, "envelope", Json::str(FORMAT));
-    set(json, "salt", Json::hex(&salt));
-    set(json, "envelope_tag", Json::hex(&auth.0));
+    set(json, "salt", hex_json(&salt));
+    set(json, "envelope_tag", hex_json(&auth.0));
     Ok(())
 }
 
@@ -210,7 +332,7 @@ impl OpenedSecret {
 
     /// The vault MAC key material: the canonical lowercase hex of the secret, as bytes.
     pub fn vault_key_material(&self) -> ZeroizingBuf {
-        crate::codec::to_hex_zeroizing(&self.bytes)
+        encode_hex(&self.bytes)
     }
 }
 
@@ -227,10 +349,11 @@ pub fn open(json: &Json, pass: Option<&[u8]>) -> Result<OpenedSecret, CliError> 
         let field = secret_field_name(json)?;
         return Ok(OpenedSecret {
             field,
-            bytes: json.field_hex(field)?,
+            bytes: hex_field(json, field)?,
         });
     }
-    if json.field_str("envelope")? != FORMAT {
+    let format = json.field_str("envelope")?;
+    if !matches!(format, FORMAT | LEGACY_FORMAT) {
         return Err(CliError::input("unsupported sealed envelope"));
     }
     let pass = pass.ok_or_else(|| {
@@ -241,11 +364,15 @@ pub fn open(json: &Json, pass: Option<&[u8]>) -> Result<OpenedSecret, CliError> 
     }
     let scheme = json.field_str("scheme")?;
     let field = secret_field_name(json)?;
-    let salt = from_hex_exact(json.field_str("salt")?, "salt")?;
-    let actual = from_hex_secret32(json.field_str("envelope_tag")?, "envelope_tag")?;
-    let mut bytes = json.field_hex(field)?;
-    let (enc, mac) = derive(pass, &salt, scheme);
-    let expected = tag(json, scheme, field, &salt, &bytes, &mac);
+    let salt = hex_field32(json, "salt")?;
+    let actual = crate::codec::from_hex_secret32(json.field_str("envelope_tag")?, "envelope_tag")?;
+    let mut bytes = hex_field(json, field)?;
+    let (enc, mac) = if format == LEGACY_FORMAT {
+        derive_v1(pass, &salt, scheme)
+    } else {
+        derive_v2(pass, &salt, scheme)
+    };
+    let expected = tag(format, json, scheme, field, &salt, &bytes, &mac);
     if !qsag_accel::ct::ct_eq_bytes(&expected.0, &actual.0) {
         return Err(CliError::input("wrong passphrase or damaged sealed key"));
     }
@@ -258,14 +385,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn envelope_hex_handles_all_octets_and_checks_every_position() {
+        let bytes: Vec<_> = (0..=255).collect();
+        let encoded = hex_json(&bytes);
+        let text = encoded.as_str().unwrap();
+        assert_eq!(decode_hex(text).unwrap().0, bytes);
+        assert_eq!(decode_hex(&text.to_ascii_uppercase()).unwrap().0, bytes);
+        for c in 0..=127u8 {
+            assert_eq!(
+                decode_hex(&format!("0{}00", char::from(c))).is_ok(),
+                c.is_ascii_hexdigit()
+            );
+        }
+    }
+
+    #[test]
+    fn opens_pinned_v1_vault() {
+        let vault = Json::object(vec![
+            ("scheme", Json::str("test")),
+            ("envelope", Json::str(LEGACY_FORMAT)),
+            ("salt", Json::hex(&[7; 32])),
+            (
+                "seed",
+                Json::str("2e6800d77fbe37c675bc251b4696f26e243e02d8437bc026501ddef5b3d0d794"),
+            ),
+            (
+                "envelope_tag",
+                Json::str("ca8178f0231be58ef0a5817580c9ec088c2225d05decf94fb050d250d850a1f0"),
+            ),
+        ]);
+        assert_eq!(
+            open(&vault, Some(b"correct horse"))
+                .unwrap()
+                .seed()
+                .unwrap()
+                .0,
+            [42; 32]
+        );
+    }
+
+    #[test]
     fn roundtrip_wrong_passphrase_and_tampering() {
         const { assert!(KDF_ROUNDS >= 100_000) };
-        let (enc_a, mac_a) = derive(b"correct horse", &[7u8; 32], "test-a");
+        let (enc_a, mac_a) = derive_v2(b"correct horse", &[7u8; 32], "test-a");
+        // Full-cost vectors from an independent OpenSSL cSHAKE256 implementation.
+        assert_eq!(
+            crate::codec::to_hex(&enc_a.0),
+            "70ae1680cf3d6cd58aec3341d8a96a27b2cf58ad2058d1d9c393fc21988ed19b"
+        );
+        assert_eq!(
+            crate::codec::to_hex(&mac_a.0),
+            "cceba68c2ff342b5c5efdf62f6085d141cb801c54e48f926c18568c0df80472e"
+        );
         assert_ne!(
             enc_a.0, mac_a.0,
             "encryption and MAC subkeys must be separated"
         );
-        let (enc_b, mac_b) = derive(b"correct horse", &[7u8; 32], "test-b");
+        let (enc_b, mac_b) = derive_v2(b"correct horse", &[7u8; 32], "test-b");
         assert_ne!(enc_a.0, enc_b.0);
         assert_ne!(mac_a.0, mac_b.0);
 
@@ -276,6 +452,7 @@ mod tests {
                 (field, Json::hex(&[42; 32])),
             ]);
             seal(&mut key, b"correct horse").unwrap();
+            assert_eq!(key.field_str("envelope").unwrap(), FORMAT);
             assert_ne!(key.field_hex(field).unwrap().0, vec![42; 32]);
             let other = if field == "seed" {
                 "secret_key"

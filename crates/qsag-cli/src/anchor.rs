@@ -58,6 +58,22 @@ const ANCHOR_MAGIC: &[u8; 8] = b"QSAGANC1";
 const ANCHOR_PAYLOAD_LEN: usize = 8 + 32 + 32 + 8 + 32 + 1 + 8 + 32;
 const ANCHOR_RECORD_LEN: usize = ANCHOR_PAYLOAD_LEN + 32;
 
+pub fn check_test_entropy(args: &Args) -> Result<(), CliError> {
+    if args.flag("deterministic-test-only")
+        && (ANCHOR_NO_VAULT_VALUE_OPTIONS
+            .iter()
+            .any(|k| args.get(k).is_some())
+            || ANCHOR_FLAG_OPTIONS
+                .iter()
+                .any(|k| *k != "ephemeral-unanchored" && args.flag(k)))
+    {
+        return Err(CliError::usage(
+            "--deterministic-test-only conflicts with anchor options",
+        ));
+    }
+    Ok(())
+}
+
 /// Value options shared across CLI subcommands that accept external monotone anchors.
 pub const ANCHOR_VALUE_OPTIONS: &[&str] = &[
     "anchor-dir",
@@ -624,6 +640,36 @@ pub fn anchor_requirement(file: &Json, supplied: bool) -> Result<bool, AnchorReq
         (true, false) => Err(AnchorRequirementError::AnchorMissing),
         (false, true) => Err(AnchorRequirementError::NotEnrolled),
         (flag, _) => Ok(flag),
+    }
+}
+
+/// Canonical anchor identity copied into each authenticated custodian bundle.
+pub fn custody_anchor_seal(meta: &Json) -> Result<Option<[u8; 24]>, CliError> {
+    match (
+        meta.get("anchor_required"),
+        meta.get("anchor_ceremony_seal"),
+    ) {
+        (Some(Json::Bool(true)), Some(seal)) => {
+            let raw = seal.as_str().ok_or_else(crate::vault::corrupt)?;
+            Ok(Some(crate::codec::from_hex_exact(
+                raw,
+                "anchor_ceremony_seal",
+            )?))
+        }
+        (None | Some(Json::Bool(false)), None) => Ok(None),
+        _ => Err(crate::vault::corrupt()),
+    }
+}
+
+pub fn verify_custody_anchor(bundle: &Json, expected: Option<[u8; 24]>) -> Result<(), CliError> {
+    let pin = expected.map_or(Json::Null, |seal| Json::hex(&seal));
+    match bundle.get("custody_anchor") {
+        Some(stored) if stored == &pin => Ok(()),
+        // Older anchored bundles can still prove their external anchor at open.
+        None if expected.is_some() => Ok(()),
+        _ => Err(CliError::state(
+            "custodian bundle and vault anchor enrollment do not match",
+        )),
     }
 }
 

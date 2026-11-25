@@ -143,7 +143,7 @@ fn mint_a_batch_sign_from_it_and_verify_statelessly() {
         0,
     );
     let party = std::fs::read_to_string(dir.path("vault/coupon-root-party-0.sk")).unwrap();
-    assert_eq!(member(&party, "envelope"), "cshake256-iterated-v1");
+    assert_eq!(member(&party, "envelope"), "cshake256-balloon-v2");
 
     // A wrong passphrase is refused before anything is minted.
     let session_args = [

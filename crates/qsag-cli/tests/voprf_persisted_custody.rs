@@ -67,13 +67,13 @@ fn encrypted_toprf_bundles_restore_and_reject_bad_passphrases() {
         "2",
         "--parties",
         "5",
-        "--deterministic",
+        "--deterministic-test-only",
         "--passphrase-env",
         "QSAG_TOPRF_PASS",
     ]);
     for party in 0..5 {
         let bundle = std::fs::read_to_string(format!("{vault}/voprf-party-{party}.share")).unwrap();
-        assert!(bundle.contains("cshake256-iterated-v1"));
+        assert!(bundle.contains("cshake256-balloon-v2"));
         assert!(!PathBuf::from(format!("{vault}/voprf-party-{party}.seed")).exists());
     }
     let args = [
@@ -89,7 +89,7 @@ fn encrypted_toprf_bundles_restore_and_reject_bad_passphrases() {
         &input,
         "--out",
         &output,
-        "--deterministic",
+        "--deterministic-test-only",
         "--passphrase-env",
         "QSAG_TOPRF_PASS",
     ];
@@ -116,9 +116,8 @@ fn encrypted_toprf_bundles_restore_and_reject_bad_passphrases() {
 #[test]
 fn anchored_toprf_enforces_locked_record_quota_and_rejects_rollback() {
     use std::os::unix::fs::DirBuilderExt;
-    let scratch = Scratch(
-        std::env::temp_dir().join(format!("qsag-toprf-anchored-{}", std::process::id())),
-    );
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("qsag-toprf-anchored-{}", std::process::id())));
     std::fs::create_dir(&scratch.0).unwrap();
     let path = |name: &str| scratch.0.join(name).to_str().unwrap().to_owned();
     let anchor = scratch.0.join("anchor");
@@ -144,7 +143,6 @@ fn anchored_toprf_enforces_locked_record_quota_and_rejects_rollback() {
         "--anchor-dir",
         anchor_s,
         "--allow-single-disk-anchor",
-        "--deterministic",
         "--passphrase-env",
         "QSAG_TOPRF_PASS",
     ]);
@@ -174,7 +172,6 @@ fn anchored_toprf_enforces_locked_record_quota_and_rejects_rollback() {
         "--anchor-dir",
         anchor_s,
         "--allow-single-disk-anchor",
-        "--deterministic",
         "--passphrase-env",
         "QSAG_TOPRF_PASS",
     ]);
@@ -198,7 +195,6 @@ fn anchored_toprf_enforces_locked_record_quota_and_rejects_rollback() {
             "--anchor-dir",
             anchor_s,
             "--allow-single-disk-anchor",
-            "--deterministic",
             "--passphrase-env",
             "QSAG_TOPRF_PASS",
         ],
@@ -229,7 +225,6 @@ fn anchored_toprf_enforces_locked_record_quota_and_rejects_rollback() {
             "--anchor-dir",
             anchor_s,
             "--allow-single-disk-anchor",
-            "--deterministic",
             "--passphrase-env",
             "QSAG_TOPRF_PASS",
         ],

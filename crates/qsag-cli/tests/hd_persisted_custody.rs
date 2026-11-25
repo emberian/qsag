@@ -71,7 +71,7 @@ fn encrypted_hd_recovers_and_signs_with_nonparticipant_file_absent() {
             &vault,
             "--watch-out",
             &watch,
-            "--deterministic",
+            "--deterministic-test-only",
             "--passphrase-env",
             "QSAG_HD_TEST_PASS",
         ],
@@ -81,7 +81,7 @@ fn encrypted_hd_recovers_and_signs_with_nonparticipant_file_absent() {
         let contents =
             fs::read_to_string(PathBuf::from(&vault).join(format!("hd-custodian-{party}.share")))
                 .unwrap();
-        assert!(contents.contains("cshake256-iterated-v1"));
+        assert!(contents.contains("cshake256-balloon-v2"));
         assert!(
             !PathBuf::from(&vault)
                 .join(format!("hd-custodian-{party}.seed"))
@@ -193,7 +193,6 @@ fn anchored_hd_enforces_budget_export_rss_and_rejects_rollback() {
             "--anchor-dir",
             anchor_s,
             "--allow-single-disk-anchor",
-            "--deterministic",
             "--passphrase-env",
             "QSAG_HD_TEST_PASS",
         ],
@@ -237,7 +236,7 @@ fn anchored_hd_enforces_budget_export_rss_and_rejects_rollback() {
             fs::read_to_string(PathBuf::from(&rss_dir).join(format!("child-1-party-{p}.rss.json")))
                 .unwrap();
         assert!(share_doc.contains("qsag-hd-rss-child-share-v1"));
-        assert!(share_doc.contains("cshake256-iterated-v1"));
+        assert!(share_doc.contains("cshake256-balloon-v2"));
     }
 
     // Export a single custodian's share even with custodian 1 deleted!
