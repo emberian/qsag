@@ -3,13 +3,10 @@
 use qsag_addr::WitnessSuiteTag;
 use qsag_agg::AggSigProfile;
 use qsag_core::fips205::Fips205Params;
-use qsag_fts::{FrontierFtsProfile, ParallelSeededParams, ParallelSeededSignature};
+use qsag_fts::FrontierFtsProfile;
 
 use crate::cli::CliError;
 use crate::codec::Json;
-
-/// Production custody parameters: 1,024 one-time epochs.
-pub const THRESHOLD_FTS_PARAMS: ParallelSeededParams = ParallelSeededParams::CUSTODY_H10_W5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scheme {
@@ -17,8 +14,6 @@ pub enum Scheme {
     Slh(Fips205Params),
     /// FrontierSumFts few-time signature, single signer, stateful (profile-specific use limit).
     Frontier(FrontierFtsProfile),
-    /// ParallelSeededFts threshold few-time signature; one signature per epoch.
-    ThresholdFts,
     /// Validator committee for succinct aggregation (stateful, one signature per epoch).
     AggCommittee,
 }
@@ -39,7 +34,7 @@ impl Scheme {
                 .iter()
                 .map(|(_, profile)| Scheme::Frontier(*profile)),
         );
-        all.extend([Scheme::ThresholdFts, Scheme::AggCommittee]);
+        all.push(Scheme::AggCommittee);
         all
     }
 
@@ -51,7 +46,6 @@ impl Scheme {
                 .find(|(_, p)| p == profile)
                 .map_or("fts-frontier", |(name, _)| name)
                 .to_string(),
-            Scheme::ThresholdFts => "fts-threshold".to_string(),
             Scheme::AggCommittee => "agg-jorts-poseidon2".to_string(),
         }
     }
@@ -82,7 +76,6 @@ impl Scheme {
                 _ => return None,
             }),
             Scheme::Frontier(_) => Some(WitnessSuiteTag::FrontierSumFts),
-            Scheme::ThresholdFts => Some(WitnessSuiteTag::ParallelSeededFts),
             Scheme::AggCommittee => None,
         }
     }
@@ -118,16 +111,6 @@ impl Scheme {
                     "stateful: use counter persisted before each signature",
                 )
             }
-            Scheme::ThresholdFts => (
-                "ParallelSeededFts (threshold few-time, dealerless Gilboa + BDOZ reservoir)",
-                format!(
-                    "32-byte chain nodes, {} one-time epochs per key",
-                    1u32 << THRESHOLD_FTS_PARAMS.tree_height
-                ),
-                64,
-                ParallelSeededSignature::encoded_len(&THRESHOLD_FTS_PARAMS),
-                "stateful: epoch burn journal + persisted reservoir updated before each signature",
-            ),
             Scheme::AggCommittee => (
                 "Jorts-Poseidon2 validator committee for succinct K-to-1 aggregation",
                 format!(

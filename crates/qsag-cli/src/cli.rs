@@ -306,6 +306,19 @@ pub fn private_dir(path: &str, create: bool) -> Result<(), CliError> {
     crate::persist::private_dir(path, create).map(|_| ())
 }
 
+pub const SINGLE_HOST_CUSTODY: &str = "single-host local ceremony (all shares in one process)";
+
+/// Reserve the exclusive destination before spending a one-time key.
+pub fn reserve_output(path: &str, private: bool) -> Result<crate::persist::Created, CliError> {
+    crate::persist::create_new(Path::new(path), private)
+        .map_err(|e| CliError::io(format_args!("creating {path}"), e))
+}
+
+pub fn finish_output(file: crate::persist::Created, bytes: &[u8]) -> Result<(), CliError> {
+    file.commit(|f| f.write_all(bytes))
+        .map_err(|e| CliError::io("writing output", e))
+}
+
 /// Create a new file and refuse to overwrite an existing one. Secret files are created with
 /// owner-only permissions.
 pub fn write_new(path: &str, contents: &[u8], secret: bool) -> Result<(), CliError> {
@@ -333,9 +346,7 @@ pub fn replace_secret(path: &str, contents: &[u8]) -> Result<(), CliError> {
 /// 32 bytes from the operating system's entropy device.
 pub fn os_random_32() -> Result<[u8; 32], CliError> {
     let mut out = Secret32::new([0u8; 32]);
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut out.0))
-        .map_err(|e| CliError::io("reading OS entropy from /dev/urandom", e))?;
+    qsag_asm::fill_os_random(&mut out.0).map_err(|e| CliError::io("reading OS entropy", e))?;
     Ok(out.0)
 }
 
@@ -514,8 +525,14 @@ mod custody_buffer_tests {
         for arch in ["arm", "aarch64", "powerpc", "powerpc64"] {
             assert_eq!(open_nofollow_nonblock_flags("linux", arch), Some(0x8800));
         }
-        assert_eq!(open_nofollow_nonblock_flags("linux", "mips64"), Some(0x20080));
-        assert_eq!(open_nofollow_nonblock_flags("linux", "sparc64"), Some(0x24000));
+        assert_eq!(
+            open_nofollow_nonblock_flags("linux", "mips64"),
+            Some(0x20080)
+        );
+        assert_eq!(
+            open_nofollow_nonblock_flags("linux", "sparc64"),
+            Some(0x24000)
+        );
         assert_eq!(open_nofollow_nonblock_flags("linux", "m68k"), None);
         for arch in [
             "x86",
@@ -527,7 +544,10 @@ mod custody_buffer_tests {
         ] {
             assert_eq!(open_nofollow_nonblock_flags("linux", arch), Some(0x20800));
         }
-        assert_eq!(open_nofollow_nonblock_flags("macos", "aarch64"), Some(0x104));
+        assert_eq!(
+            open_nofollow_nonblock_flags("macos", "aarch64"),
+            Some(0x104)
+        );
         assert_eq!(open_nofollow_nonblock_flags("linux", "unknown"), None);
     }
 

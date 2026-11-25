@@ -230,6 +230,41 @@ fn keygen(dir: &Workdir, scheme: &str, extra: &[&str]) {
 #[test]
 fn help_info_and_usage_errors() {
     assert!(expect(&["--help"], 0).contains("verify-agg"));
+    for args in [
+        &["verify-agg"][..],
+        &["verify-agg", "--min-signers", "0"][..],
+    ] {
+        let rejected = qsag(args);
+        assert_eq!(code(&rejected), 1);
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("--min-signers"));
+    }
+    let dir = Workdir::new("test-entropy-policy");
+    for (command, subcommand, output) in [
+        ("hd", "keygen", "--watch-out"),
+        ("cred", "voprf-keygen", "--public-out"),
+        ("cred", "mldsa-keygen", "--public-out"),
+    ] {
+        let vault = dir.path("vault");
+        let public = dir.path("public");
+        let mut args = vec![
+            command,
+            subcommand,
+            "--deterministic-test-only",
+            "--vault-dir",
+            &vault,
+            output,
+            &public,
+        ];
+        let refused = qsag(&args);
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("--allow-unencrypted"));
+        let anchor = dir.path("anchor");
+        args.extend(["--allow-unencrypted", "--anchor-dir", &anchor]);
+        let refused = qsag(&args);
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("--deterministic-test-only"));
+        assert!(!Path::new(&vault).exists());
+    }
     for command in [
         "info",
         "keygen",
@@ -257,7 +292,7 @@ fn help_info_and_usage_errors() {
         "\"signature_bytes\": 7856",
         "fts-compact-1122",
         "\"signature_bytes\": 1122",
-        "fts-threshold",
+        "fts-frontier-2338",
         "agg-jorts-poseidon2",
         "QuinticFp5",
         "WHIR",
@@ -274,6 +309,7 @@ fn help_info_and_usage_errors() {
     ] {
         assert!(info.contains(needle), "info lacks {needle}");
     }
+    assert!(!info.contains("fts-threshold"));
     assert_eq!(
         info,
         expect(&["info", "--json"], 0),
@@ -496,6 +532,14 @@ fn few_time_key_enforces_its_use_budget_across_invocations() {
         dir.path("other"),
     );
     let (sig1, sig2, sig3) = (dir.path("sig1"), dir.path("sig2"), dir.path("sig3"));
+    let initial_key = dir.read("sk");
+    for unavailable in [&pk, &dir.path("missing/out")] {
+        expect(
+            &["sign", "--secret", &sk, "--in", &msg, "--out", unavailable],
+            5,
+        );
+        assert_eq!(dir.read("sk"), initial_key);
+    }
     expect(&["sign", "--secret", &sk, "--in", &msg, "--out", &sig1], 0);
     assert!(dir.read("sk").contains("\"uses_completed\": 1"));
     expect(
@@ -519,113 +563,6 @@ fn few_time_key_enforces_its_use_budget_across_invocations() {
         &["verify", "--public", &pk, "--in", &msg, "--sig", &sig1],
         2,
     );
-}
-
-// The dealerless height-3 ceremony behind `fts-threshold` takes hours (measured: ~294 OT wire
-// messages/s against ~4.6 million OT calls per keygen), so this runs only against a trusted-dealer
-// binary: `cargo test --release -p qsag-cli --features test-dealer --test cli_smoke threshold_few_time`.
-#[cfg(feature = "test-dealer")]
-#[test]
-fn threshold_few_time_signature_burns_each_epoch_once() {
-    let dir = Workdir::new("threshold");
-    let (sk, pk, seed) = (dir.path("sk"), dir.path("pk"), dir.path("seed"));
-    expect(
-        &[
-            "keygen",
-            "--scheme",
-            "fts-threshold",
-            "--seed-file",
-            &seed,
-            "--secret-out",
-            &sk,
-            "--public-out",
-            &pk,
-            "--parties",
-            "3",
-            "--fast-demo",
-        ],
-        1,
-    );
-    keygen(
-        &dir,
-        "fts-threshold",
-        &[
-            "--parties",
-            "3",
-            "--fast-demo",
-            "--accept-trusted-dealer-demo",
-        ],
-    );
-    let (msg, other, sig) = (dir.path("msg"), dir.path("other"), dir.path("sig"));
-    expect(&["sign", "--secret", &sk, "--in", &msg, "--out", &sig], 1);
-    expect(
-        &[
-            "sign",
-            "--secret",
-            &sk,
-            "--in",
-            &msg,
-            "--out",
-            &sig,
-            "--accept-trusted-dealer-demo",
-        ],
-        1,
-    );
-    expect(
-        &[
-            "sign",
-            "--secret",
-            &sk,
-            "--in",
-            &msg,
-            "--out",
-            &sig,
-            "--epoch",
-            "8",
-            "--accept-trusted-dealer-demo",
-        ],
-        1,
-    );
-    expect(
-        &[
-            "sign",
-            "--secret",
-            &sk,
-            "--in",
-            &msg,
-            "--out",
-            &sig,
-            "--epoch",
-            "5",
-            "--accept-trusted-dealer-demo",
-        ],
-        0,
-    );
-    expect(&["verify", "--public", &pk, "--in", &msg, "--sig", &sig], 0);
-    expect(
-        &["verify", "--public", &pk, "--in", &other, "--sig", &sig],
-        2,
-    );
-    // The burn journal survives the process: epoch 5 can never sign a second message.
-    let again = dir.path("again");
-    expect(
-        &[
-            "sign",
-            "--secret",
-            &sk,
-            "--in",
-            &other,
-            "--out",
-            &again,
-            "--epoch",
-            "5",
-            "--accept-trusted-dealer-demo",
-        ],
-        4,
-    );
-    assert!(!Path::new(&again).exists());
-    flip_hex_digit(&sig, "signature");
-    expect(&["verify", "--public", &pk, "--in", &msg, "--sig", &sig], 2);
 }
 
 #[test]
@@ -682,10 +619,56 @@ fn aggregate_quintic_verify_and_tamper() {
     };
     sign("0,2", "0", &msg, &proof_a, 0);
     sign("1,3", "0", &msg, &proof_b, 0);
+    expect(
+        &[
+            "verify-agg",
+            "--min-signers",
+            "2",
+            "--hem-profile",
+            "quintic-gl24",
+            "--public",
+            &pk,
+            "--in",
+            &msg,
+            "--proof",
+            &proof_a,
+        ],
+        2,
+    );
+
+    expect(
+        &[
+            "verify-agg",
+            "--min-signers",
+            "3",
+            "--public",
+            &pk,
+            "--in",
+            &msg,
+            "--proof",
+            &proof_a,
+        ],
+        2,
+    );
+    expect(
+        &[
+            "verify-agg",
+            "--min-signers",
+            "2",
+            "--public",
+            &pk,
+            "--in",
+            &msg,
+            "--proof",
+            &proof_a,
+        ],
+        0,
+    );
     assert!(
         expect(
             &[
                 "verify-agg",
+                "--allow-any-subset",
                 "--public",
                 &pk,
                 "--in",
@@ -701,6 +684,7 @@ fn aggregate_quintic_verify_and_tamper() {
     expect(
         &[
             "verify-agg",
+            "--allow-any-subset",
             "--public",
             &pk,
             "--in",
@@ -722,6 +706,7 @@ fn aggregate_quintic_verify_and_tamper() {
         expect(
             &[
                 "verify-agg",
+                "--allow-any-subset",
                 "--public",
                 &pk,
                 "--in",
@@ -757,6 +742,7 @@ fn aggregate_quintic_verify_and_tamper() {
     expect(
         &[
             "verify-agg",
+            "--allow-any-subset",
             "--public",
             &pk,
             "--in",
@@ -1781,6 +1767,7 @@ fn anchored_committee_aggregate_rejects_full_snapshot_rollback() {
     expect(
         &[
             "verify-agg",
+            "--allow-any-subset",
             "--public",
             &pk,
             "--in",
@@ -2695,6 +2682,7 @@ fn e2e_hem_quorum_switch_2of3_to_3of5_and_untrusted_public_aggregate() {
     let verify_out = expect(
         &[
             "verify-aggregate",
+            "--allow-any-subset",
             "--pubkeys",
             &pubkeys_arg,
             "--message",
@@ -2711,6 +2699,7 @@ fn e2e_hem_quorum_switch_2of3_to_3of5_and_untrusted_public_aggregate() {
     expect(
         &[
             "verify-aggregate",
+            "--allow-any-subset",
             "--pubkeys",
             &pubkeys_arg,
             "--message",
@@ -2740,7 +2729,8 @@ fn e2e_cred_and_hd_subcommands() {
             &voprf_vault,
             "--public-out",
             &voprf_pk,
-            "--deterministic",
+            "--deterministic-test-only",
+            "--allow-unencrypted",
         ],
         0,
     );
@@ -2758,7 +2748,7 @@ fn e2e_cred_and_hd_subcommands() {
             &msg,
             "--out",
             &voprf_eval0,
-            "--deterministic",
+            "--deterministic-test-only",
         ],
         0,
     );
@@ -2799,7 +2789,8 @@ fn e2e_cred_and_hd_subcommands() {
             &mldsa_vault,
             "--public-out",
             &mldsa_pk,
-            "--deterministic",
+            "--deterministic-test-only",
+            "--allow-unencrypted",
         ],
         0,
     );
@@ -2819,7 +2810,7 @@ fn e2e_cred_and_hd_subcommands() {
             &mldsa_sig,
             "--context-hex",
             "abcd",
-            "--deterministic",
+            "--deterministic-test-only",
         ],
         0,
     );
@@ -2939,7 +2930,8 @@ fn e2e_cred_and_hd_subcommands() {
             &hd_vault,
             "--watch-out",
             &hd_watch,
-            "--deterministic",
+            "--deterministic-test-only",
+            "--allow-unencrypted",
         ],
         0,
     );
@@ -3617,95 +3609,24 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
 }
 
 #[test]
-fn e2e_fts_threshold_persists_reservoirs_and_signs_without_redkg() {
-    let dir = Workdir::new("fts-threshold-reservoirs");
+fn retired_threshold_scheme_is_refused_before_creating_custody_files() {
+    let dir = Workdir::new("retired-threshold");
     let sk = dir.path("fts.sk");
     let pk = dir.path("fts.pk");
-    let msg = dir.path("msg");
-    let other = dir.path("other");
-    let sig0 = dir.path("sig0");
-    let sig1 = dir.path("sig1");
-
     expect(
         &[
             "keygen",
             "--scheme",
             "fts-threshold",
-            "--accept-trusted-dealer-demo",
-            "--tree-height",
-            "2",
             "--secret-out",
             &sk,
             "--public-out",
             &pk,
         ],
-        0,
+        1,
     );
-    for p in 0..3 {
-        assert!(Path::new(&format!("{sk}.party-{p}.reservoir")).is_file());
-        assert!(Path::new(&format!("{sk}.party-{p}.reservoir.lock")).is_file());
-    }
-    expect(
-        &[
-            "sign",
-            "--secret",
-            &sk,
-            "--epoch",
-            "0",
-            "--in",
-            &msg,
-            "--out",
-            &sig0,
-            "--accept-trusted-dealer-demo",
-        ],
-        0,
-    );
-    expect(
-        &["verify", "--public", &pk, "--in", &msg, "--sig", &sig0],
-        0,
-    );
-    expect(
-        &[
-            "sign",
-            "--secret",
-            &sk,
-            "--epoch",
-            "1",
-            "--in",
-            &other,
-            "--out",
-            &sig1,
-            "--accept-trusted-dealer-demo",
-        ],
-        0,
-    );
-    expect(
-        &["verify", "--public", &pk, "--in", &other, "--sig", &sig1],
-        0,
-    );
-
-    // Corrupting a persisted party reservoir sidecar fails closed before signing.
-    let res0 = format!("{sk}.party-0.reservoir");
-    let mut raw = std::fs::read(&res0).unwrap();
-    let mid = raw.len() / 2;
-    raw[mid] ^= 0x55;
-    std::fs::write(&res0, &raw).unwrap();
-    expect(
-        &[
-            "sign",
-            "--secret",
-            &sk,
-            "--epoch",
-            "2",
-            "--in",
-            &msg,
-            "--out",
-            &dir.path("corrupt.sig"),
-            "--accept-trusted-dealer-demo",
-        ],
-        4,
-    );
-    assert!(!Path::new(&dir.path("corrupt.sig")).exists());
+    assert!(!Path::new(&sk).exists());
+    assert!(!Path::new(&pk).exists());
 }
 
 #[test]
@@ -5516,7 +5437,8 @@ fn hd_rejects_threshold_truncation_before_enrollment() {
             &vault,
             "--watch-out",
             &watch,
-            "--deterministic",
+            "--deterministic-test-only",
+            "--allow-unencrypted",
         ],
         1,
     );
@@ -5594,7 +5516,7 @@ fn enrollment_preflights_party_files_before_external_anchor_provisioning() {
             "2",
             "--parties",
             parties,
-            "--deterministic",
+            "--allow-unencrypted",
             "--anchor-dir",
             &anchor,
             "--allow-single-disk-anchor",
@@ -5657,8 +5579,18 @@ fn migrate_zcash_transparent_orchard_and_ironwood_claim_prove_verify_and_registe
     );
 
     for (alias, canonical, secret, member) in [
-        ("zip2007-t1", "zcash-transparent", secp.as_str(), "legacy_zcash_address"),
-        ("orchard", "orchard", orchard_sk.as_str(), "legacy_orchard_address"),
+        (
+            "zip2007-t1",
+            "zcash-transparent",
+            secp.as_str(),
+            "legacy_zcash_address",
+        ),
+        (
+            "orchard",
+            "orchard",
+            orchard_sk.as_str(),
+            "legacy_orchard_address",
+        ),
         ("zip2005", "ironwood", ironwood_json.as_str(), "anchor"),
     ] {
         let claim = dir.path(&format!("{canonical}-claim.json"));
@@ -5791,6 +5723,7 @@ fn quintic_public_cli_roundtrip() {
         expect(
             &[
                 "verify-aggregate",
+                "--allow-any-subset",
                 "--pubkeys",
                 &pk,
                 "--message",

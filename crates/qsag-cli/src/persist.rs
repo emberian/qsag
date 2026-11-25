@@ -65,7 +65,12 @@ pub fn no_follow() -> io::Result<OpenOptions> {
             std::env::consts::OS,
             std::env::consts::ARCH,
         )
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unsupported no-follow file flags"))?;
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "unsupported no-follow file flags",
+            )
+        })?;
         options.custom_flags(flags);
         Ok(options)
     }
@@ -116,6 +121,8 @@ pub fn verify_held(file: &File, path: &Path, private: bool) -> io::Result<Metada
 
 /// A file this process created exclusively and has not yet made durable.
 pub struct Created {
+    private: bool,
+    committed: bool,
     file: File,
     path: PathBuf,
 }
@@ -129,13 +136,12 @@ pub fn create_new(path: &Path, private: bool) -> io::Result<Created> {
         owner_only_mode(&mut options);
     }
     let created = Created {
+        private,
+        committed: false,
         file: options.open(path)?,
         path: path.to_owned(),
     };
-    if let Err(e) = verify_held(&created.file, path, private) {
-        created.discard();
-        return Err(e);
-    }
+    verify_held(&created.file, path, private)?;
     Ok(created)
 }
 
@@ -143,12 +149,12 @@ impl Created {
     /// Write the contents, sync the file, then sync its directory entry. A failure removes
     /// the partial file.
     pub fn commit(mut self, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+        verify_held(&self.file, &self.path, self.private)?;
         let result = write(&mut self.file)
             .and_then(|()| self.file.sync_all())
-            .and_then(|()| sync_parent_dir(&self.path));
-        if result.is_err() {
-            self.discard();
-        }
+            .and_then(|()| sync_parent_dir(&self.path))
+            .and_then(|()| verify_held(&self.file, &self.path, self.private).map(|_| ()));
+        self.committed = result.is_ok();
         result
     }
 
@@ -161,6 +167,14 @@ impl Created {
         {
             let _ = std::fs::remove_file(&self.path);
             let _ = sync_parent_dir(&self.path);
+        }
+    }
+}
+
+impl Drop for Created {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.discard();
         }
     }
 }
