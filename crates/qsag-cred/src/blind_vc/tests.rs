@@ -963,3 +963,968 @@ fn fs_ledger_refuses_a_replayed_presentation_in_another_process() {
 #[test]
 fn anchored_fs_ledger_refuses_a_restored_file_and_the_bare_one_replays() {
     let _serial = crate::presentation_challenge::test_support::serial();
+    use crate::presentation_challenge::test_support::{TestAnchor, dir_files, temporary_directory};
+    use alloc::boxed::Box;
+    let fx = ReplayFixture::new();
+    for anchored in [false, true] {
+        let dir = temporary_directory(if anchored { "anchored" } else { "bare" });
+        let path = dir.join("challenges");
+        let anchor = TestAnchor::default();
+        let open = || {
+            if anchored {
+                FsVerifierChallengeLedger::open_existing_anchored(
+                    &path,
+                    4,
+                    Box::new(anchor.clone()),
+                )
+            } else {
+                FsVerifierChallengeLedger::open_existing(&path, 4)
+            }
+        };
+        let mut ledger = if anchored {
+            FsVerifierChallengeLedger::create_new_anchored(&path, 4, Box::new(anchor.clone()))
+        } else {
+            FsVerifierChallengeLedger::create_new(&path, 4)
+        }
+        .unwrap();
+        assert_eq!(ledger.is_anchored(), anchored);
+        let challenge = ledger.issue(b"verifier-a", 1_000, 60, [0xE4; 32]).unwrap();
+        drop(ledger);
+        let pres = fx.present(b"verifier-a", &challenge, [6; 32]);
+        let backup = dir_files(&dir);
+
+        let mut ledger = open().unwrap();
+        assert!(fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+        assert!(!fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+        drop(ledger);
+        let current = dir_files(&dir);
+
+        // In place: same inodes, earlier bytes, as a volume snapshot restore.
+        for (file, bytes) in &backup {
+            std::fs::write(file, bytes).unwrap();
+        }
+        let restored = open();
+        if anchored {
+            let err = restored.err().expect("rolled-back ledger must not open");
+            assert!(std::format!("{err}").contains("rollback"), "{err}");
+            for (file, bytes) in &current {
+                std::fs::write(file, bytes).unwrap();
+            }
+            let mut ledger = open().unwrap();
+            assert!(!fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+        } else {
+            // No anchor: the consumed challenge is outstanding again.
+            let mut ledger = restored.unwrap();
+            assert!(fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn repeated_entropy_across_distinct_statements_produces_independent_zkboo_shares() {
+    let holder = HolderCredentialSecret {
+        schema_id: 42,
+        arity: 6,
+        attrs: core::array::from_fn(|i| {
+            [840, 1994, 3, 9910, 2030, 777].get(i).copied().unwrap_or(0)
+        }),
+        holder_blind: [17, 18, 19, 20],
+    };
+    let commitment = compute_vc_poseidon2_commit(
+        holder.schema_id,
+        &holder.attrs[..holder.arity],
+        &holder.holder_blind,
+        VC_ATTR_COMMIT_TAG,
+    )
+    .unwrap();
+    let oprf_pk = PublicKey::test_key();
+    let mut accumulator = IssuerCredentialAccumulator::new(oprf_pk, 7);
+    let index = accumulator.enroll(commitment).unwrap();
+    let cred = BlindVerifiableCredential {
+        issuer_epoch: 7,
+        schema_id: 42,
+        attr_commit: commitment,
+        issuance_token: [0; 32],
+        accumulator_leaf_index: index,
+    };
+    let reused_entropy = [0xAAu8; 32];
+    let pres1 = prove_selective_disclosure(
+        &cred,
+        &holder,
+        &accumulator.membership_witness(index).unwrap(),
+        &[0],
+        PresentationRequest {
+            verifier_scope: b"scope-alpha",
+            verifier_challenge: &[0x11; 32],
+            mode: PresentationMode::UnlinkableFresh,
+        },
+        reused_entropy,
+    )
+    .unwrap();
+    let pres2 = prove_selective_disclosure(
+        &cred,
+        &holder,
+        &accumulator.membership_witness(index).unwrap(),
+        &[0],
+        PresentationRequest {
+            verifier_scope: b"scope-alpha",
+            verifier_challenge: &[0x22; 32],
+            mode: PresentationMode::UnlinkableFresh,
+        },
+        reused_entropy,
+    )
+    .unwrap();
+
+    // Statement hedging must make all repetition GGM trees, commitments, and aux vectors independent:
+    assert_ne!(pres1.presentation_nonce, pres2.presentation_nonce);
+    assert_ne!(pres1.pres_commit, pres2.pres_commit);
+    assert_ne!(pres1.scope_tag, pres2.scope_tag);
+    for (r1, r2) in pres1.opened_reps.iter().zip(&pres2.opened_reps) {
+        assert_ne!(r1.ggm_copath, r2.ggm_copath);
+        assert_ne!(r1.com_1_hidden, r2.com_1_hidden);
+        if let (Some(a1), Some(a2)) = (&r1.aux, &r2.aux) {
+            assert_ne!(a1.delta_w, a2.delta_w);
+            assert_ne!(a1.delta_z, a2.delta_z);
+        }
+    }
+}
+
+#[test]
+fn flat_view_wire_known_answer() {
+    let expected = [
+        61, 135, 171, 82, 130, 136, 55, 10, 124, 33, 88, 220, 132, 3, 153, 201, 11, 135, 206, 216,
+        80, 196, 219, 81, 24, 19, 238, 51, 219, 46, 207, 21,
+    ];
+    assert_eq!(digest_party_view(&[2], &[1; 32], &[3], &[4]), expected);
+    assert_ne!(digest_party_view(&[2, 3], &[1; 32], &[], &[4]), expected);
+    assert_ne!(digest_party_view(&[2], &[1; 32], &[3, 0], &[4]), expected);
+}
+
+#[test]
+fn selective_disclosure_compact_wire_sub_15mib_and_roundtrips() {
+    let holder = HolderCredentialSecret {
+        schema_id: 42,
+        arity: MAX_VC_ATTRS,
+        attrs: core::array::from_fn(|i| {
+            [840, 1994, 3, 9910, 2030, 0]
+                .get(i)
+                .copied()
+                .unwrap_or(i as u64 + 100)
+        }),
+        holder_blind: [17, 18, 19, 20],
+    };
+    let commitment = compute_vc_poseidon2_commit(
+        holder.schema_id,
+        &holder.attrs[..holder.arity],
+        &holder.holder_blind,
+        VC_ATTR_COMMIT_TAG,
+    )
+    .unwrap();
+    let oprf_pk = PublicKey::test_key();
+    let mut accumulator = IssuerCredentialAccumulator::new(oprf_pk.clone(), 7);
+    let index = accumulator.enroll(commitment).unwrap();
+    let (issuer_mldsa_pk, issuer_mldsa_sk) =
+        crate::fips204_ntt::ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[0x55; 32]);
+    let root_attestation = accumulator
+        .attest_root_deterministic(
+            MlDsaLevel::MlDsa44,
+            &issuer_mldsa_sk,
+            issuer_mldsa_pk.clone(),
+        )
+        .unwrap();
+    let cred = BlindVerifiableCredential {
+        issuer_epoch: 7,
+        schema_id: 42,
+        attr_commit: commitment,
+        issuance_token: [0; 32],
+        accumulator_leaf_index: index,
+    };
+
+    for (profile, challenge_byte, max_bytes) in [
+        (ZkSoundnessProfile::Classical128, 0x73u8, 6 * 1024 * 1024),
+        (ZkSoundnessProfile::Quantum128, 0x74u8, 15 * 1024 * 1024),
+    ] {
+        let pres = prove_selective_disclosure_with_profile(
+            &cred,
+            &holder,
+            &accumulator.membership_witness(index).unwrap(),
+            &[0, 2, MAX_VC_ATTRS - 1],
+            PresentationRequest {
+                verifier_scope: b"compact-wire",
+                verifier_challenge: &[challenge_byte; 32],
+                mode: PresentationMode::UnlinkableFresh,
+            },
+            [0x42; 32],
+            profile,
+        )
+        .unwrap();
+
+        let compact = pres.to_compact_wire_bytes().unwrap();
+        assert!(
+            compact.len() < max_bytes,
+            "{profile:?} wire size {} exceeded cap {max_bytes}",
+            compact.len()
+        );
+        assert_eq!(pres.to_wire_bytes().unwrap(), compact);
+
+        let decoded = SelectiveDisclosurePresentation::from_compact_wire_bytes(&compact).unwrap();
+        assert_eq!(decoded, pres);
+        assert!(verify_presentation_with_profile(
+            &decoded,
+            &root_attestation,
+            &issuer_mldsa_pk,
+            &oprf_pk,
+            b"compact-wire",
+            &mut ReplayNotPrevented(&[challenge_byte; 32]),
+            PresentationMode::UnlinkableFresh,
+            42,
+            holder.arity,
+            profile,
+        ));
+
+        // Truncated, trailing-byte, and bit-flipped payloads fail cleanly.
+        assert!(
+            SelectiveDisclosurePresentation::from_compact_wire_bytes(&compact[..compact.len() - 1])
+                .is_err()
+        );
+        let mut trailing = compact.clone();
+        trailing.push(0);
+        assert!(SelectiveDisclosurePresentation::from_compact_wire_bytes(&trailing).is_err());
+
+        let mut tampered = compact;
+        let last = tampered.len() - 64;
+        tampered[last] ^= 1;
+        if let Ok(bad_pres) = SelectiveDisclosurePresentation::from_compact_wire_bytes(&tampered) {
+            assert!(!verify_presentation_with_profile(
+                &bad_pres,
+                &root_attestation,
+                &issuer_mldsa_pk,
+                &oprf_pk,
+                b"compact-wire",
+                &mut ReplayNotPrevented(&[challenge_byte; 32]),
+                PresentationMode::UnlinkableFresh,
+                42,
+                holder.arity,
+                profile,
+            ));
+        }
+    }
+}
+
+fn kat_hex(digest: &[u8; 32]) -> std::string::String {
+    digest.iter().map(|b| std::format!("{b:02x}")).collect()
+}
+
+fn kat_absorb_u64s(sp: &mut Shake256, xs: &[u64]) {
+    sp.absorb(&(xs.len() as u64).to_le_bytes());
+    for x in xs {
+        sp.absorb(&x.to_le_bytes());
+    }
+}
+
+fn kat_issuance_digest(req: &BlindIssuanceRequest) -> [u8; 32] {
+    let mut sp = Shake256::new();
+    sp.absorb(&req.issuer_pk_digest);
+    sp.absorb(&req.issuer_epoch.to_le_bytes());
+    kat_absorb_u64s(&mut sp, &req.issuer_attested_attrs);
+    sp.absorb(&req.session_id);
+    sp.absorb(&req.schema_id.to_le_bytes());
+    kat_absorb_u64s(&mut sp, &req.attr_commit);
+    sp.absorb(&(req.opened_reps.len() as u64).to_le_bytes());
+    for o in &req.opened_reps {
+        sp.absorb(&[o.e]);
+        sp.absorb(&o.unopened_commitment);
+        sp.absorb(&o.salt_e);
+        sp.absorb(&o.salt_e1);
+        kat_absorb_u64s(&mut sp, &o.in_shares_e);
+        kat_absorb_u64s(&mut sp, &o.in_shares_e1);
+        sp.absorb(&o.tape_seed_e);
+        sp.absorb(&o.tape_seed_e1);
+        kat_absorb_u64s(&mut sp, &o.gate_outs_e);
+        kat_absorb_u64s(&mut sp, &o.gate_outs_e1);
+        for row in &o.final_outs_all3 {
+            kat_absorb_u64s(&mut sp, row);
+        }
+        sp.absorb(&(o.num_active_final_outs as u64).to_le_bytes());
+    }
+    sp.finalize(0x1F);
+    let mut out = [0u8; 32];
+    sp.squeeze(&mut out);
+    out
+}
+
+fn kat_bytes_digest(bytes: &[u8]) -> [u8; 32] {
+    let mut sp = Shake256::new();
+    sp.absorb(bytes);
+    sp.finalize(0x1F);
+    let mut out = [0u8; 32];
+    sp.squeeze(&mut out);
+    out
+}
+
+/// Wire-compatibility pin: a fixed-seed issuance request and fixed-seed presentations under
+/// both profiles and both presentation modes must keep these exact bytes.
+#[test]
+fn fixed_seed_issuance_and_presentation_bytes_known_answer() {
+    let attrs = [840u64, 1994, 3, 9910, 2030, 0, 77];
+    let oprf_pk = PublicKey::test_key();
+    let (req, holder) = holder_prepare_blind_issuance_with_profile(
+        42,
+        &attrs,
+        oprf_pk.commitment(),
+        7,
+        [0x11; 32],
+        [0x22; 32],
+        ZkSoundnessProfile::Classical128,
+    )
+    .unwrap();
+    assert!(verify_blind_issuance_request_with_profile(
+        &req,
+        &attrs,
+        42,
+        ZkSoundnessProfile::Classical128,
+    ));
+
+    let mut accumulator = IssuerCredentialAccumulator::new(oprf_pk.clone(), 7);
+    accumulator.enroll([1, 2, 3, 4, 5, 6]).unwrap();
+    let index = accumulator.enroll(req.attr_commit).unwrap();
+    accumulator.enroll([9; 6]).unwrap();
+    let (issuer_mldsa_pk, issuer_mldsa_sk) =
+        crate::fips204_ntt::ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[0x55; 32]);
+    let root_attestation = accumulator
+        .attest_root_deterministic(
+            MlDsaLevel::MlDsa44,
+            &issuer_mldsa_sk,
+            issuer_mldsa_pk.clone(),
+        )
+        .unwrap();
+    let cred = BlindVerifiableCredential {
+        issuer_epoch: 7,
+        schema_id: 42,
+        attr_commit: req.attr_commit,
+        issuance_token: [0; 32],
+        accumulator_leaf_index: index,
+    };
+
+    let mut actual = std::vec![
+        kat_hex(&kat_issuance_digest(&req)),
+        kat_hex(&kat_bytes_digest(
+            &accumulator
+                .root()
+                .iter()
+                .flat_map(|limb| limb.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        )),
+    ];
+    for (profile, mode, challenge_byte) in [
+        (
+            ZkSoundnessProfile::Classical128,
+            PresentationMode::UnlinkableFresh,
+            0x73u8,
+        ),
+        (
+            ZkSoundnessProfile::Quantum128,
+            PresentationMode::ScopedPseudonym([0x5A; 32]),
+            0x74u8,
+        ),
+    ] {
+        let pres = prove_selective_disclosure_with_profile(
+            &cred,
+            &holder,
+            &accumulator.membership_witness(index).unwrap(),
+            &[0, 2, 6],
+            PresentationRequest {
+                verifier_scope: b"kat-scope",
+                verifier_challenge: &[challenge_byte; 32],
+                mode,
+            },
+            [0x42; 32],
+            profile,
+        )
+        .unwrap();
+        let wire = pres.to_compact_wire_bytes().unwrap();
+        let decoded = SelectiveDisclosurePresentation::from_compact_wire_bytes(&wire).unwrap();
+        assert!(verify_presentation_with_profile(
+            &decoded,
+            &root_attestation,
+            &issuer_mldsa_pk,
+            &oprf_pk,
+            b"kat-scope",
+            &mut ReplayNotPrevented(&[challenge_byte; 32]),
+            mode,
+            42,
+            attrs.len(),
+            profile,
+        ));
+        actual.push(kat_hex(&kat_bytes_digest(&wire)));
+    }
+    std::println!("BVC_KAT {actual:?}");
+    // The first digest is the classical issuance request. It was re-pinned when
+    // the `Classical128` statement and transcript gained their explicit profile
+    // tag (before that only `Quantum128` was tagged); the accumulator root and
+    // both presentation wires below did not change.
+    assert_eq!(
+        actual,
+        [
+            "5c060f825fb8fbe4367879bb70cde5b53f2bd6d5e856cd85dd45ea289be47cbc",
+            "ac05d706c5c72c17f54a06fbcd0b6fcc3b1bc9b447529ab75a7cb587201d86b1",
+            "d4bfec08995d0f69f759734b211a542e9e590b2aa9faad9f94a50fc6f2381839",
+            "07813ef70176b90e6e06c194853794a20189acba1d2c4bd6eb4c73a1b82e1e7b",
+        ]
+    );
+}
+
+// ------------------------------------------------------------------------
+// Independent reference of the canonical Poseidon2-12 profile. Nothing below
+// calls `qsag_accel::poseidon2`: field arithmetic is `u128 % p`, the linear
+// layers are explicit 12x12 matrices built from their definitions, and the
+// round constants are re-derived from the `POS2_GL1` generator.
+// ------------------------------------------------------------------------
+
+const REF_P: u128 = 0xFFFF_FFFF_0000_0001;
+type RefMat = [[u64; 12]; 12];
+
+fn ref_add(a: u64, b: u64) -> u64 {
+    ((a as u128 + b as u128) % REF_P) as u64
+}
+
+fn ref_mul(a: u64, b: u64) -> u64 {
+    ((a as u128 * b as u128) % REF_P) as u64
+}
+
+/// `M_E = M_4 (x) P_3`: entry `(3i + a, 3j + b) = M_4[i][j] * P_3[a][b]` with
+/// `M_4 = circ(2, 3, 1, 1)` and `P_3 = circ(2, 1, 1)`.
+fn ref_dense_me() -> RefMat {
+    const M4: [[u64; 4]; 4] = [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]];
+    const P3: [[u64; 3]; 3] = [[2, 1, 1], [1, 2, 1], [1, 1, 2]];
+    let mut m = [[0u64; 12]; 12];
+    for i in 0..4 {
+        for a in 0..3 {
+            for j in 0..4 {
+                for b in 0..3 {
+                    m[3 * i + a][3 * j + b] = M4[i][j] * P3[a][b];
+                }
+            }
+        }
+    }
+    m
+}
+
+/// The superseded external matrix `P_3 (x) M_4`: entry `(4a + i, 4b + j)`.
+fn ref_dense_me_superseded() -> RefMat {
+    let canonical = ref_dense_me();
+    let mut m = [[0u64; 12]; 12];
+    for i in 0..4 {
+        for a in 0..3 {
+            for j in 0..4 {
+                for b in 0..3 {
+                    m[4 * a + i][4 * b + j] = canonical[3 * i + a][3 * j + b];
+                }
+            }
+        }
+    }
+    m
+}
+
+/// `M_I = J + diag(-64, 1, 2, 4, ..., 1024)`.
+fn ref_dense_mi() -> RefMat {
+    let mut m = [[1u64; 12]; 12];
+    m[0][0] = ref_add(1, (REF_P - 64) as u64);
+    for (k, row) in m.iter_mut().enumerate().skip(1) {
+        row[k] = 1 + (1u64 << (k - 1));
+    }
+    m
+}
+
+fn ref_mat_vec(m: &RefMat, v: &[u64; 12]) -> [u64; 12] {
+    core::array::from_fn(|i| {
+        (0..12).fold(0u64, |acc, j| {
+            ref_add(acc, ref_mul(m[i][j], v[j] % REF_P as u64))
+        })
+    })
+}
+
+fn ref_mix13(x: u64) -> u64 {
+    let z0 = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let z1 = (z0 ^ (z0 >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let z2 = (z1 ^ (z1 >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z2 ^ (z2 >> 31)
+}
+
+fn ref_round_constant(tag: u64, round: u64, lane: u64) -> u64 {
+    const IV: u64 = u64::from_be_bytes(*b"POS2_GL1");
+    (ref_mix13(ref_mix13(ref_mix13(IV ^ tag) ^ round) ^ lane) as u128 % REF_P) as u64
+}
+
+fn ref_pow7(x: u64) -> u64 {
+    let x2 = ref_mul(x, x);
+    let x4 = ref_mul(x2, x2);
+    ref_mul(ref_mul(x4, x2), x)
+}
+
+/// Initial `M_E`; 4 full rounds (tag 0); 22 partial rounds (tag 1, lane 0); 4 full rounds (tag 2).
+fn ref_perm12(st: &mut [u64; 12]) {
+    let (me, mi) = (ref_dense_me(), ref_dense_mi());
+    *st = ref_mat_vec(&me, st);
+    for tag in [0u64, 1, 2] {
+        let rounds = if tag == 1 { 22 } else { 4 };
+        for r in 0..rounds {
+            if tag == 1 {
+                st[0] = ref_pow7(ref_add(st[0], ref_round_constant(1, r, 0)));
+                *st = ref_mat_vec(&mi, st);
+            } else {
+                for (lane, x) in st.iter_mut().enumerate() {
+                    *x = ref_pow7(ref_add(*x, ref_round_constant(tag, r, lane as u64)));
+                }
+                *st = ref_mat_vec(&me, st);
+            }
+        }
+    }
+}
+
+/// Rate-6, capacity-6 sponge of this module over the reference permutation.
+fn ref_sponge12(message: &[u64]) -> [u64; 12] {
+    let mut state = [0u64; 12];
+    for chunk in message.chunks(6) {
+        for (lane, &value) in state.iter_mut().zip(chunk) {
+            *lane = ref_add(*lane, value);
+        }
+        if chunk.len() < 6 {
+            state[chunk.len()] = ref_add(state[chunk.len()], 1);
+        }
+        ref_perm12(&mut state);
+    }
+    if message.len().is_multiple_of(6) {
+        state[0] = ref_add(state[0], 1);
+        ref_perm12(&mut state);
+    }
+    state
+}
+
+struct TestRng(u64);
+
+impl TestRng {
+    fn next_field(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0xA076_1D64_78BD_642F);
+        (ref_mix13(self.0) as u128 % REF_P) as u64
+    }
+
+    fn state(&mut self) -> [u64; 12] {
+        core::array::from_fn(|_| self.next_field())
+    }
+}
+
+const GATES_PER_RAW_PERM12: usize = GATES_PER_PERM12 / 3;
+
+fn poseidon2_test_states() -> Vec<[u64; 12]> {
+    let max = (REF_P - 1) as u64;
+    let mut states = vec![
+        [0u64; 12],
+        [max; 12],
+        core::array::from_fn(|i| i as u64),
+        core::array::from_fn(|i| if i.is_multiple_of(2) { max } else { 1 }),
+    ];
+    for lane in 0..12 {
+        states.push(core::array::from_fn(|i| u64::from(i == lane)));
+    }
+    let mut rng = TestRng(0x5EED_0001);
+    for _ in 0..24 {
+        states.push(rng.state());
+    }
+    states
+}
+
+#[test]
+fn poseidon2_reference_permutation_reproduces_the_canonical_kat() {
+    let mut st: [u64; 12] = core::array::from_fn(|i| i as u64);
+    ref_perm12(&mut st);
+    assert_eq!(
+        st,
+        [
+            13782584570844608145,
+            13136387643152332171,
+            7171133015474200819,
+            7643370872200861694,
+            14144755201299840503,
+            16470027036684692562,
+            1748465969625202405,
+            1718729118078964347,
+            6141020819996733037,
+            16322330185628708898,
+            11650380702735067362,
+            2734959974607798415,
+        ]
+    );
+    // The superseded profile is a different function, so every comparison below can fail.
+    assert_ne!(ref_dense_me(), ref_dense_me_superseded());
+}
+
+#[test]
+fn circuit_linear_layers_equal_the_dense_canonical_matrices() {
+    let (me, mi) = (ref_dense_me(), ref_dense_mi());
+    let superseded = ref_dense_me_superseded();
+    let mut rng = TestRng(0x5EED_0002);
+
+    // Exact matrices of the shared kernels, column by column.
+    let mut saw_superseded_difference = false;
+    for j in 0..12 {
+        let unit: [u64; 12] = core::array::from_fn(|i| u64::from(i == j));
+        let (mut e_col, mut i_col) = (unit, unit);
+        poseidon2_apply_me(&mut e_col);
+        poseidon2_apply_mi(&mut i_col);
+        for row in 0..12 {
+            assert_eq!(e_col[row], me[row][j], "M_E[{row}][{j}]");
+            assert_eq!(i_col[row], mi[row][j], "M_I[{row}][{j}]");
+            saw_superseded_difference |= e_col[row] != superseded[row][j];
+        }
+    }
+    assert!(saw_superseded_difference);
+
+    // The per-share wrappers of both ZKBoo tapes act as the same matrix on every share slot.
+    for _ in 0..32 {
+        let slots: [[u64; 12]; 3] = core::array::from_fn(|_| rng.state());
+        let st3: [[u64; 3]; 12] = core::array::from_fn(|lane| [0, 1, 2].map(|m| slots[m][lane]));
+        let st2: [[u64; 2]; 12] = core::array::from_fn(|lane| [0, 1].map(|m| slots[m][lane]));
+
+        let (mut e3, mut i3, mut e2, mut i2) = (st3, st3, st2, st2);
+        apply_me_3(&mut e3);
+        apply_mi_3(&mut i3);
+        apply_me_2(&mut e2);
+        apply_mi_2(&mut i2);
+        for (m, slot) in slots.iter().enumerate() {
+            let want_e = ref_mat_vec(&me, slot);
+            let want_i = ref_mat_vec(&mi, slot);
+            for lane in 0..12 {
+                assert_eq!(e3[lane][m], want_e[lane]);
+                assert_eq!(i3[lane][m], want_i[lane]);
+                if m < 2 {
+                    assert_eq!(e2[lane][m], want_e[lane]);
+                    assert_eq!(i2[lane][m], want_i[lane]);
+                }
+            }
+        }
+
+        // Plaintext and N-party engines call the shared kernels directly on one share.
+        let (mut e1, mut i1) = (slots[0], slots[0]);
+        poseidon2_apply_me(&mut e1);
+        poseidon2_apply_mi(&mut i1);
+        assert_eq!(e1, ref_mat_vec(&me, &slots[0]));
+        assert_eq!(i1, ref_mat_vec(&mi, &slots[0]));
+    }
+}
+
+/// Run one raw permutation (`sponge == false`, `input.len() == 12`) or one sponge call of
+/// every in-circuit engine on `input`; returns the reconstructed 12-lane outputs of the
+/// plaintext recorder, the 3-party ZKBoo tapes and the N-party share evaluator.
+fn run_all_circuit_engines(input: &[u64], sponge: bool, rng: &mut TestRng) -> [[u64; 12]; 3] {
+    let gates = if sponge {
+        (input.len() / 6 + 1) * GATES_PER_RAW_PERM12
+    } else {
+        GATES_PER_RAW_PERM12
+    };
+
+    // Plaintext gate recorder (selective-disclosure prover trace).
+    let mut rec = PlaintextGateRecorder::new();
+    let mut plain = input.to_vec();
+    if sponge {
+        rec.perm12(&mut plain);
+    } else {
+        rec.raw_perm12((&mut plain[..]).try_into().unwrap());
+    }
+    assert_eq!(rec.x.len(), gates);
+    let plain_out: [u64; 12] = plain[..12].try_into().unwrap();
+
+    // 3-party ZKBoo prover, then the verifier replay of each opened pair of views.
+    let tape_seeds: [[u8; 32]; 3] = core::array::from_fn(|m| [0xA0 + m as u8; 32]);
+    let shares: Vec<[u64; 3]> = input
+        .iter()
+        .map(|&v| split_secret_3(v, rng.next_field(), rng.next_field()))
+        .collect();
+    let mut prover = ZkBooProverTape::new(&tape_seeds, gates);
+    let mut prover_st = shares.clone();
+    if sponge {
+        prover.perm12(&mut prover_st);
+    } else {
+        prover.raw_perm12((&mut prover_st[..]).try_into().unwrap());
+    }
+    assert_eq!(prover.gate_cursor, gates);
+    let zkboo_out: [u64; 12] =
+        core::array::from_fn(|lane| prover_st[lane].iter().fold(0, |acc, &s| gl_add(acc, s)));
+    for e in 0..3 {
+        let e1 = (e + 1) % 3;
+        let mut verifier = ZkBooVerifierTape::new(
+            e,
+            &tape_seeds[e],
+            &tape_seeds[e1],
+            &prover.out[e],
+            &prover.out[e1],
+            gates,
+        );
+        let mut verifier_st: Vec<[u64; 2]> = shares.iter().map(|s| [s[e], s[e1]]).collect();
+        if sponge {
+            verifier.perm12(&mut verifier_st);
+        } else {
+            verifier.raw_perm12((&mut verifier_st[..]).try_into().unwrap());
+        }
+        assert!(verifier.ok, "opened views {e},{e1} replay");
+        assert_eq!(verifier.gate_cursor, gates);
+        for lane in 0..12 {
+            assert_eq!(verifier_st[lane], [prover_st[lane][e], prover_st[lane][e1]]);
+        }
+    }
+
+    // N-party additive-share evaluator (selective-disclosure parties), N = 5.
+    const PARTIES: usize = 5;
+    let mut share_sum = [0u64; 12];
+    let mut x_sum = vec![0u64; gates];
+    let mut y_sum = vec![0u64; gates];
+    let mut in_rest = vec![0u64; input.len()];
+    let mut z_rest = vec![0u64; gates];
+    for party in 0..PARTIES {
+        let last = party == PARTIES - 1;
+        let mut st: Vec<u64> = (0..input.len())
+            .map(|k| {
+                if last {
+                    gl_sub(input[k], in_rest[k])
+                } else {
+                    let s = rng.next_field();
+                    in_rest[k] = gl_add(in_rest[k], s);
+                    s
+                }
+            })
+            .collect();
+        let z_shares: Vec<u64> = (0..gates)
+            .map(|g| {
+                if last {
+                    gl_sub(rec.z[g], z_rest[g])
+                } else {
+                    let s = rng.next_field();
+                    z_rest[g] = gl_add(z_rest[g], s);
+                    s
+                }
+            })
+            .collect();
+        let (mut x_out, mut y_out, mut z_out) =
+            (vec![0u64; gates], vec![0u64; gates], vec![0u64; gates]);
+        let mut ev = LinearShareEvaluator {
+            is_party_zero: party == 0,
+            z_shares: &z_shares,
+            gate_cursor: 0,
+            x_out: &mut x_out,
+            y_out: &mut y_out,
+            z_out: &mut z_out,
+        };
+        if sponge {
+            ev.perm12(&mut st);
+        } else {
+            ev.raw_perm12((&mut st[..]).try_into().unwrap());
+        }
+        assert_eq!(ev.gate_cursor, gates);
+        for lane in 0..12 {
+            share_sum[lane] = gl_add(share_sum[lane], st[lane]);
+        }
+        for g in 0..gates {
+            x_sum[g] = gl_add(x_sum[g], x_out[g]);
+            y_sum[g] = gl_add(y_sum[g], y_out[g]);
+        }
+    }
+    // The parties' multiplication inputs reconstruct the plaintext trace gate by gate.
+    assert_eq!(x_sum, rec.x);
+    assert_eq!(y_sum, rec.y);
+
+    [plain_out, zkboo_out, share_sum]
+}
+
+#[test]
+fn in_circuit_poseidon2_perm12_matches_canonical_permutation() {
+    let mut rng = TestRng(0x5EED_0003);
+    for state in poseidon2_test_states() {
+        let mut reference = state;
+        ref_perm12(&mut reference);
+        let mut canonical = state;
+        poseidon2_perm12(&mut canonical);
+        assert_eq!(canonical, reference, "accel permutation vs dense reference");
+
+        for (engine, out) in run_all_circuit_engines(&state, false, &mut rng)
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(*out, canonical, "engine {engine} on {state:?}");
+        }
+    }
+}
+
+#[test]
+fn in_circuit_sponge_and_clear_commitments_match_reference_sponge() {
+    let mut rng = TestRng(0x5EED_0004);
+    for len in [12usize, 13, 16, 17, 18, 39] {
+        let message: Vec<u64> = (0..len).map(|_| rng.next_field()).collect();
+        let reference = ref_sponge12(&message);
+        let mut clear = message.clone();
+        sponge12(&mut clear);
+        assert_eq!(clear[..12], reference, "clear sponge, len {len}");
+        for (engine, out) in run_all_circuit_engines(&message, true, &mut rng)
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(*out, reference, "engine {engine}, len {len}");
+        }
+    }
+
+    // Clear commitment layouts over the reference sponge.
+    let reduce = |x: u64| (x as u128 % REF_P) as u64;
+    let (schema_id, epoch) = (0x0123_4567_89AB_CDEFu64, 0xFEDC_BA98_7654_3210u64);
+    let blind = [
+        rng.next_field(),
+        rng.next_field(),
+        rng.next_field(),
+        rng.next_field(),
+    ];
+    for arity in [1usize, 6, 7, MAX_VC_ATTRS] {
+        let attrs: Vec<u64> = (0..arity).map(|_| rng.next_field()).collect();
+        for tag in [VC_ATTR_COMMIT_TAG, VC_PRES_COMMIT_TAG] {
+            let mut message = attrs.clone();
+            message.resize(arity.max(6), 0);
+            message.extend_from_slice(&blind);
+            message.extend_from_slice(&[
+                schema_id & 0xffff_ffff,
+                ref_add(schema_id >> 32, reduce(tag)),
+                arity as u64,
+            ]);
+            assert_eq!(
+                compute_vc_poseidon2_commit(schema_id, &attrs, &blind, tag).unwrap(),
+                ref_sponge12(&message)[..6],
+            );
+        }
+    }
+
+    let scope = [
+        rng.next_field(),
+        rng.next_field(),
+        rng.next_field(),
+        rng.next_field(),
+    ];
+    let mut message = blind.to_vec();
+    message.extend_from_slice(&scope);
+    message.extend_from_slice(&[
+        0,
+        0,
+        schema_id & 0xffff_ffff,
+        ref_add(schema_id >> 32, reduce(VC_SCOPE_TAG_DOM)),
+    ]);
+    assert_eq!(
+        compute_vc_scope_tag(schema_id, &blind, &scope),
+        ref_sponge12(&message)[..6],
+    );
+
+    let left: [u64; 6] = core::array::from_fn(|_| rng.next_field());
+    let right: [u64; 6] = core::array::from_fn(|_| rng.next_field());
+    let mut message = left.to_vec();
+    message.extend_from_slice(&right);
+    message.extend_from_slice(&[
+        epoch & 0xffff_ffff,
+        9,
+        reduce(VC_MERKLE_NODE_TAG),
+        ref_add(epoch >> 32, reduce(u64::from_be_bytes(*b"POS2_GL1"))),
+    ]);
+    assert_eq!(
+        merkle_hash_pair(&left, &right, epoch, 9),
+        ref_sponge12(&message)[..6],
+    );
+}
+
+#[test]
+fn fp5_arithmetic_matches_schoolbook_reference() {
+    fn ref_fp5_mul(a: [u64; 5], b: [u64; 5]) -> [u64; 5] {
+        let mut wide = [0u64; 9];
+        for i in 0..5 {
+            for j in 0..5 {
+                wide[i + j] = ref_add(wide[i + j], ref_mul(a[i], b[j]));
+            }
+        }
+        // T^5 = 3.
+        core::array::from_fn(|k| {
+            if k < 4 {
+                ref_add(wide[k], ref_mul(3, wide[k + 5]))
+            } else {
+                wide[k]
+            }
+        })
+    }
+
+    let max = (REF_P - 1) as u64;
+    let mut rng = TestRng(0x5EED_0005);
+    let mut elems = vec![[0u64; 5], [1, 0, 0, 0, 0], [max; 5], [0, 0, 0, 0, max]];
+    for _ in 0..24 {
+        elems.push(core::array::from_fn(|_| rng.next_field()));
+    }
+    for &a in &elems {
+        let fa = Fp5::from_limbs(a);
+        assert_eq!(fa.to_limbs(), a);
+        assert_eq!(Fp5::from_canonical_limbs(a), Some(fa));
+        assert_eq!(fa.is_zero(), a == [0; 5]);
+        let bytes: Vec<u8> = a.iter().flat_map(|limb| limb.to_le_bytes()).collect();
+        assert_eq!(fa.to_le_bytes()[..], bytes[..]);
+        let scalar = rng.next_field();
+        assert_eq!(
+            fa.scale_fp(scalar).to_limbs(),
+            a.map(|limb| ref_mul(limb, scalar))
+        );
+        for &b in &elems {
+            let fb = Fp5::from_limbs(b);
+            assert_eq!(fa.mul(fb).to_limbs(), ref_fp5_mul(a, b));
+            assert_eq!(
+                fa.add(fb).to_limbs(),
+                core::array::from_fn(|i| ref_add(a[i], b[i]))
+            );
+            assert_eq!(
+                fa.sub(fb).to_limbs(),
+                core::array::from_fn(|i| ref_add(a[i], (REF_P as u64) - b[i]))
+            );
+        }
+    }
+    // The alias band is rejected limb by limb, and wide reduction agrees with `u128 % p`.
+    for k in 0..5 {
+        for bad in [REF_P as u64, u64::MAX] {
+            let alias: [u64; 5] = core::array::from_fn(|i| if i == k { bad } else { 7 });
+            assert_eq!(Fp5::from_canonical_limbs(alias), None);
+        }
+    }
+    for _ in 0..64 {
+        let lo = ((rng.next_field() as u128) << 64) | ref_mix13(rng.0) as u128;
+        let hi = ((rng.next_field() as u128) << 64) | ref_mix13(!rng.0) as u128;
+        // lo + 2^64 * hi (mod p), reduced limb-wise in u128 without overflow.
+        let two_64 = (1u128 << 64) % REF_P;
+        let want = ((lo % REF_P) + ((hi % REF_P) * two_64) % REF_P) % REF_P;
+        assert_eq!(
+            gl_reduce_split_u192(lo, hi).to_canonical_u64() as u128,
+            want
+        );
+    }
+}
+
+#[test]
+fn holder_credential_secret_accessors_match_attr_commit() {
+    let attrs = [101u64, 202, 303, 404];
+    let (req, holder) = holder_prepare_blind_issuance_with_profile(
+        0x77,
+        &attrs,
+        [0x11; 32],
+        5,
+        [0x22; 32],
+        [0x33; 32],
+        ZkSoundnessProfile::Classical128,
+    )
+    .unwrap();
+    assert_eq!(holder.arity(), 4);
+    assert_eq!(holder.attrs(), &attrs);
+    let recomputed = compute_vc_poseidon2_commit(
+        holder.schema_id,
+        holder.attrs(),
+        holder.holder_blind(),
+        VC_ATTR_COMMIT_TAG,
+    )
+    .unwrap();
+    assert_eq!(recomputed, req.attr_commit);
+}
