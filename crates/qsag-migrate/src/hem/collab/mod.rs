@@ -13,6 +13,10 @@
 //!   custody share to a [`ZkHemV2SplitProof`] (`QSAGZKS2`).
 //! * [`verify_threshold_ownership`]: the verifier for threshold ownership statements.
 
+mod over_wire;
+pub use over_wire::*;
+mod tape;
+
 pub mod custody;
 pub mod engine;
 pub mod net;
@@ -30,9 +34,9 @@ use super::relations::{
     OwnershipStatement, ownership_auxiliary_inputs, ownership_definitions, ownership_shape,
     ownership_transcript,
 };
-use engine::{Engine, MpcError, Stats};
 #[cfg(feature = "std")]
 use engine::Preprocessing;
+use engine::{Engine, MpcError, Stats};
 use net::Transport;
 
 /// Why a custodian's [`prove_ownership_party`] produced no proof.
@@ -40,6 +44,8 @@ use net::Transport;
 pub enum ThresholdError {
     /// Session anti-rollback or preprocessing burn failed before round 1.
     Mpc(MpcError),
+    Prep(prep::PrepError),
+    Verification,
     /// The statement is malformed, or the custody input does not fit it.
     Statement,
     Input(custody::InputError),
@@ -152,12 +158,15 @@ pub fn prove_ownership_party_observed<T: Transport>(
     let widths = witgen::input_bits(&defs);
     let fits = widths.len() == 1 + auxiliary.len()
         && widths[0] >= 8 * input.xor_share.len()
-        && widths[1..].iter().zip(&auxiliary).all(|(&w, a)| w == a.len());
+        && widths[1..]
+            .iter()
+            .zip(&auxiliary)
+            .all(|(&w, a)| w == a.len());
     if !fits {
         return Err(ThresholdError::Statement);
     }
     let mut secret = qsag_core::wipe::SecretBuffer(
-        custody::input_secret_bits(e, input.xor_share).map_err(ThresholdError::Input)?
+        custody::input_secret_bits(e, input.xor_share).map_err(ThresholdError::Input)?,
     );
     after(Stage::Input, e.stats);
     let padding = widths[0] - secret.len();
@@ -227,7 +236,7 @@ mod tests {
     type F = Goldilocks;
 
     fn coins(tag: u8) -> SeedStream {
-        SeedStream::new(b"QSAG.TEST.COLLAB/v2", &[tag; 32])
+        SeedStream::new(b"QSAG.COLLAB.TEST.COINS/v2", &[tag; 32])
     }
 
     fn share_additive<T>(values: &[T], parties: usize, mut coin: impl FnMut() -> T) -> Vec<Vec<T>>

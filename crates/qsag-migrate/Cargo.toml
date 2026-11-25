@@ -8,6 +8,7 @@ description = "Zero-knowledge ownership migration proofs (`zk-Hem v2`), threshol
 
 [features]
 default = ["std"]
+testing-ephemeral = []
 std = [
     "qsag-core/std",
     "qsag-asm/std",

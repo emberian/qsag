@@ -32,9 +32,7 @@ use qsag_agg::zk_hem::v2::params::{
     COL_DEGREE, COL_MASK_BITS, DIGEST_BYTES, EXT_BYTES, LIMBS, LOOKUP_DEGREE, LOOKUP_MASK_BITS,
     LookupLayout, MASK_POINTS, Profile, ROW_DEGREE, ROW_MASK_BITS, Schedule, TREE_NONCE_BYTES,
 };
-use qsag_agg::zk_hem::v2::pcs::{
-    self, Committed, MAX_STAGE0_SHARES, SplitOpening, Stage0Query,
-};
+use qsag_agg::zk_hem::v2::pcs::{self, Committed, MAX_STAGE0_SHARES, SplitOpening};
 use qsag_agg::zk_hem::v2::protocol::{
     FrontMessages, LookupMessages, Mask, SplitLookupV2Proof, ZkHemV2SplitProof,
     absorb_lookup_roots, cell_weights_to_kernel, column_table, eq_table, layout_of, limb_basis,
@@ -83,6 +81,7 @@ impl From<MpcError> for ProveError {
 
 /// A point where a custodian may deviate, for adversarial tests: the hook receives what
 /// the custodian is about to use or send and may change it.
+#[cfg(any(test, feature = "testing-ephemeral"))]
 pub enum Fault<'a> {
     /// The value table about to be committed (the custodian's shares of `Z`).
     Table(&'a mut Vec<F>),
@@ -91,8 +90,11 @@ pub enum Fault<'a> {
     /// The share of the reduced Stage-0 masked polynomial `g` about to be sent, 40 bytes/coeff.
     Word(&'a mut Vec<u8>),
     /// The Stage-0 leaves about to be opened.
-    Leaves(&'a mut Stage0Query),
+    Leaves(&'a mut qsag_agg::zk_hem::v2::pcs::Stage0Query),
 }
+
+#[cfg(not(any(test, feature = "testing-ephemeral")))]
+type Fault<'a> = core::marker::PhantomData<&'a ()>;
 
 /// Triples and uniform values one custodian's [`prove_party`] consumes for `shape`.
 pub fn prover_demand(shape: &Shape, _profile: Profile) -> Option<(usize, usize)> {
@@ -167,7 +169,10 @@ fn lookup_demand(lookups: &Lookups, ll: &LookupLayout) -> Option<(usize, usize)>
         .sum::<usize>();
     // Second zero-test product and its Fp5 multiplier.
     triples += EXT_MUL_TRIPLES;
-    randoms += LIMBS * (lookups.num_entries() - lookups.num_checked()) + LIMBS * d * (LOOKUP_DEGREE + 1) + ll.blind_cells + LIMBS;
+    randoms += LIMBS * (lookups.num_entries() - lookups.num_checked())
+        + LIMBS * d * (LOOKUP_DEGREE + 1)
+        + ll.blind_cells
+        + LIMBS;
     Some((triples, randoms))
 }
 
@@ -180,7 +185,11 @@ struct MaskShare {
 impl MaskShare {
     fn new(coef: &[SecretScratch<Sh>]) -> Self {
         let part = |pick: fn(&Sh) -> E| {
-            Mask::from_coeffs(coef.iter().map(|row| row.iter().map(pick).collect()).collect())
+            Mask::from_coeffs(
+                coef.iter()
+                    .map(|row| row.iter().map(pick).collect())
+                    .collect(),
+            )
         };
         Self {
             parts: [part(|s| s.v), part(|s| s.m[0]), part(|s| s.m[1])],
@@ -196,10 +205,12 @@ impl MaskShare {
 
     fn round_poly(&self, prefix: &[E]) -> SecretBuffer<Vec<Sh>> {
         let mut parts = self.parts.each_ref().map(|p| p.round_poly(prefix));
-        let out = (0..parts[0].len()).map(|i| Sh {
-            v: parts[0][i],
-            m: [parts[1][i], parts[2][i]],
-        }).collect();
+        let out = (0..parts[0].len())
+            .map(|i| Sh {
+                v: parts[0][i],
+                m: [parts[1][i], parts[2][i]],
+            })
+            .collect();
         for part in &mut parts {
             qsag_asm::volatile_fill(part, E::ZERO);
         }
@@ -291,16 +302,19 @@ fn commit_shares<T: Transport>(
     log_cells: usize,
     table: &[Sb],
     schedule: &Schedule,
-    fault: &mut dyn FnMut(Fault<'_>),
+    _fault: &mut dyn FnMut(Fault<'_>),
 ) -> Committed {
     let mut vals = SecretBuffer(table.iter().map(|s| s.v).collect::<Vec<_>>());
-    fault(Fault::Table(&mut vals));
+    #[cfg(any(test, feature = "testing-ephemeral"))]
+    _fault(Fault::Table(&mut vals));
+    #[cfg(not(any(test, feature = "testing-ephemeral")))]
+    let _ = (&_fault, &mut vals);
     let coeffs = hypercube_to_monomial_coeffs(&vals);
     drop(vals);
 
     let step_vars = schedule.stages[0].step_vars;
     let mask_len = pcs::mask_len(log_cells, step_vars);
-    let mask_poly: Vec<E> = (0..mask_len).map(|_| e.local_ext()).collect();
+    let mask_poly = SecretBuffer((0..mask_len).map(|_| e.local_ext()).collect::<Vec<E>>());
     let mut salt_seed = [0u8; 32];
     for chunk in salt_seed.chunks_mut(8) {
         chunk.copy_from_slice(&e.local_base().to_le_bytes());
@@ -314,7 +328,7 @@ fn commit_shares<T: Transport>(
         log_cells,
         schedule,
         coeffs,
-        mask_poly,
+        mask_poly.into_inner(),
         &salt_seed,
         &tree_nonce,
     );
@@ -359,7 +373,7 @@ fn row_sumcheck<T: Transport>(
     tau: &[E],
     base: [SecretScratch<Sb>; 3],
     mask: &MaskShare,
-    fault: &mut dyn FnMut(Fault<'_>),
+    _fault: &mut dyn FnMut(Fault<'_>),
 ) -> Result<RowOutput, ProveError> {
     let n = tau.len();
     e.check()?;
@@ -386,8 +400,8 @@ fn row_sumcheck<T: Transport>(
             let mut xs = SecretScratch::with_capacity(2 * pairs);
             let mut ys = SecretScratch::with_capacity(2 * pairs);
             for k in 0..pairs {
-                xs.extend([a[2 * k], a[2 * k + 1] - a[2 * k]]);
-                ys.extend([b[2 * k], b[2 * k + 1] - b[2 * k]]);
+                xs.extend_from_slice(&[a[2 * k], a[2 * k + 1] - a[2 * k]]);
+                ys.extend_from_slice(&[b[2 * k], b[2 * k + 1] - b[2 * k]]);
             }
             let products = SecretScratch::from(e.mul(&xs, &ys)?);
             for k in 0..pairs {
@@ -399,8 +413,8 @@ fn row_sumcheck<T: Transport>(
             let mut xs = SecretScratch::with_capacity(2 * pairs);
             let mut ys = SecretScratch::with_capacity(2 * pairs);
             for k in 0..pairs {
-                xs.extend([a[2 * k], a[2 * k + 1] - a[2 * k]]);
-                ys.extend([b[2 * k], b[2 * k + 1] - b[2 * k]]);
+                xs.extend_from_slice(&[a[2 * k], a[2 * k + 1] - a[2 * k]]);
+                ys.extend_from_slice(&[b[2 * k], b[2 * k + 1] - b[2 * k]]);
             }
             let products = SecretScratch::from(e.mul_ext(&xs, &ys)?);
             for k in 0..pairs {
@@ -416,7 +430,10 @@ fn row_sumcheck<T: Transport>(
             h2.scale(l1),
         ]);
         let mut share = masked(&pending[..], mask.round_poly(&point), rho);
-        fault(Fault::RoundShare(&mut share));
+        #[cfg(any(test, feature = "testing-ephemeral"))]
+        _fault(Fault::RoundShare(&mut share));
+        #[cfg(not(any(test, feature = "testing-ephemeral")))]
+        let _ = (&_fault, &mut share);
         e.check()?;
         let poly = e.open_ext(&share)?;
         tr.absorb_fp5_slice(b"ROW_ROUND", &poly);
@@ -594,7 +611,7 @@ fn lookup_front<T: Transport>(
                     if public_form(m, i).is_none() {
                         let column = form(m, i);
                         xs.extend_from_slice(&r[..]);
-                        ys.extend([column; LIMBS]);
+                        ys.extend_from_slice(&[column; LIMBS]);
                     }
                 }
                 inversions.push((i, *r));
@@ -653,11 +670,7 @@ fn lookup_front<T: Transport>(
         *slot = e.random()?;
     }
     let state = commit_shares(e, profile, ll.log_cells, &table, &ll.schedule, &mut |_| {});
-    let (helper_tree_nonces, helper_roots) = exchange_roots(
-        e,
-        &state.tree_nonce(),
-        &state.root(),
-    )?;
+    let (helper_tree_nonces, helper_roots) = exchange_roots(e, &state.tree_nonce(), &state.root())?;
     absorb_lookup_roots(tr, &helper_tree_nonces, &helper_roots);
 
     let tau: Vec<E> = (0..d).map(|_| tr.squeeze_fp5(b"LK_TAU")).collect();
@@ -676,8 +689,8 @@ fn lookup_front<T: Transport>(
         let mut xs = SecretScratch::with_capacity(3 * live);
         let mut ys = SecretScratch::with_capacity(3 * live);
         for k in 0..live {
-            xs.extend([h[2 * k], h[2 * k + 1], h[2 * k + 1] - h[2 * k]]);
-            ys.extend([v[2 * k], v[2 * k + 1], v[2 * k + 1] - v[2 * k]]);
+            xs.extend_from_slice(&[h[2 * k], h[2 * k + 1], h[2 * k + 1] - h[2 * k]]);
+            ys.extend_from_slice(&[v[2 * k], v[2 * k + 1], v[2 * k + 1] - v[2 * k]]);
         }
         let products = SecretScratch::from(e.mul_ext(&xs, &ys)?);
         let mut pending = SecretScratch::from(vec![Sh::ZERO; LOOKUP_DEGREE + 1]);
@@ -909,13 +922,17 @@ fn open_table<T: Transport>(
         .zip(&fold_st.kernel)
         .fold(E::ZERO, |acc, (&r, &k)| acc + r * k);
     let mut mask_claim = E::ZERO;
-    for (from, bytes) in e.exchange_guarded(own_mask_claim.to_le_bytes().to_vec())?.iter().enumerate() {
+    for (from, bytes) in e
+        .exchange_guarded(own_mask_claim.to_le_bytes().to_vec())?
+        .iter()
+        .enumerate()
+    {
         let chunk: [u8; EXT_BYTES] = bytes
             .as_slice()
             .try_into()
             .map_err(|_| ProveError::BadPeerMessage { from })?;
-        mask_claim += E::from_le_bytes_canonical(chunk)
-            .ok_or(ProveError::BadPeerMessage { from })?;
+        mask_claim +=
+            E::from_le_bytes_canonical(chunk).ok_or(ProveError::BadPeerMessage { from })?;
     }
     tr.absorb_fp5_slice(b"MASK_CLAIM", &[mask_claim]);
     let beta_r = tr.squeeze_fp5_nonzero(b"MASK_BETA");
@@ -928,7 +945,10 @@ fn open_table<T: Transport>(
         word_payload.extend_from_slice(&u.to_le_bytes());
     }
     drop(poly_sh);
+    #[cfg(any(test, feature = "testing-ephemeral"))]
     fault(Fault::Word(&mut word_payload));
+    #[cfg(not(any(test, feature = "testing-ephemeral")))]
+    let _ = (&fault, &mut word_payload);
     let mut g = vec![E::ZERO; mask_len];
     for (from, bytes) in e.exchange_guarded(word_payload)?.iter().enumerate() {
         if bytes.len() != EXT_BYTES * mask_len {
@@ -936,8 +956,7 @@ fn open_table<T: Transport>(
         }
         for (slot, chunk) in g.iter_mut().zip(bytes.chunks_exact(EXT_BYTES)) {
             let arr: [u8; EXT_BYTES] = chunk.try_into().unwrap();
-            *slot += E::from_le_bytes_canonical(arr)
-                .ok_or(ProveError::BadPeerMessage { from })?;
+            *slot += E::from_le_bytes_canonical(arr).ok_or(ProveError::BadPeerMessage { from })?;
         }
     }
 
@@ -958,7 +977,10 @@ fn open_table<T: Transport>(
         tr,
         &mut |idx| {
             let mut own = pcs::stage0_answer(state, idx);
+            #[cfg(any(test, feature = "testing-ephemeral"))]
             fault(Fault::Leaves(&mut own));
+            #[cfg(not(any(test, feature = "testing-ephemeral")))]
+            let _ = (&fault, &mut own);
             let mut encoded = Vec::new();
             pcs::push_stage0_query(&mut encoded, &own);
             match e.exchange_guarded(encoded) {
@@ -997,11 +1019,24 @@ pub fn prove_party<T: Transport>(
     profile: Profile,
     z: Vec<Sb>,
 ) -> Result<ZkHemV2SplitProof, ProveError> {
-    prove_party_with_fault(e, shape, public_inputs, statement, profile, z, &mut |_| {})
+    prove_with_hook(e, shape, public_inputs, statement, profile, z, &mut |_| {})
 }
 
 /// [`prove_party`] with a hook at each [`Fault`] point.
+#[cfg(any(test, feature = "testing-ephemeral"))]
 pub fn prove_party_with_fault<T: Transport>(
+    e: &mut Engine<T>,
+    shape: &Shape,
+    public_inputs: &[F],
+    statement: &[u8],
+    profile: Profile,
+    z: Vec<Sb>,
+    fault: &mut dyn FnMut(Fault<'_>),
+) -> Result<ZkHemV2SplitProof, ProveError> {
+    prove_with_hook(e, shape, public_inputs, statement, profile, z, fault)
+}
+
+fn prove_with_hook<T: Transport>(
     e: &mut Engine<T>,
     shape: &Shape,
     public_inputs: &[F],
@@ -1022,7 +1057,16 @@ pub fn prove_party_with_fault<T: Transport>(
     if z.len() != shape.num_vars || public_inputs.len() != shape.num_public {
         return Err(ProveError::Malformed);
     }
-    let res = prove_party_validated(e, shape, &layout, public_inputs, statement, profile, &mut z, fault);
+    let res = prove_party_validated(
+        e,
+        shape,
+        &layout,
+        public_inputs,
+        statement,
+        profile,
+        &mut z,
+        fault,
+    );
     if res.is_err() {
         e.poison();
     }
@@ -1090,16 +1134,12 @@ fn prove_party_validated<T: Transport>(
         &layout.schedule,
         fault,
     );
-    let (tree_nonces, roots) = exchange_roots(
-        e,
-        &state.tree_nonce(),
-        &state.root(),
-    )?;
+    let (tree_nonces, roots) = exchange_roots(e, &state.tree_nonce(), &state.root())?;
 
     let mut tr = split_transcript(
         profile,
         shape,
-        &layout,
+        layout,
         statement,
         public_inputs,
         &tree_nonces,
@@ -1135,20 +1175,14 @@ fn prove_party_validated<T: Transport>(
             out.gamma,
         );
     }
-    let (col_mask_sum, col_rounds) = column_sumcheck(
-        e,
-        &mut tr,
-        matrix,
-        &z_var,
-        &col_mask,
-    )?;
+    let (col_mask_sum, col_rounds) = column_sumcheck(e, &mut tr, matrix, &z_var, &col_mask)?;
     drop(z_var);
 
     // Verifier front-end replay to obtain the exact cell weights & claimed values.
     let mut tr = split_transcript(
         profile,
         shape,
-        &layout,
+        layout,
         statement,
         public_inputs,
         &tree_nonces,
@@ -1156,7 +1190,7 @@ fn prove_party_validated<T: Transport>(
     );
     let front = replay_front(
         shape,
-        &layout,
+        layout,
         public_inputs,
         &mut tr,
         &FrontMessages {
@@ -1656,7 +1690,13 @@ pub(super) mod tests {
                     |_, _| {},
                 );
                 let proof = out[0].0.clone().unwrap();
-                assert!(verify_split(&shape, &[f(35)], b"stmt", proof.profile, &proof));
+                assert!(verify_split(
+                    &shape,
+                    &[f(35)],
+                    b"stmt",
+                    proof.profile,
+                    &proof
+                ));
                 (proof, pattern(out[0].1))
             })
             .collect();
@@ -1673,8 +1713,8 @@ pub(super) mod tests {
         let profile = Profile::default();
         let (triples, randoms) = prover_demand(&shape, profile).unwrap();
         let mut dealer = super::super::engine::Dealer::new(2, &[0xE7; 32]);
-        let shared: Vec<Vec<Sb>> = {
-            let mut per_party = vec![Vec::with_capacity(assignment.len()); 2];
+        let shared = {
+            let mut per_party = qsag_core::wipe::secret_vecs_with_capacity(2, assignment.len());
             for &val in &assignment {
                 let sh = dealer.share(val);
                 per_party[0].push(sh[0]);
