@@ -16,6 +16,7 @@
 //! Earlier codec versions are rejected rather than reinterpreted.
 
 use super::*;
+use qsag_verified::StatefulVelocityGuard;
 
 const DOMAIN: &[u8] = b"QSAG.POLICY.DURABLE_LEDGER.V6";
 
@@ -80,6 +81,32 @@ impl Reader<'_> {
 }
 
 impl PolicySignerGuardShare {
+    fn enrolled_checkpoint_key(&self, ledger: &[u8; 32]) -> SecretBuffer<[u8; 32]> {
+        SecretBuffer(cshake256_framed_32(
+            b"QSAG.POLICY.GUARD.CHECKPOINT.KEY.V1",
+            &[&self.local_salt_seed, ledger],
+        ))
+    }
+
+    /// Authenticate this ledger's checkpoint with the enrolled guard's private key.
+    pub fn export_enrolled_checkpoint(&self, ledger: &[u8; 32], generation: u64) -> Vec<u8> {
+        self.export_durable_checkpoint(&self.enrolled_checkpoint_key(ledger), generation)
+    }
+
+    /// Restore a checkpoint authenticated by this guard for this ledger.
+    pub fn restore_enrolled_checkpoint(
+        &mut self,
+        ledger: &[u8; 32],
+        bytes: &[u8],
+        generation: u64,
+    ) -> Result<u64, PolicyGuardError> {
+        self.restore_from_durable_checkpoint(
+            bytes,
+            &self.enrolled_checkpoint_key(ledger),
+            generation,
+        )
+    }
+
     /// Export authenticated ledger bytes. Generation is clamped to the largest
     /// generation already exported/restored by this handle. Persist the result
     /// atomically with an external monotonic fence before releasing output.
@@ -653,12 +680,8 @@ impl SharedWindowSpendLedger {
             .as_ref()
             .ok_or(PolicyGuardError::InvalidCheckpoint)?
             .cap_units();
-        let mut verified = qsag_verified::StatefulVelocityGuard::new_window(
-            window,
-            cap,
-            self.policy_digest,
-            self.policy_digest,
-        );
+        let mut verified =
+            StatefulVelocityGuard::new_window(window, cap, self.policy_digest, self.policy_digest);
         if generation != 0 {
             let (next, result) = verified.authorize_spend(qsag_verified::VelocitySpendRequest {
                 window_id: window,
