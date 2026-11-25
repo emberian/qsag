@@ -50,6 +50,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use qsag_verified::{VerifiedBeltQuorumGuard, VerifiedWotsC256Guard};
 
 #[cfg(any(test, feature = "testing-ephemeral"))]
 use qsag_core::belt_latch::MemoryWal;
@@ -302,10 +303,13 @@ pub fn message_hash(pk: &QuorumPublicKey, leaf: u64, msg: &[u8]) -> Node {
 /// The 128 base-4 digits selected by `counter`, or `None` if they do not sum to
 /// [`WOTS_TARGET_SUM`]. Delegates codeword validation to `qsag_verified::VerifiedWotsC256Guard`.
 pub fn digits_at(msg_hash: &Node, counter: u32) -> Option<Vec<u8>> {
+    Some(codeword_at(msg_hash, counter)?.digits().to_vec())
+}
+
+fn codeword_at(msg_hash: &Node, counter: u32) -> Option<VerifiedWotsC256Guard> {
     let digest = h32(TAG_DIGEST, &[msg_hash, &counter.to_be_bytes()]);
-    qsag_verified::VerifiedWotsC256Guard::from_digest_verified(digest)
-        .ok()
-        .map(|guard| guard.digits().to_vec())
+    let guard = VerifiedWotsC256Guard::from_digest_verified(digest).ok()?;
+    (guard.verified_sum() == WOTS_TARGET_SUM && guard.validated_digest() == digest).then_some(guard)
 }
 
 /// Smallest counter whose digits reach the target sum. The counter is public and the search
@@ -380,25 +384,23 @@ pub fn quorum_jorts_verify(pk: &QuorumPublicKey, msg: &[u8], sig: &QuorumJortsSi
         return false;
     }
     let msg_hash = message_hash(pk, sig.leaf, msg);
-    let Some(digits) = digits_at(&msg_hash, sig.counter) else {
+    let Some(codeword) = codeword_at(&msg_hash, sig.counter) else {
         return false;
     };
-    let ends: Vec<Node> = sig
-        .nodes
-        .iter()
-        .zip(&digits)
-        .enumerate()
-        .map(|(chain, (node, &digit))| {
-            chain_walk(
-                &pk.pk_seed,
-                sig.leaf,
-                chain,
-                usize::from(digit),
-                WOTS_STEPS,
-                node,
-            )
-        })
-        .collect();
+    let mut ends = Vec::with_capacity(WOTS_CHAINS);
+    for (chain, node) in sig.nodes.iter().enumerate() {
+        let Some(digit) = codeword.digit_at(chain) else {
+            return false;
+        };
+        ends.push(chain_walk(
+            &pk.pk_seed,
+            sig.leaf,
+            chain,
+            usize::from(digit),
+            WOTS_STEPS,
+            node,
+        ));
+    }
     let leaf_node = leaf_hash(&pk.pk_seed, sig.leaf, &ends);
     qsag_verified::ct_eq_bytes32(
         &root_from_path(&pk.pk_seed, sig.leaf, &leaf_node, &sig.auth_path),
@@ -1614,7 +1616,7 @@ fn build_verified_belt_guard(
     max_window: u64,
     next_epoch: u64,
     in_flight: Option<&BeltLatchRecord>,
-) -> Result<(qsag_verified::VerifiedBeltQuorumGuard, SecretWalKey), QuorumError> {
+) -> Result<(VerifiedBeltQuorumGuard, SecretWalKey), QuorumError> {
     let guard_key_commit = belt_guard_key_commit(pk, party);
     let mut custodian_keys = [[0u8; 32]; 64];
     for (i, slot) in custodian_keys.iter_mut().take(cfg.n).enumerate() {
@@ -1628,7 +1630,7 @@ fn build_verified_belt_guard(
         Some(prev) => prev.epoch,
         None => next_epoch,
     };
-    let guard_res = qsag_verified::VerifiedBeltQuorumGuard::new_validated(
+    let guard_res = VerifiedBeltQuorumGuard::new_validated(
         cfg.n as u32,
         cfg.t as u32,
         cfg.f as u32,
@@ -1656,9 +1658,14 @@ fn build_verified_belt_guard(
             &prev_receipt,
         );
         let (next_guard, res) =
-            guard.propose_or_retry_epoch(prev.epoch, prev_binding, prev_receipt, prev_tag);
+            guard.step(qsag_verified::BeltQuorumStepInput::ProposeOrRetryEpoch {
+                proposed_epoch: prev.epoch,
+                msg_tag: prev_binding,
+                receipt_digest: prev_receipt,
+                receipt_tag: prev_tag,
+            });
         guard = next_guard;
-        if res.is_err() {
+        if !matches!(res, Ok(qsag_verified::BeltQuorumStepOutput::EpochBound)) {
             return Err(QuorumError::Latch(BeltLatchError::WalPoisoned));
         }
     }
@@ -1676,7 +1683,7 @@ pub struct ShamirCustodian<W: DurableWal> {
     latch: BeltLatch<W>,
     leaves: SecretLeaves,
     max_window: u64,
-    verified_guard: Option<qsag_verified::VerifiedBeltQuorumGuard>,
+    verified_guard: Option<VerifiedBeltQuorumGuard>,
     wal_receipt_key: SecretWalKey,
     last_authorized_grant: Option<qsag_verified::BeltAuthorizationGrant>,
     guard_poisoned: bool,
@@ -1732,7 +1739,10 @@ impl<W: DurableWal> ShamirCustodian<W> {
     }
 
     pub fn next_epoch(&self) -> u64 {
-        self.latch.next_epoch()
+        let durable = self.latch.next_epoch();
+        self.verified_guard
+            .as_ref()
+            .map_or(durable, |guard| durable.max(guard.next_epoch()))
     }
 
     /// Storage of this custodian in bytes of share material.
@@ -1929,13 +1939,17 @@ impl<W: DurableWal> ShamirCustodian<W> {
     /// the certificate's leaf and binding, a valid MAC for this custodian) and require a
     /// quorum of them.
     pub fn verify_certificate(&self, cert: &LatchCertificate) -> Result<usize, QuorumError> {
+        let guard = self
+            .verified_guard
+            .as_ref()
+            .ok_or(QuorumError::Latch(BeltLatchError::WalPoisoned))?;
         let valid_acks = self.verified_certificate_acks(cert);
         let valid = valid_acks.len();
         // The second condition restates the configuration invariant at the point of use.
-        if valid < self.cfg.q || 2 * valid <= self.cfg.n + self.cfg.f {
+        if valid < guard.q() as usize || 2 * valid <= guard.n() as usize + self.cfg.f {
             return Err(QuorumError::CertificateTooSmall {
                 valid,
-                required: self.cfg.q,
+                required: guard.q() as usize,
             });
         }
         Ok(valid)
@@ -2019,6 +2033,8 @@ impl<W: DurableWal> ShamirCustodian<W> {
             return Ok(());
         }
 
+        let certified = guard.ack_bitmap().count_ones() as usize;
+        let counted = guard.ack_count() as usize;
         let (next_guard, auth_res) = guard.authorize_shares(record.leaf, binding);
         let poisoned = next_guard.is_poisoned();
         self.verified_guard = Some(next_guard);
@@ -2027,10 +2043,12 @@ impl<W: DurableWal> ShamirCustodian<W> {
             self.last_authorized_grant = None;
         }
         let grant = auth_res.map_err(|_| QuorumError::CertificateTooSmall {
-            valid: wire_acks.len(),
+            valid: certified,
             required: self.cfg.q,
         })?;
-        if grant.authorized_epoch != record.leaf
+        if certified != counted
+            || grant.certified_acks as usize != certified
+            || grant.authorized_epoch != record.leaf
             || !qsag_verified::ct_eq_bytes32(&grant.msg_tag, &binding)
             || (grant.certified_acks as usize) < self.cfg.q
         {

@@ -8,20 +8,17 @@
 //! `qsag_agg::ValidatorSignature`, `qsag_agg::verify_individual_signature`, and untrusted public
 //! `Hem` WHIR multi-signature aggregation under `HemQuintic128` (`QSAGHQM2`, `[DKT26]` `< 2^{-128}` QROM).
 //!
-//! Three custody architectures are provided:
-//! 1. **Mode QS-A ([`HemCommitteePartitionedQuorum`]):** Partitions active XMSS leaves across all
-//!    `binom(n, t)` `t`-custodian committees with `t`-of-`t` additive `Goldilocks` shares,
-//!    2-round pairwise echo MACs, and monotone per-committee latches.
-//! 2. **Mode QS-B ([`HemDynamicShamirQuorum`]):** Global XMSS tree with `(t, n)` Shamir shares
+//! **Dynamic Shamir custody ([`HemDynamicShamirQuorum`]):** Global XMSS tree with `(t, n)` Shamir shares
 //!    authenticated under a shared `GoldilocksExt2` SPDZ MAC key, BFT/honest-intersection
 //!    [`EpochLatchCertificate`] gating (`2q > n + (t - 1)`), zero-constant proactive refresh
 //!    (`Π_refresh`), and 2-round committed + HVZK degree-`< t'` + SPDZ `MacCheck` dynamic
 //!    `(t, n) -> (t', n')` quorum-switching (`Π_reshare`) preserving the exact 65-byte validator
 //!    public key and monotone leaf high-water mark.
-//! 3. **Seed-Level SPDZ MPC ([`HemSpdzSeedQuorum`]):** 100% dealerless bit-shared Goldilocks DKG,
+//! **Seed-Level SPDZ MPC ([`HemSpdzSeedQuorum`]):** 100% dealerless bit-shared Goldilocks DKG,
 //!    refresh, and `(t, n) -> (t', n')` seed resharing backed by native `[Goldilocks; 4]` SPDZ
 //!    MPC (`0` intermediate A2B conversions).
 
+use crate::wire_channel::WireTransport;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -54,8 +51,7 @@ pub use qsag_core::poseidon2_mpc::{
 };
 use qsag_core::preprocessing::{
     OtMesh, PartyPrivateRng, commit_and_open_spdz_goldilocks_batch_quorum,
-    open_and_check_degree_ext2, open_and_check_degree_goldilocks,
-    validate_all_eval_points_goldilocks,
+    open_and_check_degree_ext2, validate_all_eval_points_goldilocks,
 };
 use qsag_core::sponge::keccak::{cshake256_32, encode_multi_frame};
 use qsag_core::sponge::poseidon2::{POSEIDON2_CONST_IV, poseidon2_hash32};
@@ -64,9 +60,6 @@ use qsag_core::wipe::{
     SecretBuffer, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_ext2, wipe_goldilocks,
 };
 
-use crate::hash::{mac32, mac32_verify};
-
-const HEM_QSA_ECHO_TAG: &[u8] = b"QSAG.HEM.QSA.ECHO/v1";
 const HEM_QSB_SUBSHARE_COMMIT_TAG: &[u8] = b"QSAG.HEM.QSB.COMMIT/v1";
 const HEM_QSB_CHALLENGE_TAG: &[u8] = b"QSAG.HEM.QSB.CHAL/v1";
 const HEM_PUB_DIR_MAGIC: &[u8; 8] = b"QSAGHDIR";
@@ -140,7 +133,7 @@ pub enum HemQuorumError {
     ShareInvalidated {
         party: usize,
     },
-    UnknownCommittee,
+    Transport(crate::wire_channel::TransportError),
     NotEnoughSigners {
         have: usize,
         need: usize,
@@ -151,10 +144,6 @@ pub enum HemQuorumError {
     PartyOutOfRange {
         party: usize,
         n: usize,
-    },
-    EchoMacInvalid {
-        from: usize,
-        to: usize,
     },
     CommitmentMismatch {
         dealer: usize,
@@ -169,6 +158,7 @@ pub enum HemQuorumError {
     },
     PrfCommitmentMismatch,
     LatchRefused,
+    LocalChannelFailed,
     LeafExhausted,
     TswGrindExhausted,
     SignatureSelfCheckFailed,
@@ -524,432 +514,6 @@ fn derive_leaf_prf_secret_clear(
     hem_poseidon2_compress12_ff(sk_prf, pk_seed, tweak)
 }
 
-// ============================================================================
-// 1. Mode QS-A: `HemCommitteePartitionedQuorum` (`binom(n, t)` Subtrees)
-// ============================================================================
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CommitteeRange {
-    members: Vec<usize>,
-    leaf_start: usize,
-    leaf_end: usize,
-}
-
-struct HemQsaCustodian {
-    party_id: usize,
-    pair_keys: Vec<[u8; 32]>,
-    committee_next_leaf: Vec<usize>,
-    committee_in_flight: Vec<Option<(usize, [u8; 32])>>,
-    /// Indexed by `[leaf_idx]`: `Some` iff `party_id` belongs to the committee owning `leaf_idx`.
-    leaf_prf_shares: Vec<Option<HemDigest4>>,
-    leaf_chain_shares: Vec<Option<Vec<[HemDigest4; HEM_WOTS_MAX_STEP]>>>,
-}
-
-impl fmt::Debug for HemQsaCustodian {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HemQsaCustodian")
-            .field("party_id", &self.party_id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for HemQsaCustodian {
-    fn drop(&mut self) {
-        for k in &mut self.pair_keys {
-            wipe_bytes32(k);
-        }
-        for prf in self.leaf_prf_shares.iter_mut().flatten() {
-            wipe_goldilocks(prf);
-        }
-        for chains in self.leaf_chain_shares.iter_mut().flatten() {
-            for steps in chains.iter_mut() {
-                for st in steps.iter_mut() {
-                    wipe_goldilocks(st);
-                }
-            }
-        }
-    }
-}
-
-/// Mode `QS-A` (`CommitteePartitionedJorts` over `Hem` `JortsPoseidon2` `w=4, chains=128, sum=192`):
-/// partitions the XMSS leaves into disjoint committee ranges, shared `t`-of-`t` additively over
-/// `Goldilocks` with pairwise echo-MAC confirmation before any chain share opens.
-pub struct HemCommitteePartitionedQuorum {
-    t: usize,
-    n: usize,
-    pk: HemJortsPublicKey,
-    leaves: Vec<HemDigest4>,
-    endpoints: Vec<[HemDigest4; HEM_WOTS_CHAINS]>,
-    prf_commits: Vec<HemDigest4>,
-    committees: Vec<CommitteeRange>,
-    custodians: Vec<HemQsaCustodian>,
-}
-
-impl fmt::Debug for HemCommitteePartitionedQuorum {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HemCommitteePartitionedQuorum")
-            .field("t", &self.t)
-            .field("n", &self.n)
-            .field("pk", &self.pk)
-            .finish_non_exhaustive()
-    }
-}
-
-fn enumerate_combinations(n: usize, t: usize) -> Vec<Vec<usize>> {
-    let mut out = Vec::new();
-    let mut cur = Vec::with_capacity(t);
-    fn rec(start: usize, n: usize, t: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
-        if cur.len() == t {
-            out.push(cur.clone());
-            return;
-        }
-        let rem = t - cur.len();
-        if start + rem > n {
-            return;
-        }
-        for i in start..=(n - rem) {
-            cur.push(i);
-            rec(i + 1, n, t, cur, out);
-            cur.pop();
-        }
-    }
-    rec(0, n, t, &mut cur, &mut out);
-    out
-}
-
-impl HemCommitteePartitionedQuorum {
-    /// Stage a `t`-of-`n` committee-partitioned `Hem` `JortsPoseidon2` quorum from ceremony entropy.
-    pub fn stage(
-        ceremony_seed: [u8; 32],
-        t: usize,
-        n: usize,
-        leaves_per_committee: usize,
-    ) -> Result<Self, HemQuorumError> {
-        if t < 2 || t > n || n > 12 {
-            return Err(HemQuorumError::InvalidQuorum { t, n });
-        }
-        let combos = enumerate_combinations(n, t);
-        let active_leaves = combos
-            .len()
-            .checked_mul(leaves_per_committee)
-            .ok_or(HemQuorumError::InvalidActiveLeaves { active_leaves: 0 })?;
-        if leaves_per_committee == 0 || active_leaves > HEM_JORTS_MAX_LEAVES {
-            return Err(HemQuorumError::InvalidActiveLeaves { active_leaves });
-        }
-
-        let mut rng = PartyPrivateRng::from_seed(
-            cshake256_32(b"QSAG.HEM.QSA.RNG/v1", &ceremony_seed),
-            b"QSAG.HEM.QSA.RNG.STREAM/v1",
-        );
-        let dkg_pk_seed = cshake256_32(b"QSAG.HEM.QSA.PKSEED/v1", &ceremony_seed);
-        let mut sk_seed_bytes = cshake256_32(b"QSAG.HEM.QSA.SKSEED/v1", &ceremony_seed);
-        let mut sk_prf_bytes = cshake256_32(b"QSAG.HEM.QSA.SKPRF/v1", &ceremony_seed);
-
-        let pk_seed = hem_pk_seed_from_bytes32(&dkg_pk_seed);
-        let mut sk_seed =
-            hem_expand_secret_bytes32_clear(&sk_seed_bytes, pk_seed, HEM_DOMAIN_SK_SEED_EXPAND);
-        let mut sk_prf =
-            hem_expand_secret_bytes32_clear(&sk_prf_bytes, pk_seed, HEM_DOMAIN_SK_PRF_EXPAND);
-        wipe_bytes32(&mut sk_seed_bytes);
-        wipe_bytes32(&mut sk_prf_bytes);
-
-        let mut pair_matrix = vec![vec![[0u8; 32]; n]; n];
-        for i in 0..n {
-            let (upper, lower) = pair_matrix.split_at_mut(i + 1);
-            let row_i = &mut upper[i];
-            for (offset, row_j) in lower.iter_mut().enumerate() {
-                let k = rng.next_bytes32();
-                row_i[i + 1 + offset] = k;
-                row_j[i] = k;
-            }
-        }
-
-        let mut committees = Vec::with_capacity(combos.len());
-        for (c_idx, members) in combos.into_iter().enumerate() {
-            committees.push(CommitteeRange {
-                members,
-                leaf_start: c_idx * leaves_per_committee,
-                leaf_end: (c_idx + 1) * leaves_per_committee,
-            });
-        }
-
-        let mut custodians: Vec<HemQsaCustodian> = (0..n)
-            .map(|p| HemQsaCustodian {
-                party_id: p,
-                pair_keys: pair_matrix[p].clone(),
-                committee_next_leaf: committees.iter().map(|c| c.leaf_start).collect(),
-                committee_in_flight: vec![None; committees.len()],
-                leaf_prf_shares: vec![None; active_leaves],
-                leaf_chain_shares: vec![None; active_leaves],
-            })
-            .collect();
-        for row in &mut pair_matrix {
-            for k in row {
-                wipe_bytes32(k);
-            }
-        }
-
-        let mut leaves = Vec::with_capacity(HEM_JORTS_MAX_LEAVES);
-        let mut endpoints = Vec::with_capacity(active_leaves);
-        let mut prf_commits = Vec::with_capacity(active_leaves);
-
-        for (c_idx, comm) in committees.iter().enumerate() {
-            let _ = c_idx;
-            for kp in comm.leaf_start..comm.leaf_end {
-                let mut prf_secret = derive_leaf_prf_secret_clear(sk_prf, pk_seed, kp as u32);
-                prf_commits.push(hem_prf_check_digest_clear(prf_secret, pk_seed));
-
-                // Split `prf_secret` into `t` additive `Goldilocks` shares
-                let mut prf_rem = SecretBuffer(prf_secret);
-                for &member in &comm.members[..t - 1] {
-                    let sh = SecretBuffer(core::array::from_fn(|_| rng.next_goldilocks()));
-                    for l in 0..4 {
-                        prf_rem[l] -= sh[l];
-                    }
-                    custodians[member].leaf_prf_shares[kp] = Some(*sh);
-                }
-                custodians[comm.members[t - 1]].leaf_prf_shares[kp] = Some(*prf_rem);
-                drop(prf_rem);
-                wipe_goldilocks(&mut prf_secret);
-
-                let mut kp_endpoints = [[Goldilocks::ZERO; 4]; HEM_WOTS_CHAINS];
-                let mut per_member_chains: Vec<Vec<[HemDigest4; HEM_WOTS_MAX_STEP]>> = (0..t)
-                    .map(|_| Vec::with_capacity(HEM_WOTS_CHAINS))
-                    .collect();
-
-                for (r, ep_slot) in kp_endpoints.iter_mut().enumerate().take(HEM_WOTS_CHAINS) {
-                    let y0 = SecretBuffer(hem_wots_base_secret_clear(
-                        sk_seed, pk_seed, 0, 0, kp as u32, r as u32,
-                    ));
-                    let y1 = SecretBuffer(hem_wots_step_hash_injective(
-                        pk_seed, *y0, 0, 0, kp as u32, r as u32, 0,
-                    ));
-                    let y2 = SecretBuffer(hem_wots_step_hash_injective(
-                        pk_seed, *y1, 0, 0, kp as u32, r as u32, 1,
-                    ));
-                    let y3 =
-                        hem_wots_step_hash_injective(pk_seed, *y2, 0, 0, kp as u32, r as u32, 2);
-                    *ep_slot = y3;
-                    let secret_states = SecretBuffer([*y0, *y1, *y2]);
-                    drop((y0, y1, y2));
-
-                    let mut member_steps =
-                        SecretBuffer(vec![[[Goldilocks::ZERO; 4]; HEM_WOTS_MAX_STEP]; t]);
-                    for step in 0..HEM_WOTS_MAX_STEP {
-                        let mut rem = SecretBuffer(secret_states[step]);
-                        for m_slot in member_steps.iter_mut().take(t - 1) {
-                            let sh = SecretBuffer(core::array::from_fn(|_| rng.next_goldilocks()));
-                            for l in 0..4 {
-                                rem[l] -= sh[l];
-                            }
-                            m_slot[step] = *sh;
-                        }
-                        member_steps[t - 1][step] = *rem;
-                    }
-                    for m_idx in 0..t {
-                        per_member_chains[m_idx].push(member_steps[m_idx]);
-                    }
-                }
-
-                for (m_idx, &party) in comm.members.iter().enumerate() {
-                    custodians[party].leaf_chain_shares[kp] =
-                        Some(core::mem::take(&mut per_member_chains[m_idx]));
-                }
-                leaves.push(hem_compress_wots_endpoints_sponge(
-                    pk_seed,
-                    0,
-                    0,
-                    kp as u32,
-                    &kp_endpoints,
-                ));
-                endpoints.push(kp_endpoints);
-            }
-        }
-        wipe_goldilocks(&mut sk_seed);
-        wipe_goldilocks(&mut sk_prf);
-
-        for kp in active_leaves..HEM_JORTS_MAX_LEAVES {
-            leaves.push(hem_unassigned_leaf_digest(pk_seed, kp as u32));
-        }
-        let pk_root = hem_merkle_root_from_leaves(pk_seed, &leaves)
-            .ok_or(HemQuorumError::InvalidActiveLeaves { active_leaves })?;
-
-        Ok(Self {
-            t,
-            n,
-            pk: HemJortsPublicKey { pk_seed, pk_root },
-            leaves,
-            endpoints,
-            prf_commits,
-            committees,
-            custodians,
-        })
-    }
-
-    #[inline]
-    pub fn public_key(&self) -> HemJortsPublicKey {
-        self.pk
-    }
-
-    /// Sign `msg` using the unique `t`-member committee matching `signers`, emitting an exact
-    /// 4,328-byte [`HemJortsSignature`].
-    pub fn sign_with_committee(
-        &mut self,
-        signers: &[usize],
-        msg: &[u8],
-    ) -> Result<(u64, HemJortsSignature), HemQuorumError> {
-        validate_party_subset(signers, self.t, self.n)?;
-        if signers.len() != self.t {
-            return Err(HemQuorumError::UnknownCommittee);
-        }
-        let mut sorted = signers.to_vec();
-        sorted.sort_unstable();
-        let comm_idx = self
-            .committees
-            .iter()
-            .position(|c| c.members == sorted)
-            .ok_or(HemQuorumError::UnknownCommittee)?;
-        let comm = &self.committees[comm_idx];
-
-        let leaf_idx = self.custodians[sorted[0]].committee_next_leaf[comm_idx];
-        if leaf_idx >= comm.leaf_end {
-            return Err(HemQuorumError::LeafExhausted);
-        }
-        for &p in &sorted[1..] {
-            if self.custodians[p].committee_next_leaf[comm_idx] != leaf_idx {
-                return Err(HemQuorumError::LatchRefused);
-            }
-        }
-
-        let (mu_bytes, mu) = hem_compute_message_mu(&self.pk, msg);
-        let leaf_le = (leaf_idx as u64).to_le_bytes();
-        let binding = encode_multi_frame(&[&self.pk.to_bytes(), &leaf_le, &mu_bytes]);
-
-        // 2-round pairwise echo MAC verification across all `t` committee members before latching
-        let mut echoes = Vec::with_capacity(self.t * self.t);
-        for &from in &sorted {
-            for &to in &sorted {
-                if from != to {
-                    let tag = mac32(
-                        &self.custodians[from].pair_keys[to],
-                        HEM_QSA_ECHO_TAG,
-                        &[&binding],
-                    );
-                    echoes.push((from, to, tag));
-                }
-            }
-        }
-        for (from, to, tag) in &echoes {
-            if !mac32_verify(
-                &self.custodians[*to].pair_keys[*from],
-                HEM_QSA_ECHO_TAG,
-                &[&binding],
-                tag,
-            ) {
-                return Err(HemQuorumError::EchoMacInvalid {
-                    from: *from,
-                    to: *to,
-                });
-            }
-        }
-
-        // Advance every committee member's monotone latch strictly before opening any secret share
-        for &p in &sorted {
-            self.custodians[p].committee_in_flight[comm_idx] = Some((leaf_idx, mu_bytes));
-            self.custodians[p].committee_next_leaf[comm_idx] = leaf_idx + 1;
-        }
-
-        let mut prf_leaf = [Goldilocks::ZERO; 4];
-        for &p in &sorted {
-            let sh = self.custodians[p].leaf_prf_shares[leaf_idx]
-                .ok_or(HemQuorumError::ShareInvalidated { party: p })?;
-            for l in 0..4 {
-                prf_leaf[l] += sh[l];
-            }
-        }
-        if hem_prf_check_digest_clear(prf_leaf, self.pk.pk_seed) != self.prf_commits[leaf_idx] {
-            wipe_goldilocks(&mut prf_leaf);
-            return Err(HemQuorumError::PrfCommitmentMismatch);
-        }
-
-        let r_rand = hem_derive_r_rand_clear(prf_leaf, self.pk.pk_seed, mu, leaf_idx as u64);
-        wipe_goldilocks(&mut prf_leaf);
-
-        let (tsw_ctr, digits) = hem_grind_stateful_tsw_digits(
-            self.pk.pk_seed,
-            self.pk.pk_root,
-            r_rand,
-            mu,
-            leaf_idx as u32,
-            100_000,
-        )
-        .ok_or(HemQuorumError::TswGrindExhausted)?;
-
-        let mut wots_chains = Vec::with_capacity(HEM_WOTS_CHAINS);
-        for (r, &d) in digits.iter().enumerate().take(HEM_WOTS_CHAINS) {
-            let d_usize = d as usize;
-            if d_usize == HEM_WOTS_MAX_STEP {
-                wots_chains.push(self.endpoints[leaf_idx][r]);
-            } else {
-                let mut acc = [Goldilocks::ZERO; 4];
-                for &p in &sorted {
-                    let chains = self.custodians[p].leaf_chain_shares[leaf_idx]
-                        .as_ref()
-                        .ok_or(HemQuorumError::ShareInvalidated { party: p })?;
-                    for l in 0..4 {
-                        acc[l] += chains[r][d_usize][l];
-                    }
-                }
-                let mut cur = acc;
-                for step in (d as u32)..(HEM_WOTS_MAX_STEP as u32) {
-                    cur = hem_wots_step_hash_injective(
-                        self.pk.pk_seed,
-                        cur,
-                        0,
-                        0,
-                        leaf_idx as u32,
-                        r as u32,
-                        step,
-                    );
-                }
-                if cur != self.endpoints[leaf_idx][r] {
-                    return Err(HemQuorumError::EndpointVerificationFailed { chain: r });
-                }
-                wots_chains.push(acc);
-            }
-        }
-
-        // Burn spent leaf shares in RAM immediately after opening
-        for &p in &sorted {
-            if let Some(mut prf_sh) = self.custodians[p].leaf_prf_shares[leaf_idx].take() {
-                wipe_goldilocks(&mut prf_sh);
-            }
-            if let Some(mut ch_sh) = self.custodians[p].leaf_chain_shares[leaf_idx].take() {
-                for steps in &mut ch_sh {
-                    for st in steps {
-                        wipe_goldilocks(st);
-                    }
-                }
-            }
-        }
-
-        let (merkle_path, _) = hem_merkle_auth_path(self.pk.pk_seed, &self.leaves, leaf_idx)
-            .ok_or(HemQuorumError::SignatureSelfCheckFailed)?;
-        let sig = HemJortsSignature {
-            r_rand,
-            stateful_leaf_idx: leaf_idx as u32,
-            tsw_ctr,
-            wots_chains,
-            merkle_path,
-        };
-        if !verify_hem_jorts_signature(&self.pk, msg, &sig) {
-            return Err(HemQuorumError::SignatureSelfCheckFailed);
-        }
-        Ok((leaf_idx as u64, sig))
-    }
-}
-
-// ============================================================================
 // 2. Mode QS-B: `HemDynamicShamirQuorum` (`Π_refresh` & `(t, n) -> (t', n')` `Π_reshare`)
 // ============================================================================
 
@@ -1165,7 +729,8 @@ impl HemShamirCustodianShare {
                 party: self.party_id,
             });
         }
-        let mut out = Vec::new();
+        let total = 60 + (self.active_leaves - self.high_water_leaf) * HEM_LEAF_SCALARS * 24;
+        let mut out = SecretBuffer(Vec::with_capacity(total));
         out.extend_from_slice(HEM_CUSTODIAN_SHARE_MAGIC);
         out.extend_from_slice(&(self.party_id as u32).to_le_bytes());
         out.extend_from_slice(&self.quorum_epoch.to_le_bytes());
@@ -1190,7 +755,7 @@ impl HemShamirCustodianShare {
                 out.extend_from_slice(&m.c1.to_le_bytes());
             }
         }
-        Ok(out)
+        Ok(out.into_inner())
     }
 
     /// Restore an isolated custodian share from canonical vault bytes.
@@ -1245,21 +810,21 @@ impl HemShamirCustodianShare {
         let alpha_c1 = read_gl(bytes, &mut pos)?;
         let alpha_share = GoldilocksExt2::new(alpha_c0, alpha_c1);
 
-        let mut leaf_vals = vec![Vec::new(); active_leaves];
-        let mut leaf_macs = vec![Vec::new(); active_leaves];
+        let mut leaf_vals = SecretBuffer(vec![Vec::new(); active_leaves]);
+        let mut leaf_macs = SecretBuffer(vec![Vec::new(); active_leaves]);
         for kp in high_water_leaf..active_leaves {
-            let mut vals = Vec::with_capacity(HEM_LEAF_SCALARS);
+            let mut vals = SecretBuffer(Vec::with_capacity(HEM_LEAF_SCALARS));
             for _ in 0..HEM_LEAF_SCALARS {
                 vals.push(read_gl(bytes, &mut pos)?);
             }
-            let mut macs = Vec::with_capacity(HEM_LEAF_SCALARS);
+            let mut macs = SecretBuffer(Vec::with_capacity(HEM_LEAF_SCALARS));
             for _ in 0..HEM_LEAF_SCALARS {
                 let c0 = read_gl(bytes, &mut pos)?;
                 let c1 = read_gl(bytes, &mut pos)?;
                 macs.push(GoldilocksExt2::new(c0, c1));
             }
-            leaf_vals[kp] = vals;
-            leaf_macs[kp] = macs;
+            leaf_vals[kp] = vals.into_inner();
+            leaf_macs[kp] = macs.into_inner();
         }
         if pos != bytes.len() {
             return Err(HemQuorumError::MalformedVaultBytes);
@@ -1275,8 +840,8 @@ impl HemShamirCustodianShare {
             active_leaves,
             invalidated: false,
             alpha_share,
-            leaf_vals,
-            leaf_macs,
+            leaf_vals: leaf_vals.into_inner(),
+            leaf_macs: leaf_macs.into_inner(),
         })
     }
 }
@@ -1358,6 +923,243 @@ impl HemReservedLeaf {
     #[inline]
     pub const fn leaf_epoch(&self) -> u64 {
         self.cert.epoch()
+    }
+}
+
+/// One signer’s reserved leaf. Consumed by one message-bound signing ceremony.
+pub struct HemWireSigner {
+    share: HemShamirCustodianShare,
+    roster: Vec<usize>,
+    leaf_epoch: u64,
+    latch: [u8; 32],
+}
+
+impl HemReservedLeaf {
+    /// Distribute the already burned leaf shares in the order of the selected signers.
+    pub fn into_wire_signers(
+        self,
+        dir: &HemQuorumPublicDirectory,
+        authority: &HemEpochLatchAuthority,
+        msg: &[u8],
+    ) -> Result<Vec<HemWireSigner>, HemQuorumError> {
+        let share = self
+            .signer_shares
+            .first()
+            .ok_or(HemQuorumError::LatchRefused)?;
+        certified_leaf(dir, authority, share.n, share.t, &self.cert, msg)?;
+        let roster: Vec<_> = self.signer_shares.iter().map(|s| s.party_id).collect();
+        Ok(self
+            .signer_shares
+            .into_iter()
+            .map(|share| HemWireSigner {
+                share,
+                roster: roster.clone(),
+                leaf_epoch: self.cert.epoch(),
+                latch: self.cert.binding,
+            })
+            .collect())
+    }
+}
+
+fn hem_wire_binding(
+    dir: &HemQuorumPublicDirectory,
+    epoch: u64,
+    quorum: (usize, usize),
+    roster: &[usize],
+    latch: &[u8; 32],
+) -> [u8; 32] {
+    let mut scope = dir.pk.to_bytes().to_vec();
+    scope.extend_from_slice(&epoch.to_le_bytes());
+    scope.extend_from_slice(&(quorum.0 as u32).to_le_bytes());
+    scope.extend_from_slice(&(quorum.1 as u32).to_le_bytes());
+    scope.extend_from_slice(latch);
+    for &p in roster {
+        scope.extend_from_slice(&(p as u32).to_le_bytes());
+    }
+    cshake256_32(b"QSAG.HEM.SIGN.WIRE.V1", &scope)
+}
+
+impl HemShamirCustodianShare {
+    fn take_signing_leaf(&mut self, kp: usize) -> Self {
+        let mut leaf_vals = vec![Vec::new(); self.active_leaves];
+        let mut leaf_macs = vec![Vec::new(); self.active_leaves];
+        leaf_vals[kp] = core::mem::take(&mut self.leaf_vals[kp]);
+        leaf_macs[kp] = core::mem::take(&mut self.leaf_macs[kp]);
+        Self {
+            party_id: self.party_id,
+            quorum_epoch: self.quorum_epoch,
+            t: self.t,
+            n: self.n,
+            eval_point: self.eval_point,
+            high_water_leaf: kp,
+            active_leaves: self.active_leaves,
+            invalidated: false,
+            alpha_share: GoldilocksExt2::ZERO,
+            leaf_vals,
+            leaf_macs,
+        }
+    }
+
+    /// Each endpoint of the enrolled roster uses its own authenticated and locked
+    /// WAL for this key generation. The signing subset releases shares only after
+    /// every member of the intersecting acknowledgement quorum has persisted the same
+    /// reservation. Authenticated endpoints are ordered by `acknowledgers`. Non-signers return None.
+    #[cfg(any(test, feature = "std"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_wire_signer(
+        &mut self,
+        dir: &HemQuorumPublicDirectory,
+        roster: &[usize],
+        acknowledgers: &[usize],
+        leaf_epoch: u64,
+        msg: &[u8],
+        wire: &mut impl WireTransport,
+        wal: &mut qsag_core::dkg::FsWalEpochLatch,
+        persist: impl FnOnce(&Self) -> Result<(), HemQuorumError>,
+    ) -> Result<Option<HemWireSigner>, HemQuorumError> {
+        use qsag_core::tsw_baggy::StatefulEpochLatch;
+        validate_party_subset(roster, self.t, self.n)?;
+        validate_party_subset(acknowledgers, self.t, self.n)?;
+        let kp = usize::try_from(leaf_epoch).map_err(|_| HemQuorumError::LeafExhausted)?;
+        if self.invalidated
+            || acknowledgers.get(wire.party()) != Some(&self.party_id)
+            || wire.parties() != acknowledgers.len()
+            || !qsag_core::dkg::latch_quorum_intersects_honestly(
+                acknowledgers.len(),
+                self.n,
+                self.t,
+            )
+            || !roster.iter().all(|p| acknowledgers.contains(p))
+            || !dir.verify_consistency()
+            || dir.active_leaves != self.active_leaves
+            || kp < self.high_water_leaf
+            || kp >= self.active_leaves
+            || self.leaf_vals[kp].len() != HEM_LEAF_SCALARS
+            || wal.peek_next_epoch() > leaf_epoch
+        {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        let latch = message_latch_binding(dir, leaf_epoch, msg);
+        let signing = hem_wire_binding(dir, self.quorum_epoch, (self.t, self.n), roster, &latch);
+        // Party identifiers are canonical GF(256) indices. Bind their wire order
+        // so every signer checks the same acknowledgement roster.
+        let ack_ids: Vec<u8> = acknowledgers.iter().map(|&party| party as u8).collect();
+        let binding = qsag_core::sponge::keccak::cshake256_32_multi_frame(
+            b"QSAG.HEM.ACK.WIRE.V1",
+            &[&signing, &ack_ids],
+        );
+        wal.reserve_epoch_at(leaf_epoch, 62, &binding)
+            .map_err(|_| HemQuorumError::LatchRefused)?;
+        let signing_share = roster
+            .contains(&self.party_id)
+            .then(|| self.take_signing_leaf(kp));
+        self.burn_leaves_below(kp + 1);
+        persist(self)?;
+        unanimous_ack(wire, 0x484d530f, &binding)?;
+        Ok(signing_share.map(|share| HemWireSigner {
+            share,
+            roster: roster.to_vec(),
+            leaf_epoch,
+            latch,
+        }))
+    }
+}
+
+#[cfg(any(test, feature = "std"))]
+fn unanimous_ack(
+    wire: &mut impl WireTransport,
+    tag: u32,
+    binding: &[u8; 32],
+) -> Result<(), HemQuorumError> {
+    let acks = wire
+        .broadcast(tag, binding)
+        .map_err(HemQuorumError::Transport)?;
+    if acks.len() != wire.parties() || acks.iter().any(|ack| ack != binding) {
+        return Err(HemQuorumError::LatchRefused);
+    }
+    Ok(())
+}
+
+fn message_latch_binding(dir: &HemQuorumPublicDirectory, leaf_epoch: u64, msg: &[u8]) -> [u8; 32] {
+    let (mu, _) = hem_compute_message_mu(&dir.pk, msg);
+    let pk = dir.pk.latch_pq_public_key(dir.dkg_pk_seed);
+    qsag_core::dkg::epoch_latch_binding(&pk.pk_seed, &pk.pk_root, leaf_epoch, &mu)
+}
+
+impl HemWireSigner {
+    pub fn sign(
+        self,
+        wire: &mut impl crate::wire_channel::WireTransport,
+        dir: &HemQuorumPublicDirectory,
+        expected_epoch: u64,
+        msg: &[u8],
+    ) -> Result<HemJortsSignature, HemQuorumError> {
+        let sh = &self.share;
+        if wire.parties() != self.roster.len()
+            || self.roster.get(wire.party()) != Some(&sh.party_id)
+            || sh.invalidated
+            || sh.quorum_epoch != expected_epoch
+        {
+            return Err(HemQuorumError::ShareInvalidated { party: sh.party_id });
+        }
+        let kp = usize::try_from(self.leaf_epoch).map_err(|_| HemQuorumError::LeafExhausted)?;
+        if !dir.verify_consistency()
+            || self.latch != message_latch_binding(dir, self.leaf_epoch, msg)
+        {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        if kp != sh.high_water_leaf
+            || sh
+                .leaf_vals
+                .get(kp)
+                .is_none_or(|v| v.len() != HEM_LEAF_SCALARS)
+        {
+            return Err(HemQuorumError::LeafExhausted);
+        }
+        let digest = hem_wire_binding(dir, expected_epoch, (sh.t, sh.n), &self.roster, &self.latch);
+        let views = wire
+            .broadcast(0x484d5300, &digest)
+            .map_err(HemQuorumError::Transport)?;
+        if views.iter().any(|v| v != &digest) {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        let points: Vec<_> = self
+            .roster
+            .iter()
+            .map(|&p| Goldilocks::from_u64_reduced((p + 1) as u64))
+            .collect();
+        let tables = qsag_core::preprocessing::GoldilocksOpeningTables::new(sh.t, &points)
+            .map_err(Poseidon2MpcError::Preprocess)?;
+        let mut tag = 0x484d5300;
+        sign_certified_leaf(dir, kp, msg, |indices| {
+            tag += 1;
+            let mut bytes = SecretBuffer(Vec::with_capacity(8 * indices.len()));
+            for &idx in indices {
+                bytes.extend_from_slice(&sh.leaf_vals[kp][idx].to_le_bytes());
+            }
+            let rows = SecretBuffer(
+                wire.broadcast(tag, &bytes)
+                    .map_err(HemQuorumError::Transport)?,
+            );
+            if rows.iter().any(|r| r.len() != bytes.len()) {
+                return Err(HemQuorumError::MalformedVaultBytes);
+            }
+            let mut shares = SecretBuffer(vec![Goldilocks::ZERO; rows.len()]);
+            (0..indices.len())
+                .map(|k| {
+                    for (slot, row) in shares.iter_mut().zip(rows.iter()) {
+                        let raw = row[8 * k..][..8]
+                            .try_into()
+                            .map_err(|_| HemQuorumError::MalformedVaultBytes)?;
+                        *slot = Goldilocks::from_canonical(u64::from_le_bytes(raw))
+                            .map_err(|_| HemQuorumError::MalformedVaultBytes)?;
+                    }
+                    tables
+                        .open(&shares, "hem_wire_sign")
+                        .map_err(|_| HemQuorumError::SignatureSelfCheckFailed)
+                })
+                .collect()
+        })
     }
 }
 
@@ -1721,23 +1523,7 @@ impl HemDynamicShamirQuorum {
         let mut signer_shares = Vec::with_capacity(signer_indices.len());
         for &p in signer_indices {
             let sh = &mut self.shares[p];
-            let mut leaf_vals = vec![Vec::new(); active_leaves];
-            let mut leaf_macs = vec![Vec::new(); active_leaves];
-            leaf_vals[kp] = core::mem::take(&mut sh.leaf_vals[kp]);
-            leaf_macs[kp] = core::mem::take(&mut sh.leaf_macs[kp]);
-            signer_shares.push(HemShamirCustodianShare {
-                party_id: sh.party_id,
-                quorum_epoch: sh.quorum_epoch,
-                t: sh.t,
-                n: sh.n,
-                eval_point: sh.eval_point,
-                high_water_leaf: kp,
-                active_leaves,
-                invalidated: false,
-                alpha_share: GoldilocksExt2::ZERO,
-                leaf_vals,
-                leaf_macs,
-            });
+            signer_shares.push(sh.take_signing_leaf(kp));
         }
         self.high_water_leaf = kp + 1;
         for sh in &mut self.shares {
@@ -2166,16 +1952,698 @@ impl HemDynamicShamirQuorum {
         let new_cluster =
             HemEpochLatchCluster::establish(new_n, new_t, hw as u64, &mut latch_rngs)?;
 
-        // Commit: retire the old `(t, n)` custody and install the new one.
-        for old_sh in &mut self.shares {
-            old_sh.invalidate_and_wipe();
-        }
-        self.quorum_epoch = next_quorum_epoch;
-        self.t = new_t;
-        self.n = new_n;
-        self.latch_cluster = new_cluster;
-        self.shares = new_shares;
+        self.install_reshare(new_shares, new_cluster, new_t, new_n);
         Ok(())
+    }
+}
+
+/// Public configuration for switching the unspent leaves to a new Shamir roster.
+/// The transfer mesh orders the selected old dealers first, then the new recipients.
+pub struct HemWireReshare {
+    binding: [u8; 32],
+    dealers: Vec<usize>,
+    weights: Vec<Goldilocks>,
+    points: Vec<Goldilocks>,
+    old_n: usize,
+    #[cfg(any(test, feature = "std"))]
+    key: HemJortsPublicKey,
+    threshold: usize,
+    epoch: u64,
+    floor: usize,
+    leaves: usize,
+}
+
+/// Private, single-use check material for one recipient. Generated before any
+/// custodian inputs are needed, using the dealerless sacrificed-triple protocol.
+pub struct HemReshareCheck {
+    binding: [u8; 32],
+    party: usize,
+    mask: SecretBuffer<Goldilocks>,
+    mask_key: SecretBuffer<GoldilocksExt2>,
+    mask_product: SecretBuffer<GoldilocksExt2>,
+    blind: SecretBuffer<[GoldilocksExt2; 3]>,
+}
+
+impl HemReshareCheck {
+    /// Transfer one recipient's fresh check material over its authenticated
+    /// confidential link to the offline preprocessing service (endpoint zero).
+    pub fn dispatch(self, link: &mut impl WireTransport) -> Result<(), HemQuorumError> {
+        if link.party() != 0 || link.parties() != 2 {
+            return Err(HemQuorumError::MalformedVaultBytes);
+        }
+        let mut packet = SecretBuffer(Vec::with_capacity(122));
+        packet.extend_from_slice(&self.binding);
+        packet.extend_from_slice(&(self.party as u16).to_be_bytes());
+        packet.extend_from_slice(&self.mask.to_be_bytes());
+        for x in [&*self.mask_key, &*self.mask_product]
+            .into_iter()
+            .chain(self.blind.iter())
+        {
+            packet.extend_from_slice(&x.to_be_bytes());
+        }
+        link.send_frame(1, 0x484d520f, &packet)
+            .map_err(HemQuorumError::Transport)
+    }
+}
+
+/// One enrolled dealer's custody, consumed by the agreed handoff.
+pub struct RetiredHemDealer {
+    binding: [u8; 32],
+    share: HemShamirCustodianShare,
+}
+
+impl HemWireReshare {
+    /// Reconstruct a transfer plan solely from the authenticated public directory,
+    /// current custody epoch and floor, old dealer identifiers, and new quorum shape.
+    pub fn from_directory(
+        session: [u8; 32],
+        dir: &HemQuorumPublicDirectory,
+        epoch: u64,
+        floor: usize,
+        (old_t, old_n): (usize, usize),
+        old: &[usize],
+        (t, n): (usize, usize),
+    ) -> Result<Self, HemQuorumError> {
+        if old_t < 2 || old_t > old_n || old_n >= MAX_HEM_QUORUM_PARTIES {
+            return Err(HemQuorumError::InvalidQuorum { t: old_t, n: old_n });
+        }
+        if !dir.verify_consistency() || floor > dir.active_leaves {
+            return Err(HemQuorumError::MalformedVaultBytes);
+        }
+        validate_party_subset(old, old_t, old_n)?;
+        if t < 2 || t > n || n >= MAX_HEM_QUORUM_PARTIES || epoch == u64::MAX {
+            return Err(HemQuorumError::InvalidQuorum { t, n });
+        }
+        let dealers = old[..old_t].to_vec();
+        let old_points = dealers
+            .iter()
+            .map(|&p| Goldilocks::from_u64_reduced((p + 1) as u64))
+            .collect::<Vec<_>>();
+        let weights = lagrange_weights_zero_goldilocks(&old_points)
+            .ok_or(HemQuorumError::InvalidQuorum { t, n })?;
+        let mut scope = dir.pk.to_bytes().to_vec();
+        scope.extend_from_slice(&session);
+        for value in [
+            epoch,
+            floor as u64,
+            dir.active_leaves as u64,
+            old_t as u64,
+            old_n as u64,
+            t as u64,
+            n as u64,
+        ] {
+            scope.extend_from_slice(&value.to_be_bytes());
+        }
+        for &p in &dealers {
+            scope.extend_from_slice(&(p as u64).to_be_bytes());
+        }
+        Ok(HemWireReshare {
+            binding: cshake256_32(b"QSAG.HEM.RESHARE.WIRE.V1", &scope),
+            dealers,
+            weights,
+            points: canonical_eval_points(n),
+            old_n,
+            #[cfg(any(test, feature = "std"))]
+            key: dir.pk,
+            threshold: t,
+            epoch,
+            floor,
+            leaves: dir.active_leaves,
+        })
+    }
+
+    /// At one enrolled recipient, import its checks from the pinned offline service.
+    /// The callback must durably consume this plan binding for the recipient exactly
+    /// once, including across restarts. A retry must use a fresh plan and preprocessing.
+    pub fn receive_check(
+        &self,
+        party: usize,
+        link: &mut impl WireTransport,
+        consume: impl FnOnce(&[u8; 32], usize) -> Result<(), HemQuorumError>,
+    ) -> Result<HemReshareCheck, HemQuorumError> {
+        if link.party() != 1 || link.parties() != 2 || party >= self.points.len() {
+            return Err(HemQuorumError::MalformedVaultBytes);
+        }
+        let bytes = SecretBuffer(
+            link.recv_frame(0, 0x484d520f)
+                .map_err(HemQuorumError::Transport)?,
+        );
+        if bytes.len() != 122
+            || bytes[..32] != self.binding
+            || bytes[32..34] != (party as u16).to_be_bytes()
+        {
+            return Err(HemQuorumError::MalformedVaultBytes);
+        }
+        let mask = SecretBuffer(
+            Goldilocks::from_be_bytes_canonical(
+                bytes[34..42]
+                    .try_into()
+                    .map_err(|_| HemQuorumError::MalformedVaultBytes)?,
+            )
+            .map_err(|_| HemQuorumError::MalformedVaultBytes)?,
+        );
+        let mut fields = bytes[42..].as_chunks::<16>().0.iter();
+        let mut next = || {
+            GoldilocksExt2::from_be_bytes_canonical(
+                *fields.next().ok_or(HemQuorumError::MalformedVaultBytes)?,
+            )
+            .map_err(|_| HemQuorumError::MalformedVaultBytes)
+        };
+        let check = HemReshareCheck {
+            binding: self.binding,
+            party,
+            mask,
+            mask_key: SecretBuffer(next()?),
+            mask_product: SecretBuffer(next()?),
+            blind: SecretBuffer([next()?, next()?, next()?]),
+        };
+        consume(&self.binding, party)?;
+        Ok(check)
+    }
+
+    pub fn prepare_checks(
+        &self,
+        rngs: &mut [PartyPrivateRng],
+    ) -> Result<Vec<HemReshareCheck>, HemQuorumError> {
+        use qsag_core::preprocessing::{
+            commit_and_open_spdz_goldilocks_batch_quorum_with_mesh, run_dealerless_pi_pow7,
+        };
+        check_randomness_count(rngs, self.points.len())?;
+        let mut mesh =
+            OtMesh::try_establish(self.binding, rngs).map_err(Poseidon2MpcError::Preprocess)?;
+        let mut vaults = run_dealerless_pi_pow7(
+            self.binding,
+            self.threshold,
+            &self.points,
+            0,
+            3,
+            0,
+            &mut mesh,
+            rngs,
+        )
+        .map_err(Poseidon2MpcError::Preprocess)?;
+        let alphas = SecretBuffer(vaults.iter().map(|v| v.mac_alpha_share).collect::<Vec<_>>());
+        let triples = vaults
+            .iter_mut()
+            .map(|v| v.reserve_beaver(3))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Poseidon2MpcError::Preprocess)?;
+        // Align the left operands of two independent products to one base-field mask.
+        let offsets = SecretBuffer(
+            triples
+                .iter()
+                .map(|q| vec![q[0].a - q[1].a])
+                .collect::<Vec<_>>(),
+        );
+        let macs = SecretBuffer(
+            triples
+                .iter()
+                .map(|q| vec![q[0].a_mac - q[1].a_mac])
+                .collect::<Vec<_>>(),
+        );
+        let delta = commit_and_open_spdz_goldilocks_batch_quorum_with_mesh(
+            &self.binding,
+            "hem_wire_mask",
+            self.threshold,
+            &self.points,
+            &offsets,
+            &macs,
+            &alphas,
+            rngs,
+            Some(&mut mesh),
+        )
+        .map_err(Poseidon2MpcError::Preprocess)?[0];
+        let u = GoldilocksExt2::new(Goldilocks::ZERO, Goldilocks::ONE);
+        Ok(triples
+            .iter()
+            .enumerate()
+            .map(|(party, q)| HemReshareCheck {
+                binding: self.binding,
+                party,
+                mask: SecretBuffer(q[0].a),
+                mask_key: SecretBuffer(GoldilocksExt2::new(q[0].b, q[1].b)),
+                mask_product: SecretBuffer(GoldilocksExt2::new(q[0].c, q[1].c + delta * q[1].b)),
+                // Independent native extension-field product R*A under the fresh preprocessing key.
+                blind: SecretBuffer([
+                    alphas[party],
+                    GoldilocksExt2::new(q[2].a, q[2].b),
+                    q[2].a_mac + u * q[2].b_mac,
+                ]),
+            })
+            .collect())
+    }
+
+    fn commitments(
+        &self,
+        wire: &mut impl WireTransport,
+        packets: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>, HemQuorumError> {
+        let count = self.dealers.len();
+        if wire.parties() != count + self.points.len() {
+            return Err(HemQuorumError::MalformedVaultBytes);
+        }
+        let mut row = self.binding.to_vec();
+        for (j, packet) in packets.iter().enumerate() {
+            row.extend_from_slice(&qsag_core::sponge::keccak::cshake256_32_multi_frame(
+                b"QSAG.HEM.RESHARE.PACKET.V1",
+                &[
+                    &self.binding,
+                    &(wire.party() as u64).to_be_bytes(),
+                    &(j as u64).to_be_bytes(),
+                    packet,
+                ],
+            ));
+        }
+        let rows = wire
+            .broadcast(0x484d5200, &row)
+            .map_err(HemQuorumError::Transport)?;
+        if rows.len() != wire.parties()
+            || rows.iter().enumerate().any(|(i, r)| {
+                r.len() != 32 + if i < count { 32 * self.points.len() } else { 0 }
+                    || r[..32] != self.binding
+            })
+        {
+            return Err(HemQuorumError::MalformedVaultBytes);
+        }
+        Ok(rows)
+    }
+
+    /// Retire this generation at every old endpoint before any dealer releases a packet.
+    /// The WAL is the same per-generation WAL used by reserve_wire_signer. Moving its
+    /// floor past the last leaf also prevents restoration of a pre-retirement share.
+    #[cfg(any(test, feature = "std"))]
+    pub fn retire(
+        &self,
+        share: HemShamirCustodianShare,
+        old_roster: &mut impl WireTransport,
+        wal: &mut qsag_core::dkg::FsWalEpochLatch,
+        persist_retirement: impl FnOnce(u64, &[u8; 32]) -> Result<(), HemQuorumError>,
+    ) -> Result<Option<RetiredHemDealer>, HemQuorumError> {
+        use qsag_core::tsw_baggy::StatefulEpochLatch;
+        if share.invalidated
+            || share.quorum_epoch != self.epoch
+            || share.n != self.old_n
+            || share.t != self.dealers.len()
+            || share.high_water_leaf > self.floor
+            || share.active_leaves != self.leaves
+            || wal.peek_next_epoch() > self.floor as u64
+            || old_roster.parties() != self.old_n
+            || old_roster.party() != share.party_id
+        {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        wal.reserve_epoch_at(self.leaves as u64, 62, &self.binding)
+            .map_err(|_| HemQuorumError::LatchRefused)?;
+        persist_retirement(self.epoch, &self.binding)?;
+        unanimous_ack(old_roster, 0x484d520f, &self.binding)?;
+        Ok(self
+            .dealers
+            .contains(&share.party_id)
+            .then_some(RetiredHemDealer {
+                binding: self.binding,
+                share,
+            }))
+    }
+
+    /// Consume a durably retired dealer's custody for this exact handoff.
+    pub fn deal(
+        &self,
+        wire: &mut impl WireTransport,
+        dealer: RetiredHemDealer,
+        rng: &mut PartyPrivateRng,
+    ) -> Result<(), HemQuorumError> {
+        if dealer.binding != self.binding {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        self.send_dealings(wire, &dealer.share, rng)
+    }
+
+    fn send_dealings(
+        &self,
+        wire: &mut impl WireTransport,
+        share: &HemShamirCustodianShare,
+        rng: &mut PartyPrivateRng,
+    ) -> Result<(), HemQuorumError> {
+        let i = wire.party();
+        if self.dealers.get(i) != Some(&share.party_id)
+            || share.invalidated
+            || share.high_water_leaf > self.floor
+            || share.active_leaves != self.leaves
+            || share.n != self.old_n
+            || share.t != self.dealers.len()
+            || share.quorum_epoch != self.epoch
+        {
+            return Err(HemQuorumError::ShareInvalidated {
+                party: share.party_id,
+            });
+        }
+        let weight = self.weights[i];
+        let alpha = SecretBuffer(shamir_share_ext2(
+            self.threshold,
+            &self.points,
+            share.alpha_share.mul_base(weight),
+            rng,
+        ));
+        let mask_secret = SecretBuffer(rng.next_ext2());
+        let masks = SecretBuffer(shamir_share_ext2(
+            self.threshold,
+            &self.points,
+            *mask_secret,
+            rng,
+        ));
+        let packet_bytes = 32 + (self.leaves - self.floor) * HEM_LEAF_SCALARS * 24;
+        let mut packets = SecretBuffer(
+            (0..self.points.len())
+                .map(|_| Vec::with_capacity(packet_bytes))
+                .collect::<Vec<_>>(),
+        );
+        for ((packet, a), m) in packets.iter_mut().zip(alpha.iter()).zip(masks.iter()) {
+            for v in [a.c0, a.c1, m.c0, m.c1] {
+                packet.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        for kp in self.floor..self.leaves {
+            if share.leaf_vals[kp].len() != HEM_LEAF_SCALARS
+                || share.leaf_macs[kp].len() != HEM_LEAF_SCALARS
+            {
+                return Err(HemQuorumError::MalformedVaultBytes);
+            }
+            for (&val, &mac) in share.leaf_vals[kp].iter().zip(&share.leaf_macs[kp]) {
+                let vs = SecretBuffer(shamir_share_goldilocks(
+                    self.threshold,
+                    &self.points,
+                    val * weight,
+                    rng,
+                ));
+                let ms = SecretBuffer(shamir_share_ext2(
+                    self.threshold,
+                    &self.points,
+                    mac.mul_base(weight),
+                    rng,
+                ));
+                for ((packet, v), m) in packets.iter_mut().zip(vs.iter()).zip(ms.iter()) {
+                    for word in [*v, m.c0, m.c1] {
+                        packet.extend_from_slice(&word.to_le_bytes());
+                    }
+                }
+            }
+        }
+        self.commitments(wire, &packets)?;
+        for (j, packet) in packets.iter().enumerate() {
+            wire.send_frame(self.dealers.len() + j, 0x484d5201, packet)
+                .map_err(HemQuorumError::Transport)?;
+        }
+        Ok(())
+    }
+
+    /// Receive and validate one new share. The new-roster mesh is ordered by
+    /// custodian index. No unmasked chain value or MAC residual crosses either mesh.
+    pub fn receive(
+        &self,
+        transfer: &mut impl WireTransport,
+        new_roster: &mut impl WireTransport,
+        check: HemReshareCheck,
+        rng: &mut PartyPrivateRng,
+    ) -> Result<HemShamirCustodianShare, HemQuorumError> {
+        let j = new_roster.party();
+        if j != check.party
+            || check.binding != self.binding
+            || new_roster.parties() != self.points.len()
+            || j >= self.points.len()
+            || transfer.party() != self.dealers.len() + j
+        {
+            return Err(HemQuorumError::MalformedVaultBytes);
+        }
+        let commits = self.commitments(transfer, &[])?;
+        let refs = commits.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let transcript =
+            qsag_core::sponge::keccak::cshake256_32_multi_frame(b"QSAG.HEM.RESHARE.CHAL.V1", &refs);
+        let count = (self.leaves - self.floor) * HEM_LEAF_SCALARS;
+        let mut coefficients = PartyPrivateRng::from_seed(transcript, b"QSAG.HEM.RESHARE.DEG.V1");
+        let alpha_weight = coefficients.next_ext2();
+        let weights = (0..count)
+            .map(|_| (coefficients.next_ext2(), coefficients.next_ext2()))
+            .collect::<Vec<_>>();
+        let mut alpha = SecretBuffer(GoldilocksExt2::ZERO);
+        let mut values = SecretBuffer(vec![Goldilocks::ZERO; count]);
+        let mut macs = SecretBuffer(vec![GoldilocksExt2::ZERO; count]);
+        let mut degrees = SecretBuffer(Vec::with_capacity(self.dealers.len()));
+        for (i, commit) in commits.iter().enumerate().take(self.dealers.len()) {
+            let packet = SecretBuffer(
+                transfer
+                    .recv_frame(i, 0x484d5201)
+                    .map_err(HemQuorumError::Transport)?,
+            );
+            let digest = qsag_core::sponge::keccak::cshake256_32_multi_frame(
+                b"QSAG.HEM.RESHARE.PACKET.V1",
+                &[
+                    &self.binding,
+                    &(i as u64).to_be_bytes(),
+                    &(j as u64).to_be_bytes(),
+                    &packet,
+                ],
+            );
+            if packet.len() != 32 + 24 * count || commit[32 + 32 * j..][..32] != digest {
+                return Err(HemQuorumError::CommitmentMismatch {
+                    dealer: self.dealers[i],
+                    recipient: j,
+                });
+            }
+            let mut fields = packet.as_chunks::<8>().0.iter();
+            let mut next = || {
+                fields
+                    .next()
+                    .and_then(|b| Goldilocks::from_le_bytes_canonical(*b).ok())
+                    .ok_or(HemQuorumError::MalformedVaultBytes)
+            };
+            let a = SecretBuffer(GoldilocksExt2::new(next()?, next()?));
+            let mask = SecretBuffer(GoldilocksExt2::new(next()?, next()?));
+            *alpha += *a;
+            let mut z = SecretBuffer(*mask + alpha_weight * (*a));
+            for ((v, m), &(cv, cm)) in values.iter_mut().zip(macs.iter_mut()).zip(&weights) {
+                let x = SecretBuffer(next()?);
+                let tag = SecretBuffer(GoldilocksExt2::new(next()?, next()?));
+                *v += *x;
+                *m += *tag;
+                *z += cv.mul_base(*x) + cm * (*tag);
+            }
+            degrees.push(*z);
+        }
+        let mut open =
+            |tag: u32, local: &[GoldilocksExt2]| -> Result<Vec<GoldilocksExt2>, HemQuorumError> {
+                let mut bytes = SecretBuffer(Vec::with_capacity(local.len() * 16));
+                for value in local {
+                    bytes.extend_from_slice(&value.c0.to_le_bytes());
+                    bytes.extend_from_slice(&value.c1.to_le_bytes());
+                }
+                let rows = SecretBuffer(
+                    new_roster
+                        .commit_open(tag, &transcript, rng.next_bytes32(), &bytes)
+                        .map_err(HemQuorumError::Transport)?,
+                );
+                if rows.iter().any(|r| r.len() != bytes.len()) {
+                    return Err(HemQuorumError::MalformedVaultBytes);
+                }
+                let mut shares = SecretBuffer(vec![GoldilocksExt2::ZERO; rows.len()]);
+                (0..local.len())
+                    .map(|idx| {
+                        for (row, out) in rows.iter().zip(shares.iter_mut()) {
+                            let words = row[idx * 16..][..16].as_chunks::<8>().0;
+                            *out = GoldilocksExt2::from_canonical_u64_pair(
+                                u64::from_le_bytes(words[0]),
+                                u64::from_le_bytes(words[1]),
+                            )
+                            .map_err(|_| HemQuorumError::MalformedVaultBytes)?;
+                        }
+                        open_and_check_degree_ext2(
+                            self.threshold,
+                            &self.points,
+                            &shares,
+                            "hem_wire_check",
+                        )
+                        .map_err(|_| HemQuorumError::ReshareMacCheckFailed)
+                    })
+                    .collect()
+            };
+        open(0x484d5210, &degrees)?;
+        // Convert the independent mask product S*r to alpha*r using a masked
+        // opening of alpha-S. Open only the masked linear combination of values.
+        let d = open(0x484d5211, &[*alpha - *check.mask_key])?[0];
+        let mut folded = SecretBuffer(*check.mask);
+        let mut tag = SecretBuffer(*check.mask_product + d.mul_base(*check.mask));
+        for (&x, &m) in values.iter().zip(macs.iter()) {
+            let beta = coefficients.next_goldilocks();
+            *folded += x * beta;
+            *tag += m.mul_base(beta);
+        }
+        let opened = open(
+            0x484d5212,
+            &[GoldilocksExt2::new(*folded, Goldilocks::ZERO)],
+        )?[0];
+        if opened.c1 != Goldilocks::ZERO {
+            return Err(HemQuorumError::ReshareMacCheckFailed);
+        }
+        let e = open(
+            0x484d5213,
+            &[*tag - alpha.mul_base(opened.c0) + check.blind[1]],
+        )?[0];
+        let product = open(0x484d5214, &[e * check.blind[0] - check.blind[2]])?[0];
+        if !product.ct_eq(GoldilocksExt2::ZERO) {
+            return Err(HemQuorumError::ReshareMacCheckFailed);
+        }
+        let mut leaf_vals = vec![Vec::new(); self.floor];
+        let mut leaf_macs = vec![Vec::new(); self.floor];
+        leaf_vals.extend(
+            values
+                .as_chunks::<HEM_LEAF_SCALARS>()
+                .0
+                .iter()
+                .map(|leaf| leaf.to_vec()),
+        );
+        leaf_macs.extend(
+            macs.as_chunks::<HEM_LEAF_SCALARS>()
+                .0
+                .iter()
+                .map(|leaf| leaf.to_vec()),
+        );
+        Ok(HemShamirCustodianShare {
+            party_id: j,
+            quorum_epoch: self.epoch + 1,
+            t: self.threshold,
+            n: self.points.len(),
+            eval_point: self.points[j],
+            high_water_leaf: self.floor,
+            active_leaves: self.leaves,
+            invalidated: false,
+            alpha_share: *alpha,
+            leaf_vals,
+            leaf_macs,
+        })
+    }
+}
+
+impl HemDynamicShamirQuorum {
+    pub fn wire_reshare_plan(
+        &self,
+        session: [u8; 32],
+        old: &[usize],
+        t: usize,
+        n: usize,
+    ) -> Result<HemWireReshare, HemQuorumError> {
+        HemWireReshare::from_directory(
+            session,
+            &self.public_dir,
+            self.quorum_epoch,
+            self.high_water_leaf,
+            (self.t, self.n),
+            old,
+            (t, n),
+        )
+    }
+
+    /// Perform a single-host handoff under the caller's exclusive custody lock.
+    /// The endpoints are created internally, so a failed transaction cannot send
+    /// a candidate generation outside this process. Separated custodians use
+    /// `HemWireReshare::retire`, `deal` and `receive`.
+    #[cfg(feature = "std")]
+    pub fn reshare_local(
+        &mut self,
+        plan: &HemWireReshare,
+        old_rngs: &mut [PartyPrivateRng],
+        new_rngs: &mut [PartyPrivateRng],
+    ) -> Result<(), HemQuorumError> {
+        use crate::wire_channel::confidential_loopback;
+        let n = plan.points.len();
+        let mesh = |size, domain| {
+            confidential_loopback(size, cshake256_32(domain, &plan.binding))
+                .map_err(|_| HemQuorumError::LocalChannelFailed)
+        };
+        let transfer = mesh(self.t + n, b"QSAG.HEM.HANDOFF.LOCAL.TRANSFER")?;
+        let recipients = mesh(n, b"QSAG.HEM.HANDOFF.LOCAL.RECIPIENTS")?;
+        self.reshare_on_channels(plan, transfer, recipients, old_rngs, new_rngs)
+    }
+
+    /// Drive isolated dealers and recipients and install the verified roster atomically.
+    #[cfg(any(test, feature = "std"))]
+    fn reshare_on_channels<T: WireTransport + Send>(
+        &mut self,
+        plan: &HemWireReshare,
+        transfer: Vec<T>,
+        recipients: Vec<T>,
+        old_rngs: &mut [PartyPrivateRng],
+        new_rngs: &mut [PartyPrivateRng],
+    ) -> Result<(), HemQuorumError> {
+        let n = plan.points.len();
+        if transfer.len() != self.t + n
+            || recipients.len() != n
+            || plan.epoch != self.quorum_epoch
+            || plan.floor != self.high_water_leaf
+            || plan.old_n != self.n
+            || plan.key != self.public_key()
+            || plan.dealers.len() != self.t
+        {
+            return Err(HemQuorumError::MalformedVaultBytes);
+        }
+        check_randomness_count(old_rngs, self.n)?;
+        let checks = plan.prepare_checks(new_rngs)?;
+        let shares = std::thread::scope(|scope| -> Result<Vec<_>, HemQuorumError> {
+            let mut channels = transfer.into_iter();
+            let mut dealers = Vec::new();
+            for (&id, mut wire) in plan.dealers.iter().zip(channels.by_ref().take(self.t)) {
+                let share = &self.shares[id];
+                let mut rng = private_operation_rng(
+                    &plan.binding,
+                    b"QSAG.HEM.WIRE.DEAL.V1",
+                    id,
+                    &mut old_rngs[id],
+                );
+                dealers.push(scope.spawn(move || plan.send_dealings(&mut wire, share, &mut rng)));
+            }
+            let receivers: Vec<_> = channels
+                .zip(recipients)
+                .zip(checks)
+                .zip(new_rngs.iter_mut())
+                .map(|(((mut transfer, mut roster), check), rng)| {
+                    scope.spawn(move || plan.receive(&mut transfer, &mut roster, check, rng))
+                })
+                .collect();
+            for dealer in dealers {
+                dealer
+                    .join()
+                    .map_err(|_| HemQuorumError::MalformedVaultBytes)??;
+            }
+            receivers
+                .into_iter()
+                .map(|r| r.join().map_err(|_| HemQuorumError::MalformedVaultBytes)?)
+                .collect()
+        })?;
+        let mut latch_rngs =
+            private_operation_rngs(&plan.binding, b"QSAG.HEM.QSB.NEW.LATCH/v2", new_rngs);
+        let cluster = HemEpochLatchCluster::establish(
+            n,
+            plan.threshold,
+            self.high_water_leaf as u64,
+            &mut latch_rngs,
+        )?;
+        self.install_reshare(shares, cluster, plan.threshold, n);
+        Ok(())
+    }
+
+    fn install_reshare(
+        &mut self,
+        shares: Vec<HemShamirCustodianShare>,
+        cluster: HemEpochLatchCluster,
+        t: usize,
+        n: usize,
+    ) {
+        for old in &mut self.shares {
+            old.invalidate_and_wipe();
+        }
+        self.quorum_epoch += 1;
+        self.t = t;
+        self.n = n;
+        self.shares = shares;
+        self.latch_cluster = cluster;
     }
 }
 
@@ -2185,7 +2653,7 @@ impl HemDynamicShamirQuorum {
     clippy::too_many_arguments,
     reason = "Detached signing binds directory, latch authority, quorum epoch, threshold, committee size, certificate, message and share slice"
 )]
-pub fn sign_from_shamir_share_slice(
+fn sign_from_shamir_share_slice(
     public_dir: &HemQuorumPublicDirectory,
     latch_authority: &HemEpochLatchAuthority,
     expected_quorum_epoch: u64,
@@ -2227,40 +2695,63 @@ pub fn sign_from_shamir_share_slice(
         pts.push(sh.eval_point);
     }
 
-    let (mu_bytes, mu) = hem_compute_message_mu(&public_dir.pk, msg);
-    let latch_pk = public_dir.pk.latch_pq_public_key(public_dir.dkg_pk_seed);
-    let binding = qsag_core::dkg::epoch_latch_binding(
-        &latch_pk.pk_seed,
-        &latch_pk.pk_root,
-        latch_cert.epoch(),
-        &mu_bytes,
-    );
-    latch_cert
-        .verify_against(latch_authority, n, t, latch_cert.epoch(), &binding)
-        .map_err(|_| HemQuorumError::LatchRefused)?;
-
-    let kp = usize::try_from(latch_cert.epoch()).map_err(|_| HemQuorumError::LeafExhausted)?;
-    if kp >= public_dir.active_leaves {
-        return Err(HemQuorumError::LeafExhausted);
-    }
+    let kp = certified_leaf(public_dir, latch_authority, n, t, latch_cert, msg)?;
     for sh in signer_shares {
         if kp < sh.high_water_leaf || sh.leaf_vals[kp].len() != HEM_LEAF_SCALARS {
             return Err(HemQuorumError::LeafExhausted);
         }
     }
+    let tables = qsag_core::preprocessing::GoldilocksOpeningTables::new(t, &pts)
+        .map_err(Poseidon2MpcError::Preprocess)?;
+    sign_certified_leaf(public_dir, kp, msg, |indices| {
+        indices
+            .iter()
+            .map(|&idx| {
+                let shares = SecretBuffer(
+                    signer_shares
+                        .iter()
+                        .map(|sh| sh.leaf_vals[kp][idx])
+                        .collect::<Vec<_>>(),
+                );
+                tables
+                    .open(&shares, "hem_sign")
+                    .map_err(|_| HemQuorumError::SignatureSelfCheckFailed)
+            })
+            .collect()
+    })
+}
 
-    let mut prf_leaf = [Goldilocks::ZERO; 4];
-    let mut share_buf = vec![Goldilocks::ZERO; signer_shares.len()];
-    for (limb, out) in prf_leaf.iter_mut().enumerate() {
-        for (i, sh) in signer_shares.iter().enumerate() {
-            share_buf[i] = sh.leaf_vals[kp][limb];
-        }
-        *out = open_and_check_degree_goldilocks(t, &pts, &share_buf, "hem_qsb_open_prf")
-            .map_err(|_| HemQuorumError::PrfCommitmentMismatch)?;
+fn certified_leaf(
+    dir: &HemQuorumPublicDirectory,
+    latch_authority: &HemEpochLatchAuthority,
+    n: usize,
+    t: usize,
+    latch_cert: &HemEpochLatchCertificate,
+    msg: &[u8],
+) -> Result<usize, HemQuorumError> {
+    let binding = message_latch_binding(dir, latch_cert.epoch(), msg);
+    latch_cert
+        .verify_against(latch_authority, n, t, latch_cert.epoch(), &binding)
+        .map_err(|_| HemQuorumError::LatchRefused)?;
+
+    let kp = usize::try_from(latch_cert.epoch()).map_err(|_| HemQuorumError::LeafExhausted)?;
+    if kp >= dir.active_leaves {
+        return Err(HemQuorumError::LeafExhausted);
     }
+    Ok(kp)
+}
+fn sign_certified_leaf(
+    public_dir: &HemQuorumPublicDirectory,
+    kp: usize,
+    msg: &[u8],
+    mut open: impl FnMut(&[usize]) -> Result<Vec<Goldilocks>, HemQuorumError>,
+) -> Result<HemJortsSignature, HemQuorumError> {
+    let (_, mu) = hem_compute_message_mu(&public_dir.pk, msg);
+    let mut prf_leaf = open(&[0, 1, 2, 3])?
+        .try_into()
+        .map_err(|_| HemQuorumError::PrfCommitmentMismatch)?;
     if hem_prf_check_digest_clear(prf_leaf, public_dir.pk.pk_seed) != public_dir.prf_commits[kp] {
         wipe_goldilocks(&mut prf_leaf);
-        wipe_goldilocks(&mut share_buf);
         return Err(HemQuorumError::PrfCommitmentMismatch);
     }
 
@@ -2277,21 +2768,26 @@ pub fn sign_from_shamir_share_slice(
     )
     .ok_or(HemQuorumError::TswGrindExhausted)?;
 
+    let mut indices = Vec::new();
+    for (r, &digit) in digits.iter().enumerate().take(HEM_WOTS_CHAINS) {
+        if usize::from(digit) < HEM_WOTS_MAX_STEP {
+            let base = 4 + (r * HEM_WOTS_MAX_STEP + usize::from(digit)) * 4;
+            indices.extend(base..base + 4);
+        }
+    }
+    let chain_values = open(&indices)?;
+    if chain_values.len() != indices.len() {
+        return Err(HemQuorumError::SignatureSelfCheckFailed);
+    }
+    let mut nodes = chain_values.as_chunks::<4>().0.iter().copied();
     let mut wots_chains = Vec::with_capacity(HEM_WOTS_CHAINS);
     for (r, &d) in digits.iter().enumerate().take(HEM_WOTS_CHAINS) {
-        let d_usize = d as usize;
-        if d_usize == HEM_WOTS_MAX_STEP {
+        if usize::from(d) == HEM_WOTS_MAX_STEP {
             wots_chains.push(public_dir.endpoints[kp][r]);
         } else {
-            let base = 4 + (r * HEM_WOTS_MAX_STEP + d_usize) * 4;
-            let mut node = [Goldilocks::ZERO; 4];
-            for (limb, out) in node.iter_mut().enumerate() {
-                for (i, sh) in signer_shares.iter().enumerate() {
-                    share_buf[i] = sh.leaf_vals[kp][base + limb];
-                }
-                *out = open_and_check_degree_goldilocks(t, &pts, &share_buf, "hem_qsb_open_chain")
-                    .map_err(|_| HemQuorumError::EndpointVerificationFailed { chain: r })?;
-            }
+            let node = nodes
+                .next()
+                .ok_or(HemQuorumError::SignatureSelfCheckFailed)?;
             let mut cur = node;
             for step in (d as u32)..(HEM_WOTS_MAX_STEP as u32) {
                 cur = hem_wots_step_hash_injective(
@@ -2305,13 +2801,11 @@ pub fn sign_from_shamir_share_slice(
                 );
             }
             if cur != public_dir.endpoints[kp][r] {
-                wipe_goldilocks(&mut share_buf);
                 return Err(HemQuorumError::EndpointVerificationFailed { chain: r });
             }
             wots_chains.push(node);
         }
     }
-    wipe_goldilocks(&mut share_buf);
 
     let (merkle_path, _) = hem_merkle_auth_path(public_dir.pk.pk_seed, &public_dir.leaves, kp)
         .ok_or(HemQuorumError::SignatureSelfCheckFailed)?;
@@ -3204,10 +3698,10 @@ mod tests {
         assert_eq!(qsb.public_key(), pk0_initial);
         assert_eq!(qsb.quorum_epoch(), 2);
 
-        // 2. Validator 1: QS-A Committee-Partitioned Quorum (2-of-3)
-        let mut qsa = HemCommitteePartitionedQuorum::stage([0x44; 32], 2, 3, 4).unwrap();
+        // 2. Validator 1: Independent dynamic Shamir quorum (2-of-3)
+        let mut second = HemDynamicShamirQuorum::stage([0x44; 32], 2, 3, 4).unwrap();
         let agg_pk1 =
-            ValidatorPublicKey::from_bytes_canonical(&qsa.public_key().to_bytes()).unwrap();
+            ValidatorPublicKey::from_bytes_canonical(&second.public_key().to_bytes()).unwrap();
 
         // 3. Validator 2: Standard single-custodian `ValidatorKeypair` (`JortsPoseidon2`)
         let mut v2_kp =
@@ -3221,7 +3715,7 @@ mod tests {
             .unwrap();
         assert_eq!(ep1, 1);
 
-        let (_, sig_qsa) = qsa.sign_with_committee(&[0, 2], block_msg).unwrap();
+        let (_, sig_second) = second.sign_quorum(&[0, 2], &[0, 1, 2], block_msg).unwrap();
         let mut wal2 = TestEpochWal::default();
         let sig_v2 = v2_kp.sign_stateful(block_msg, 0, &mut wal2).unwrap();
 
@@ -3230,9 +3724,9 @@ mod tests {
             &sig_qsb.to_bytes(),
         )
         .unwrap();
-        let agg_sig_qsa = ValidatorSignature::from_bytes_canonical(
+        let agg_sig_second = ValidatorSignature::from_bytes_canonical(
             AggSigProfile::JortsPoseidon2,
-            &sig_qsa.to_bytes(),
+            &sig_second.to_bytes(),
         )
         .unwrap();
 
@@ -3244,7 +3738,7 @@ mod tests {
         assert!(verify_individual_signature(
             &agg_pk1,
             block_msg,
-            &agg_sig_qsa
+            &agg_sig_second
         ));
         assert!(verify_individual_signature(&agg_pk2, block_msg, &sig_v2));
 
@@ -3258,12 +3752,221 @@ mod tests {
             &committee_pks,
             &bitmap,
             &mode,
-            &[agg_sig_qsb, agg_sig_qsa, sig_v2],
+            &[agg_sig_qsb, agg_sig_second, sig_v2],
         )
         .unwrap();
 
         assert_eq!(agg_proof.num_signers(), 3);
-        assert!(verify_hem_quintic_128(&committee_pks, &mode, &agg_proof));
+        assert!(verify_hem_quintic_128(
+            HemQuinticProfile::TurboShake400,
+            &committee_pks,
+            &mode,
+            &agg_proof
+        ));
+    }
+
+    #[test]
+    fn detached_wire_signers_require_a_matching_latch_and_persist_each_burn() {
+        use crate::wire_channel::InMemoryWireMesh;
+        let mut q = HemDynamicShamirQuorum::stage([0x77; 32], 2, 3, 1).unwrap();
+        let dir = q.public_directory().clone();
+        let msg = b"detached signing";
+        let roster = [0, 2];
+        let path = std::env::temp_dir().join(format!(
+            "qsag-detached-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let mut signers = std::thread::scope(|scope| {
+            let jobs: Vec<_> = q
+                .shares
+                .iter_mut()
+                .zip(InMemoryWireMesh::connect(3, [0x78; 32]).0)
+                .map(|(share, mut wire)| {
+                    let dir = &dir;
+                    let file = path.join(format!("{}.wal", share.party_id));
+                    scope.spawn(move || {
+                        let key = [share.party_id as u8 + 1; 32];
+                        let snapshot = SecretBuffer(share.to_vault_bytes().unwrap());
+                        let mut wal =
+                            qsag_core::dkg::FsWalEpochLatch::create_new_for_fresh_key(&file, key)
+                                .unwrap();
+                        let signer = share
+                            .reserve_wire_signer(
+                                dir,
+                                &roster,
+                                &[0, 1, 2],
+                                0,
+                                msg,
+                                &mut wire,
+                                &mut wal,
+                                |spent| {
+                                    assert_eq!(spent.high_water_leaf, 1);
+                                    Ok(())
+                                },
+                            )
+                            .unwrap();
+                        drop(wal);
+                        let mut recovered =
+                            qsag_core::dkg::FsWalEpochLatch::open_existing(file, key).unwrap();
+                        let mut stale =
+                            HemShamirCustodianShare::from_vault_bytes(&snapshot).unwrap();
+                        assert!(
+                            stale
+                                .reserve_wire_signer(
+                                    dir,
+                                    &roster,
+                                    &[0, 1, 2],
+                                    0,
+                                    b"another message",
+                                    &mut wire,
+                                    &mut recovered,
+                                    |_| panic!()
+                                )
+                                .is_err()
+                        );
+                        signer
+                    })
+                })
+                .collect();
+            jobs.into_iter()
+                .filter_map(|job| job.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        std::fs::remove_dir_all(path).unwrap();
+        let jobs: Vec<_> = signers
+            .drain(..)
+            .zip(InMemoryWireMesh::connect(2, [0x79; 32]).0)
+            .collect();
+        let sigs = std::thread::scope(|scope| {
+            let jobs = jobs
+                .into_iter()
+                .map(|(party, mut peers)| {
+                    let dir = &dir;
+                    scope.spawn(move || party.sign(&mut peers, dir, 0, msg))
+                })
+                .collect::<Vec<_>>();
+            jobs.into_iter()
+                .map(|j| j.join().unwrap().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(sigs[0].to_bytes(), sigs[1].to_bytes());
+        assert!(verify_hem_jorts_signature(&dir.pk, msg, &sigs[0]));
+    }
+
+    #[test]
+    fn retired_custodians_cannot_reserve_a_leaf_from_an_old_snapshot() {
+        use crate::wire_channel::InMemoryWireMesh;
+        use qsag_core::dkg::FsWalEpochLatch;
+        let q = HemDynamicShamirQuorum::stage([0x85; 32], 2, 3, 1).unwrap();
+        let plan = q.wire_reshare_plan([0x86; 32], &[0, 2], 2, 3).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "qsag-retire-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        std::thread::scope(|scope| {
+            for (source, mut wire) in q
+                .shares
+                .iter()
+                .zip(InMemoryWireMesh::connect(3, [0x87; 32]).0)
+            {
+                let plan = &plan;
+                let dir = q.public_directory();
+                let file = path.join(source.party_id.to_string());
+                scope.spawn(move || {
+                    let raw = SecretBuffer(source.to_vault_bytes().unwrap());
+                    let old = HemShamirCustodianShare::from_vault_bytes(&raw).unwrap();
+                    let key = [source.party_id as u8 + 1; 32];
+                    let mut wal = FsWalEpochLatch::create_new_for_fresh_key(&file, key).unwrap();
+                    let token = plan
+                        .retire(old, &mut wire, &mut wal, |epoch, digest| {
+                            assert_eq!(epoch, 0);
+                            assert_eq!(digest, &plan.binding);
+                            Ok(())
+                        })
+                        .unwrap();
+                    assert_eq!(token.is_some(), plan.dealers.contains(&source.party_id));
+                    drop((token, wal));
+                    let mut fresh_wal = FsWalEpochLatch::open_existing(file, key).unwrap();
+                    let mut stale = HemShamirCustodianShare::from_vault_bytes(&raw).unwrap();
+                    assert!(
+                        stale
+                            .reserve_wire_signer(
+                                dir,
+                                &[0, 2],
+                                &[0, 1, 2],
+                                0,
+                                b"old generation",
+                                &mut wire,
+                                &mut fresh_wal,
+                                |_| panic!()
+                            )
+                            .is_err()
+                    );
+                });
+            }
+        });
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn wire_reshare_recipient_only_imports_its_own_checks_after_a_durable_burn() {
+        use crate::wire_channel::InMemoryWireMesh;
+        let q = HemDynamicShamirQuorum::stage([0x59; 32], 2, 2, 1).unwrap();
+        let plan = q.wire_reshare_plan([0x60; 32], &[0, 1], 2, 2).unwrap();
+        let checks = plan.prepare_checks(&mut test_party_rngs(11, 2)).unwrap();
+        let mut pipe = InMemoryWireMesh::connect(2, [0x61; 32]).0;
+        let mut node = pipe.pop().unwrap();
+        let mut sender = pipe.pop().unwrap();
+        for (p, check) in checks.into_iter().enumerate() {
+            let expected = SecretBuffer([*check.mask_product, check.blind[2]]);
+            check.dispatch(&mut sender).unwrap();
+            if p == 0 {
+                assert!(plan.receive_check(1, &mut node, |_, _| panic!()).is_err());
+            } else {
+                let imported = plan
+                    .receive_check(p, &mut node, |id, recipient| {
+                        assert_eq!(id, &plan.binding);
+                        assert_eq!(recipient, p);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(
+                    (*imported.mask_product).ct_eq(expected[0])
+                        && imported.blind[2].ct_eq(expected[1])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wire_reshare_rejects_validly_transmitted_share_with_invalid_mac() {
+        use crate::wire_channel::InMemoryWireMesh;
+        let mut quorum = HemDynamicShamirQuorum::stage([0x61; 32], 2, 3, 1).unwrap();
+        let plan = quorum.wire_reshare_plan([0x62; 32], &[2, 0], 2, 3).unwrap();
+        let key = quorum.public_key();
+        quorum.shares[2].leaf_vals[0][0] += Goldilocks::ONE;
+        let result = quorum.reshare_on_channels(
+            &plan,
+            InMemoryWireMesh::connect(5, [0x63; 32]).0,
+            InMemoryWireMesh::connect(3, [0x64; 32]).0,
+            &mut test_party_rngs(20, 3),
+            &mut test_party_rngs(30, 3),
+        );
+        assert!(matches!(result, Err(HemQuorumError::ReshareMacCheckFailed)));
+        assert_eq!(quorum.quorum_epoch(), 0);
+        assert_eq!(quorum.high_water_leaf(), 0);
+        assert_eq!(quorum.public_key(), key);
+        assert!(quorum.shares.iter().all(|s| !s.invalidated));
     }
 
     #[test]
@@ -3834,6 +4537,7 @@ mod tests {
         )
         .unwrap();
         assert!(verify_hem_quintic_128(
+            HemQuinticProfile::TurboShake400,
             core::slice::from_ref(&agg_pk),
             &mode,
             &proof,
