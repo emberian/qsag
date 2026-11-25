@@ -71,6 +71,15 @@ pub(super) struct Argument {
     pub opening: FixedPathWhirW24,
 }
 impl Argument {
+    pub fn fits(&self, cfg: &IvcStepConfig) -> bool {
+        self.acc.point.len() == 2 * cfg.log_cells + 3
+            && self.row.len() == cfg.log_cells
+            && self.row.iter().all(|r| r.len() == 10)
+            && self.col.len() == cfg.log_cells
+            && self.col.iter().all(|r| r.len() == 3)
+            && self.opening.fits(cfg)
+    }
+
     pub fn blank(cfg: &IvcStepConfig) -> Self {
         Self {
             acc: Acc::dummy(cfg.log_cells),
@@ -252,6 +261,7 @@ pub(super) fn verify<B: Wide>(
         },
     )
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prove(
     cfg: &IvcStepConfig,
     shape: &Shape,
@@ -260,6 +270,7 @@ pub(super) fn prove(
     acc: Acc,
     assignment: Vec<F>,
     seed: &[u8; 32],
+    #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
 ) -> Option<Argument> {
     use qsag_core::wipe::SecretBuffer;
     let mut z = SecretBuffer::new(assignment);
@@ -282,7 +293,13 @@ pub(super) fn prove(
         t.resize(n, F::ZERO);
     }
     z.resize(n, F::ZERO);
-    let committed = IvcTableCommitment::commit(cfg, &z, seed)?;
+    let committed = IvcTableCommitment::commit_inner(
+        cfg,
+        &z,
+        seed,
+        #[cfg(feature = "vulkan")]
+        gpu,
+    )?;
     let nonce = committed.nonce();
     let root = committed.root();
     let mut tr = start(
@@ -325,7 +342,12 @@ pub(super) fn prove(
         .zip(z.iter())
         .fold(E::ZERO, |a, (x, y)| a + x.mul_base(*y));
     tr.absorb_fp5_slice(b"TERMINAL", &[matrix, val]);
-    let (value, opening) = committed.open(&tr.0[..7], &ry)?;
+    let (value, opening) = committed.open_inner(
+        &tr.0[..7],
+        &ry,
+        #[cfg(feature = "vulkan")]
+        gpu,
+    )?;
     (val == value).then_some(Argument {
         acc,
         root,

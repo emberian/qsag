@@ -6,10 +6,10 @@ use super::super::{
 use super::*;
 use alloc::collections::BTreeMap;
 pub(super) const COMMITTEE: MultisigParams = MultisigParams {
-    capacity: 2,
+    capacity: 64,
     depth: 8,
 };
-const ROSTER_STAGE: usize = 0x524547;
+const REGISTRY_DOMAIN: usize = 0x524547;
 fn address_leaf(addr: [F; 4]) -> Digest {
     let mut tr = Duplex::new();
     tr.frame(&mut Native::default(), b"IVC-REG-LEAF", &addr);
@@ -18,16 +18,27 @@ fn address_leaf(addr: [F; 4]) -> Digest {
 /// A 64-level sparse directory keyed by shard ID. Policies use the threshold
 /// and member-tree address checked by the Jorts multisignature relation.
 pub struct IvcPolicyRegistry {
+    pub(super) committee: MultisigParams,
     levels: Vec<BTreeMap<u64, Digest>>,
     defaults: Vec<Digest>,
 }
 impl IvcPolicyRegistry {
     pub const POLICY_DEPTH: usize = COMMITTEE.depth;
+    /// Signature slots per default leaf. Multiple leaves can cover the entire member tree.
     pub const MAX_SIGNERS_PER_SHARD: usize = COMMITTEE.capacity;
     pub fn new(entries: &[(u64, Policy)]) -> Option<Self> {
+        Self::with_committee(COMMITTEE, entries)
+    }
+
+    pub fn with_committee(committee: MultisigParams, entries: &[(u64, Policy)]) -> Option<Self> {
+        if !committee.valid() || committee.depth > 8 {
+            return None;
+        }
         let mut leaves = BTreeMap::new();
         for (i, p) in entries {
-            if leaves.insert(*i, address_leaf(p.address())).is_some() {
+            if p.depth() != committee.depth
+                || leaves.insert(*i, address_leaf(p.address())).is_some()
+            {
                 return None;
             }
         }
@@ -40,7 +51,7 @@ impl IvcPolicyRegistry {
                 crate::sponge::poseidon2_gl24_compress_merkle(
                     l,
                     r,
-                    &[f(ROSTER_STAGE as u64), f(h as u64)],
+                    &[f(REGISTRY_DOMAIN as u64), f(h as u64)],
                 )
             };
             let mut next = BTreeMap::new();
@@ -55,7 +66,11 @@ impl IvcPolicyRegistry {
             levels.push(next);
             defaults.push(fold(&default, &default));
         }
-        Some(Self { levels, defaults })
+        Some(Self {
+            committee,
+            levels,
+            defaults,
+        })
     }
     pub fn root(&self) -> [u8; 32] {
         let root = self.levels[64].get(&0).unwrap_or(&self.defaults[64]);
@@ -77,7 +92,7 @@ pub struct IvcShard<'a> {
 fn signed<W: Base, B: Wide<W = W>>(b: &mut B, words: &[W]) -> [W; 4] {
     let mut tr = Duplex::new();
     let mut msg = words[..10].to_vec();
-    msg.extend_from_slice(&words[14..22]);
+    msg.extend_from_slice(&words[23..STATEMENT_WORDS]);
     tr.frame(b, b"IVC-JORTS-MESSAGE", &msg);
     core::array::from_fn(|i| tr.0[i].clone())
 }
@@ -86,12 +101,15 @@ pub fn ivc_signing_message(root: [u8; 32], shard_id: u64, message_digest: [u8; 3
         policy_registry_root: root,
         shard_lo: shard_id,
         shard_hi: 0,
-        total_quorums: 0,
+        total_signers: 0,
+        shard_threshold: 0,
+        signer_bitmap: [0; IVC_BITMAP_BYTES],
         message_digest,
     };
     crate::sponge::limbs4_to_le_bytes32(signed(&mut Native::default(), &stmt.public_inputs()))
 }
 pub(super) struct Witness {
+    committee: MultisigParams,
     slots: Vec<Slot>,
     threshold: u32,
     address: [F; 4],
@@ -102,9 +120,10 @@ impl Witness {
     pub(super) fn corrupt_chain(&mut self) {
         self.slots[0].corrupt_chain_for_test();
     }
-    pub fn blank() -> Self {
+    pub fn blank(committee: MultisigParams) -> Self {
         Self {
-            slots: vec![Slot::placeholder(COMMITTEE.depth); COMMITTEE.capacity],
+            committee,
+            slots: vec![Slot::placeholder(committee.depth); committee.capacity],
             threshold: 1,
             address: [F::ZERO; 4],
             path: [[F::ZERO; 7]; 64],
@@ -121,7 +140,8 @@ impl Witness {
             return None;
         }
         Some(Self {
-            slots: multisig::slots_for(COMMITTEE, s.policy, &message, s.signers).ok()?,
+            committee: reg.committee,
+            slots: multisig::slots_for(reg.committee, s.policy, &message, s.signers, false).ok()?,
             threshold: s.policy.threshold(),
             address,
             path: reg.path(s.shard_id),
@@ -145,9 +165,10 @@ pub(super) fn populate(
     for (x, y) in acc.iter().zip(dummy) {
         cs.enforce_equal(x, &Lc::constant(y));
     }
-    for x in &s {
+    for x in s[..8].iter().chain(&s[10..15]).chain(&s[23..]) {
         bits(cs, x, 32);
     }
+    let bitmap: Vec<_> = s[15..23].iter().flat_map(|x| bits(cs, x, 32)).collect();
     tree::add64(
         cs,
         &s[8..10],
@@ -164,7 +185,7 @@ pub(super) fn populate(
         let sib = hash.map(|x| Backend::alloc(cs, x));
         let l = core::array::from_fn(|i| select(cs, bit, &sib[i], &cur[i]));
         let r = core::array::from_fn(|i| cur[i].plus(&sib[i]).minus(&l[i]));
-        cur = compress(cs, ROSTER_STAGE, h, &l, &r);
+        cur = compress(cs, REGISTRY_DOMAIN, h, &l, &r);
     }
     let pack = |v: &[Lc]| {
         v.iter()
@@ -198,7 +219,29 @@ pub(super) fn populate(
         .iter()
         .map(|c| c.iter().fold(Lc::zero(), |a, x| a.scaled(f(256)).plus(x)))
         .collect();
-    let count = multisig::check_slots(cs, COMMITTEE, &addr, &mu, w.threshold, &w.slots);
+    let (count, indices, threshold) =
+        multisig::check_slots(cs, w.committee, &addr, &mu, w.threshold, &w.slots, false);
+    cs.enforce_equal(&threshold, &s[14]);
+    let members = 1 << w.committee.depth;
+    for bit in &bitmap[members..] {
+        cs.enforce_zero(bit.clone());
+    }
+    let weight = bitmap.iter().fold(Lc::zero(), |sum, bit| sum.plus(bit));
+    cs.enforce_equal(&weight, &count);
+    // Strictly increasing active indices select distinct set bits. Equal
+    // cardinalities then exclude every unselected bit.
+    for (active, index) in indices {
+        let mut level = bitmap[..members].to_vec();
+        for bit in index {
+            level = level
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|[lo, hi]| select(cs, &bit, hi, lo))
+                .collect();
+        }
+        cs.enforce_mul(active, Lc::constant(F::ONE).minus(&level[0]), Lc::zero());
+    }
     cs.enforce_equal(&count, &s[12]);
     cs.enforce_zero(s[13].clone());
 }

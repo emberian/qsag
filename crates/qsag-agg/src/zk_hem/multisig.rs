@@ -1,7 +1,7 @@
 //! Fixed-capacity multisignature with a witnessed policy as a zk-Hem relation.
 //!
 //! It uses the committed-mask protocol; its security statement is summarised on
-//! [`protocol::prove`] and given in `crates/qsag-agg/SECURITY.md`.
+//! [`crate::zk_hem::v2::protocol::prove`] and given in `crates/qsag-agg/SECURITY.md`.
 //!
 //! The only public inputs to the relation are the policy address and a 32-byte message:
 //!
@@ -79,6 +79,9 @@ fn first4_lc(st: &[Lc; 12]) -> [Lc; 4] {
     core::array::from_fn(|i| st[i].clone())
 }
 
+/// Maximum number of signature slots in a multisignature proof.
+pub const MAX_MULTISIG_CAPACITY: usize = 256;
+
 /// Capacity and policy-tree depth; together they fix the relation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MultisigParams {
@@ -89,8 +92,8 @@ pub struct MultisigParams {
 }
 
 impl MultisigParams {
-    fn valid(self) -> bool {
-        (1..=64).contains(&self.capacity) && (1..=20).contains(&self.depth)
+    pub(super) fn valid(self) -> bool {
+        (1..=MAX_MULTISIG_CAPACITY).contains(&self.capacity) && (1..=20).contains(&self.depth)
     }
 
     /// Bits of `sum(active) - threshold`.
@@ -178,6 +181,10 @@ impl Policy {
         (0..self.depth)
             .map(|level| self.levels[level][(index >> level) ^ 1])
             .collect()
+    }
+
+    pub fn depth(&self) -> usize {
+        self.depth
     }
 
     pub fn threshold(&self) -> u32 {
@@ -438,13 +445,13 @@ fn xmss_node(
     first4_lc(&st)
 }
 
-/// Rows of one slot. Returns `(active, member index, members root)`.
+/// Rows of one slot. Returns `(active, member index bits, members root)`.
 fn slot_gadget(
     cs: &mut ConstraintSystem,
     params: MultisigParams,
     slot: &Slot,
     message_limbs: &[Lc],
-) -> (Lc, Lc, [Lc; 4]) {
+) -> (Lc, Vec<Lc>, [Lc; 4]) {
     let active: Lc = cs.alloc(f(u64::from(slot.active))).into();
     cs.enforce_boolean(&active);
     let seed = alloc4(cs, &slot.pk_seed);
@@ -571,7 +578,7 @@ fn slot_gadget(
     }
     enforce_equal4(cs, &node, &root);
 
-    (active, pack_bits(&index_bits), members_root)
+    (active, index_bits, members_root)
 }
 
 fn synthesize(
@@ -600,7 +607,15 @@ fn populate(
         .map(|v| cs.public_input(v).into())
         .collect();
     let (address_lc, message_limbs) = publics.split_at(4);
-    check_slots(cs, params, address_lc, message_limbs, threshold, slots);
+    check_slots(
+        cs,
+        params,
+        address_lc,
+        message_limbs,
+        threshold,
+        slots,
+        true,
+    );
 }
 
 pub(super) fn check_slots(
@@ -610,36 +625,40 @@ pub(super) fn check_slots(
     message_limbs: &[Lc],
     threshold: u32,
     slots: &[Slot],
-) -> Lc {
+    require_threshold: bool,
+) -> (Lc, Vec<(Lc, Vec<Lc>)>, Lc) {
     assert_eq!(slots.len(), params.capacity);
     let threshold_lc: Lc = cs.alloc(f(u64::from(threshold))).into();
 
     // Bound the hidden threshold independently of Policy::new and the active slots.
-    // Both differences are below 128, so no field wrap can pass.
-    let lower = alloc_bits(
-        cs,
-        u64::from(threshold.saturating_sub(1)),
-        params.slack_bits(),
-    );
+    // At capacity 256 standalone slacks use nine bits. Partial leaves bound
+    // the threshold by the full policy tree, independent of the slot count.
+    let (maximum, width) = if require_threshold {
+        (params.capacity, params.slack_bits())
+    } else {
+        (1 << params.depth, params.depth + 1)
+    };
+    let lower = alloc_bits(cs, u64::from(threshold.saturating_sub(1)), width);
     cs.enforce_equal(
         &threshold_lc.plus_const(F::ZERO - F::ONE),
         &pack_bits(&lower),
     );
-    let upper = alloc_bits(
-        cs,
-        params.capacity.saturating_sub(threshold as usize) as u64,
-        params.slack_bits(),
-    );
+    let upper = alloc_bits(cs, maximum.saturating_sub(threshold as usize) as u64, width);
     cs.enforce_equal(
-        &Lc::constant(f(params.capacity as u64)).minus(&threshold_lc),
+        &Lc::constant(f(maximum as u64)).minus(&threshold_lc),
         &pack_bits(&upper),
     );
 
     let mut prev: Option<(Lc, Lc, [Lc; 4])> = None;
     let mut active_sum = Lc::zero();
     let mut members_root = None;
+    let mut active_indices = Vec::new();
     for slot in slots {
-        let (active, index, root) = slot_gadget(cs, params, slot, message_limbs);
+        let (active, index_bits, root) = slot_gadget(cs, params, slot, message_limbs);
+        let index = pack_bits(&index_bits);
+        if !require_threshold {
+            active_indices.push((active.clone(), index_bits));
+        }
         active_sum = active_sum.plus(&active);
         match &prev {
             None => members_root = Some(root.clone()),
@@ -669,17 +688,22 @@ pub(super) fn check_slots(
         prev = Some((active, index, root));
     }
 
-    // `sum(active) >= threshold`.
-    let slack = cs.eval(&active_sum).to_canonical_u64() as i128 - i128::from(threshold);
+    let minimum = if require_threshold {
+        threshold_lc.clone()
+    } else {
+        Lc::constant(F::ONE)
+    };
+    let slack = cs.eval(&active_sum).to_canonical_u64() as i128
+        - i128::from(cs.eval(&minimum).to_canonical_u64());
     let slack_bits = alloc_bits(cs, slack.max(0) as u64, params.slack_bits());
-    cs.enforce_equal(&active_sum.minus(&threshold_lc), &pack_bits(&slack_bits));
+    cs.enforce_equal(&active_sum.minus(&minimum), &pack_bits(&slack_bits));
 
     // Address of the policy.
     let Some(members_root) = members_root else {
         unreachable!("capacity is at least one")
     };
     let mut msg: Vec<Lc> = members_root.to_vec();
-    msg.push(threshold_lc);
+    msg.push(threshold_lc.clone());
     msg.push(Lc::constant(f(POLICY_ROOT_TAG)));
     let policy_root = first4_lc(&sponge12(cs, &msg));
     let mut msg: Vec<Lc> = label_limbs().map(Lc::constant).to_vec();
@@ -688,7 +712,7 @@ pub(super) fn check_slots(
     for (got, want) in computed.iter().zip(address_lc) {
         cs.enforce_equal(got, want);
     }
-    active_sum
+    (active_sum, active_indices, threshold_lc)
 }
 
 pub(super) fn slots_for(
@@ -696,11 +720,12 @@ pub(super) fn slots_for(
     policy: &Policy,
     message: &[u8; 32],
     signers: &[MultisigSigner],
+    require_threshold: bool,
 ) -> Result<Vec<Slot>, MultisigError> {
     if policy.depth != params.depth {
         return Err(MultisigError::InvalidPolicy);
     }
-    if signers.len() < policy.threshold as usize
+    if (require_threshold && signers.len() < policy.threshold as usize)
         || signers.len() > params.capacity
         || signers.is_empty()
         || signers
@@ -782,7 +807,7 @@ impl MultisigRelation {
         message: &[u8; 32],
         signers: &[MultisigSigner],
     ) -> Result<Vec<Slot>, MultisigError> {
-        slots_for(self.params, policy, message, signers)
+        slots_for(self.params, policy, message, signers, true)
     }
 
     /// The assignment of the relation for a signer set (`signers` ordered by member index),

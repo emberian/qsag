@@ -2311,6 +2311,14 @@ impl SignerBitmap {
         if !self.is_disjoint(other) {
             return None;
         }
+        self.union(other)
+    }
+
+    /// Unique signers in either bitmap over the same committee.
+    pub fn union(&self, other: &Self) -> Option<Self> {
+        if self.num_validators != other.num_validators {
+            return None;
+        }
         let words = self
             .words
             .iter()
@@ -2321,6 +2329,25 @@ impl SignerBitmap {
             num_validators: self.num_validators,
             words,
         })
+    }
+
+    pub fn overlap_count(&self, other: &Self) -> Option<usize> {
+        (self.num_validators == other.num_validators).then(|| {
+            self.words
+                .iter()
+                .zip(&other.words)
+                .map(|(a, b)| (a & b).count_ones() as usize)
+                .sum()
+        })
+    }
+
+    pub fn is_subset_of(&self, other: &Self) -> bool {
+        self.num_validators == other.num_validators
+            && self
+                .words
+                .iter()
+                .zip(&other.words)
+                .all(|(a, b)| a & !b == 0)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -2424,6 +2451,23 @@ impl core::error::Error for SigError {}
 #[cfg(test)]
 mod persistence_and_encoding_tests {
     use super::*;
+
+    #[test]
+    fn bitmap_union_counts_unique_validators_across_words() {
+        let l = SignerBitmap::from_active_indices(129, &[0, 63, 64]).unwrap();
+        let r = SignerBitmap::from_active_indices(129, &[0, 64, 128]).unwrap();
+        let union = l.union(&r).unwrap();
+        assert_eq!(union.active_indices(), [0, 63, 64, 128]);
+        assert_eq!(union.count_ones(), 4);
+        assert_eq!(l.overlap_count(&r), Some(2));
+        assert_eq!(l.union(&l).as_ref(), Some(&l));
+        assert!(l.is_subset_of(&union) && r.is_subset_of(&union));
+        assert!(!l.is_subset_of(&r));
+        assert!(l.union_disjoint(&r).is_none());
+        let other = SignerBitmap::new_empty(130);
+        assert!(l.overlap_count(&other).is_none() && l.union(&other).is_none());
+        assert!(!l.is_subset_of(&other));
+    }
 
     #[test]
     fn signature_canonical_decoding() {
