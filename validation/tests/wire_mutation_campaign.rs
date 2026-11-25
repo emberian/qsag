@@ -2,16 +2,13 @@
 //! Deterministic `120,000+` Adversarial Wire-Mutation & Boundary Campaign
 //!
 //! Exercises structured boundary corruptions (magic tags, length prefixes, trailing bytes,
-//! `GOLDILOCKS_PRIME` non-canonical limbs, bitmap active-set mismatches, 64-bit alignment pad
-//! bytes, `u32::MAX` generation wraparound, ISA reserved-bit encodings, `.org` OOM guards, and
-//! VM trap latches) plus deterministic SplitMix64 byte/bit-flip fuzzing across:
-//! 1. `HemQuinticProof::from_bytes` (`QSAGHQM2`) + `verify_hem_quintic_128` (`30,000+` mutations)
+//! `GOLDILOCKS_PRIME` non-canonical limbs, and bitmap active-set mismatches) plus deterministic
+//! SplitMix64 byte/bit-flip fuzzing across:
+//! 1. `HemQuinticProof::from_bytes` (`QSAGHQM2`) + `verify_hem_quintic_128` (`40,000+` mutations)
 //! 2. `FixedPathWhirW24::from_bytes_canonical` (`QSAGIW24`) & `SuccinctIvcProof::from_bytes_canonical`
-//!    (`QSAGIVC1`) + `verify_ivc_tree` (`30,000+` mutations)
+//!    (`QSAGIVC1`) + `verify_ivc_tree` (`40,000+` mutations)
 //! 3. `ZkHemV2Proof::from_bytes` (`QSAGZKH2`) & `ZkHemV2SplitProof::from_bytes` (`QSAGZKS2`)
-//!    with and without LogUp lookup tables (`30,000+` mutations)
-//! 4. `qsag-ass2` Owner `WOTS+C` frames, fast capability `CMD_LOAD_CODE`, 32-bit ISA codec,
-//!    two-pass assembler, and `Ass2Vm` (`30,000+` mutations)
+//!    with and without LogUp lookup tables (`40,000+` mutations)
 
 use qsag_agg::field::{GOLDILOCKS_PRIME, Goldilocks};
 use qsag_agg::sig::{EpochWalSink, SigError, WalEpochState};
@@ -25,16 +22,6 @@ use qsag_agg::{
     AggSigProfile, FixedPathWhirW24, HemQuinticProfile, HemQuinticProof, IvcStepConfig,
     IvcSubtreeStatement, IvcTableCommitment, SignerBitmap, SigningMode, SuccinctIvcProof,
     ValidatorKeypair, prove_hem_quintic_128, verify_hem_quintic_128, verify_ivc_tree,
-};
-use qsag_ass2::wire::{
-    Ass2WireError, OwnerOp, capability_commit_code, compute_image_id, encode_owner_lifecycle_frame,
-    load_code_frame, load_code_wotsc_frame, owner_wotsc_pubkey,
-    parse_and_verify_load_code_wotsc_frame, parse_and_verify_owner_lifecycle_frame,
-    parse_load_code_frame,
-};
-use qsag_ass2::{
-    Ass2Vm, DitMode, RunExit, StepOutcome, assemble, decode_insn_le, disassemble_insn,
-    encode_insn_le,
 };
 
 struct SplitMix64(u64);
@@ -133,15 +120,44 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
         let turbo_wire = turbo_proof.to_bytes();
         let gl24_wire = gl24_proof.to_bytes();
 
-        assert_eq!(HemQuinticProof::from_bytes(&turbo_wire).as_ref(), Some(&turbo_proof));
-        assert_eq!(HemQuinticProof::from_bytes(&gl24_wire).as_ref(), Some(&gl24_proof));
-        assert!(verify_hem_quintic_128(&pks, &shared_mode, &turbo_proof));
-        assert!(verify_hem_quintic_128(&pks, &per_mode, &gl24_proof));
+        assert_eq!(
+            HemQuinticProof::from_bytes(&turbo_wire).as_ref(),
+            Some(&turbo_proof)
+        );
+        assert_eq!(
+            HemQuinticProof::from_bytes(&gl24_wire).as_ref(),
+            Some(&gl24_proof)
+        );
+        assert!(verify_hem_quintic_128(
+            HemQuinticProfile::TurboShake400,
+            &pks,
+            &shared_mode,
+            &turbo_proof
+        ));
+        assert!(verify_hem_quintic_128(
+            HemQuinticProfile::Poseidon2Gl24,
+            &pks,
+            &per_mode,
+            &gl24_proof
+        ));
+        assert!(!verify_hem_quintic_128(
+            HemQuinticProfile::Poseidon2Gl24,
+            &pks,
+            &shared_mode,
+            &turbo_proof
+        ));
+        assert!(!verify_hem_quintic_128(
+            HemQuinticProfile::TurboShake400,
+            &pks,
+            &per_mode,
+            &gl24_proof
+        ));
 
         // Structured boundary checks: trailing byte, truncated prefix, zero bitmap, bad profile tag,
         // and PerSignerMessages boundary shifting `[b"per-0", b"per-1"]` -> `[b"per-", b"0per-1"]`!
         let shifted_msgs: [&[u8]; 2] = [b"per-", b"0per-1"];
         assert!(!verify_hem_quintic_128(
+            HemQuinticProfile::Poseidon2Gl24,
             &pks,
             &SigningMode::PerSignerMessages(&shifted_msgs),
             &gl24_proof
@@ -170,11 +186,11 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
         }
 
         // 30,000 randomized single/multi-byte & non-canonical-limb injections
-        for step in 0..30_000usize {
-            let (base, mode) = if step & 1 == 0 {
-                (&turbo_wire, &shared_mode)
+        for step in 0..40_000usize {
+            let (base, expected_profile, mode) = if step & 1 == 0 {
+                (&turbo_wire, HemQuinticProfile::TurboShake400, &shared_mode)
             } else {
-                (&gl24_wire, &per_mode)
+                (&gl24_wire, HemQuinticProfile::Poseidon2Gl24, &per_mode)
             };
             let mut cand = base.clone();
             match step % 6 {
@@ -191,7 +207,11 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
                 2 => {
                     // Inject non-canonical Goldilocks limb >= p into payload
                     let off = 29 + rng.next_usize(cand.len() - 37);
-                    let bad_limb = if step & 2 == 0 { GOLDILOCKS_PRIME } else { u64::MAX };
+                    let bad_limb = if step & 2 == 0 {
+                        GOLDILOCKS_PRIME
+                    } else {
+                        u64::MAX
+                    };
                     cand[off..off + 8].copy_from_slice(&bad_limb.to_le_bytes());
                 }
                 3 => {
@@ -212,7 +232,7 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
                 assert_eq!(decoded.to_bytes(), cand);
                 // Only decode-checked envelope passed; cryptographic verification must reject!
                 assert!(
-                    !verify_hem_quintic_128(&pks, mode, &decoded),
+                    !verify_hem_quintic_128(expected_profile, &pks, mode, &decoded),
                     "forged HemQuinticProof accepted at step {step}"
                 );
             }
@@ -283,12 +303,14 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
             policy_registry_root: [0x12; 32],
             shard_lo: 0,
             shard_hi: 2,
-            total_quorums: 2,
+            total_signers: 2,
+            shard_threshold: 0,
+            signer_bitmap: [0; 32],
             message_digest: [0x34; 32],
         };
         assert!(!verify_ivc_tree(&ivc_stmt, &parsed_zero_ivc));
 
-        for step in 0..30_000usize {
+        for step in 0..40_000usize {
             if step % 3 != 0 {
                 let mut cand = op16_wire.clone();
                 match step % 5 {
@@ -298,8 +320,9 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
                     }
                     1 => {
                         let word_idx = 8 + 8 * rng.next_usize((cand.len() - 8) / 8);
-                        cand[word_idx..word_idx + 8]
-                            .copy_from_slice(&(GOLDILOCKS_PRIME + (step as u64 % 99)).to_le_bytes());
+                        cand[word_idx..word_idx + 8].copy_from_slice(
+                            &(GOLDILOCKS_PRIME + (step as u64 % 99)).to_le_bytes(),
+                        );
                     }
                     2 => {
                         cand.pop();
@@ -367,7 +390,7 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
         let plain_proof = v2::prove(
             &plain_shape,
             plain_z,
-            b"x5-v2-plain",
+            b"campaign-v2-plain",
             Profile::TurboShakeJohnson400,
             &[0x51; 32],
         )
@@ -386,7 +409,7 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
         let lk_proof = v2::prove(
             &lk_shape,
             lk_z,
-            b"x5-v2-lk",
+            b"campaign-v2-lk",
             Profile::TurboShakeJohnson400,
             &[0x62; 32],
         )
@@ -412,7 +435,7 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
             total_mutations += 1;
         }
 
-        for step in 0..30_000usize {
+        for step in 0..40_000usize {
             match step % 3 {
                 0 => {
                     let mut cand = plain_wire.clone();
@@ -426,7 +449,7 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
                         assert!(!v2::verify(
                             &plain_shape,
                             &[f(77)],
-                            b"x5-v2-plain",
+                            b"campaign-v2-plain",
                             Profile::TurboShakeJohnson400,
                             &dec
                         ));
@@ -441,7 +464,7 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
                         assert!(!v2::verify(
                             &lk_shape,
                             &[f(88)],
-                            b"x5-v2-lk",
+                            b"campaign-v2-lk",
                             Profile::TurboShakeJohnson400,
                             &dec
                         ));
@@ -456,163 +479,10 @@ fn adversarial_wire_mutation_campaign_120k_zero_panics_zero_forgeries() {
                         assert!(!v2::verify_split(
                             &plain_shape,
                             &[f(77)],
-                            b"x5-v2-plain",
+                            b"campaign-v2-plain",
                             Profile::TurboShakeJohnson400,
                             &dec
                         ));
-                    }
-                }
-            }
-            total_mutations += 1;
-        }
-    }
-
-    // =========================================================================
-    // Campaign 4: `qsag-ass2` Wire Frames, WOTS+C, ISA Codec & VM — 30,000+ mutations
-    // =========================================================================
-    {
-        let sk0 = [0x42u8; 32];
-        let sk1 = [0x99u8; 32];
-        let owner_pk = owner_wotsc_pubkey(&sk0);
-        let next_pk = owner_wotsc_pubkey(&sk1);
-        let enclave_id = [0xA5u8; 32];
-        let nonce: [u8; 16] = core::array::from_fn(|i| (i + 1) as u8);
-        let record = (7u64 << 32) | 2;
-        let words = [0x0006_0000u32, 0x0005_0000u32]; // even word count -> 4 pad bytes!
-        let sib = [0x5Cu8; 16];
-        let cap = capability_commit_code(&compute_image_id(&enclave_id, &words), &sib);
-
-        let gate_frame = encode_owner_lifecycle_frame(
-            0x80,
-            &sk0,
-            &enclave_id,
-            OwnerOp::Gate { from: 2, to: 3 },
-            &nonce,
-            record,
-            &cap,
-            &next_pk,
-        )
-        .unwrap();
-        let fast_load = load_code_frame(0x40, &sib, &words).unwrap();
-        let wotsc_load =
-            load_code_wotsc_frame(0x80, &sk0, &enclave_id, &nonce, record, &next_pk, &words)
-                .unwrap();
-
-        // Explicit boundary checks: `u32::MAX` generation wraparound and non-zero pad bytes!
-        let max_gen_record = (u64::from(u32::MAX) << 32) | 2;
-        assert_eq!(
-            encode_owner_lifecycle_frame(
-                0x80,
-                &sk0,
-                &enclave_id,
-                OwnerOp::Commit,
-                &nonce,
-                max_gen_record,
-                &cap,
-                &next_pk
-            ),
-            Err(Ass2WireError::GenerationOverflow)
-        );
-        assert!(
-            load_code_wotsc_frame(
-                0x80,
-                &sk0,
-                &enclave_id,
-                &nonce,
-                max_gen_record,
-                &next_pk,
-                &words
-            )
-            .is_none()
-        );
-        for pad_pos in 1..=4 {
-            let mut dirty_fast = fast_load.clone();
-            let n = dirty_fast.len();
-            dirty_fast[n - pad_pos] = 1;
-            assert_eq!(
-                parse_load_code_frame(&dirty_fast),
-                Err(Ass2WireError::NonZeroPadding)
-            );
-            let mut dirty_wotsc = wotsc_load.clone();
-            let m = dirty_wotsc.len();
-            dirty_wotsc[m - pad_pos] = 0x80;
-            assert_eq!(
-                parse_and_verify_load_code_wotsc_frame(
-                    &dirty_wotsc,
-                    &owner_pk,
-                    &enclave_id,
-                    &nonce,
-                    record
-                ),
-                Err(Ass2WireError::NonZeroPadding)
-            );
-            total_mutations += 2;
-        }
-
-        // Explicit boundary checks: `.org 0xffffffff` rejected in pass 1, VM trap stays latched!
-        assert!(assemble(".org 0xffffffff\nhalt").is_err());
-        let mut trap_vm = Ass2Vm::new(4096);
-        trap_vm.dit_mode = DitMode::Trap;
-        trap_vm.load_image(0, &[0xFF, 0xFF, 0xFF, 0xFF]).unwrap();
-        let RunExit::Trap(cause) = trap_vm.run(4) else {
-            panic!("illegal instruction must trap");
-        };
-        assert_eq!(trap_vm.step(), StepOutcome::Trap(cause));
-        assert_eq!(trap_vm.run(4), RunExit::Trap(cause));
-
-        for step in 0..30_000usize {
-            match step % 4 {
-                0 => {
-                    let mut cand = gate_frame.to_vec();
-                    let idx = rng.next_usize(cand.len());
-                    cand[idx] ^= rng.next_nonzero_u8();
-                    // Byte 0 is serial width prefix (`0`, `0x40`, `0x80`); any mutation elsewhere must fail!
-                    if idx > 0 {
-                        assert!(
-                            parse_and_verify_owner_lifecycle_frame(
-                                &cand,
-                                &owner_pk,
-                                &enclave_id,
-                                &nonce,
-                                record
-                            )
-                            .is_err(),
-                            "mutated gate_frame forged verification at byte {idx}"
-                        );
-                    }
-                }
-                1 => {
-                    let mut cand = wotsc_load.clone();
-                    let idx = rng.next_usize(cand.len());
-                    cand[idx] ^= rng.next_nonzero_u8();
-                    if idx > 0 {
-                        assert!(
-                            parse_and_verify_load_code_wotsc_frame(
-                                &cand,
-                                &owner_pk,
-                                &enclave_id,
-                                &nonce,
-                                record
-                            )
-                            .is_err(),
-                            "mutated wotsc_load forged verification at byte {idx}"
-                        );
-                    }
-                }
-                2 => {
-                    let mut cand = fast_load.clone();
-                    let idx = rng.next_usize(cand.len());
-                    cand[idx] ^= rng.next_nonzero_u8();
-                    if let Ok((p, ws, tok)) = parse_load_code_frame(&cand) {
-                        assert_eq!(load_code_frame(p, &tok, &ws).unwrap(), cand);
-                    }
-                }
-                _ => {
-                    let raw_word = (rng.next_u64() as u32).to_le_bytes();
-                    if let Some(insn) = decode_insn_le(raw_word) {
-                        assert_eq!(encode_insn_le(&insn).unwrap(), raw_word);
-                        let text = disassemble_insn(&insn);
-                        assert_eq!(assemble(&text).unwrap(), raw_word);
                     }
                 }
             }

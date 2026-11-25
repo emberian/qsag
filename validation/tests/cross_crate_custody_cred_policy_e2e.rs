@@ -8,7 +8,7 @@
 //!    - 438-repetition Quantum-128 ZKBoo blind issuance (`holder_prepare_blind_issuance`,
 //!      `threshold_issue_blind_vc`) into `IssuerCredentialAccumulator` + ML-DSA-44 root attestation
 //!    - Zero-copy witness extraction via `HolderCredentialSecret::{arity, attrs, holder_blind}`
-//!      into `qsag_agg::zk_hem::blind_vc::{BlindVcWitness, BlindVcStatement::derive, prove_presentation}`
+//!      into `qsag_cred::presentation::{BlindVcWitness, BlindVcStatement::derive, prove_presentation}`
 //!    - Exact cross-crate Poseidon2 rate-6 accumulator root equality, `~239 KiB` succinct proof wire
 //!      roundtrip, verification, and adversarial tamper rejection.
 //! 2. **Journey B (`qsag-addr` + `qsag-policy` + `SpongeMacaroon` + `Compact1122` `PqBiscuit` ->
@@ -43,7 +43,7 @@ use fips204::traits::{SerDes as Fips204SerDes, Verifier as Fips204Verifier};
 use qsag_accel::CpuReferenceBackend;
 use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag, policy_signing_key_id};
 use qsag_agg::field::Goldilocks as AggGoldilocks;
-use qsag_agg::zk_hem::blind_vc::{
+use qsag_cred::presentation::{
     BlindVcStatement, BlindVcWitness, prove_presentation, verify_presentation,
 };
 use qsag_agg::zk_hem::v2::params::Profile as ZkHemProfile;
@@ -543,7 +543,7 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
     assert!(root_attestation.verify(&issuer_mldsa_pk, &oprf_pk));
 
     // 4. Bridge `HolderCredentialSecret` + `CredentialMembershipWitness` directly into
-    //    `qsag_agg::zk_hem::blind_vc::{BlindVcWitness, BlindVcStatement::derive}` (`C4-F7` fix)!
+    //    `qsag_cred::presentation::{BlindVcWitness, BlindVcStatement::derive}` (`C4-F7` fix)!
     let membership = accumulator
         .membership_witness(cred.accumulator_leaf_index)
         .expect("membership_witness");

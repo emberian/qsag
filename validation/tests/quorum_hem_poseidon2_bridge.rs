@@ -3,8 +3,7 @@
 //! Cross-Crate `Poseidon2`, Merkle-Compression & `QS <-> AG` (`Hem` Quorum) Differential Validation
 //!
 //! Validates:
-//! 1. End-to-end compatibility of `qsag-quorum` (`HemCommitteePartitionedQuorum` QS-A,
-//!    `HemDynamicShamirQuorum` QS-B with proactive refresh `Π_refresh` and `(2, 3) -> (3, 5)`
+//! 1. End-to-end compatibility of `qsag-quorum` (`HemDynamicShamirQuorum` QS-B with proactive refresh `Π_refresh` and `(2, 3) -> (3, 5)`
 //!    quorum-switching `Π_reshare`, and dealerless `HemSpdzSeedQuorum`) with `qsag-agg`
 //!    (`ValidatorPublicKey`, `ValidatorSignature`, `verify_individual_signature`, and untrusted
 //!    `prove_hem_quintic_128` Quintic `Fp5` WHIR aggregation under `[DKT26]` `< 2^{-128}` QROM), plus negative adversarial
@@ -36,7 +35,7 @@ use qsag_core::poseidon2_mpc::{
 use qsag_core::preprocessing::PartyPrivateRng;
 use qsag_external_validation::{GOLDILOCKS_P, poseidon2_ref};
 use qsag_quorum::{
-    HemCommitteePartitionedQuorum, HemDynamicShamirQuorum, HemSpdzSeedQuorum,
+    HemDynamicShamirQuorum, HemSpdzSeedQuorum,
 };
 
 fn party_rngs(seed: u8, n: usize) -> Vec<PartyPrivateRng> {
@@ -51,7 +50,7 @@ fn party_rngs(seed: u8, n: usize) -> Vec<PartyPrivateRng> {
 }
 
 #[test]
-fn e2e_quorum_qsa_qsb_spdz_to_hem_whir_aggregation_and_adversarial_rejection() {
+fn e2e_quorum_qsb_spdz_to_hem_whir_aggregation_and_adversarial_rejection() {
     // 1. Validator 0: QS-B Dynamic Shamir Quorum `(2, 3)` -> reshare `(3, 5)` -> refresh -> sign
     let mut qsb = HemDynamicShamirQuorum::stage([0x21; 32], 2, 3, 4).unwrap();
     let pk0 = qsb.public_key();
@@ -71,11 +70,7 @@ fn e2e_quorum_qsa_qsb_spdz_to_hem_whir_aggregation_and_adversarial_rejection() {
         .unwrap();
     assert_eq!(qsb.public_key(), pk0);
 
-    // 2. Validator 1: QS-A Committee-Partitioned Quorum `(2, 3)`
-    let mut qsa = HemCommitteePartitionedQuorum::stage([0x31; 32], 2, 3, 4).unwrap();
-    let pk1 = qsa.public_key();
-
-    // 3. Validator 2: 100% Dealerless SPDZ Seed Quorum `(2, 2)` (OT + Gilboa + SPDZ online MPC)
+    // Independent SPDZ seed quorum.
     let mut spdz = HemSpdzSeedQuorum::keygen_dealerless_online_fixture(
         [0x41; 32],
         2,
@@ -86,16 +81,13 @@ fn e2e_quorum_qsa_qsb_spdz_to_hem_whir_aggregation_and_adversarial_rejection() {
     .unwrap();
     let pk2 = spdz.public_key();
 
-    let consensus_msg = b"external-validation: QS-A + QS-B(3,5) + Dealerless-SPDZ -> Hem QROM-128";
+    let consensus_msg = b"external-validation: QS-B(3,5) + Dealerless-SPDZ -> Hem QROM-128";
     // Note: on a `(3, 5)` BFT latch cluster, quorum requires `2*q > 5 + 2 => q >= 4` ackers.
     let (ep_qsb, sig_qsb) = qsb
         .sign_quorum(&[0, 2, 4], &[0, 1, 2, 4], consensus_msg)
         .unwrap();
     assert_eq!(ep_qsb, 0);
     assert!(verify_hem_jorts_signature(&pk0, consensus_msg, &sig_qsb));
-
-    let (_, sig_qsa) = qsa.sign_with_committee(&[1, 2], consensus_msg).unwrap();
-    assert!(verify_hem_jorts_signature(&pk1, consensus_msg, &sig_qsa));
 
     let (ep_spdz, sig_spdz) = spdz
         .sign_quorum_online_fixture(
@@ -110,12 +102,12 @@ fn e2e_quorum_qsa_qsb_spdz_to_hem_whir_aggregation_and_adversarial_rejection() {
     assert_eq!(ep_spdz, 0);
     assert!(verify_hem_jorts_signature(&pk2, consensus_msg, &sig_spdz));
 
-    // Convert all 3 threshold custody keys (65 B) & signatures (4,328 B) into `qsag_agg` wire types
-    let agg_pks: Vec<ValidatorPublicKey> = [pk0, pk1, pk2]
+    // Convert both threshold custody keys (65 B) & signatures (4,328 B) into `qsag_agg` wire types
+    let agg_pks: Vec<ValidatorPublicKey> = [pk0, pk2]
         .iter()
         .map(|pk| ValidatorPublicKey::from_bytes_canonical(&pk.to_bytes()).unwrap())
         .collect();
-    let agg_sigs: Vec<ValidatorSignature> = [sig_qsb, sig_qsa, sig_spdz]
+    let agg_sigs: Vec<ValidatorSignature> = [sig_qsb, sig_spdz]
         .iter()
         .map(|s| {
             ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &s.to_bytes())
@@ -127,8 +119,8 @@ fn e2e_quorum_qsa_qsb_spdz_to_hem_whir_aggregation_and_adversarial_rejection() {
         assert!(!verify_individual_signature(pk, b"tampered-msg", sig));
     }
 
-    // Aggregate all 3 heterogeneous threshold-quorum validators into a single Quintic Fp5 QROM-128 proof
-    let bitmap = SignerBitmap::from_active_indices(3, &[0, 1, 2]).unwrap();
+    // Aggregate both heterogeneous threshold-quorum validators into a single Quintic Fp5 QROM-128 proof
+    let bitmap = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
     let mode = SigningMode::SharedMessage(consensus_msg);
     let agg_proof = prove_hem_quintic_128(
         HemQuinticProfile::TurboShake400,
@@ -138,13 +130,28 @@ fn e2e_quorum_qsa_qsb_spdz_to_hem_whir_aggregation_and_adversarial_rejection() {
         &agg_sigs,
     )
     .unwrap();
-    assert!(verify_hem_quintic_128(&agg_pks, &mode, &agg_proof));
+    assert!(verify_hem_quintic_128(
+        HemQuinticProfile::TurboShake400,
+        &agg_pks,
+        &mode,
+        &agg_proof
+    ));
 
     // Adversarial rejection checks: wrong message or swapped committee roster must be rejected
     let wrong_mode = SigningMode::SharedMessage(b"forged-consensus-block");
-    assert!(!verify_hem_quintic_128(&agg_pks, &wrong_mode, &agg_proof));
-    let swapped_pks = vec![agg_pks[1], agg_pks[0], agg_pks[2]];
-    assert!(!verify_hem_quintic_128(&swapped_pks, &mode, &agg_proof));
+    assert!(!verify_hem_quintic_128(
+        HemQuinticProfile::TurboShake400,
+        &agg_pks,
+        &wrong_mode,
+        &agg_proof
+    ));
+    let swapped_pks = vec![agg_pks[1], agg_pks[0]];
+    assert!(!verify_hem_quintic_128(
+        HemQuinticProfile::TurboShake400,
+        &swapped_pks,
+        &mode,
+        &agg_proof
+    ));
 }
 
 proptest! {

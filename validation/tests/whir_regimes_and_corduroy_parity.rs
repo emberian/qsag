@@ -223,11 +223,11 @@ fn corduroy_stateless_76896_and_quintic_hem_profiles_and_zkhem_v2() {
         )
         .unwrap();
         let wire = proof.to_bytes();
-        assert!(verify_hem_quintic_128(&pks, &mode, &proof));
+        assert!(verify_hem_quintic_128(profile, &pks, &mode, &proof));
         assert_wire_bit_flips_rejected(
             &wire,
             HemQuinticProof::from_bytes,
-            |p| verify_hem_quintic_128(&pks, &mode, p),
+            |p| verify_hem_quintic_128(profile, &pks, &mode, p),
         );
     }
 

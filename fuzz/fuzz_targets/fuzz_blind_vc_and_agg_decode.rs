@@ -3,18 +3,18 @@
 
 //! Coverage-guided untrusted wire-decoder & verifier fuzzer for Quintic `Fp5` zero-knowledge
 //! credentials, capabilities, multisignatures, and regional hierarchy proofs:
-//! 1. `zk_hem::blind_vc` (`ZkHemV2Proof` `QSAGZKH2`),
+//! 1. `qsag_cred::presentation` (`ZkHemV2Proof` `QSAGZKH2`),
 //! 2. `zk_hem::multisig` (`ZkHemV2Proof` `QSAGZKH2`),
-//! 3. `zk_hem::capability::ZkCapabilityBatchProof` (`QSAGCAP1`), and
+//! 3. `qsag_cred::capability::ZkCapabilityBatchProof` (`QSAGCAP1`), and
 //! 4. `HierarchicalHemAggregate` (`QSAGHEM\x04`).
 
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
-use qsag_agg::zk_hem::blind_vc::{
+use qsag_cred::presentation::{
     BlindVcStatement, BlindVcWitness, prove_presentation, verify_presentation,
 };
-use qsag_agg::zk_hem::capability::{
+use qsag_cred::capability::{
     CAPABILITY_WIRE_MAGIC, CapabilityParams, CapabilityRelation, ZkCapabilityBatchProof,
 };
 use qsag_agg::zk_hem::multisig::{MultisigParams, MultisigRelation, Policy};
