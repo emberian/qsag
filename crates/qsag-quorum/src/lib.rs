@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(unsafe_code)]
-// Only volatile_coupon::memory permits audited Linux memory-protection FFI.
+// Only the volatile coupon custody module permits audited OS memory-protection FFI.
 //! Generalized `(t, n)` quorum-switching `Jorts` signatures and isolated single-party
 //! protocol nodes that talk over a framed wire transport.
 //!
@@ -39,16 +39,15 @@ pub use dealerless_staging::{
 };
 pub use quorum_jorts::verify_jorts_signature;
 
-pub use hem_quorum::{
-    HemCommitteePartitionedQuorum, HemDynamicShamirQuorum, HemJortsPublicKey, HemJortsSignature,
-    HemQuorumError, HemQuorumPublicDirectory, HemShamirCustodianShare, HemSpdzSeedQuorum,
-    sign_from_shamir_share_slice,
-};
+#[cfg(any(test, feature = "std"))]
+pub use cnf_party::run_isolated_cnf_ceremony;
 pub use cnf_party::{
     CnfPartyError, CnfPartyKeys, IsolatedCnfParty, IsolatedCnfSweep, run_isolated_cnf_dkg,
 };
-#[cfg(any(test, feature = "std"))]
-pub use cnf_party::run_isolated_cnf_ceremony;
+pub use hem_quorum::{
+    HemDynamicShamirQuorum, HemJortsPublicKey, HemJortsSignature, HemQuorumError,
+    HemQuorumPublicDirectory, HemShamirCustodianShare, HemSpdzSeedQuorum,
+};
 pub use qsag_core::cnf_rss::{
     CnfRssConfig, CnfRssError, CnfRssKeyShare256, run_dealerless_cnf_rss_dkg,
 };
@@ -70,15 +69,5 @@ mod directory_anchor;
 #[cfg(feature = "std")]
 pub use directory_anchor::FsDirectoryMonotoneAnchor;
 
-#[cfg(all(
-    any(test, feature = "std"),
-    target_os = "linux",
-    target_pointer_width = "64"
-))]
 pub mod volatile_coupon;
-#[cfg(all(
-    any(test, feature = "std"),
-    target_os = "linux",
-    target_pointer_width = "64"
-))]
-pub use volatile_coupon::{BaggySig, baggy_verify};
+pub use volatile_coupon::{BaggySig, baggy_verify, baggy_verify_at};
