@@ -399,8 +399,7 @@ impl Report {
         if log_proofs == 0 {
             return query_bits;
         }
-        let collision_bits =
-            1000 * (8 * TREE_NONCE_BYTES as i64 + 1 - 2 * i64::from(log_proofs));
+        let collision_bits = 1000 * (8 * TREE_NONCE_BYTES as i64 + 1 - 2 * i64::from(log_proofs));
         sum_bits(query_bits, collision_bits)
     }
 
@@ -676,7 +675,7 @@ pub fn report(profile: Profile, size: ShapeSize) -> Option<Report> {
     )
 }
 
-/// The report for a compiled v2 [`Shape`], including any [`Lookups`].
+/// The report for a compiled v2 [`Shape`], including any [`crate::zk_hem::relation::Lookups`].
 pub fn report_for_shape(profile: Profile, shape: &Shape) -> Option<Report> {
     if shape.closing() != Closing::V2 || shape.log_rows < 5 {
         return None;
@@ -898,7 +897,10 @@ mod tests {
             let n = 4u128 << rem;
             let k = (1u128 << rem) + 2;
             // Strictly beyond Johnson (`agree < sqrt(k * n)`):
-            assert!(agree * agree < k * n, "rem={rem}: {agree} not below Johnson");
+            assert!(
+                agree * agree < k * n,
+                "rem={rem}: {agree} not below Johnson"
+            );
             // Exact rational inequality `a / n >= 1/3 + k / (3n) + 1/eta_inv`:
             assert!(3 * eta_inv * agree >= eta_inv * (n + k) + 3 * n);
             assert!(3 * eta_inv * (agree - 1) < eta_inv * (n + k) + 3 * n);

@@ -1,5 +1,5 @@
 //! Relations proved by the committed zk-Hem v2 protocol in [`super::v2::protocol`] and the
-//! public hologram / recursion protocols in [`super::protocol`].
+//! public hologram / recursion protocols in [`crate::hem_quintic`] and [`super::recursive_ivc`].
 //!
 //! A relation is a list of rows over one assignment vector `z` (`z[0] = 1`):
 //!
@@ -148,13 +148,35 @@ impl From<Var> for Lc {
     }
 }
 
+/// The same linear forms occur at different variable offsets in repeated
+/// permutation gadgets. Each row names an anchor column and a span of shared
+/// (distance from anchor, coefficient) pairs. Column zero stays absolute.
+#[derive(Clone, Debug, Default)]
+struct RowTemplates {
+    rows: Vec<(u32, u32)>,
+    candidates: BTreeMap<u64, (usize, usize)>,
+}
+
 /// Sparse matrix in compressed-row form.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Csr {
     ptr: Vec<u32>,
     col: Vec<u32>,
     val: Vec<F>,
+    templates: Option<RowTemplates>,
 }
+
+impl PartialEq for Csr {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+            && if self.templates.is_none() && other.templates.is_none() {
+                self.col == other.col && self.val == other.val
+            } else {
+                (0..self.num_rows()).all(|i| self.row(i).eq(other.row(i)))
+            }
+    }
+}
+impl Eq for Csr {}
 
 impl Default for Csr {
     fn default() -> Self {
@@ -168,6 +190,7 @@ impl Csr {
             ptr: vec![0],
             col: Vec::new(),
             val: Vec::new(),
+            templates: None,
         }
     }
 
@@ -176,6 +199,46 @@ impl Csr {
     }
 
     fn push_terms(&mut self, terms: &[(u32, F)]) {
+        if let Some(t) = &mut self.templates {
+            let anchor = terms.last().map_or(0, |t| t.0);
+            let distance = |col| {
+                if col == 0 {
+                    0
+                } else {
+                    anchor.wrapping_sub(col).wrapping_add(1)
+                }
+            };
+            let mut hash = 0xcbf29ce484222325u64;
+            for &(col, val) in terms {
+                hash = (hash ^ u64::from(distance(col))).wrapping_mul(0x100000001b3);
+                hash = (hash ^ val.to_canonical_u64()).wrapping_mul(0x100000001b3);
+            }
+            // A hash collision can only cost space. Compare all terms before reuse.
+            let hit = t.candidates.get(&hash).copied().filter(|&(off, len)| {
+                len == terms.len()
+                    && terms.iter().enumerate().all(|(i, &(col, val))| {
+                        self.col[off + i] == distance(col) && self.val[off + i] == val
+                    })
+            });
+            let offset = if let Some((off, _)) = hit {
+                off
+            } else {
+                let off = self.col.len();
+                self.col.extend(terms.iter().map(|&(col, _)| distance(col)));
+                self.val.extend(terms.iter().map(|&(_, val)| val));
+                t.candidates.insert(hash, (off, terms.len()));
+                off
+            };
+            t.rows.push((anchor, offset as u32));
+            self.ptr.push(
+                self.ptr
+                    .last()
+                    .unwrap()
+                    .checked_add(terms.len() as u32)
+                    .expect("CSR nonzero count"),
+            );
+            return;
+        }
         for &(v, c) in terms {
             self.col.push(v);
             self.val.push(c);
@@ -185,7 +248,10 @@ impl Csr {
 
     /// `count` rows without entries.
     fn push_empty_rows(&mut self, count: usize) {
-        let end = self.col.len() as u32;
+        let end = *self.ptr.last().unwrap();
+        if let Some(t) = &mut self.templates {
+            t.rows.resize(t.rows.len() + count, (0, 0));
+        }
         self.ptr.resize(self.ptr.len() + count, end);
     }
 
@@ -195,6 +261,19 @@ impl Csr {
             *self = other;
             return;
         }
+        if let (Some(t), Some(u)) = (&mut self.templates, &other.templates) {
+            let base = *self.ptr.last().unwrap();
+            let offset = self.col.len() as u32;
+            t.rows
+                .extend(u.rows.iter().map(|&(anchor, off)| (anchor, off + offset)));
+            self.ptr.extend(other.ptr[1..].iter().map(|p| base + p));
+            self.col.extend(other.col);
+            self.val.extend(other.val);
+            return;
+        }
+        debug_assert!(
+            self.templates.is_none() && other.templates.is_none() || other.num_rows() == 0
+        );
         let base = self.col.len() as u32;
         self.ptr.extend(other.ptr[1..].iter().map(|&p| base + p));
         self.col.extend_from_slice(&other.col);
@@ -238,17 +317,26 @@ impl Csr {
 
     #[inline]
     pub fn nnz(&self) -> usize {
-        self.col.len()
+        *self.ptr.last().unwrap() as usize
     }
 
     /// `(column, coefficient)` pairs of row `i`.
     #[inline]
     pub fn row(&self, i: usize) -> impl Iterator<Item = (usize, F)> + '_ {
-        let (lo, hi) = (self.ptr[i] as usize, self.ptr[i + 1] as usize);
-        self.col[lo..hi]
+        let lo = self.ptr[i] as usize;
+        let len = self.ptr[i + 1] as usize - lo;
+        let span = self.templates.as_ref().map(|t| t.rows[i]);
+        let off = span.map_or(lo, |(_, start)| start as usize);
+        self.col[off..off + len]
             .iter()
-            .zip(&self.val[lo..hi])
-            .map(|(&c, &v)| (c as usize, v))
+            .zip(&self.val[off..off + len])
+            .map(move |(&col, &v)| {
+                let col = match span {
+                    Some((anchor, _)) if col != 0 => anchor.wrapping_add(1).wrapping_sub(col),
+                    _ => col,
+                };
+                (col as usize, v)
+            })
     }
 
     #[inline]
@@ -262,9 +350,18 @@ impl Csr {
         for &p in &self.ptr {
             sponge.u32(p);
         }
-        for (&c, &v) in self.col.iter().zip(&self.val) {
-            sponge.u32(c);
-            sponge.u64(v.to_canonical_u64());
+        if self.templates.is_some() {
+            for i in 0..self.num_rows() {
+                for (c, v) in self.row(i) {
+                    sponge.u32(c as u32);
+                    sponge.u64(v.to_canonical_u64());
+                }
+            }
+        } else {
+            for (&c, &v) in self.col.iter().zip(&self.val) {
+                sponge.u32(c);
+                sponge.u64(v.to_canonical_u64());
+            }
         }
     }
 }
@@ -851,6 +948,17 @@ impl ConstraintSystem {
         }
     }
 
+    /// Store translated copies of recursive verifier rows once during shape synthesis.
+    pub(super) fn with_row_templates() -> Self {
+        let mut cs = Self::new();
+        for group in [&mut cs.p2_sbox, &mut cs.sbox, &mut cs.mul] {
+            for csr in group.matrices() {
+                csr.templates = Some(RowTemplates::default());
+            }
+        }
+        cs
+    }
+
     /// A builder that records a [`Def`] for every variable; close it with
     /// [`Self::finish_recorded`] (produces a [`Closing::V2`] relation).
     pub fn new_recording() -> Self {
@@ -906,7 +1014,7 @@ impl ConstraintSystem {
     }
 
     /// Relation builder that places [`poseidon2_perm`] S-box rows and S-box output variables on
-    /// 128-row / 128-variable boundaries for [`super::protocol::ShapeHologram`].
+    /// 128-row / 128-variable boundaries for `ShapeHologram`.
     pub fn new_hologram_aligned() -> Self {
         let mut cs = Self::new();
         cs.hologram_aligned = true;
@@ -1368,6 +1476,11 @@ impl ConstraintSystem {
                 mut c,
             } = self.take_rows(total, closing.pad_rows());
             closing.push_rows(mask_var_base, &mut a, &mut b, &mut c);
+            for matrix in [&mut a, &mut b, &mut c] {
+                if let Some(t) = &mut matrix.templates {
+                    t.candidates.clear();
+                }
+            }
             let z = core::mem::take(&mut self.values);
             let mut shape = Shape {
                 log_rows,
@@ -1592,7 +1705,6 @@ pub fn sponge12_native(message: &[F]) -> [F; 12] {
     }
     state
 }
-
 
 // ============================================================================
 // Width-24 `Poseidon2-GL-w24` gadgets (`SECURITY.md §V2.10` + `§V2.11` 708-row R1CS)
@@ -1849,17 +1961,14 @@ impl CubicR1csSystem {
     }
 
     pub fn eval(&self, lc: &Lc) -> F {
-        lc.terms()
-            .iter()
-            .fold(F::ZERO, |acc, &(v, c)| acc + c.const_mul(self.values[v as usize]))
+        lc.terms().iter().fold(F::ZERO, |acc, &(v, c)| {
+            acc + c.const_mul(self.values[v as usize])
+        })
     }
 
     /// Allocate `y = a * b * d` and record one cubic R1CS row `<a, z> * <b, z> * <d, z> = y`.
     pub fn mul3(&mut self, a: &Lc, b: &Lc, d: &Lc) -> Var {
-        let val = self
-            .eval(a)
-            .const_mul(self.eval(b))
-            .const_mul(self.eval(d));
+        let val = self.eval(a).const_mul(self.eval(b)).const_mul(self.eval(d));
         let y = self.alloc(val);
         self.rows.push((a.clone(), b.clone(), d.clone(), y.into()));
         y
@@ -1875,8 +1984,7 @@ impl CubicR1csSystem {
 
     pub fn enforce_equal(&mut self, a: &Lc, b: &Lc) {
         let one = Lc::constant(F::ONE);
-        self.rows
-            .push((a.minus(b), one.clone(), one, Lc::zero()));
+        self.rows.push((a.minus(b), one.clone(), one, Lc::zero()));
     }
 
     #[inline]
@@ -1936,6 +2044,24 @@ mod tests {
 
     fn hex32(bytes: [u8; 32]) -> alloc::string::String {
         bytes.iter().map(|b| alloc::format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn recursive_row_templates_preserve_shape_digest_and_assignment() {
+        fn build(mut cs: ConstraintSystem) -> (Shape, Vec<F>) {
+            for j in 0..4 {
+                let mut state = core::array::from_fn(|i| cs.alloc(f(1 + i as u64 + j)).into());
+                poseidon2_gl24_perm_gadget(&mut cs, &mut state);
+                cs.mul(&state[2], &state[0]);
+            }
+            cs.finish()
+        }
+        let (plain, original) = build(ConstraintSystem::new());
+        let (compact, witness) = build(ConstraintSystem::with_row_templates());
+        assert_eq!(original, witness);
+        assert_eq!(compact, plain);
+        assert!(compact.a.col.len() < compact.a.nnz());
+        assert!(compact.is_satisfied(&witness));
     }
 
     #[test]

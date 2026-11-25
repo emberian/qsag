@@ -9,6 +9,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
+use qsag_core::wipe::SecretBuffer;
 
 use super::field5::Fp5;
 use super::hash::{Channel, Digest, Hasher, MAX_LOG_LEAVES, MerkleTree, verify_multiproof};
@@ -128,7 +129,10 @@ pub(super) fn par_chunk(len: usize) -> usize {
     len.div_ceil(workers).max(PAR_MIN)
 }
 
-pub(in crate::zk_hem) fn par_chunks_mut<T: Send>(data: &mut [T], f: impl Fn(usize, &mut [T]) + Sync) {
+pub(in crate::zk_hem) fn par_chunks_mut<T: Send>(
+    data: &mut [T],
+    f: impl Fn(usize, &mut [T]) + Sync,
+) {
     let chunk = par_chunk(data.len());
     #[cfg(feature = "std")]
     if data.len() > chunk {
@@ -238,19 +242,19 @@ pub fn eval_poly<T: Coef, const K: usize>(coeffs: &[T], xs: [Fp5; K]) -> [Fp5; K
 const EVAL_BLOCK: usize = 32;
 
 pub(crate) fn eval_at_base(coeffs: &[Fp5], y: Goldilocks) -> Fp5 {
-    let verified: Vec<qsag_whir_verified::Fp5> = coeffs.iter().map(|&c| c.to_verified()).collect();
-    Fp5::from_verified(qsag_whir_verified::eval_fp5_univariate_at_base(
+    let verified: Vec<qsag_whir_verified::Fp5> = coeffs.iter().copied().map(Into::into).collect();
+    Fp5::from(qsag_whir_verified::eval_fp5_univariate_at_base(
         &verified,
         y.to_canonical_u64(),
     ))
 }
 
 pub(crate) fn verify_at_base_pin(coeffs: &[Fp5], y: Goldilocks, expected: Fp5) -> bool {
-    let verified: Vec<qsag_whir_verified::Fp5> = coeffs.iter().map(|&c| c.to_verified()).collect();
+    let verified: Vec<qsag_whir_verified::Fp5> = coeffs.iter().copied().map(Into::into).collect();
     qsag_whir_verified::verify_fp5_univariate_at_base_pin(
         &verified,
         y.to_canonical_u64(),
-        expected.to_verified(),
+        expected.into(),
     )
 }
 
@@ -289,7 +293,11 @@ pub fn encode_ext(coeffs: &[Fp5], log_domain: usize) -> Vec<Fp5> {
     out
 }
 
-pub(in crate::zk_hem) fn encode_ext_folded(coeffs: &[Fp5], log_domain: usize, step_vars: usize) -> Vec<Fp5> {
+pub(in crate::zk_hem) fn encode_ext_folded(
+    coeffs: &[Fp5],
+    log_domain: usize,
+    step_vars: usize,
+) -> Vec<Fp5> {
     let log_folded = log_domain - step_vars;
     assert!(coeffs.len() <= 1 << log_folded);
     let shift = SHIFT.pow(1 << step_vars);
@@ -329,15 +337,15 @@ pub(crate) fn fold_fiber(mut vals: Vec<Fp5>, x0: Goldilocks, chals: &[[Fp5; 3]])
         let (mut xt, mut xt_inv) = (x, x_inv);
         for t in 0..half {
             let (a, b) = (vals[t], vals[t + half]);
-            vals[t] = Fp5::from_verified(qsag_whir_verified::cwyz_duet_fold_fp5(
-                a.to_verified(),
-                b.to_verified(),
+            vals[t] = Fp5::from(qsag_whir_verified::cwyz_duet_fold_fp5(
+                a.into(),
+                b.into(),
                 INV_TWO.const_mul(xt_inv).to_canonical_u64(),
                 INV_TWO.to_canonical_u64(),
                 xt.square().to_canonical_u64(),
-                theta.to_verified(),
-                alpha.to_verified(),
-                beta.to_verified(),
+                theta.into(),
+                alpha.into(),
+                beta.into(),
             ));
             xt = xt.const_mul(zeta);
             xt_inv = xt_inv.const_mul(zeta_inv);
@@ -417,40 +425,109 @@ pub fn commit(
     salt_seed: &[u8; 32],
     tree_nonce: &[u8; TREE_NONCE_BYTES],
 ) -> Committed {
+    commit_inner(
+        profile,
+        log_cells,
+        schedule,
+        coeffs,
+        mask,
+        salt_seed,
+        tree_nonce,
+        #[cfg(feature = "vulkan")]
+        None,
+    )
+    .expect("CPU commitment is infallible")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_inner(
+    profile: Profile,
+    log_cells: usize,
+    schedule: &Schedule,
+    coeffs: Vec<Goldilocks>,
+    mask: Vec<Fp5>,
+    salt_seed: &[u8; 32],
+    tree_nonce: &[u8; TREE_NONCE_BYTES],
+    #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
+) -> Result<Committed, super::protocol::ZkHemV2Error> {
+    let coeffs = SecretBuffer::new(coeffs);
+    let mask = SecretBuffer::new(mask);
     let _phase = crate::profile::span("zkhem2_commit");
     let dims = stage_dims(log_cells, schedule).expect("unsupported v2 schedule");
     let d0 = dims[0];
     assert_eq!(coeffs.len(), 1 << log_cells);
     assert_eq!(mask.len(), mask_len(log_cells, d0.step_vars));
     let phase = crate::profile::span("zkhem2_commit_encode");
-    let z_code = encode_base(&coeffs, d0.log_domain);
-    let r_code = encode_ext_folded(&mask, d0.log_domain, d0.step_vars);
+    let encode_cpu = || {
+        (
+            SecretBuffer::new(encode_base(&coeffs, d0.log_domain)),
+            SecretBuffer::new(encode_ext_folded(&mask, d0.log_domain, d0.step_vars)),
+        )
+    };
+    #[cfg(feature = "vulkan")]
+    let (z_code, r_code) = if let Some(gpu) = gpu {
+        crate::vulkan::encode_stage0(gpu, &coeffs, &mask, d0.log_domain, d0.step_vars)
+            .map_err(super::protocol::ZkHemV2Error::Vulkan)?
+    } else {
+        encode_cpu()
+    };
+    #[cfg(not(feature = "vulkan"))]
+    let (z_code, r_code) = encode_cpu();
     drop(phase);
     let _merkle = crate::profile::span("zkhem2_commit_merkle");
     let hasher = Hasher::new(profile);
-    let mut leaves = vec![[0u8; DIGEST_BYTES]; d0.fibers];
-    crate::pcs::fill_indexed(&mut leaves, |j| {
-        let mut salt = hasher.salt(salt_seed, j as u32);
-        let mut z = fiber(&z_code, &d0, j);
-        let digest = hasher.leaf_stage0(tree_nonce, j as u32, &salt, &z, r_code[j]);
-        qsag_asm::volatile_fill(&mut salt, 0u8);
-        qsag_asm::volatile_fill(&mut z, Goldilocks::ZERO);
-        digest
-    });
-    let tree = MerkleTree::build(hasher, 0, leaves);
-    Committed {
+    let cpu_tree = || {
+        let mut leaves = vec![[0u8; DIGEST_BYTES]; d0.fibers];
+        crate::pcs::fill_indexed(&mut leaves, |j| {
+            let mut salt = hasher.salt(salt_seed, j as u32);
+            let mut z = fiber(&z_code, &d0, j);
+            let digest = hasher.leaf_stage0(tree_nonce, j as u32, &salt, &z, r_code[j]);
+            qsag_asm::volatile_fill(&mut salt, 0u8);
+            qsag_asm::volatile_fill(&mut z, Goldilocks::ZERO);
+            digest
+        });
+        MerkleTree::build(hasher, 0, leaves)
+    };
+    #[cfg(feature = "vulkan")]
+    let tree = if let Some(gpu) = gpu {
+        let word4 = |bytes: &[u8; 32]| {
+            core::array::from_fn(|i| u64::from_le_bytes(bytes.as_chunks::<8>().0[i]))
+        };
+        let mask = crate::vulkan::ext_words(&r_code);
+        let framing = qsag_accel::vulkan::CanopyProfile::ZkStage0 {
+            midstate: hasher.tree_midstate(),
+            turbo: profile.uses_turboshake(),
+            salt_seed: word4(salt_seed),
+            nonce: word4(tree_nonce),
+            mask_code: &mask,
+        };
+        crate::vulkan::tree(
+            gpu,
+            hasher,
+            framing,
+            0,
+            d0.arity(),
+            &crate::vulkan::base_words(&z_code),
+        )
+        .map_err(super::protocol::ZkHemV2Error::Vulkan)?
+    } else {
+        cpu_tree()
+    };
+    #[cfg(not(feature = "vulkan"))]
+    let tree = cpu_tree();
+    Ok(Committed {
         profile,
         log_cells,
         schedule: schedule.clone(),
         dims,
-        coeffs,
-        mask,
-        z_code,
-        r_code,
+        coeffs: coeffs.into_inner(),
+        mask: mask.into_inner(),
+        z_code: z_code.into_inner(),
+        r_code: r_code.into_inner(),
         salt_seed: *salt_seed,
         tree_nonce: *tree_nonce,
         tree,
-    }
+    })
 }
 
 // ============================================================================
@@ -582,7 +659,9 @@ impl Reader<'_> {
             .map(|_| {
                 Some(Stage0Leaf {
                     salt: self.take()?,
-                    z: (0..d0.arity()).map(|_| self.base()).collect::<Option<_>>()?,
+                    z: (0..d0.arity())
+                        .map(|_| self.base())
+                        .collect::<Option<_>>()?,
                     r: self.fp5()?,
                 })
             })
@@ -868,17 +947,17 @@ impl<'a> KernelTerms<'a> {
 
 pub fn next_claim(wire: &[Fp5; 5], claim: Fp5, phi: Fp5, [theta, alpha, beta]: [Fp5; 3]) -> Fp5 {
     let [sigma_even, tau_01, tau_10, c_f, c_g] = *wire;
-    Fp5::from_verified(qsag_whir_verified::cwyz_bridge_claim_step_fp5(
-        sigma_even.to_verified(),
-        tau_01.to_verified(),
-        tau_10.to_verified(),
-        c_f.to_verified(),
-        c_g.to_verified(),
-        claim.to_verified(),
-        phi.to_verified(),
-        theta.to_verified(),
-        alpha.to_verified(),
-        beta.to_verified(),
+    Fp5::from(qsag_whir_verified::cwyz_bridge_claim_step_fp5(
+        sigma_even.into(),
+        tau_01.into(),
+        tau_10.into(),
+        c_f.into(),
+        c_g.into(),
+        claim.into(),
+        phi.into(),
+        theta.into(),
+        alpha.into(),
+        beta.into(),
     ))
 }
 
@@ -1405,6 +1484,71 @@ pub fn open<C: Channel>(
     claim: Fp5,
     ch: &mut C,
 ) -> Result<Opening, MaskRankDeficient> {
+    open_with(st, kernel, claim, ch, cpu_oracle)
+}
+
+fn cpu_oracle(
+    i: usize,
+    d: &StageDims,
+    poly: &[Fp5],
+    hasher: Hasher,
+) -> Result<(Vec<Fp5>, MerkleTree), MaskRankDeficient> {
+    let phase = crate::profile::span("zkhem2_open_encode");
+    let code = encode_ext(poly, d.log_domain);
+    drop(phase);
+    let _phase = crate::profile::span("zkhem2_open_merkle");
+    let mut leaves = vec![[0u8; DIGEST_BYTES]; d.fibers];
+    crate::pcs::fill_indexed(&mut leaves, |j| {
+        hasher.leaf_ext(i as u8, j as u32, &fiber(&code, d, j))
+    });
+    Ok((code, MerkleTree::build(hasher, i as u8, leaves)))
+}
+
+impl From<MaskRankDeficient> for super::protocol::ZkHemV2Error {
+    fn from(_: MaskRankDeficient) -> Self {
+        Self::MaskRankDeficient
+    }
+}
+pub(crate) fn open_prover<C: Channel>(
+    st: &Committed,
+    kernel: Vec<Fp5>,
+    claim: Fp5,
+    ch: &mut C,
+    #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
+) -> Result<Opening, super::protocol::ZkHemV2Error> {
+    #[cfg(feature = "vulkan")]
+    if let Some(gpu) = gpu {
+        return open_with(st, kernel, claim, ch, |i, d, poly, hasher| {
+            let code = SecretBuffer::new(
+                crate::vulkan::encode_ext(gpu, poly, d.log_domain, SHIFT)
+                    .map_err(super::protocol::ZkHemV2Error::Vulkan)?,
+            );
+            let framing = qsag_accel::vulkan::CanopyProfile::ZkExtension {
+                midstate: hasher.tree_midstate(),
+                turbo: st.profile.uses_turboshake(),
+            };
+            let tree = crate::vulkan::tree(
+                gpu,
+                hasher,
+                framing,
+                i as u8,
+                d.arity(),
+                &crate::vulkan::ext_words(&code),
+            )
+            .map_err(super::protocol::ZkHemV2Error::Vulkan)?;
+            Ok((code.into_inner(), tree))
+        });
+    }
+    Ok(open(st, kernel, claim, ch)?)
+}
+
+fn open_with<C: Channel, Err: From<MaskRankDeficient>>(
+    st: &Committed,
+    kernel: Vec<Fp5>,
+    claim: Fp5,
+    ch: &mut C,
+    oracle: impl Fn(usize, &StageDims, &[Fp5], Hasher) -> Result<(Vec<Fp5>, MerkleTree), Err>,
+) -> Result<Opening, Err> {
     let _phase = crate::profile::span("zkhem2_open");
     let hasher = Hasher::new(st.profile);
     let dims = &st.dims;
@@ -1423,25 +1567,18 @@ pub fn open<C: Channel>(
         mask_evals,
         folds: stage0_folds,
         mask_claim,
-        g: mut poly,
+        g: poly,
         st: mut fold,
         chals: mut prev_chals,
         beta_r,
     } = red;
+    let mut poly = SecretBuffer::new(poly);
     let mut stage0_query = None;
     let mut stages: Vec<LaterStage> = Vec::with_capacity(dims.len() - 1);
-    let mut prev_oracle: Option<(Vec<Fp5>, MerkleTree)> = None;
+    let mut prev_oracle: Option<(SecretBuffer<Vec<Fp5>>, MerkleTree)> = None;
     for (i, d) in dims.iter().enumerate().skip(1) {
-        let phase = crate::profile::span("zkhem2_open_encode");
-        let code = encode_ext(&poly, d.log_domain);
-        drop(phase);
-        let phase = crate::profile::span("zkhem2_open_merkle");
-        let mut leaves = vec![[0u8; DIGEST_BYTES]; d.fibers];
-        crate::pcs::fill_indexed(&mut leaves, |j| {
-            hasher.leaf_ext(i as u8, j as u32, &fiber(&code, d, j))
-        });
-        let tree = MerkleTree::build(hasher, i as u8, leaves);
-        drop(phase);
+        let (code, tree) = oracle(i, d, &poly, hasher)?;
+        let code = SecretBuffer::new(code);
         let root = tree.root();
         ch.absorb(b"STAGE_ROOT", &root);
         let ood_points: [Fp5; LATER_OOD_POINTS] =
@@ -1495,9 +1632,8 @@ pub fn open<C: Channel>(
         prev_chals = Vec::with_capacity(d.step_vars);
         for _ in 0..d.step_vars {
             let folded = prove_fold(&poly, &mut fold, 0, ch);
-            qsag_asm::volatile_fill(&mut poly, Fp5::ZERO);
             let (next, wire, c) = folded?;
-            poly = next;
+            poly = SecretBuffer::new(next);
             folds.push(wire);
             prev_chals.push(c);
         }
@@ -1510,21 +1646,19 @@ pub fn open<C: Channel>(
                 siblings: Vec::new(),
             },
         });
-        if let Some((mut old_code, _)) = prev_oracle.replace((code, tree)) {
-            qsag_asm::volatile_fill(&mut old_code, Fp5::ZERO);
-        }
+        prev_oracle = Some((code, tree));
     }
 
     ch.absorb_fp5_slice(b"FINAL_POLY", &poly);
     let last = dims.len() - 1;
     let d = &dims[last];
     let idx = ch.squeeze_distinct_indices(b"QUERY", d.fibers, d.queries);
-    let (mut code, tree) = prev_oracle.take().expect("at least two stages");
+    let (code, tree) = prev_oracle.take().expect("at least two stages");
     stages[last - 1].query = ExtQuery {
         leaves: idx.iter().map(|&j| fiber(&code, d, j)).collect(),
         siblings: tree.open(&idx),
     };
-    qsag_asm::volatile_fill(&mut code, Fp5::ZERO);
+    drop(code);
     let mut mask_eval_array = [Fp5::ZERO; MASK_POINTS];
     mask_eval_array.copy_from_slice(&mask_evals);
     Ok(Opening {
@@ -1533,7 +1667,7 @@ pub fn open<C: Channel>(
         mask_claim,
         stage0_query: stage0_query.expect("at least two stages"),
         stages,
-        final_coeffs: poly,
+        final_coeffs: poly.into_inner(),
     })
 }
 
@@ -1636,8 +1770,14 @@ fn verify_inner<C: Channel>(
     }
     let mut claim = claim;
     let mut kernel = KernelTerms::new(terms);
-    let (mut prev_chals, beta_r) =
-        stage0_reduce_verify_fields(mask_evals, stage0_folds, mask_claim, &mut claim, &mut kernel, ch);
+    let (mut prev_chals, beta_r) = stage0_reduce_verify_fields(
+        mask_evals,
+        stage0_folds,
+        mask_claim,
+        &mut claim,
+        &mut kernel,
+        ch,
+    );
 
     for i in 1..dims.len() {
         let stage = &stages[i - 1];
@@ -1688,10 +1828,7 @@ fn verify_inner<C: Channel>(
     }
 
     ch.absorb_fp5_slice(b"FINAL_POLY", final_coeffs);
-    if !qsag_whir_verified::verify_ood_pin_eq_fp5(
-        kernel.apply(final_coeffs).to_verified(),
-        claim.to_verified(),
-    ) {
+    if !qsag_whir_verified::verify_ood_pin_eq_fp5(kernel.apply(final_coeffs).into(), claim.into()) {
         return false;
     }
     let last = dims.len() - 1;
@@ -1863,10 +2000,7 @@ pub(super) mod tests {
     }
 
     fn transcript(f: &Fixture) -> Transcript {
-        Transcript::new(
-            f.profile,
-            &[b"pcs-test", &f.st.tree_nonce(), &f.st.root()],
-        )
+        Transcript::new(f.profile, &[b"pcs-test", &f.st.tree_nonce(), &f.st.root()])
     }
 
     fn prove(f: &Fixture) -> Opening {

@@ -98,8 +98,9 @@ pub struct Schedule {
 /// [`MIN_LOG_CELLS`]. Under `[DKT26]` Theorem 5.12 (`(2m + 1)^3 * n^2 / (3 D)`), proximity
 /// parameter `m <= 512` makes the mask-line round non-binding across all `2^16..=2^28` tables;
 /// `bounds::tests::stage0_queries_are_minimal` recomputes and pins every entry.
-pub const STAGE0_QUERIES: [usize; MAX_LOG_CELLS - MIN_LOG_CELLS + 1] =
-    [267, 267, 267, 267, 267, 267, 267, 267, 266, 266, 266, 266, 266];
+pub const STAGE0_QUERIES: [usize; MAX_LOG_CELLS - MIN_LOG_CELLS + 1] = [
+    267, 267, 267, 267, 267, 267, 267, 267, 266, 266, 266, 266, 266,
+];
 
 /// Queries of a stage after the first at rate `1 / blowup`.
 pub const fn later_stage_queries(blowup: usize) -> usize {

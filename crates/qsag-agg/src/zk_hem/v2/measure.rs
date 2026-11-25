@@ -9,8 +9,9 @@
 //! ```
 //!
 //! Cases: `s17`, `s20`, `s22` (synthetic, `2^n` rows, one fresh variable per row), `f82k`
-//! (`2^17` rows, 82,000 variables), `bip32` (`2^21` rows, 1,088,721 variables), `blindvc`,
-//! `multisig`. Optional `QSAG_V2_PROTO=turboshake|cshake` selects the hash profile (default
+//! (`2^17` rows, 82,000 variables), `bip32` (`2^21` rows, 1,088,721 variables),
+//! `multisig`. The credential benchmark is `qsag_cred::presentation::tests::bench_blind_vc_presentation`.
+//! Optional `QSAG_V2_PROTO=turboshake|cshake` selects the hash profile (default
 //! `CshakeJohnson400`). `QSAG_PROFILE=1` adds the phase lines of `crate::profile`.
 
 use alloc::string::String;
@@ -21,7 +22,6 @@ use super::params::{Profile, ShapeSize};
 use super::protocol::{self as v2, ZkHemV2Proof, layout_of};
 use crate::field::Goldilocks;
 use crate::sponge::cshake256_32;
-use crate::zk_hem::blind_vc::{BlindVcStatement, BlindVcWitness, MAX_VC_ATTRS};
 use crate::zk_hem::multisig::{MultisigParams, MultisigRelation, MultisigSigner, Policy};
 use crate::zk_hem::relation::{ConstraintSystem, Lc, Shape};
 
@@ -72,24 +72,6 @@ struct Case {
     statement: Vec<u8>,
 }
 
-fn blind_vc_fixture() -> (BlindVcStatement, BlindVcWitness) {
-    let w = BlindVcWitness {
-        attrs: (0..MAX_VC_ATTRS).map(|i| f(1_000 + 17 * i as u64)).collect(),
-        holder_blind: core::array::from_fn(|i| f(0xA000 + i as u64)),
-        presentation_blind: core::array::from_fn(|i| f(0xB000 + i as u64)),
-        path_bits: core::array::from_fn(|i| i % 3 == 1),
-        siblings: core::array::from_fn(|l| core::array::from_fn(|j| f((l * 6 + j) as u64 + 5))),
-    };
-    let st = BlindVcStatement::derive(
-        &w,
-        7,
-        0x1234_5678_9ABC,
-        [f(11), f(22), f(33), f(44)],
-        &[0, 5, 9],
-    );
-    (st, w)
-}
-
 fn multisig_case() -> Case {
     use crate::sig::{AggSigProfile, ValidatorKeypair};
     const MESSAGE: [u8; 32] = *b"qsag private policy multisig msg";
@@ -134,15 +116,6 @@ fn case(name: &str) -> Case {
         "s22" => close(synthetic_sized(22, 1 << 22)),
         "f82k" => close(synthetic_sized(17, 82_000)),
         "bip32" => close(synthetic_sized(21, 1_088_721)),
-        "blindvc" => {
-            let (st, w) = blind_vc_fixture();
-            let (shape, assignment) = st.synthesize_v2(&w);
-            Case {
-                shape,
-                assignment,
-                statement: st.statement_bytes(b"ctx"),
-            }
-        }
         "multisig" => multisig_case(),
         other => panic!("unknown QSAG_V2_CASE {other}"),
     }

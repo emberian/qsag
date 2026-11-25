@@ -1,5 +1,5 @@
-//! zk-Hem v2 for a [`Shape`] closed by [`ConstraintSystem::finish_v2`] or
-//! [`ConstraintSystem::finish_recorded`] (SECURITY.md, section V2).
+//! zk-Hem v2 for a [`Shape`] closed by [`crate::zk_hem::relation::ConstraintSystem::finish_v2`] or
+//! [`crate::zk_hem::relation::ConstraintSystem::finish_recorded`] (SECURITY.md, section V2).
 //!
 //! Supports:
 //! * Single-prover proofs ([`ZkHemV2Proof`], magic `QSAGZKH2`) with per-tree 256-bit
@@ -46,6 +46,8 @@ pub enum ZkHemV2Error {
     MaskRankDeficient,
     /// The public pole challenge equals a checked compressed tuple. Retry with a fresh seed.
     LookupPoleHit,
+    #[cfg(feature = "vulkan")]
+    Vulkan(qsag_accel::vulkan::VulkanError),
 }
 
 /// The table layout of a v2 relation, including any [`Lookups`].
@@ -341,13 +343,15 @@ impl ZkHemV2SplitProof {
         let row_values = [take(&mut pos)?, take(&mut pos)?, take(&mut pos)?];
         let col_mask_sum = take(&mut pos)?;
         let col_rounds = rounds(&mut pos, layout.var_bits, COL_DEGREE)?;
-        let opening =
-            SplitOpening::read(bytes, &mut pos, layout.log_cells, &layout.schedule, committers)?;
+        let opening = SplitOpening::read(
+            bytes,
+            &mut pos,
+            layout.log_cells,
+            &layout.schedule,
+            committers,
+        )?;
         let lookup = match (lookup_front, &layout.lookup) {
-            (
-                Some((helper_tree_nonces, helper_roots, mask_sum, lk_rounds, values)),
-                Some(ll),
-            ) => {
+            (Some((helper_tree_nonces, helper_roots, mask_sum, lk_rounds, values)), Some(ll)) => {
                 let h_open =
                     SplitOpening::read(bytes, &mut pos, ll.log_cells, &ll.schedule, committers)?;
                 Some(SplitLookupV2Proof {
@@ -563,7 +567,7 @@ pub fn row_challenge_good(shape: &Shape, rx: &[E]) -> bool {
 
 /// Over F, each of the two independent five-pad groups spans E exactly when
 /// the five corner weights form a basis. In these E coordinates the minor
-/// for (n,v,h) is diagonal: k, k, eq_rl[base]. The third coordinate is
+/// for (n,v,h) is diagonal: k, k, `eq_rl[base]`. The third coordinate is
 /// one free extension-field helper entry. See SECURITY.md V2.11.
 pub fn lookup_masks_full_rank(lookups: &Lookups, rl: &[E]) -> bool {
     if rl.len() != lookups.log_entries || !pad_basis_exists(rl) {
@@ -1101,7 +1105,10 @@ fn start_transcript(
     );
     tr.absorb(
         b"STAGE0_ROOT",
-        &encode_roots(core::slice::from_ref(tree_nonce), core::slice::from_ref(root)),
+        &encode_roots(
+            core::slice::from_ref(tree_nonce),
+            core::slice::from_ref(root),
+        ),
     );
     tr
 }
@@ -1391,36 +1398,75 @@ pub(in crate::zk_hem) fn row_sumcheck(
 
 pub(in crate::zk_hem) fn column_sumcheck(
     tr: &mut impl Channel,
-    mut tm: Vec<E>,
+    tm: Vec<E>,
     z: &[F],
     mask: &Mask,
     rho: E,
 ) -> (Vec<Vec<E>>, Vec<E>, E) {
+    column_sumcheck_inner(
+        tr,
+        tm,
+        z,
+        mask,
+        rho,
+        #[cfg(feature = "vulkan")]
+        None,
+    )
+    .expect("CPU sumcheck is infallible")
+}
+
+type ColumnRounds = (Vec<Vec<E>>, Vec<E>, E);
+fn column_sumcheck_inner(
+    tr: &mut impl Channel,
+    mut tm: Vec<E>,
+    z: &[F],
+    mask: &Mask,
+    rho: E,
+    #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
+) -> Result<ColumnRounds, ZkHemV2Error> {
     let _phase = crate::profile::span("zkhem2_column_sumcheck");
     let n = tm.len().trailing_zeros() as usize;
-    let mut tz: Vec<E> = Vec::new();
+    let mut tz = SecretBuffer::new(Vec::<E>::new());
     let mut rounds = Vec::with_capacity(n);
     let mut ry: Vec<E> = Vec::with_capacity(n);
     for round in 0..n {
         let tm_ref = &tm;
-        let mut evals: [E; COL_DEGREE + 1] = if round == 0 {
-            round_evals(0..tm.len() / 2, |i| {
-                let (m0, m1) = (tm_ref[2 * i], tm_ref[2 * i + 1]);
-                let (z0, z1) = (z[2 * i], z[2 * i + 1]);
-                [
-                    m0.mul_base(z0),
-                    m1.mul_base(z1),
-                    (m1 + m1 - m0).mul_base(z1 + z1 - z0),
-                ]
-            })
-        } else {
-            let tz_ref = &tz;
-            round_evals(0..tm.len() / 2, |i| {
-                let (m0, m1) = (tm_ref[2 * i], tm_ref[2 * i + 1]);
-                let (z0, z1) = (tz_ref[2 * i], tz_ref[2 * i + 1]);
-                [m0 * z0, m1 * z1, (m1 + m1 - m0) * (z1 + z1 - z0)]
-            })
+        let cpu_evals = || {
+            if round == 0 {
+                round_evals(0..tm.len() / 2, |i| {
+                    let (m0, m1) = (tm_ref[2 * i], tm_ref[2 * i + 1]);
+                    let (z0, z1) = (z[2 * i], z[2 * i + 1]);
+                    [
+                        m0.mul_base(z0),
+                        m1.mul_base(z1),
+                        (m1 + m1 - m0).mul_base(z1 + z1 - z0),
+                    ]
+                })
+            } else {
+                let tz_ref = &tz;
+                round_evals(0..tm.len() / 2, |i| {
+                    let (m0, m1) = (tm_ref[2 * i], tm_ref[2 * i + 1]);
+                    let (z0, z1) = (tz_ref[2 * i], tz_ref[2 * i + 1]);
+                    [m0 * z0, m1 * z1, (m1 + m1 - m0) * (z1 + z1 - z0)]
+                })
+            }
         };
+        #[cfg(feature = "vulkan")]
+        let mut evals = if let Some(gpu) = gpu {
+            let weights = crate::vulkan::ext_words(&tm);
+            let result = if round == 0 {
+                gpu.sumcheck_round(&crate::vulkan::base_words(z), &weights)
+            } else {
+                gpu.sumcheck_round(&crate::vulkan::ext_words(&tz), &weights)
+            };
+            result
+                .map_err(ZkHemV2Error::Vulkan)?
+                .map(|w| super::field5::Fp5(w.map(F::from_u64_reduced)))
+        } else {
+            cpu_evals()
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let mut evals = cpu_evals();
         let mut coeffs = evals_to_coeffs(&evals);
         qsag_asm::volatile_fill(&mut evals, E::ZERO);
         let mut g = mask.round_poly(&ry);
@@ -1432,15 +1478,35 @@ pub(in crate::zk_hem) fn column_sumcheck(
         let c = tr.squeeze_fp5(b"COL_ROUND");
         rounds.push(coeffs);
         ry.push(c);
+        #[cfg(feature = "vulkan")]
+        if let Some(gpu) = gpu {
+            let r = c.0.map(F::to_canonical_u64);
+            let next = if round == 0 {
+                gpu.fold_table(&crate::vulkan::base_words(z), r)
+            } else {
+                gpu.fold_table(&crate::vulkan::ext_words(&tz), r)
+            };
+            let unpack = |v: Vec<[u64; 5]>| {
+                SecretBuffer::new(v)
+                    .iter()
+                    .map(|w| super::field5::Fp5(w.map(F::from_u64_reduced)))
+                    .collect()
+            };
+            tz = SecretBuffer::new(unpack(next.map_err(ZkHemV2Error::Vulkan)?));
+            tm = unpack(
+                gpu.fold_table(&crate::vulkan::ext_words(&tm), r)
+                    .map_err(ZkHemV2Error::Vulkan)?,
+            );
+            continue;
+        }
         if round == 0 {
-            tz = fold_base(z, c);
+            tz = SecretBuffer::new(fold_base(z, c));
         } else {
             fold_in_place(&mut tz, c, true);
         }
         fold_in_place(&mut tm, c, false);
     }
-    qsag_asm::volatile_fill(&mut tz, E::ZERO);
-    (rounds, ry, tm[0])
+    Ok((rounds, ry, tm[0]))
 }
 
 fn invert_lookup_denominators(values: &mut [E]) -> Result<(), ZkHemV2Error> {
@@ -1504,6 +1570,7 @@ struct LookupFront {
     values: [E; 3],
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lookup_prove_front(
     profile: Profile,
     lookups: &Lookups,
@@ -1512,6 +1579,7 @@ fn lookup_prove_front(
     tr: &mut Transcript,
     coins: &mut Coins,
     check: bool,
+    #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
 ) -> Result<LookupFront, ZkHemV2Error> {
     let _phase = crate::profile::span("zkhem2_lookup");
     let d = lookups.log_entries;
@@ -1519,8 +1587,8 @@ fn lookup_prove_front(
     let gamma = tr.squeeze_fp5(b"LK_GAMMA");
     let alpha = tr.squeeze_fp5(b"LK_ALPHA");
 
-    let mut n = vec![E::ZERO; entries];
-    let mut v = vec![E::ZERO; entries];
+    let mut n = SecretBuffer::new(vec![E::ZERO; entries]);
+    let mut v = SecretBuffer::new(vec![E::ZERO; entries]);
     par_chunks_mut(&mut n, |off, part| {
         for (j, slot) in part.iter_mut().enumerate() {
             *slot = E::from_base(lookups.num.row_dot(off + j, z));
@@ -1534,23 +1602,14 @@ fn lookup_prove_front(
             });
         }
     });
-    let mut h: Vec<E> = v.iter().map(|&v| alpha - v).collect();
-    let wipe = |tables: [&mut Vec<E>; 3]| {
-        for t in tables {
-            qsag_asm::volatile_fill(t, E::ZERO);
-        }
-    };
-    if let Err(pole) = invert_lookup_denominators(&mut h[..checked]) {
-        wipe([&mut n, &mut v, &mut h]);
-        return Err(pole);
-    }
+    let mut h = SecretBuffer::new(v.iter().map(|&v| alpha - v).collect::<Vec<_>>());
+    invert_lookup_denominators(&mut h[..checked])?;
     let mut total = E::ZERO;
-    for (slot, &num) in h[..checked].iter_mut().zip(&n) {
+    for (slot, &num) in h[..checked].iter_mut().zip(n.iter()) {
         *slot *= num;
         total += *slot;
     }
     if check && !total.is_zero() {
-        wipe([&mut n, &mut v, &mut h]);
         return Err(ZkHemV2Error::Unsatisfied);
     }
     for slot in &mut h[checked..] {
@@ -1571,11 +1630,11 @@ fn lookup_prove_front(
     let mask_poly: Vec<E> = (0..pcs::mask_len(ll.log_cells, step_vars))
         .map(|_| coins.next_fp5())
         .collect();
-    let mut salt_seed = coins.next_bytes32();
+    let salt_seed = SecretBuffer::new(coins.next_bytes32());
     let helper_nonce = coins.next_bytes32();
     let coeffs = hypercube_to_monomial_coeffs(&table);
     qsag_asm::volatile_fill(&mut table, F::ZERO);
-    let committed = pcs::commit(
+    let committed = pcs::commit_inner(
         profile,
         ll.log_cells,
         &ll.schedule,
@@ -1583,8 +1642,10 @@ fn lookup_prove_front(
         mask_poly,
         &salt_seed,
         &helper_nonce,
-    );
-    qsag_asm::volatile_fill(&mut salt_seed, 0u8);
+        #[cfg(feature = "vulkan")]
+        gpu,
+    )?;
+    drop(salt_seed);
     absorb_lookup_roots(
         tr,
         core::slice::from_ref(&helper_nonce),
@@ -1622,7 +1683,7 @@ fn lookup_prove_front(
         let _ = round;
     }
     let mut values = [n[0], v[0], h[0]];
-    wipe([&mut n, &mut v, &mut h]);
+    drop((n, v, h));
     if !lookup_masks_full_rank(lookups, &point) {
         qsag_asm::volatile_fill(&mut values, E::ZERO);
         return Err(ZkHemV2Error::MaskRankDeficient);
@@ -1661,7 +1722,11 @@ pub fn lookup_column_add(
     }
 }
 
-pub(in crate::zk_hem) fn row_tables(shape: &Shape, assignment: &[F], check: bool) -> Option<[Vec<F>; 3]> {
+pub(in crate::zk_hem) fn row_tables(
+    shape: &Shape,
+    assignment: &[F],
+    check: bool,
+) -> Option<[Vec<F>; 3]> {
     let _phase = crate::profile::span("zkhem2_row_tables");
     let rows = shape.num_rows();
     let fill = |m: &crate::zk_hem::relation::Csr| {
@@ -1789,9 +1854,42 @@ pub fn prove(
     profile: Profile,
     seed: &[u8; 32],
 ) -> Result<ZkHemV2Proof, ZkHemV2Error> {
-    prove_inner(shape, assignment, statement, profile, seed, true, None)
+    prove_inner(
+        shape,
+        assignment,
+        statement,
+        profile,
+        seed,
+        true,
+        None,
+        #[cfg(feature = "vulkan")]
+        None,
+    )
 }
 
+/// Prove using the audited device for codeword transforms, Canopy trees and column sumcheck.
+#[cfg(feature = "vulkan")]
+pub fn prove_with_vulkan(
+    gpu: &qsag_accel::vulkan::VulkanFp5Session<'_>,
+    shape: &Shape,
+    assignment: Vec<F>,
+    statement: &[u8],
+    profile: Profile,
+    seed: &[u8; 32],
+) -> Result<ZkHemV2Proof, ZkHemV2Error> {
+    prove_inner(
+        shape,
+        assignment,
+        statement,
+        profile,
+        seed,
+        true,
+        None,
+        Some(gpu),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn prove_inner(
     shape: &Shape,
     mut assignment: Vec<F>,
@@ -1800,6 +1898,7 @@ fn prove_inner(
     seed: &[u8; 32],
     check: bool,
     claimed: Option<&[F]>,
+    #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
 ) -> Result<ZkHemV2Proof, ZkHemV2Error> {
     let Some(layout) = layout_of(shape) else {
         qsag_asm::volatile_fill(&mut assignment, F::ZERO);
@@ -1838,7 +1937,7 @@ fn prove_inner(
     qsag_asm::volatile_fill(&mut secrets.table, F::ZERO);
     secrets.table = Vec::new();
     drop(phase);
-    let committed = pcs::commit(
+    let committed = pcs::commit_inner(
         profile,
         layout.log_cells,
         &layout.schedule,
@@ -1846,7 +1945,9 @@ fn prove_inner(
         core::mem::take(&mut secrets.mask_poly),
         &secrets.salt_seed,
         &secrets.tree_nonce,
-    );
+        #[cfg(feature = "vulkan")]
+        gpu,
+    )?;
     let tree_nonce = committed.tree_nonce();
     let root = committed.root();
     let mut tr = start_transcript(
@@ -1871,6 +1972,8 @@ fn prove_inner(
                 &mut tr,
                 &mut coins,
                 check,
+                #[cfg(feature = "vulkan")]
+                gpu,
             )?,
         )),
         _ => None,
@@ -1896,7 +1999,11 @@ fn prove_inner(
     }
 
     tr.absorb_fp5_slice(b"ROW_VALUES", &row_values);
-    let combine = squeeze_point(&mut tr, b"COMBINE", if lookup_front.is_some() { 5 } else { 3 });
+    let combine = squeeze_point(
+        &mut tr,
+        b"COMBINE",
+        if lookup_front.is_some() { 5 } else { 3 },
+    );
     let col_mask_sum = secrets.col_mask.sum();
     tr.absorb_fp5_slice(b"COL_MASK_SUM", &[col_mask_sum]);
     let rho2 = tr.squeeze_fp5_nonzero(b"RHO2");
@@ -1910,8 +2017,15 @@ fn prove_inner(
             lf.gamma,
         );
     }
-    let (col_rounds, ry, matrix_at_point) =
-        column_sumcheck(&mut tr, tm, &z_var, &secrets.col_mask, rho2);
+    let (col_rounds, ry, matrix_at_point) = column_sumcheck_inner(
+        &mut tr,
+        tm,
+        &z_var,
+        &secrets.col_mask,
+        rho2,
+        #[cfg(feature = "vulkan")]
+        gpu,
+    )?;
     drop(z_var);
 
     let lambda = tr.squeeze_fp5(b"LAMBDA");
@@ -1945,12 +2059,24 @@ fn prove_inner(
     };
     drop(phase);
 
-    let opening = pcs::open(&committed, kernel, value, &mut tr)
-        .map_err(|pcs::MaskRankDeficient| ZkHemV2Error::MaskRankDeficient)?;
+    let opening = pcs::open_prover(
+        &committed,
+        kernel,
+        value,
+        &mut tr,
+        #[cfg(feature = "vulkan")]
+        gpu,
+    )?;
     let lookup = match (lookup_front, helper_claim) {
         (Some((_, _, lf)), Some((h_kernel, h_val))) => {
-            let h_open = pcs::open(&lf.committed, h_kernel, h_val, &mut tr)
-                .map_err(|pcs::MaskRankDeficient| ZkHemV2Error::MaskRankDeficient)?;
+            let h_open = pcs::open_prover(
+                &lf.committed,
+                h_kernel,
+                h_val,
+                &mut tr,
+                #[cfg(feature = "vulkan")]
+                gpu,
+            )?;
             Some(LookupV2Proof {
                 helper_tree_nonce: lf.committed.tree_nonce(),
                 helper_root: lf.committed.root(),
@@ -2418,7 +2544,7 @@ const _: () = assert!(PAD_VARS == LIMBS);
 const _: () = assert!(ROW_DEGREE < 1 << ROW_MASK_BITS && COL_DEGREE < 1 << COL_MASK_BITS);
 const _: () = assert!(LOOKUP_DEGREE < 1 << LOOKUP_MASK_BITS);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "relation-test-utils"))]
 fn solve_pad(rx: &[E], target: E) -> [F; LIMBS] {
     let weights: [E; LIMBS] = core::array::from_fn(|c| eq_index(&rx[..3], c));
     let mut aug: [[F; LIMBS + 1]; LIMBS] = core::array::from_fn(|row| {
@@ -2453,8 +2579,9 @@ fn solve_pad(rx: &[E], target: E) -> [F; LIMBS] {
 /// with `proof.row_values` at `rx` on a `Closing::V2` relation without lookups, then compares
 /// `M(rx, ry) * candidate_with_recovered_masks(ry)` with the masked column sumcheck terminal
 /// claim (`col_final`).
-#[cfg(test)]
-pub(crate) fn candidate_matches_masked_evaluation(
+#[cfg(any(test, feature = "relation-test-utils"))]
+#[doc(hidden)]
+pub fn candidate_matches_masked_evaluation(
     shape: &Shape,
     profile: Profile,
     public: &[F],
@@ -2587,6 +2714,86 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "vulkan")]
+    #[ignore = "requires an audited Vulkan device"]
+    fn vulkan_wire_parity_zkh2() {
+        let backend = qsag_accel::VulkanSpirvBackend::try_new_audited().unwrap();
+        let session = backend.fp5_session().unwrap();
+        // Compare several opposite-half folds with the verified scalar CWYZ oracle.
+        let code: Vec<_> = (0..1024u64)
+            .map(|v| {
+                E::from_base(F::from_u64_reduced(v + 3))
+                    * Fp5(core::array::from_fn(|j| {
+                        F::from_u64_reduced(u64::MAX - v - j as u64)
+                    }))
+            })
+            .collect();
+        let packed = crate::vulkan::ext_words(&code);
+        let spectrum = session.ntt(&packed, false).unwrap();
+        assert_eq!(session.ntt(&spectrum, true).unwrap(), *packed);
+        let challenges =
+            core::array::from_fn::<_, 3, _>(|i| core::array::from_fn(|k| code[3 * i + k]));
+        let gpu_code = session
+            .fold_fibers(
+                &crate::vulkan::ext_words(&code),
+                F::NON_RESIDUE.to_canonical_u64(),
+                &challenges.map(|c| c.map(|e| e.0.map(F::to_canonical_u64))),
+            )
+            .unwrap();
+        let omega = F::two_adic_generator(10);
+        for (j, actual) in gpu_code.into_iter().enumerate() {
+            let fiber = (0..8).map(|k| code[j + k * 128]).collect();
+            let expected =
+                pcs::fold_fiber(fiber, F::NON_RESIDUE * omega.pow(j as u64), &challenges);
+            assert_eq!(actual, expected.0.map(F::to_canonical_u64));
+        }
+        for steps in [1024, 16384] {
+            let (shape, z) = fixture(steps);
+            for profile in Profile::ALL {
+                let start = std::time::Instant::now();
+                let cpu = prove(&shape, z.clone(), STATEMENT, profile, &SEED).unwrap();
+                let cpu_time = start.elapsed();
+                let before = backend.gpu_submission_count();
+                let start = std::time::Instant::now();
+                let gpu = prove_with_vulkan(&session, &shape, z.clone(), STATEMENT, profile, &SEED)
+                    .unwrap();
+                let gpu_time = start.elapsed();
+                assert!(backend.gpu_submission_count() > before);
+                assert!(cpu.to_bytes() == gpu.to_bytes());
+                assert!(verify(
+                    &shape,
+                    &publics(&shape, &z),
+                    STATEMENT,
+                    profile,
+                    &gpu
+                ));
+                std::println!(
+                    "{steps} steps {profile:?} {} bytes, CPU {cpu_time:?}, GPU {gpu_time:?}",
+                    gpu.to_bytes().len()
+                );
+            }
+        }
+        let mut cs = ConstraintSystem::new();
+        let value: Lc = cs.public_input(f(239)).into();
+        cs.enforce_byte(&value);
+        let (shape, z) = cs.finish_v2();
+        let profile = Profile::TurboShakeJohnson400;
+        let cpu = prove(&shape, z.clone(), STATEMENT, profile, &SEED).unwrap();
+        let gpu =
+            prove_with_vulkan(&session, &shape, z.clone(), STATEMENT, profile, &SEED).unwrap();
+        assert!(gpu.lookup.is_some());
+        assert!(cpu.to_bytes() == gpu.to_bytes());
+        assert!(verify(
+            &shape,
+            &publics(&shape, &z),
+            STATEMENT,
+            profile,
+            &gpu
+        ));
+        assert_eq!(backend.cpu_fallback_count(), 0);
+    }
+
+    #[test]
     fn honest_roundtrip_both_profiles_and_serialization() {
         let (shape, z) = fixture(40);
         assert!(shape.is_satisfied(&z));
@@ -2634,6 +2841,8 @@ mod tests {
             Profile::CshakeJohnson400,
             &SEED,
             false,
+            None,
+            #[cfg(feature = "vulkan")]
             None,
         )
         .unwrap();
@@ -2864,6 +3073,8 @@ mod tests {
             Profile::TurboShakeJohnson400,
             &SEED,
             false,
+            None,
+            #[cfg(feature = "vulkan")]
             None,
         )
         .unwrap();
