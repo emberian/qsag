@@ -1,8 +1,8 @@
 module
-public import Qsag.Exec.WhirKernels
 public import Qsag.Oracle.Keccak
 public import Qsag.Protocol.Aggregation.Aggregation
-public import Qsag.Math.QuarticExt4
+public import Qsag.Math.GoldilocksEncoding
+public import Qsag.Math.QuinticExt5
 public import Qsag.Math.GoldilocksBase
 
 
@@ -24,9 +24,9 @@ open Qsag Aggregation
 
 /-! ## 0. Core Oracle Predicates & Two-Slot Ledger Recovery -/
 
-/-- Executable configuration predicate for the production global-liveness profile. -/
+/-- Executable configuration predicate for the production global-liveness profile (`n ≤ 64`). -/
 def quorumAccepts (t n f q : Nat) : Bool :=
-  decide (0 < t ∧ t ≤ n ∧ n ≤ 255 ∧ 0 < q ∧ q ≤ n ∧ f < t ∧ t ≤ q ∧
+  decide (0 < t ∧ t ≤ n ∧ n ≤ 64 ∧ 0 < q ∧ q ≤ n ∧ f < t ∧ t ≤ q ∧
     3 * f + 1 ≤ n ∧ n + f < 2 * q ∧ q ≤ n - f)
 
 /-- Generic WOTS+C profile, including the unused zero suffix and exact digest width. -/
@@ -158,7 +158,7 @@ def QuorumConfig.new (t n f : Nat) : Option QuorumConfig :=
 
 /-- `QuorumConfig::tight(t)`: tightest global-liveness profile `n = 3t - 2`, `f = t - 1`, `q = 2t - 1`. -/
 def QuorumConfig.tight (t : Nat) : Option QuorumConfig :=
-  if 0 < t ∧ t ≤ 255 then QuorumConfig.new t (3 * t - 2) (t - 1) else none
+  if 0 < t ∧ 3 * t - 2 ≤ 64 then QuorumConfig.new t (3 * t - 2) (t - 1) else none
 
 def ValidQuorumConfig (cfg : QuorumConfig) : Prop :=
   QuorumConfig.withQuorum cfg.t cfg.n cfg.f cfg.q = some cfg
@@ -168,7 +168,7 @@ def ValidQuorumConfig (cfg : QuorumConfig) : Prop :=
     (`extractBeltHonestQuorumWitness`). -/
 theorem quorumConfig_withQuorum_sound (cfg : QuorumConfig)
     (hValid : ValidQuorumConfig cfg) :
-    0 < cfg.t ∧ cfg.t ≤ cfg.n ∧ cfg.n ≤ 255 ∧
+    0 < cfg.t ∧ cfg.t ≤ cfg.n ∧ cfg.n ≤ 64 ∧
     cfg.f < cfg.t ∧ cfg.t ≤ cfg.q ∧
     3 * cfg.f + 1 ≤ cfg.n ∧ cfg.n + cfg.f < 2 * cfg.q ∧ cfg.q ≤ cfg.n - cfg.f ∧
     (∀ (Q1 Q2 Corrupt : CustodiansMask cfg.n)
@@ -185,26 +185,26 @@ theorem quorumConfig_withQuorum_sound (cfg : QuorumConfig)
   split at hValid
   · next ha =>
     simp only [quorumAccepts, decide_eq_true_eq] at ha
-    rcases ha with ⟨ht0, htn, hn255, _, _, hft, htq, h3f, h2q, hqnf⟩
-    refine ⟨ht0, htn, hn255, hft, htq, h3f, h2q, hqnf, ?_⟩
+    rcases ha with ⟨ht0, htn, hn64, _, _, hft, htq, h3f, h2q, hqnf⟩
+    refine ⟨ht0, htn, hn64, hft, htq, h3f, h2q, hqnf, ?_⟩
     intro Q1 Q2 Corrupt hQ1 hQ2 hC
     exact (extractBeltHonestQuorumWitness Q1 Q2 Corrupt h2q hQ1 hQ2 hC).property
   · cases hValid
 
-/-- `QuorumConfig.tight t` constructs `⟨t, 3t - 2, t - 1, 2t - 1⟩` whenever `1 ≤ t` and `3t - 2 ≤ 255`. -/
-theorem quorumConfig_tight_sound (t : Nat) (hPos : 0 < t) (hCap : 3 * t - 2 ≤ 255) :
+/-- `QuorumConfig.tight t` constructs `⟨t, 3t - 2, t - 1, 2t - 1⟩` whenever `1 ≤ t` and `3t - 2 ≤ 64`. -/
+theorem quorumConfig_tight_sound (t : Nat) (hPos : 0 < t) (hCap : 3 * t - 2 ≤ 64) :
     QuorumConfig.tight t = some ⟨t, 3 * t - 2, t - 1, 2 * t - 1⟩ := by
-  have hLt86 : t < 86 :=
-    if h : t < 86 then h
+  have hLt23 : t < 23 :=
+    if h : t < 23 then h
     else False.elim <| by
-      have h86 : 86 ≤ t := Nat.le_of_not_lt h
-      have h258 : 258 ≤ 3 * t := Nat.mul_le_mul_left 3 h86
-      have h256 : 256 ≤ 3 * t - 2 := Nat.sub_le_sub_right h258 2
-      exact Nat.not_le_of_gt (Nat.lt_of_lt_of_le (by decide : 255 < 256) h256) hCap
-  have hFin : ∀ x : Fin 86, 0 < x.val → 3 * x.val - 2 ≤ 255 →
+      have h23 : 23 ≤ t := Nat.le_of_not_lt h
+      have h69 : 69 ≤ 3 * t := Nat.mul_le_mul_left 3 h23
+      have h67 : 67 ≤ 3 * t - 2 := Nat.sub_le_sub_right h69 2
+      exact Nat.not_le_of_gt (Nat.lt_of_lt_of_le (by decide : 64 < 67) h67) hCap
+  have hFin : ∀ x : Fin 23, 0 < x.val → 3 * x.val - 2 ≤ 64 →
       QuorumConfig.tight x.val = some ⟨x.val, 3 * x.val - 2, x.val - 1, 2 * x.val - 1⟩ := by
     decide
-  exact hFin ⟨t, hLt86⟩ hPos hCap
+  exact hFin ⟨t, hLt23⟩ hPos hCap
 
 theorem witness_quorumConfig_valid : ∃ cfg : QuorumConfig, ValidQuorumConfig cfg := by
   refine ⟨⟨2, 4, 1, 3⟩, ?_⟩
@@ -819,77 +819,6 @@ end LegacyPoseidon16
 
 /-! ## 4. `Hem` Affine Duet Fold & CWYZ Sumcheck Bridge (`aeneas/qsag-whir-verified/src/lib.rs`) -/
 
-abbrev hemDuetFold := Qsag.Exec.hemDuetFold
-abbrev hemAffineDuetFold := Qsag.Exec.hemAffineDuetFold
-abbrev hemBridgeClaimStep := Qsag.Exec.hemBridgeClaimStep
-
-def HemFoldClaim (v0 v1 : GoldilocksExt4) (x : Goldilocks)
-    (theta alpha beta claimed : GoldilocksExt4) : Prop :=
-  x ≠ Goldilocks.zero ∧ hemAffineDuetFold v0 v1 x theta alpha beta = claimed
-
-private theorem ext4_sub_self (a : GoldilocksExt4) :
-    GoldilocksExt4.sub a a = GoldilocksExt4.zero :=
-  LawfulCommRing.sub_self a
-
-private theorem ext4_zero_mul (a : GoldilocksExt4) :
-    GoldilocksExt4.mul GoldilocksExt4.zero a = GoldilocksExt4.zero :=
-  LawfulCommRing.zero_mul a
-
-private theorem ext4_zero_add (a : GoldilocksExt4) :
-    GoldilocksExt4.add GoldilocksExt4.zero a = a :=
-  LawfulCommRing.zero_add a
-
-private theorem hemAffineDuetFold_aux (v : GoldilocksExt4) (invTwoX half xSq : Goldilocks)
-    (theta alpha beta : GoldilocksExt4) :
-    GoldilocksExt4.add
-      (GoldilocksExt4.mul (GoldilocksExt4.sub v v) (GoldilocksExt4.embedBase invTwoX))
-      (GoldilocksExt4.mul
-        (GoldilocksExt4.add alpha (GoldilocksExt4.mul beta (GoldilocksExt4.embedBase xSq)))
-        (foldDuetExt4 v v invTwoX half theta)) =
-    GoldilocksExt4.mul
-      (GoldilocksExt4.add alpha (GoldilocksExt4.mul beta (GoldilocksExt4.embedBase xSq)))
-      (foldDuetExt4 v v invTwoX half theta) := by
-  rw [ext4_sub_self, ext4_zero_mul, ext4_zero_add]
-
-/-- On any symmetric fiber `v0 = v1 = v`, the odd component vanishes and `hemAffineDuetFold`
-    equals `(alpha + beta * x^2) * foldDuetExt4 v v (2x)⁻¹ 2⁻¹ theta`. -/
-theorem hemAffineDuetFold_symmetric_sound (v : GoldilocksExt4) (x : Goldilocks)
-    (theta alpha beta claimed : GoldilocksExt4)
-    (hClaim : HemFoldClaim v v x theta alpha beta claimed) :
-    claimed = GoldilocksExt4.mul
-      (GoldilocksExt4.add alpha
-        (GoldilocksExt4.mul beta (GoldilocksExt4.embedBase (Goldilocks.mul x x))))
-      (foldDuetExt4 v v (Goldilocks.mul (Goldilocks.inv (Goldilocks.ofNat 2)) (Goldilocks.inv x))
-        (Goldilocks.inv (Goldilocks.ofNat 2)) theta) := by
-  rcases hClaim with ⟨_, hEq⟩
-  rw [← hEq]
-  exact hemAffineDuetFold_aux v
-    (Goldilocks.mul (Goldilocks.inv (Goldilocks.ofNat 2)) (Goldilocks.inv x))
-    (Goldilocks.inv (Goldilocks.ofNat 2))
-    (Goldilocks.mul x x) theta alpha beta
-
-theorem witness_hemAffineDuetFold_claim :
-    ∃ (v : GoldilocksExt4) (x : Goldilocks) (theta alpha beta claimed : GoldilocksExt4),
-      HemFoldClaim v v x theta alpha beta claimed := by
-  refine ⟨GoldilocksExt4.one, Goldilocks.one, GoldilocksExt4.one,
-    GoldilocksExt4.one, GoldilocksExt4.zero,
-    hemAffineDuetFold GoldilocksExt4.one GoldilocksExt4.one Goldilocks.one
-      GoldilocksExt4.one GoldilocksExt4.one GoldilocksExt4.zero, ?_⟩
-  exact ⟨by decide, rfl⟩
-
-/-- `#tooth`: Dropping or zeroing the asymmetric `theta` challenge changes `hemAffineDuetFold`
-    on asymmetric fibers (`v0 ≠ v1`). -/
-theorem tooth_hemAffineDuetFold_theta_drop_rejected :
-    ¬ HemFoldClaim GoldilocksExt4.one GoldilocksExt4.zero Goldilocks.one
-      GoldilocksExt4.one GoldilocksExt4.one GoldilocksExt4.zero
-      (hemAffineDuetFold GoldilocksExt4.one GoldilocksExt4.zero Goldilocks.one
-        GoldilocksExt4.zero GoldilocksExt4.one GoldilocksExt4.zero) := by
-  unfold HemFoldClaim
-  intro h
-  have hEq := h.2
-  simp only [hemAffineDuetFold, Exec.hemAffineDuetFold, foldDuetExt4.public_eq_1] at hEq
-  revert hEq
-  decide +kernel
 
 /-! ## 5. POSIX Crash WAL Schedules (`DurableBurnJournal` & `FsBeltWal`) -/
 
@@ -1222,8 +1151,6 @@ end Qsag.SpecOracle
 #tooth_pair Qsag.SpecOracle.LegacyPoseidon16.poseidon2Perm16_pair_invertible vs Qsag.SpecOracle.LegacyPoseidon16.tooth_poseidon2Perm16_zero_not_fixed
 #verify_inhabited Qsag.SpecOracle.LegacyPoseidon16.poseidon2Perm16_pair_invertible Qsag.SpecOracle.LegacyPoseidon16.witness_poseidon2Perm16_pair
 
-#tooth_pair Qsag.SpecOracle.hemAffineDuetFold_symmetric_sound vs Qsag.SpecOracle.tooth_hemAffineDuetFold_theta_drop_rejected
-#verify_inhabited Qsag.SpecOracle.hemAffineDuetFold_symmetric_sound Qsag.SpecOracle.witness_hemAffineDuetFold_claim
 
 #tooth_pair Qsag.SpecOracle.posixBurnStep_tear_fails_closed vs Qsag.SpecOracle.tooth_posixBurn_retained_rejects_truncation
 #verify_inhabited Qsag.SpecOracle.posixBurnStep_tear_fails_closed Qsag.SpecOracle.witness_posixBurnTornDisk
@@ -1233,8 +1160,5 @@ end Qsag.SpecOracle
 
 public section
 namespace Qsag.SpecOracle
-abbrev hemHorner := Qsag.Exec.hemHorner
-abbrev hemHorner_nil := Qsag.Exec.hemHorner_nil
-abbrev hemHorner_cons := Qsag.Exec.hemHorner_cons
 end Qsag.SpecOracle
 end

@@ -1157,10 +1157,7 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                         let mut s1: [u64; 25] = core::array::from_fn(|i| {
                             if n == 0 { 0 } else { n.wrapping_add(i as u64) }
                         });
-                        let mut s2 = s1;
                         qsag_agg::sponge::keccak_p1600_12(&mut s1);
-                        qsag_ass2::wire::keccak_p1600_12(&mut s2);
-                        assert_eq!(s1, s2);
                         assert_eq!(s1.map(|x| x.to_string()).join(","), *expected);
                     }
                     "zkh2_salt" => {
@@ -1313,72 +1310,10 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                     other => panic!("unexpected hqm2fs op {other}"),
                 }
             }
-            "ass2wotsc" => match parts[1] {
-                "ts256" => {
-                    let mut out = vec![0u8; parts[2].parse().unwrap()];
-                    let msg = hex::decode(parts[3]).unwrap();
-                    qsag_ass2::wire::turboshake256(&msg, &mut out);
-                    assert_eq!(hex::encode(out), *expected);
-                }
-                "step" => {
-                    let node: [u8; 16] = hex::decode(parts[4]).unwrap().try_into().unwrap();
-                    let got = qsag_ass2::wire::wotsc_step(
-                        &node,
-                        parts[2].parse().unwrap(),
-                        parts[3].parse().unwrap(),
-                    );
-                    assert_eq!(hex::encode(got), *expected);
-                }
-                "pubkey" => {
-                    let sk: [u8; 32] = hex::decode(parts[2]).unwrap().try_into().unwrap();
-                    assert_eq!(hex::encode(qsag_ass2::wire::owner_wotsc_pubkey(&sk)), *expected);
-                }
-                "cap_code" => {
-                    let img: [u8; 16] = hex::decode(parts[2]).unwrap().try_into().unwrap();
-                    let sib: [u8; 16] = hex::decode(parts[3]).unwrap().try_into().unwrap();
-                    assert_eq!(
-                        hex::encode(qsag_ass2::wire::capability_commit_code(&img, &sib)),
-                        *expected
-                    );
-                }
-                "cap_cth" => {
-                    let sib: [u8; 16] = hex::decode(parts[2]).unwrap().try_into().unwrap();
-                    let req: [u8; 16] = hex::decode(parts[3]).unwrap().try_into().unwrap();
-                    assert_eq!(
-                        hex::encode(qsag_ass2::wire::capability_commit_cth(&sib, &req)),
-                        *expected
-                    );
-                }
-                "img_id" => {
-                    let enc: [u8; 32] = hex::decode(parts[2]).unwrap().try_into().unwrap();
-                    let ws: Vec<u32> = parts[3]
-                        .split(',')
-                        .map(|s| s.parse().unwrap())
-                        .collect();
-                    assert_eq!(
-                        hex::encode(qsag_ass2::wire::compute_image_id(&enc, &ws)),
-                        *expected
-                    );
-                }
-                "chal" => {
-                    let salt: u64 = parts[2].parse().unwrap();
-                    let enc = [0xa5u8; 32];
-                    let nonce: [u8; 16] = core::array::from_fn(|i| (i + 1) as u8);
-                    let cap = [0x33u8; 16];
-                    let next = [0x77u8; 32];
-                    let d = qsag_ass2::wire::wotsc_challenge_digest(
-                        &enc, 0x12, 0, &nonce, 0, &cap, &next, salt,
-                    );
-                    let ok =
-                        d.iter().map(|&b| u32::from(b)).sum::<u32>() == qsag_ass2::wire::WOTSC_TARGET_SUM;
-                    assert_eq!(format!("{};{ok}", hex::encode(d)), *expected);
-                }
-                other => panic!("unexpected ass2wotsc op {other}"),
-            },
             other => panic!("unexpected CrossKat tag {other}"),
         }
     }
-    assert_eq!(count, 342, "expected all 342 Lean CrossKat records");
+    assert_eq!(count, 331, "expected all 331 Lean CrossKat records");
 
     // The `qsag-kat` snapshot is the same artifact as the workspace `tests/kat_vectors.json`.
     assert_eq!(

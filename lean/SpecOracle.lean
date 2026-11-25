@@ -109,11 +109,6 @@ def fsBeltWalEvent (s : String) : Except String Qsag.SpecOracle.FsBeltWalEvent :
     return .bind ⟨UInt64.ofNat (fields.getD 0 0), rep32 mByte, rep32 sByte, [dByte]⟩
 
 /-- Binary exponentiation using the executable extension multiplication. -/
-def extPow (x : GoldilocksExt4) (n : Nat) : GoldilocksExt4 :=
-  (List.range 64).foldl (fun acc i =>
-    let acc := GoldilocksExt4.mul acc acc
-    if n / 2^(63-i) % 2 == 1 then GoldilocksExt4.mul acc x else acc) GoldilocksExt4.one
-
 def latchTrace (events : String) : Except String String := do
   let mut st := BeltLatchNodeState.init 12 64
   let mut out := []

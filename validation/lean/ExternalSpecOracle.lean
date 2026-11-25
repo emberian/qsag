@@ -119,11 +119,6 @@ def projToAffine (p : Nat) (pt : RcbProjPoint) : Nat × Nat :=
   let zInv := powMod 384 (pt.z % p) (p - 2) p
   (((pt.x % p) * zInv) % p, ((pt.y % p) * zInv) % p)
 
-def extPow (x : GoldilocksExt4) (n : Nat) : GoldilocksExt4 :=
-  (List.range 64).foldl (fun acc i =>
-    let acc := GoldilocksExt4.mul acc acc
-    if n / 2 ^ (63 - i) % 2 == 1 then GoldilocksExt4.mul acc x else acc) GoldilocksExt4.one
-
 def state12FromList (xs : List Nat) : Poseidon2State12 :=
   let g := fun i => Goldilocks.ofNat (xs.getD i 0)
   ⟨⟨g 0, g 1, g 2, g 3⟩, ⟨g 4, g 5, g 6, g 7⟩, ⟨g 8, g 9, g 10, g 11⟩⟩
@@ -210,30 +205,6 @@ def main : IO Unit := do
       s!"\"inv_a\":\"{invA}\",\"pow7_a\":\"{pow7A}\"" ++
     "}"
 
-  let ext4Samples : List (List Nat × List Nat) := [
-    ([0, 0, 0, 0], [1, 0, 0, 0]),
-    ([1, 2, 3, 4], [5, 6, 7, 8]),
-    ([0xFFFFFFFF00000000, 0xFFFFFFFF, 0x100000000, 7],
-     [0xCAFEBABE12345678, 0x0FEDCBA987654321, 42, 99])
-  ]
-  let mkExt4 := fun (ls : List Nat) =>
-    (⟨⟨Goldilocks.ofNat (ls.getD 0 0), Goldilocks.ofNat (ls.getD 1 0)⟩,
-      ⟨Goldilocks.ofNat (ls.getD 2 0), Goldilocks.ofNat (ls.getD 3 0)⟩⟩ : GoldilocksExt4)
-  let ext4Limbs := fun (x : GoldilocksExt4) =>
-    [x.c0.c0.val, x.c0.c1.val, x.c1.c0.val, x.c1.c1.val]
-  let ext4Rows := ext4Samples.map fun (xs, ys) =>
-    let x := mkExt4 xs
-    let y := mkExt4 ys
-    let m := GoldilocksExt4.mul x y
-    let invX := GoldilocksExt4.inv x
-    let frobX := extPow x goldilocksPrime
-    "{" ++
-      s!"\"x\":{jsonNatStrList (ext4Limbs x)}," ++
-      s!"\"y\":{jsonNatStrList (ext4Limbs y)}," ++
-      s!"\"mul\":{jsonNatStrList (ext4Limbs m)}," ++
-      s!"\"inv_x\":{jsonNatStrList (ext4Limbs invX)}," ++
-      s!"\"frob_x\":{jsonNatStrList (ext4Limbs frobX)}" ++
-    "}"
 
   -- 2. Poseidon2 width-12 & width-16 forward + inverse + sponge hash32
   let p12Inputs : List (List Nat) := [
@@ -568,39 +539,6 @@ def main : IO Unit := do
       s!"\"merge_root_hex\":\"{bytesToHex mergeR}\"" ++
     "}"
 
-  -- 11. WHIR high-capacity stage geometries (`nv = 6..28` via live `hemStageGeometry`) & 6 wire regimes
-  let whirNvs : List Nat := [6, 12, 16, 20, 22, 24, 25, 26, 27, 28]
-  let whirGeomRows := whirNvs.map fun nv =>
-    let stgs := hemStageGeometry nv
-    let foldSum := (stgs.map Prod.snd).foldl (· + ·) 0
-    let stgJson := "[" ++ String.intercalate ", "
-      (stgs.map fun (lb, sv) => s!"[{lb}, {sv}]") ++ "]"
-    "{" ++
-      s!"\"nv\":{nv}," ++
-      s!"\"stages\":{stgJson}," ++
-      s!"\"folding_sum\":{foldSum}" ++
-    "}"
-
-  let whirRegimes := Aggregation.WhirSecurityRegime.all.map fun r =>
-    let qCounts := (Aggregation.whirSchedule4Stage r).map (·.numQueries)
-    "{" ++
-      s!"\"wire_tag\":{r.tagByte}," ++
-      s!"\"pow_bits\":{r.powBits}," ++
-      s!"\"query_counts\":{jsonNatNumList qCounts}" ++
-    "}"
-
-  let whirJson :=
-    let stgArr := String.intercalate ", " whirGeomRows
-    let regArr := String.intercalate ", " whirRegimes
-    "{" ++
-      "\"max_pcs_num_vars\":28," ++
-      "\"max_batch_polys\":16," ++
-      "\"ood_samples\":2," ++
-      "\"retired_wire_tags\":[0, 1, 3]," ++
-      s!"\"stage_geometries\":[{stgArr}]," ++
-      s!"\"regimes\":[{regArr}]" ++
-    "}"
-
   -- 12. Aggregate signature profiles (`JortsPoseidon2` `4,328 B` & `CorduroyPoseidon2` `76,896 B`, `maxSigsLog2 = 20`)
   let jortsGeom := xmssPoseidon2Geom
   let cordGeom := corduroyPoseidon2Geom
@@ -635,7 +573,6 @@ def main : IO Unit := do
   IO.println "{"
   IO.println "  \"generator\": \"lean-4.35.0-ExternalSpecOracle\","
   IO.println ("  \"goldilocks_edges\": [" ++ String.intercalate ", " glJsonRows ++ "],")
-  IO.println ("  \"goldilocks_ext4\": [" ++ String.intercalate ", " ext4Rows ++ "],")
   IO.println ("  \"poseidon2_12\": [" ++ String.intercalate ", " p12Rows ++ "],")
   IO.println ("  \"poseidon2_hash32\": [" ++ String.intercalate ", " pHashRows ++ "],")
   IO.println ("  \"sponges\": [" ++ String.intercalate ", " spongeRows ++ "],")
@@ -678,7 +615,6 @@ def main : IO Unit := do
   IO.println "  },"
   IO.println ("  \"pors_fp_and_baggy\": " ++ porsJson ++ ",")
   IO.println ("  \"frontier_sum_fts\": [" ++ String.intercalate ", " ftsRows ++ "],")
-  IO.println ("  \"whir_high_cap_and_regimes\": " ++ whirJson ++ ",")
   IO.println ("  \"agg_sig_profiles\": " ++ aggSigJson)
   IO.println "}"
 

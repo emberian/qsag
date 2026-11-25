@@ -3,17 +3,13 @@
 
 Usage on Linux: python3 scripts/cross_kat_runner.py --build
 Builds the canonical qsag-kat Lake target and executes its --cross-kat mode
-twice, comparing all 317 non-legacy records against linked production Rust.
+twice, comparing all 306 records against linked production Rust.
 
 Negative checks corrupt every result independently, remove/append records, and
-exercise WOTS+C rejection of digest mutations in both languages (legacy V128 and
-ASS2 base-256 WOTS+C). These are
+exercise WOTS+C rejection of digest mutations in both languages. These are
 comparator/behavior checks, not claims of production-source mutation coverage.
 Rust Fp5, TurboShake400, HemQuintic128, and Merkle compression use qsag-agg;
-Poseidon2-GL-w24 and ASS2 WOTS+C cross-check qsag-agg, qsag-accel, and qsag-ass2.
---isolate-agg-modules explicitly compiles its unmodified field/sponge/sig/pcs
-modules under a minimal no_std facade; this bypasses unrelated crate-root errors
-and does not certify that the full crate builds. The default always builds the unmodified crate.
+Poseidon2-GL-w24 cross-checks qsag-agg and qsag-accel.
 Intermediate tower inverses use Tower128's subfield embedding, independently
 of Lean's recursive norm inversion. Zero inverse is normalized to zero.
 Temporary sources/build products are owned by this process and cleaned on exit.
@@ -29,12 +25,9 @@ import json
 import os
 from pathlib import Path
 import platform
-import re
-import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 
 RUST = r'''
 use std::io::{self, BufRead};
@@ -88,8 +81,8 @@ fn eval(a:&[&str])->String{
    _=>panic!()
   },
   "turbo400"=>match a[1]{
-   "perm12"=>{let n:u64=a[2].parse().unwrap();let mut s1=core::array::from_fn(|i|if n==0{0}else{n.wrapping_add(i as u64)});let mut s2=s1;
-    qsag_agg::sponge::keccak_p1600_12(&mut s1);qsag_ass2::wire::keccak_p1600_12(&mut s2);assert_eq!(s1,s2);csv(s1)},
+   "perm12"=>{let n:u64=a[2].parse().unwrap();let mut s1=core::array::from_fn(|i|if n==0{0}else{n.wrapping_add(i as u64)});
+    qsag_agg::sponge::keccak_p1600_12(&mut s1);csv(s1)},
    "zkh2_salt"=>{let h=V2Hasher::new(V2Profile::TurboShakeJohnson400);let seed:[u8;32]=core::array::from_fn(|i|i as u8);hex(&h.salt(&seed,a[2].parse().unwrap()))},
    "zkh2_leaf_ext"=>{let h=V2Hasher::new(V2Profile::TurboShakeJohnson400);hex(&h.leaf_ext(a[2].parse().unwrap(),a[3].parse().unwrap(),&[Fp5::ONE,Fp5::X]))},
    "zkh2_node"=>{let h=V2Hasher::new(V2Profile::TurboShakeJohnson400);let l:[u8;50]=core::array::from_fn(|i|i as u8);let r:[u8;50]=core::array::from_fn(|i|(100+i) as u8);hex(&h.node(a[2].parse().unwrap(),&l,&r))},
@@ -126,21 +119,6 @@ fn eval(a:&[&str])->String{
     _=>panic!()
    }
   },
-  "ass2wotsc"=>match a[1]{
-   "ts256"=>{let mut out=vec![0u8;a[2].parse().unwrap()];qsag_ass2::wire::turboshake256(&bytes(a[3]),&mut out);hex(&out)},
-   "step"=>{let n:[u8;16]=bytes(a[4]).try_into().unwrap();hex(&qsag_ass2::wire::wotsc_step(&n,a[2].parse().unwrap(),a[3].parse().unwrap()))},
-   "pubkey"=>{let sk:[u8;32]=bytes(a[2]).try_into().unwrap();hex(&qsag_ass2::wire::owner_wotsc_pubkey(&sk))},
-   "cap_code"=>{let img:[u8;16]=bytes(a[2]).try_into().unwrap();let sib:[u8;16]=bytes(a[3]).try_into().unwrap();hex(&qsag_ass2::wire::capability_commit_code(&img,&sib))},
-   "cap_cth"=>{let sib:[u8;16]=bytes(a[2]).try_into().unwrap();let req:[u8;16]=bytes(a[3]).try_into().unwrap();hex(&qsag_ass2::wire::capability_commit_cth(&sib,&req))},
-   "img_id"=>{let enc:[u8;32]=bytes(a[2]).try_into().unwrap();let ws:Vec<u32>=nums(a[3]).into_iter().map(|x|x as u32).collect();hex(&qsag_ass2::wire::compute_image_id(&enc,&ws))},
-   "chal"=>{
-    let salt:u64=a[2].parse().unwrap();
-    let enc=[0xa5u8;32];let nonce:[u8;16]=core::array::from_fn(|i|(i+1) as u8);let cap=[0x33u8;16];let next=[0x77u8;32];
-    let d=qsag_ass2::wire::wotsc_challenge_digest(&enc,0x12,0,&nonce,0,&cap,&next,salt);
-    let ok=d.iter().map(|&b|u32::from(b)).sum::<u32>()==qsag_ass2::wire::WOTSC_TARGET_SUM;
-    format!("{};{}",hex(&d),ok)},
-   _=>panic!()
-  },
   "wotsplus"=>{let m=vec![a[2].parse().unwrap();a[1].parse().unwrap()];let (d,n)=try_wots_base16_digits_and_csum(&m).unwrap();csv(d[..n].iter().map(|&x|x as u64))},
   "wotsc"=>{let m=[a[1].parse().unwrap();32];let digits=qsag_core::tsw_baggy::extract_base_w_digits_checked(4,128,&m).unwrap();format!("{};{}",csv(digits.iter().map(|&x|x as u64)),qsag_core::wots_c::WotsCParams::V128.digits(&m).is_some())},
   "adrs"=>{let ty=match a[1]{"0"=>Fips205AdrsType::WotsHash,"1"=>Fips205AdrsType::WotsPk,"2"=>Fips205AdrsType::Tree,"3"=>Fips205AdrsType::ForsTree,"4"=>Fips205AdrsType::ForsRoots,"5"=>Fips205AdrsType::WotsPrf,"6"=>Fips205AdrsType::ForsPrf,_=>panic!()};hex(&Fips205Adrs{layer:0x12345678,tree:a[2].parse().unwrap(),adrs_type:ty,key_pair:0x87654321,f5:0xffffffff,f6:0xabcdef01}.to_bytes())},
@@ -153,7 +131,7 @@ fn main(){for line in io::stdin().lock().lines(){let line=line.unwrap();println!
 EXPECTED = {"gold": 24, "ext2": 25, "fp5": 25, "tower": 60,
             "shake": 24, "cshake": 72, "keccak": 4, "poseidon": 3,
             "compress": 3, "tree": 3, "p2gl24": 9, "turbo400": 12,
-            "hqm2fs": 8, "ass2wotsc": 11, "wotsplus": 9, "wotsc": 4, "adrs": 21}
+            "hqm2fs": 8, "wotsplus": 9, "wotsc": 4, "adrs": 21}
 
 
 # Independent reference for the canonical Poseidon2-12 profile over Goldilocks, as dense matrices:
@@ -286,7 +264,6 @@ def parse_vectors(output):
     if any(not isinstance(r, list) or len(r) != 2 or
            any(not isinstance(x, str) for x in r) for r in rows):
         raise ValueError("invalid KAT JSON record")
-    rows = [r for r in rows if not r[0].startswith("ext4 ")]
     requests = [r[0] for r in rows]
     if len(set(requests)) != len(requests):
         raise ValueError("duplicate KAT request")
@@ -328,10 +305,6 @@ def negative_checks(rows, results):
     if not values['wotsc 27'].endswith(';true') or any(
             not values[f'wotsc {v}'].endswith(';false') for v in [0,26,255]):
         raise ValueError("WOTS+C valid/invalid digest mutation checks failed")
-    ass2_chals = [v for k, v in rows if k.startswith('ass2wotsc chal ')]
-    if (len(ass2_chals) != 2 or not values['ass2wotsc chal 0'].endswith(';false')
-            or sum(x.endswith(';true') for x in ass2_chals) != 1):
-        raise ValueError("ASS2 WOTS+C valid/invalid challenge sum checks failed")
     return rejected
 
 
@@ -339,8 +312,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', action='store_true', help='build Main as qsag-kat first')
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument('--isolate-agg-modules', action='store_true',
-                        help='compile unmodified agg primitive modules under a minimal no_std facade')
     parser.add_argument('--check-poseidon2-fixtures', action='store_true',
                         help='only check committed Poseidon2 KAT fixtures against the reference (no build, any OS)')
     parser.add_argument('--target-dir', type=Path, default=None,
@@ -368,36 +339,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='cross-kat-', dir=root / 'scripts') as tmp:
         work = Path(tmp)
         (work / 'src').mkdir()
-        agg = root / 'crates/qsag-agg'
-        if args.isolate_agg_modules:
-            # Compile complete production modules, not reimplementations or
-            # extracted function bodies. Only the crate-root wiring is replaced.
-            staged = work / 'agg'
-            shutil.copytree(agg / 'src', staged / 'src')
-            shutil.copytree(agg / 'examples', staged / 'examples')
-            lib = (agg / 'src/lib.rs').read_text()
-            error_type = re.search(r'pub enum HemAggError \{[^}]+\}', lib)
-            if error_type is None:
-                raise ValueError('cannot identify agg error type')
-            facade = ('#![no_std]\nextern crate alloc;\n'
-                      'pub mod field; pub mod sponge; pub mod sig; pub mod pcs;\n'
-                      '#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n' + error_type[0] +
-                      '\npub type AggError = HemAggError;\n')
-            (staged / 'src/lib.rs').write_text(facade)
-            # Preserve the original manifest, resolving only workspace/path fields.
-            manifest = (agg / 'Cargo.toml').read_text()
-            workspace = tomllib.loads((root / 'Cargo.toml').read_text())['workspace']['package']
-            for key in ['rust-version', 'version', 'edition', 'license']:
-                manifest = manifest.replace(f'{key}.workspace = true',
-                                            f'{key} = {json.dumps(workspace[key])}')
-            manifest = re.sub(r'path = "([^"]+)"',
-                              lambda m: 'path = ' + json.dumps(str((agg / m[1]).resolve())), manifest)
-            manifest = manifest.replace('default = ["std"]', 'default = []')
-            (staged / 'Cargo.toml').write_text(manifest)
-            agg = staged
-            print('NOTE: using unmodified qsag-agg primitive modules with a temporary no_std facade', file=sys.stderr)
-        deps = '\n'.join(f'{name} = {{ path = {json.dumps(str(agg if name == "qsag-agg" else root / "crates" / name))} }}'
-                         for name in ['qsag-core', 'qsag-agg', 'qsag-accel', 'qsag-ass2'])
+        deps = '\n'.join(f'{name} = {{ path = {json.dumps(str(root / "crates" / name))} }}'
+                         for name in ['qsag-core', 'qsag-agg', 'qsag-accel'])
         (work / 'Cargo.toml').write_text('[workspace]\n[package]\nname="cross-kat-driver"\n'
                                        'version="0.0.0"\nedition="2024"\n[dependencies]\n' + deps + '\n')
         (work / 'src/main.rs').write_text(RUST)
@@ -415,8 +358,7 @@ def main():
                       'output_and_count_mutations_rejected': mutations,
                       'wotsc_invalid_digests_rejected': 3, 'lean_deterministic': True,
                       'poseidon2_reference_rows': reference_rows,
-                      'poseidon2_fixture_values': reference_fixtures,
-                      'isolated_agg_modules': args.isolate_agg_modules}, sort_keys=True))
+                      'poseidon2_fixture_values': reference_fixtures}, sort_keys=True))
 
 
 if __name__ == '__main__':

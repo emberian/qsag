@@ -753,8 +753,8 @@ def rust_function(source, signature):
 
 
 LATCH_MUTANTS = [
-    ("poison_check", "belt", "if self.wal_poisoned {", "if false {", "fail,0:0:0:1,1:0:0:1"),
-    ("poison_set", "belt", "self.wal_poisoned = true;", "self.wal_poisoned = false;", "fail,0:0:0:1,1:0:0:1"),
+    ("poison_check", "kernel", "if self.wal_poisoned {", "if false {", "fail,0:0:0:1,1:0:0:1"),
+    ("poison_set", "kernel", "wal_poisoned: true,", "wal_poisoned: false,", "fail,0:0:0:1,1:0:0:1"),
     ("epoch_consumed", "kernel", "if req.epoch < self.next_epoch {", "if false {", "2:0:0:1,1:0:0:1"),
     ("epoch_capacity", "kernel", "if req.epoch >= self.capacity_limit {", "if false {", "0:0:0:1"),
     ("epoch_jump", "kernel", "if req.epoch - self.next_epoch > BELT_LATCH_MAX_EPOCH_JUMP {", "if false {", "65:0:0:1"),
@@ -830,11 +830,11 @@ def driver_source(root):
     pos_src = (root / "crates/qsag-accel/src/poseidon2.rs").read_text()
     pos_head = pos_src[:pos_src.index("/// Stack-allocated zeroizing Width-12")]
     pos_head = "\n".join(line for line in pos_head.splitlines() if not line.startswith("//!"))
-    assert pos_head.count("qsag_asm::portable::goldilocks_pow7_ct_portable(x)") == 1
+    assert pos_head.count("qsag_verified::goldilocks_pow7(qsag_verified::Goldilocks(x)).0") == 1
     pos_mut = (pos_head.replace("use crate::AccelError;\n", "")
                        .replace("use crate::ct::ct_zeroize_u64s;\n", "")
                        .replace("crate::goldilocks", "qsag_accel::goldilocks")
-                       .replace("qsag_asm::portable::goldilocks_pow7_ct_portable(x)", "gl_mul(gl_mul(x, x), x)"))
+                       .replace("qsag_verified::goldilocks_pow7(qsag_verified::Goldilocks(x)).0", "gl_mul(gl_mul(x, x), x)"))
     source += "\n#[allow(dead_code, unused_variables)] mod poseidon_mut {\n" + pos_mut + "\n}\n"
     arms.append('"poseidon_sbox_deg3" => { let mut s:[u64;12]=nums(a[2]).try_into().unwrap(); poseidon_mut::poseidon2_perm12(&mut s); csv(&s) },')
 
