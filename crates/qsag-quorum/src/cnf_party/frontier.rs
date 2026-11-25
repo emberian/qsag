@@ -78,7 +78,10 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
                     return Err(CnfPartyError::InvalidParameters);
                 }
                 let mut pre = cshake256_static_midstate(tag);
-                for block in frame.clear[..start * RATE_BYTES].as_chunks::<RATE_BYTES>().0 {
+                for block in frame.clear[..start * RATE_BYTES]
+                    .as_chunks::<RATE_BYTES>()
+                    .0
+                {
                     for (word, b) in pre.iter_mut().zip(block.as_chunks::<8>().0) {
                         *word ^= u64::from_le_bytes(*b);
                     }

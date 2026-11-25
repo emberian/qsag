@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Isolated-party honest-majority CNF replicated sharing: one custodian per value.
 //!
 //! [`IsolatedCnfParty`] is one party of a `(t, n)` CNF protocol with `f = t - 1` corruptions
@@ -82,9 +83,12 @@ use qsag_core::wots_c::{LaneSpec, WOTS_STEPS};
 
 use crate::hash::{SeedRng, expand, h32};
 use crate::party_node::{PoisonJournal, ROUND_ABORT};
-use crate::wire_channel::{MacSealedWireChannel, TransportError, WireTransport};
+use crate::wire_channel::{
+    ConfidentialWireChannel, MacSealedWireChannel, TransportError, WireTransport,
+};
 
 mod frontier;
+mod refresh;
 
 /// Reshare corrections of one multiplication batch.
 pub const ROUND_CNF_MUL: u32 = 0x0400_0000;
@@ -100,6 +104,8 @@ pub const ROUND_CNF_OPEN: u32 = 0x0405_0000;
 pub const ROUND_CNF_HEDGED_COMMIT: u32 = 0x0406_0000;
 /// Round-2 commitment-echo + opening for hedged `SLH-DSA` `opt_rand` coin-tossing.
 pub const ROUND_CNF_HEDGED_OPEN: u32 = 0x0407_0000;
+/// Open the one-time-padded weighted gate value.
+pub const ROUND_CNF_CHECK_MASK_OPEN: u32 = 0x0408_0000;
 pub const ROUND_CNF_DKG_COMMIT: u32 = 0x0410_0000;
 pub const ROUND_CNF_DKG_OPEN: u32 = 0x0411_0000;
 pub const ROUND_CNF_DKG_CONFIRM: u32 = 0x0412_0000;
@@ -116,6 +122,7 @@ const MAX_PENDING_PLANE_WORDS: usize = 24 * BATCH_SPONGES * 25;
 const PURPOSE_RESHARE: u8 = 1;
 const PURPOSE_MAC_KEY: u8 = 2;
 const PURPOSE_CHECK_BLIND: u8 = 3;
+const PURPOSE_CHECK_MASK: u8 = 4;
 
 /// Errors of the isolated CNF party.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -537,6 +544,7 @@ pub fn run_isolated_cnf_dkg<T: WireTransport>(
     link_keys: Vec<[u8; 32]>,
     rng: &mut SeedRng,
 ) -> Result<CnfPartyKeys, CnfPartyError> {
+    let link_keys = SecretBuffer(link_keys);
     let me = transport.party();
     let topo = Topology::new(cfg, me)?;
     if !matches!(key_len, 16 | 24 | 32)
@@ -556,14 +564,20 @@ pub fn run_isolated_cnf_dkg<T: WireTransport>(
         key_shares: vec![[0; 32]; topo.held.len()],
         prf_shares: vec![[0; 32]; topo.held.len()],
         prss_seeds: vec![[0; 32]; topo.held.len()],
-        link_keys: link_keys.clone(),
+        link_keys: link_keys.to_vec(),
         scheme_identity: None,
         slh_profile_digest: None,
     };
     let session_id = h32(b"QSAG.CNF.DKG/v2", &[&deployment_id, &session_id]);
     let dkg_session = h32(b"cnf-party/dkg-session", &[&session_id]);
-    let mut channel =
-        MacSealedWireChannel::new_encrypted(transport, deployment_id, dkg_session, link_keys)?;
+    let mut channel = ConfidentialWireChannel::establish_pq_hybrid(
+        transport,
+        deployment_id,
+        dkg_session,
+        link_keys.into_inner(),
+        rng.bytes32(),
+    )?
+    .into_sealed();
     let outcome = dkg_inner(&topo, key_len, &mut channel, &session_id, rng, &mut keys);
     match outcome {
         Ok(()) => Ok(keys),
@@ -788,11 +802,14 @@ fn gf_mul(a: u128, b: u128) -> u128 {
 }
 
 fn public_gamma_pattern(gamma: &[[u64; 2]; 64]) -> qsag_asm::XorCombinePattern {
-    core::array::from_fn(|bit| core::array::from_fn(|group| {
-        (0..4).fold(0, |nibble, offset| {
-            nibble | ((((gamma[4 * group + offset][bit / 64] >> (bit % 64)) & 1) as u8) << offset)
+    core::array::from_fn(|bit| {
+        core::array::from_fn(|group| {
+            (0..4).fold(0, |nibble, offset| {
+                nibble
+                    | ((((gamma[4 * group + offset][bit / 64] >> (bit % 64)) & 1) as u8) << offset)
+            })
         })
-    }))
+    })
 }
 
 /// `out[i] = XOR_b gamma[b] * bit_b(plane[i])`. Only the public gamma coefficients
@@ -981,17 +998,31 @@ impl Drop for SharedState {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fault {
+    NonzeroRefreshMask,
     /// Add an error to the bit part of the correction of multiplication `ctr`, the same for
     /// every holder and for the party itself: a pure additive attack on `z`.
-    AdditiveBitCorrection { ctr: u64 },
+    AdditiveBitCorrection {
+        ctr: u64,
+    },
     /// The same on the randomized part (`r * z`).
-    AdditiveRandCorrection { ctr: u64 },
+    AdditiveRandCorrection {
+        ctr: u64,
+    },
+    /// Apply the same malformed randomized correction at two specified rounds.
+    PairedRandCorrections([u64; 2]),
     /// Send holder `peer` a different correction of multiplication `ctr` than the others.
-    InconsistentCorrection { ctr: u64, peer: usize },
+    InconsistentCorrection {
+        ctr: u64,
+        peer: usize,
+    },
     /// Send `peer` a wrong share when an output is opened.
-    WrongOpeningShare { peer: usize },
+    WrongOpeningShare {
+        peer: usize,
+    },
     /// Send `peer` a wrong slot-view digest.
-    WrongConsistencyHash { peer: usize },
+    WrongConsistencyHash {
+        peer: usize,
+    },
 }
 
 /// Per held slot: packed `u64` bit-shares and flattened `128 * words` `u64` `GF(2^128)` bit-planes.
@@ -1126,6 +1157,53 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
         Self::new(&keys, transport, session_id, rng_seed, journal)
     }
 
+    /// Establish an ephemeral hybrid channel using separately provisioned roster links.
+    pub fn from_custody_with_links(
+        deployment_id: [u8; 32],
+        share: &CnfRssKeyShare256,
+        transport: T,
+        session_id: [u8; 32],
+        links: Vec<[u8; 32]>,
+        rng_seed: &[u8; 32],
+        journal: J,
+    ) -> Result<Self, CnfPartyError> {
+        let links = SecretBuffer(links);
+        let keys = CnfPartyKeys::from_custody(deployment_id, share)?;
+        Self::start(&keys, transport, session_id, rng_seed, journal, |t| {
+            let seed = h32(
+                b"QSAG.QUORUM.CUSTODY.HANDSHAKE/v1",
+                &[rng_seed, &session_id],
+            );
+            Ok(ConfidentialWireChannel::establish_pq_hybrid(
+                t,
+                deployment_id,
+                session_id,
+                links.into_inner(),
+                seed,
+            )?
+            .into_sealed())
+        })
+    }
+
+    /// Continue on the same confirmed channel after custody generation agreement.
+    pub fn from_custody_with_channel(
+        deployment_id: [u8; 32],
+        share: &CnfRssKeyShare256,
+        channel: ConfidentialWireChannel<T>,
+        session: [u8; 32],
+        rng_seed: &[u8; 32],
+        journal: J,
+    ) -> Result<Self, CnfPartyError> {
+        let keys = CnfPartyKeys::from_custody(deployment_id, share)?;
+        Self::start(&keys, channel, session, rng_seed, journal, |channel| {
+            let sealed = channel.into_sealed();
+            if !sealed.matches_encrypted(&deployment_id, &session) {
+                return Err(TransportError::AuthenticationFailed);
+            }
+            Ok(sealed)
+        })
+    }
+
     /// Build a party from its own key material. `session_id` must be fresh: the journal
     /// reserves it, and a session that was ever reserved or poisoned is refused.
     /// `rng_seed` is this party's private entropy for its coin shares.
@@ -1134,7 +1212,25 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
         transport: T,
         session_id: [u8; 32],
         rng_seed: &[u8; 32],
+        journal: J,
+    ) -> Result<Self, CnfPartyError> {
+        Self::start(keys, transport, session_id, rng_seed, journal, |t| {
+            MacSealedWireChannel::new_encrypted(
+                t,
+                keys.deployment_id,
+                session_id,
+                keys.link_keys.clone(),
+            )
+        })
+    }
+
+    fn start<U: WireTransport>(
+        keys: &CnfPartyKeys,
+        transport: U,
+        session_id: [u8; 32],
+        rng_seed: &[u8; 32],
         mut journal: J,
+        establish: impl FnOnce(U) -> Result<MacSealedWireChannel<T>, TransportError>,
     ) -> Result<Self, CnfPartyError> {
         let topo = Topology::new(&keys.cfg, keys.party)?;
         if transport.party() != keys.party
@@ -1151,12 +1247,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
         journal
             .reserve_session(&session_id)
             .map_err(|_| CnfPartyError::Journal)?;
-        let transport = MacSealedWireChannel::new_encrypted(
-            transport,
-            keys.deployment_id,
-            session_id,
-            keys.link_keys.clone(),
-        )?;
+        let transport = establish(transport)?;
         let prss_seeds: Vec<_> = keys
             .prss_seeds
             .iter()
@@ -1213,7 +1304,10 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             prss_seeds,
             scheme_identity: keys.scheme_identity,
             slh_profile_digest: keys.slh_profile_digest,
-            rng: SeedRng::new(rng_seed, &h32(b"QSAG.CNF.COINS/v2", &[&keys.deployment_id, &session_id])),
+            rng: SeedRng::new(
+                rng_seed,
+                &h32(b"QSAG.CNF.COINS/v2", &[&keys.deployment_id, &session_id]),
+            ),
             r,
             transcripts,
             coin_binding: [0; 32],
@@ -1400,6 +1494,9 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
                 corr_bits[0] ^= 1;
             }
             Some(Fault::AdditiveRandCorrection { ctr: c }) if c == ctr && elems > 0 => {
+                corr_rand[0] ^= 1;
+            }
+            Some(Fault::PairedRandCorrections(rounds)) if elems > 0 && rounds.contains(&ctr) => {
                 corr_rand[0] ^= 1;
             }
             _ => {}
@@ -1664,15 +1761,41 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
         Ok(value)
     }
 
+    fn check_random(&self, purpose: u8) -> SecretBuffer<Vec<u128>> {
+        SecretBuffer(
+            (0..self.topo.held.len())
+                .map(|l| {
+                    let mut raw = SecretBuffer([0u8; 16]);
+                    expand(
+                        b"cnf-party/prss-key",
+                        &[
+                            &self.prss_seeds[l],
+                            &self.session,
+                            &(self.topo.held[l] as u64).to_be_bytes(),
+                            &[purpose],
+                            &self.barrier_ctr.to_be_bytes(),
+                        ],
+                        &mut raw[..],
+                    );
+                    u128::from_le_bytes(*raw)
+                })
+                .collect(),
+        )
+    }
+
     fn barrier_inner(&mut self) -> Result<(), CnfPartyError> {
         if !self.has_unverified_gates() {
             return Ok(());
         }
         let held = self.topo.held.len();
+        // Bind the only correction influencing r*w before publishing the weights.
+        let r = SecretBuffer(self.r.clone());
+        let mask = self.check_random(PURPOSE_CHECK_MASK);
+        let rs = SecretBuffer(self.mul_field(&r, &mask)?);
         self.exchange_consistency(0)?;
         let coin = self.joint_coin()?;
-        let mut u = vec![0u128; held];
-        let mut w = vec![0u128; held];
+        let mut u = SecretBuffer(vec![0u128; held]);
+        let mut w = SecretBuffer(vec![0u128; held]);
         let count = self.pending_rand[0].len();
         if count > 0 {
             let mut raw = vec![0u8; 16 * count];
@@ -1727,29 +1850,33 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             }
             qsag_asm::volatile_fill(&mut row_g, [0; 2]);
         }
-        let r = self.r.clone();
-        let rw = self.mul_field(&r, &w)?;
-        let t: Vec<u128> = u.iter().zip(&rw).map(|(a, b)| a ^ b).collect();
-        let rho: Vec<u128> = (0..held)
-            .map(|l| {
-                let mut raw = [0u8; 16];
-                expand(
-                    b"cnf-party/prss-key",
-                    &[
-                        &self.prss_seeds[l],
-                        &self.session,
-                        &(self.topo.held[l] as u64).to_be_bytes(),
-                        &[PURPOSE_CHECK_BLIND],
-                        &self.barrier_ctr.to_be_bytes(),
-                    ],
-                    &mut raw,
-                );
-                u128::from_le_bytes(raw)
-            })
-            .collect();
-        let blinded = self.mul_field(&rho, &t)?;
+        let masked = SecretBuffer(
+            w.iter()
+                .zip(mask.iter())
+                .map(|(w, s)| (w ^ s).to_le_bytes().to_vec())
+                .collect::<Vec<_>>(),
+        );
+        let opened = self.open_shares(ROUND_CNF_CHECK_MASK_OPEN, &masked)?;
+        let w_hat = u128::from_le_bytes(
+            opened
+                .try_into()
+                .map_err(|_| CnfPartyError::InvalidParameters)?,
+        );
+        drop((mask, masked));
+        let t = SecretBuffer(
+            (0..held)
+                .map(|l| u[l] ^ rs[l] ^ gf_mul(r[l], w_hat))
+                .collect::<Vec<_>>(),
+        );
+        let rho = self.check_random(PURPOSE_CHECK_BLIND);
+        let blinded = SecretBuffer(self.mul_field(&rho, &t)?);
         self.exchange_consistency(1)?;
-        let shares: Vec<Vec<u8>> = blinded.iter().map(|s| s.to_le_bytes().to_vec()).collect();
+        let shares = SecretBuffer(
+            blinded
+                .iter()
+                .map(|s| s.to_le_bytes().to_vec())
+                .collect::<Vec<_>>(),
+        );
         let opened = self.open_shares(ROUND_CNF_CHECK_OPEN, &shares)?;
         if !ct_eq_bytes(&opened, &[0u8; 16]) {
             return Err(CnfPartyError::MultiplicationCheckFailed);
@@ -2581,7 +2708,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
         })
     }
 
-    /// Sealed [`SlhMpcOracles`] view over this isolated custodian party.
+    /// Sealed `SlhMpcOracles` view over this isolated custodian party.
     pub fn slh_oracles(&mut self) -> IsolatedCnfSlhOracles<'_, Self> {
         IsolatedCnfSlhOracles(self)
     }
@@ -3398,15 +3525,18 @@ mod tests {
             for (bit, word) in words.iter_mut().take(64).enumerate() {
                 *word = 1u64 << bit;
             }
-            let expected: Vec<[u64; 2]> = words.iter().map(|word| {
-                let mut value = 0u128;
-                for (bit, coefficient) in gamma.iter().enumerate() {
-                    if (word >> bit) & 1 != 0 {
-                        value ^= gf_from_words(*coefficient);
+            let expected: Vec<[u64; 2]> = words
+                .iter()
+                .map(|word| {
+                    let mut value = 0u128;
+                    for (bit, coefficient) in gamma.iter().enumerate() {
+                        if (word >> bit) & 1 != 0 {
+                            value ^= gf_from_words(*coefficient);
+                        }
                     }
-                }
-                gf_words(value)
-            }).collect();
+                    gf_words(value)
+                })
+                .collect();
             let mut actual = vec![[u64::MAX; 2]; len];
             bind_plane_gamma(&words, &gamma, &pattern, &mut actual);
             assert_eq!(actual, expected, "plane words={len}");
@@ -3417,9 +3547,7 @@ mod tests {
     fn ceremony_preserves_party_order_and_propagates_panics_after_joining() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let outputs = run_isolated_cnf_ceremony(vec![7, 11, 13], |index, value| {
-            (index, *value)
-        });
+        let outputs = run_isolated_cnf_ceremony(vec![7, 11, 13], |index, value| (index, *value));
         assert_eq!(outputs, vec![(0, 7), (1, 11), (2, 13)]);
 
         let entered = AtomicUsize::new(0);
@@ -3430,7 +3558,10 @@ mod tests {
                 *value
             })
         });
-        assert!(result.is_err(), "a missing party must not look like success");
+        assert!(
+            result.is_err(),
+            "a missing party must not look like success"
+        );
         assert_eq!(entered.load(Ordering::SeqCst), 3);
     }
 
@@ -3445,6 +3576,59 @@ mod tests {
             .iter()
             .map(|s| CnfPartyKeys::from_custody([0xDA; 32], s).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn tooth_refresh_checks_zero_sum_and_preserves_both_keys() {
+        for bad in [false, true] {
+            let cfg = CnfRssConfig::new(3, 5).unwrap();
+            let mut rngs: Vec<_> = (0..5)
+                .map(|p| PartyPrivateRng::from_seed([p; 32], b"refresh"))
+                .collect();
+            let (shares, _) = run_dealerless_cnf_rss_dkg([21; 32], &cfg, 32, &mut rngs).unwrap();
+            let session = [42; 32];
+            let (ends, _) = InMemoryWireMesh::connect(5, session);
+            let input: Vec<_> = ends.into_iter().map(Some).collect();
+            let out = run_isolated_cnf_ceremony(input, |p, e| {
+                let links = (0..5)
+                    .map(|j| [1 + (p.min(j) * 5 + p.max(j)) as u8; 32])
+                    .collect();
+                let mut node = IsolatedCnfParty::from_custody_with_links(
+                    [9; 32],
+                    &shares[p],
+                    e.take().unwrap(),
+                    session,
+                    links,
+                    &[p as u8; 32],
+                    MemoryPoisonJournal::new(),
+                )
+                .unwrap();
+                if bad && p == 0 {
+                    node.fault = Some(Fault::NonzeroRefreshMask);
+                }
+                node.refresh_share(&shares[p])
+            });
+            if bad {
+                assert!(out.iter().all(Result::is_err));
+                continue;
+            }
+            let updated: Vec<_> = out.into_iter().map(Result::unwrap).collect();
+            let mut delta = [0; 64];
+            for slot in 0..cfg.total_slots() {
+                let old = shares.iter().find_map(|s| s.held_slot(slot)).unwrap();
+                let mut replicas = updated.iter().filter_map(|s| s.held_slot(slot));
+                let new = replicas.next().unwrap();
+                assert!(replicas.all(|r| r == new));
+                assert_ne!(old.0, new.0);
+                assert_ne!(old.1, new.1);
+                assert_ne!(old.2, new.2);
+                for j in 0..32 {
+                    delta[j] ^= old.0[j] ^ new.0[j];
+                    delta[j + 32] ^= old.1[j] ^ new.1[j];
+                }
+            }
+            assert_eq!(delta, [0; 64]);
+        }
     }
 
     /// Test-only pooling of every party's key material: the clear `sk_seed`.
@@ -3588,10 +3772,21 @@ mod tests {
             .into_iter()
             .map(Result::unwrap)
             .collect();
-            // Every frame of the DKG is a DKG frame, and each party talks to each peer.
+            use crate::wire_channel::{ROUND_PQ_HS_CONFIRM, ROUND_PQ_HS_INIT, ROUND_PQ_HS_RESP};
+            for tag in [ROUND_PQ_HS_INIT, ROUND_PQ_HS_RESP, ROUND_PQ_HS_CONFIRM] {
+                assert_eq!(
+                    stats.frames().iter().filter(|f| f.round_tag == tag).count(),
+                    n * (n - 1) / 2
+                );
+            }
             assert!(stats.frames().iter().all(|f| matches!(
                 f.round_tag,
-                ROUND_CNF_DKG_COMMIT | ROUND_CNF_DKG_OPEN | ROUND_CNF_DKG_CONFIRM
+                ROUND_PQ_HS_INIT
+                    | ROUND_PQ_HS_RESP
+                    | ROUND_PQ_HS_CONFIRM
+                    | ROUND_CNF_DKG_COMMIT
+                    | ROUND_CNF_DKG_OPEN
+                    | ROUND_CNF_DKG_CONFIRM
             )));
             for slot in 0..cfg.total_slots() {
                 let excluded = cfg.excluded_subset(slot).unwrap();
@@ -3645,7 +3840,8 @@ mod tests {
                     session
                 };
                 let mut rng = SeedRng::new(&[0x70 + p as u8; 32], b"dkg");
-                run_isolated_cnf_dkg(&cfg, 16, [0xDA; 32], endpoint, sid, links, &mut rng).map(|_| ())
+                run_isolated_cnf_dkg(&cfg, 16, [0xDA; 32], endpoint, sid, links, &mut rng)
+                    .map(|_| ())
             });
             assert!(out.iter().all(Result::is_err), "{out:?}");
         }
@@ -3775,6 +3971,30 @@ mod tests {
             assert_eq!(honest_corrections, 3 * 27);
         }
 
+        // On each directed correction link the public coin is followed by the masked
+        // opening and only the final blinding product. No weighted-wire product can be
+        // corrected between learning the challenge and opening the masked value.
+        for from in 0..n {
+            for to in (0..n).filter(|&to| to != from) {
+                let rounds: Vec<_> = frames
+                    .iter()
+                    .filter(|f| f.from == from && f.to == to)
+                    .map(|f| f.round_tag)
+                    .collect();
+                let coin = rounds
+                    .iter()
+                    .position(|&r| r == ROUND_CNF_COIN_OPEN)
+                    .unwrap();
+                assert_eq!(rounds[coin + 1], ROUND_CNF_CHECK_MASK_OPEN);
+                assert!(
+                    rounds[coin + 2..]
+                        .iter()
+                        .filter(|&&r| r == ROUND_CNF_MUL)
+                        .count()
+                        <= 1
+                );
+            }
+        }
         // Changing the secret in the missed slot leaves the shape of the coalition's view
         // (senders, rounds, lengths) unchanged, and changes the opened output.
         let mut resecret = custody_keys(t, n, 16, 0x44);
@@ -3831,6 +4051,33 @@ mod tests {
                 Fault::AdditiveBitCorrection { ctr: 9 },
                 |e| *e == CnfPartyError::MultiplicationCheckFailed,
             );
+        }
+    }
+
+    #[test]
+    fn randomized_correction_faults_across_the_coin_abort_for_either_input() {
+        for flip in [false, true] {
+            let mut keys = custody_keys(2, 3, 16, 0x39);
+            if flip {
+                for key in &mut keys {
+                    if let Some(i) = key.slots.iter().position(|&slot| slot == 0) {
+                        key.key_shares[i][0] ^= 1;
+                    }
+                }
+            }
+            let (clean, _) = keyed_hash_run(&keys, [0xF0; 32], &[]);
+            let expected = keyed_hash_reference(&keys);
+            assert!(clean.iter().all(|r| r.as_ref() == Ok(&expected)));
+            // Round 0 authenticates the input. Round 26 multiplies the final
+            // residual by the fresh blind, after the challenge is public.
+            let (result, poisoned) = keyed_hash_run(
+                &keys,
+                [0xF1; 32],
+                &[(0, Fault::PairedRandCorrections([0, 26]))],
+            );
+            assert!(result.iter().all(Result::is_err));
+            assert!(result[1..].contains(&Err(CnfPartyError::MultiplicationCheckFailed)));
+            assert!(poisoned.into_iter().all(|p| p));
         }
     }
 
@@ -4167,8 +4414,15 @@ mod tests {
                     let topo = Topology::new(&cfg, corrupt).unwrap();
                     let session = h32(b"QSAG.CNF.DKG/v2", &[&[0xDA; 32], &session]);
                     let dkg_session = h32(b"cnf-party/dkg-session", &[&session]);
-                    let mut chan =
-                        MacSealedWireChannel::new_encrypted(endpoint, [0xDA; 32], dkg_session, links).unwrap();
+                    let mut chan = MacSealedWireChannel::establish_pq_hybrid(
+                        endpoint,
+                        [0xDA; 32],
+                        dkg_session,
+                        links,
+                        [0x18; 32],
+                        true,
+                    )
+                    .unwrap();
                     let held = topo.held.len();
                     let salt = [0x11u8; 32];
                     let contrib = [0x22u8; 32];
@@ -4195,7 +4449,8 @@ mod tests {
                     for peer in topo.peers() {
                         let mut items = topo.common(peer);
                         items.push(held);
-                        let _ = recv_checked(&mut chan, peer, ROUND_CNF_DKG_COMMIT, 32 * items.len());
+                        let _ =
+                            recv_checked(&mut chan, peer, ROUND_CNF_DKG_COMMIT, 32 * items.len());
                     }
                     let mut bad_contrib = contrib;
                     bad_contrib[0] ^= u8::from(corrupt_opening);
@@ -4216,7 +4471,8 @@ mod tests {
                     Err(CnfPartyError::OpeningRejected { party: corrupt })
                 } else {
                     let mut rng = SeedRng::new(&[0x80 + p as u8; 32], b"dkg-bad-open");
-                    run_isolated_cnf_dkg(&cfg, 32, [0xDA; 32], endpoint, session, links, &mut rng).map(|_| ())
+                    run_isolated_cnf_dkg(&cfg, 32, [0xDA; 32], endpoint, session, links, &mut rng)
+                        .map(|_| ())
                 }
             });
 
@@ -4270,7 +4526,8 @@ mod tests {
                     let ep = ep.take().unwrap();
                     let links = (0..n).map(|q| link(p, q)).collect();
                     let mut rng = SeedRng::new(&[0x60 + p as u8; 32], b"baggy-wire-dkg");
-                    run_isolated_cnf_dkg(&cfg, 32, [0xDA; 32], ep, dkg_sid, links, &mut rng).unwrap()
+                    run_isolated_cnf_dkg(&cfg, 32, [0xDA; 32], ep, dkg_sid, links, &mut rng)
+                        .unwrap()
                 })
             } else {
                 custody_keys(t, n, 32, 0x47)
@@ -4303,10 +4560,9 @@ mod tests {
                 let mut cache = WaistbandCache::disabled();
                 let mut ledger = MemoryFirstSigned::new();
                 let (pk, binding) = baggy_keygen_mpc(party, &params, &mut cache).unwrap();
-                let sig = baggy_sign_mpc(
-                    party, &params, &pk, &binding, &mut cache, &mut ledger, msg,
-                )
-                .unwrap();
+                let sig =
+                    baggy_sign_mpc(party, &params, &pk, &binding, &mut cache, &mut ledger, msg)
+                        .unwrap();
                 (pk, binding, sig)
             });
 
@@ -4358,9 +4614,13 @@ mod tests {
         for (t, n) in [(2usize, 3usize), (3, 5)] {
             let mut keys = custody_keys(t, n, 16, 0x68 + n as u8);
             let (sk_seed, sk_prf) = pooled_keypair(&keys);
-            let (ref_sk, ref_pk) =
-                slh_keygen_internal(&params, &sk_seed[..16], &sk_prf[..16], &keys[0].pk_seed[..16])
-                    .unwrap();
+            let (ref_sk, ref_pk) = slh_keygen_internal(
+                &params,
+                &sk_seed[..16],
+                &sk_prf[..16],
+                &keys[0].pk_seed[..16],
+            )
+            .unwrap();
             let ref_det_sig = slh_sign(&params, &msg, ctx, &ref_sk, None).unwrap();
 
             // Keygen + deterministic signing + hedged coin-toss signing.
@@ -4422,9 +4682,13 @@ mod tests {
 
         let mut base_keys = custody_keys(t, n, 16, 0x73);
         let (sk_seed, sk_prf) = pooled_keypair(&base_keys);
-        let (_, pk) =
-            slh_keygen_internal(&params, &sk_seed[..16], &sk_prf[..16], &base_keys[0].pk_seed[..16])
-                .unwrap();
+        let (_, pk) = slh_keygen_internal(
+            &params,
+            &sk_seed[..16],
+            &sk_prf[..16],
+            &base_keys[0].pk_seed[..16],
+        )
+        .unwrap();
         for k in &mut base_keys {
             k.bind_slh_params(&params, pk.pk_seed_slice()).unwrap();
         }
@@ -4587,9 +4851,7 @@ mod tests {
         // `#tooth`: `frontier_sign` previously locked `scheme_identity` and called
         // `wal.reserve_use(&key, 1)` BEFORE checking `self.is_poisoned()` or `pk.pk_seed == self.pk_seed`,
         // permanently burning the one-time `FrontierFtsPublicKey` epoch WAL slot on a poisoned party!
-        use qsag_fts::{
-            FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey, FtsEpochWal,
-        };
+        use qsag_fts::{FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey, FtsEpochWal};
 
         #[derive(Default)]
         struct TestEpochWal(alloc::collections::BTreeMap<[u8; 32], u8>);
@@ -4715,7 +4977,8 @@ mod tests {
             )
             .unwrap();
             for k in &mut skeys {
-                k.bind_slh_params(&sparams, ref_spk.pk_seed_slice()).unwrap();
+                k.bind_slh_params(&sparams, ref_spk.pk_seed_slice())
+                    .unwrap();
             }
             let smsg = b"isolated CNF FIPS 205 SLH-DSA-SHAKE-128f benchmark";
             let sctx = b"bench";
@@ -4726,7 +4989,9 @@ mod tests {
             let t1 = Instant::now();
             let ssigs = run_isolated_cnf_ceremony(p_ssign, |_, party: &mut Party| {
                 let hedged = party.hedged_slh_randomizer(16).unwrap();
-                let det = party.slh_sign(&sparams, smsg, sctx, &ref_spk, None).unwrap();
+                let det = party
+                    .slh_sign(&sparams, smsg, sctx, &ref_spk, None)
+                    .unwrap();
                 (det, hedged)
             });
             let s_elapsed = t1.elapsed();

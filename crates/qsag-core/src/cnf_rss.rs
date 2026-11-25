@@ -166,7 +166,7 @@ impl CnfRssConfig {
         self.n >= 2 * self.t - 1
     }
 
-    /// Subset $S_{\text{slot}} \in \binom{[n]}{t-1}$ of custodians EXCLUDED from holding `slot_idx`.
+    /// Subset $S_{\text{slot}} \in \binom{\[n\]}{t-1}$ of custodians EXCLUDED from holding `slot_idx`.
     pub fn excluded_subset(&self, slot_idx: usize) -> Option<&[usize]> {
         self.subsets.get(slot_idx).map(Vec::as_slice)
     }
@@ -512,7 +512,7 @@ impl CnfRssKeyShare256 {
 ///
 /// Executes:
 /// 1. 2-round committed coin toss deriving `pk_seed` (`key_len` bytes in `16 | 24 | 32`);
-/// 2. Per-complement $H_m = [n] \setminus S_m$ 2-round committed group seed ceremony deriving
+/// 2. Per-complement $H_m = \[n\] \setminus S_m$ 2-round committed group seed ceremony deriving
 ///    `(sk_seed_S, sk_prf_S, slot_prg_seed_S)` exclusively among legitimate holders $i \notin S_m$;
 /// 3. Pairwise 2-round committed PRF key ceremony deriving `K_{a, b}` for Theorem 4.1 zero-masks.
 pub fn run_dealerless_cnf_rss_dkg(
