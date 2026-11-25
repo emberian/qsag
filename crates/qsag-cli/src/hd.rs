@@ -1,8 +1,8 @@
-//! Dealerless hardened post-quantum HD inventory & watch-only child derivation CLI
+//! Single-host hardened post-quantum HD inventory & watch-only child derivation CLI
 //! (`qsag hd`), backed by [`qsag_hd`].
 //!
 //! Subcommands:
-//! - `keygen` — 3-round dealerless subset-seed ceremony (`SeedCeremonyRound1..3`) +
+//! - `keygen` — local three-round subset-seed ceremony (`SeedCeremonyRound1..3`) +
 //!   corroborated `SLH-DSA-SHAKE-128f` batch inventory commitment + `QSHDQB05` durable budget.
 //! - `derive` — `0`-round watch-only Bech32m deposit address + Poseidon2 Merkle proof
 //!   derivation (`0` secret keys touched).
@@ -43,12 +43,13 @@ use crate::keys::SECRET_FORMAT;
 const HD_HELP: &str = "\
 qsag hd <subcommand> [options]
 
-Dealerless post-quantum SLH-DSA-SHAKE-128f HD inventory & 0-round watch-only derivation:
-  keygen        run 3-round dealerless subset-seed ceremony and emit watch-only inventory
+Single-host post-quantum SLH-DSA-SHAKE-128f HD inventory & 0-round watch-only derivation:
+  keygen        run local subset-seed ceremony and emit watch-only inventory
   derive        derive a watch-only Bech32m child address + Poseidon2 Merkle opening (0 secrets)
   verify-child  verify a derived child address and Poseidon2 opening against the watch-only file
   recover       budget-gated child SLH-DSA-SHAKE-128f signing key recovery from >= t custodians
   export-rss    budget-gated 2-of-3 RssKeyShare256 child share export (0 cleartext secret keys)
+Local ceremonies hold all shares in one process. For separated custody see qsag quorum wire, quorum daemon, or migrate collab.
 ";
 
 const HD_META_FORMAT: &str = "qsag-hd-vault-meta-v1";
@@ -94,10 +95,8 @@ fn map_hd_err(err: HdError) -> CliError {
         HdError::InvalidBatchSize
         | HdError::ChildIndexOutOfBounds
         | HdError::UnsupportedCommittee
-        | HdError::DuplicateOrZeroEvalPoint
         | HdError::AddressCodecError(_) => CliError::usage(format!("HD parameter error: {err:?}")),
         HdError::InvalidThresholdParameters
-        | HdError::DerivationBudgetExceeded { .. }
         | HdError::EvaluationBudgetExceeded
         | HdError::DurableBudgetRequired
         | HdError::BudgetStorageFailed => {
@@ -107,7 +106,7 @@ fn map_hd_err(err: HdError) -> CliError {
     }
 }
 
-/// The `--deterministic` HD ceremony label. Each count enters as its own full-width frame,
+/// The `--deterministic-test-only` HD ceremony label. Each count enters as its own full-width frame,
 /// so no two committee shapes share a label.
 fn deterministic_ceremony_label(threshold: usize, parties: usize, batch_size: usize) -> [u8; 32] {
     cshake256_framed_32(
@@ -414,6 +413,7 @@ fn load_hd_custodian(
     party: usize,
     config: &CommitteeConfig,
     master_root: &[u8; 32],
+    anchor_seal: Option<[u8; 24]>,
     passphrase: Option<&[u8]>,
 ) -> Result<OpenedHdCustodian, CliError> {
     let path = hd_share_path(vault_dir, party);
@@ -431,6 +431,7 @@ fn load_hd_custodian(
     let opened = crate::envelope::open(&doc, passphrase)?;
     lock.set_key_material(&opened);
     lock.authenticate(&doc)?;
+    crate::anchor::verify_custody_anchor(&doc, anchor_seal)?;
     let raw = opened.secret_key()?;
     if raw.len() < 72 || &raw[..8] != HD_CUSTODY_PAYLOAD_MAGIC {
         return Err(CliError::input("corrupt or unsupported HD custody payload"));
@@ -493,16 +494,22 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         "passphrase-file",
     ];
     opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
-    let mut flags = vec!["deterministic", "allow-unencrypted", "json", "help"];
+    let mut flags = vec![
+        "deterministic-test-only",
+        "allow-unencrypted",
+        "json",
+        "help",
+    ];
     flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
     let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag hd keygen [--threshold <t>] [--parties <n>] [--count <pow2>] --vault-dir <dir> --watch-out <path> [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--allow-unencrypted] [--deterministic] [--json]\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
+            "qsag hd keygen [--threshold <t>] [--parties <n>] [--count <pow2>] --vault-dir <dir> --watch-out <path> [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--allow-unencrypted] [--deterministic-test-only] [--json]\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
         );
         return Ok(());
     }
     args.no_positionals()?;
+    crate::anchor::check_test_entropy(&args)?;
     let vault_dir = args.require("vault-dir")?;
     let watch_out = args.require("watch-out")?;
     let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
@@ -533,7 +540,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         ));
     }
     let passphrase = crate::envelope::passphrase(&args)?;
-    if passphrase.is_none() && !args.flag("allow-unencrypted") && !args.flag("deterministic") {
+    if passphrase.is_none() && !args.flag("allow-unencrypted") {
         return Err(CliError::usage(
             "HD custody requires --passphrase-env or --passphrase-file (or explicit --allow-unencrypted)",
         ));
@@ -541,7 +548,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     ensure_absent(&hd_meta_path(vault_dir))?;
     ensure_absent(watch_out)?;
 
-    let deterministic = args.flag("deterministic");
+    let deterministic = args.flag("deterministic-test-only");
     let label = if deterministic {
         deterministic_ceremony_label(threshold, parties, batch_size)
     } else {
@@ -653,6 +660,10 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         let enrollment_nonce = Secret32::new(os_random_32()?);
         let doc = Json::object(vec![
             ("format", Json::str(HD_SHARE_FORMAT)),
+            (
+                "custody_anchor",
+                anchor_seal.map_or(Json::Null, |s| Json::hex(&s)),
+            ),
             ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
             ("scheme", Json::str("hd-local-custody")),
             ("party", Json::num(idx)),
@@ -668,6 +679,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     }
 
     let mut meta_fields = vec![
+        ("custody_model", Json::str(crate::cli::SINGLE_HOST_CUSTODY)),
         ("format", Json::str(HD_META_FORMAT)),
         ("custody_format", Json::str(HD_SHARE_FORMAT)),
         ("threshold", Json::num(threshold)),
@@ -996,6 +1008,7 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
             idx,
             &config,
             &master_root,
+            crate::anchor::custody_anchor_seal(&meta)?,
             passphrase.as_deref().map(Vec::as_slice),
         )?;
         if let Some(prev) = &agreed_budget_mac {
@@ -1267,6 +1280,7 @@ fn export_rss(raw: &[String]) -> Result<(), CliError> {
             party,
             &config,
             &master_root,
+            crate::anchor::custody_anchor_seal(&meta)?,
             vault_pass.as_deref().map(Vec::as_slice),
         )?;
         if let Some(prev) = &agreed_budget_mac {

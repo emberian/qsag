@@ -2,10 +2,9 @@
 //! ceremonies (`qsag cred`), backed by [`qsag_cred::voprf`] and [`qsag_cred::threshold_mldsa`].
 //!
 //! Subcommands:
-//! - `voprf-keygen` — Dealerless Poseidon2 TOPRF setup with encrypted party bundles: the
-//!   replicated five-server backend, or the Shamir-SPDZ backend for any `2 <= t <= n <= 64`.
+//! - `voprf-keygen` — Dealerless Poseidon2 TOPRF setup with encrypted Shamir-SPDZ party bundles for `2 <= t <= n <= 64`.
 //! - `voprf-eval` — Blinded client query and evaluation with durable monotone counter
-//!   reservation: all five servers (replicated), or any `t` persisted shares (Shamir-SPDZ).
+//!   reservation, using any `t` persisted shares.
 //! - `mldsa-keygen` — Dealerless `(t, n)` threshold FIPS 204 ML-DSA (`44`/`65`/`87`) setup:
 //!   replicated key shares up to sixteen custodians, Shamir key shares up to sixty-four.
 //! - `mldsa-sign` — Sealed-`w1` abort-private `(2t - 1)`-of-`n` threshold FIPS 204 signing
@@ -23,9 +22,9 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::LockedRecord;
 use qsag_core::wipe::SecretBuffer;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
-use qsag_cred::voprf::{self, CounterStore, PublicKey as ToprfPublicKey, SERVERS as TOPRF_SERVERS};
+use qsag_cred::voprf::{self, CounterStore};
 use qsag_cred::voprf_spdz::{
-    SpdzConfig, SpdzPublic, SpdzServer, SpdzSession, spdz_blind, spdz_dkg,
+    SpdzConfig, SpdzPublic, SpdzServer, SpdzSession, spdz_dkg, spdz_evaluate_wire,
 };
 use qsag_cred::{
     FsNonceBurnStore, MlDsaLevel, MpcTransport, MpcTransportError, NonceBurnPersistence,
@@ -48,16 +47,15 @@ const CRED_HELP: &str = "\
 qsag cred <subcommand> [options]
 
 Post-quantum threshold credential & standard-verifier FIPS 204 threshold ML-DSA ceremonies:
-  voprf-keygen  run dealerless Poseidon2 TOPRF setup: replicated (2, 5), or Shamir-SPDZ (t, n <= 64)
-  voprf-eval    evaluate from persisted TOPRF party bundles: all five, or any t (Shamir-SPDZ)
-  mldsa-keygen  run dealerless (t, n) threshold FIPS 204 ML-DSA key generation (44 / 65 / 87)
+  voprf-keygen  enroll a threshold Shamir-SPDZ Poseidon2 TOPRF committee
+  voprf-eval    evaluate using any threshold of enrolled TOPRF party bundles
+  mldsa-keygen  run single-host (t, n) threshold FIPS 204 ML-DSA key generation (44 / 65 / 87)
   mldsa-sign    co-sign a message with >= 2t - 1 threshold ML-DSA custodians (sealed-w1 ZK)
   mldsa-verify  verify a standard FIPS 204 ML-DSA signature against the threshold public key
+Local ceremonies hold all shares in one process. For separated custody see qsag quorum wire, quorum daemon, or migrate collab.
 ";
 
-const VOPRF_SHARE_FORMAT: &str = "qsag-cred-voprf-share-v1";
 const VOPRF_SPDZ_SHARE_FORMAT: &str = "qsag-cred-voprf-spdz-share-v1";
-const VOPRF_RSS_SCHEME: &str = "voprf-poseidon2-2of5";
 const VOPRF_SPDZ_SCHEME: &str = "voprf-poseidon2-shamir-spdz";
 const VOPRF_SPDZ_BACKEND: &str = "shamir-spdz";
 const VOPRF_META_FORMAT: &str = "qsag-cred-voprf-meta-v1";
@@ -109,156 +107,6 @@ fn read_input_arg(args: &Args) -> Result<ZeroizingBuf, CliError> {
 // In-process synchronous channels for multi-custodian local vault execution
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-struct ToprfPhaseSlot {
-    arrivals: usize,
-    private: [Option<[Vec<u8>; TOPRF_SERVERS]>; TOPRF_SERVERS],
-    broadcast: [Option<Vec<u8>>; TOPRF_SERVERS],
-    aborted: bool,
-}
-
-impl Drop for ToprfPhaseSlot {
-    fn drop(&mut self) {
-        for arr in self.private.iter_mut().flatten() {
-            for buf in arr {
-                ct_zeroize_bytes(buf);
-            }
-        }
-        for buf in self.broadcast.iter_mut().flatten() {
-            ct_zeroize_bytes(buf);
-        }
-    }
-}
-
-struct SharedToprfHub {
-    aborted: AtomicBool,
-    phases: Mutex<BTreeMap<([u8; 32], bool), ToprfPhaseSlot>>,
-    cv: Condvar,
-}
-
-impl SharedToprfHub {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            aborted: AtomicBool::new(false),
-            phases: Mutex::new(BTreeMap::new()),
-            cv: Condvar::new(),
-        })
-    }
-
-    fn abort_all(&self) {
-        self.aborted.store(true, Ordering::Release);
-        if let Ok(mut map) = self.phases.lock() {
-            for slot in map.values_mut() {
-                slot.aborted = true;
-            }
-            self.cv.notify_all();
-        }
-    }
-}
-
-struct LocalToprfEndpoint {
-    party: usize,
-    hub: Arc<SharedToprfHub>,
-}
-
-impl voprf::Transport for LocalToprfEndpoint {
-    fn exchange(
-        &mut self,
-        phase: [u8; 32],
-        outgoing: [Vec<u8>; TOPRF_SERVERS],
-    ) -> Result<[Vec<u8>; TOPRF_SERVERS], voprf::Error> {
-        let key = (phase, false);
-        let mut guard = self
-            .hub
-            .phases
-            .lock()
-            .map_err(|_| voprf::Error::Transport)?;
-        {
-            let slot = guard.entry(key).or_default();
-            if self.hub.aborted.load(Ordering::Acquire)
-                || slot.aborted
-                || slot.private[self.party].is_some()
-            {
-                return Err(voprf::Error::Transport);
-            }
-            slot.private[self.party] = Some(outgoing);
-            slot.arrivals += 1;
-            if slot.arrivals == TOPRF_SERVERS {
-                self.hub.cv.notify_all();
-            }
-        }
-        loop {
-            let slot = guard.get(&key).ok_or(voprf::Error::Transport)?;
-            // A round every server completed is delivered even if a peer has
-            // already failed on it and aborted: the abort only stops later rounds.
-            if slot.arrivals == TOPRF_SERVERS {
-                let inbox = core::array::from_fn(|sender| {
-                    slot.private[sender]
-                        .as_ref()
-                        .map(|msgs| msgs[self.party].clone())
-                        .unwrap_or_default()
-                });
-                return Ok(inbox);
-            }
-            if self.hub.aborted.load(Ordering::Acquire) || slot.aborted {
-                return Err(voprf::Error::Transport);
-            }
-            guard = self
-                .hub
-                .cv
-                .wait(guard)
-                .map_err(|_| voprf::Error::Transport)?;
-        }
-    }
-
-    fn broadcast(
-        &mut self,
-        phase: [u8; 32],
-        message: Vec<u8>,
-    ) -> Result<[Vec<u8>; TOPRF_SERVERS], voprf::Error> {
-        let key = (phase, true);
-        let mut guard = self
-            .hub
-            .phases
-            .lock()
-            .map_err(|_| voprf::Error::Transport)?;
-        {
-            let slot = guard.entry(key).or_default();
-            if self.hub.aborted.load(Ordering::Acquire)
-                || slot.aborted
-                || slot.broadcast[self.party].is_some()
-            {
-                return Err(voprf::Error::Transport);
-            }
-            slot.broadcast[self.party] = Some(message);
-            slot.arrivals += 1;
-            if slot.arrivals == TOPRF_SERVERS {
-                self.hub.cv.notify_all();
-            }
-        }
-        loop {
-            let slot = guard.get(&key).ok_or(voprf::Error::Transport)?;
-            // A round every server completed is delivered even if a peer has
-            // already failed on it and aborted: the abort only stops later rounds.
-            if slot.arrivals == TOPRF_SERVERS {
-                let inbox = core::array::from_fn(|sender| {
-                    slot.broadcast[sender].clone().unwrap_or_default()
-                });
-                return Ok(inbox);
-            }
-            if self.hub.aborted.load(Ordering::Acquire) || slot.aborted {
-                return Err(voprf::Error::Transport);
-            }
-            guard = self
-                .hub
-                .cv
-                .wait(guard)
-                .map_err(|_| voprf::Error::Transport)?;
-        }
-    }
-}
-
-/// Vault-wide external monotone anchor + MAC-authenticated per-party generation ledger (`QSCRPST1`),
 /// binding every custodian's durable burn/counter generation AND the vault-wide high-water
 /// counter/epoch into a single [`FsExternalMountAnchor`] (`--anchor-dir` or `--anchor-tpm-nv`,
 /// optionally combined with the `--anchor-vmgenid` snapshot/clone guard).
@@ -869,6 +717,7 @@ fn open_party_bundle(
 
 /// Enrollment facts every TOPRF party bundle is bound to.
 struct VoprfEnrollment<'a> {
+    anchor_seal: Option<[u8; 24]>,
     share_format: &'a str,
     scheme: &'a str,
     threshold: usize,
@@ -897,6 +746,10 @@ fn write_voprf_bundle(
     let enrollment_nonce = Secret32::new(os_random_32()?);
     let bundle = Json::object(vec![
         ("format", Json::str(enrollment.share_format)),
+        (
+            "custody_anchor",
+            enrollment.anchor_seal.map_or(Json::Null, |s| Json::hex(&s)),
+        ),
         ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
         ("scheme", Json::str(enrollment.scheme)),
         ("party", Json::num(party)),
@@ -941,6 +794,7 @@ fn load_voprf_bundle(
         MAX_KEY_FILE_BYTES,
         passphrase,
     )?;
+    crate::anchor::verify_custody_anchor(&bundle, enrollment.anchor_seal)?;
     if bundle.field_u64("party")? != party as u64
         || bundle.field_u64("threshold")? != enrollment.threshold as u64
         || bundle.field_u64("parties")? != enrollment.parties as u64
@@ -998,7 +852,7 @@ fn preflight_voprf_party_files(vault_dir: &str, parties: usize) -> Result<(), Cl
     Ok(())
 }
 
-/// The `--deterministic` ML-DSA DKG session identifier. Threshold and party count enter as
+/// The `--deterministic-test-only` ML-DSA DKG session identifier. Threshold and party count enter as
 /// separate full-width frames, so no two committee shapes share a session.
 fn mldsa_deterministic_dkg_session(level_name: &str, threshold: usize, parties: usize) -> [u8; 32] {
     cshake256_framed_32(
@@ -1034,7 +888,7 @@ fn voprf_spdz_keygen(
     })?;
     private_dir(vault_dir, true)?;
     preflight_voprf_party_files(vault_dir, config.servers())?;
-    let deterministic = args.flag("deterministic");
+    let deterministic = args.flag("deterministic-test-only");
     let session = toprf_seed(
         deterministic,
         b"QSAG.CLI.TOPRF.DET.SESSION.V1",
@@ -1050,7 +904,7 @@ fn voprf_spdz_keygen(
     }
     let servers = spdz_dkg(config, session, &seeds).map_err(|e| {
         CliError::verify(format!(
-            "dealerless Shamir-SPDZ TOPRF enrollment aborted: {e}"
+            "single-host Shamir-SPDZ TOPRF enrollment aborted: {e}"
         ))
     })?;
     let public = servers[0].public().clone();
@@ -1072,6 +926,7 @@ fn voprf_spdz_keygen(
         None => None,
     };
     let enrollment = VoprfEnrollment {
+        anchor_seal,
         share_format: VOPRF_SPDZ_SHARE_FORMAT,
         scheme: VOPRF_SPDZ_SCHEME,
         threshold: config.threshold(),
@@ -1099,6 +954,7 @@ fn voprf_spdz_keygen(
     }
     let record = public.to_bytes();
     let mut meta_fields = vec![
+        ("custody_model", Json::str(crate::cli::SINGLE_HOST_CUSTODY)),
         ("format", Json::str(VOPRF_META_FORMAT)),
         ("share_format", Json::str(VOPRF_SPDZ_SHARE_FORMAT)),
         ("backend", Json::str(VOPRF_SPDZ_BACKEND)),
@@ -1139,7 +995,7 @@ fn voprf_spdz_keygen(
         print!("{}", report.to_pretty());
     } else {
         println!(
-            "initialized ({}, {}) dealerless Shamir-SPDZ TOPRF vault {vault_dir} (commitment {})",
+            "initialized ({}, {}) single-host Shamir-SPDZ TOPRF vault {vault_dir} (commitment {})",
             config.threshold(),
             config.servers(),
             to_hex(&commitment)
@@ -1162,6 +1018,7 @@ fn voprf_spdz_eval(
     input: &ZeroizingBuf,
     passphrase: Option<&[u8]>,
 ) -> Result<(), CliError> {
+    let reserved_output = crate::cli::reserve_output(out_path, true)?;
     let record = meta.field_hex("enrollment")?;
     if pub_json.field_hex("enrollment")?.0 != record.0 {
         return Err(CliError::verify(
@@ -1200,6 +1057,7 @@ fn voprf_spdz_eval(
         )));
     }
     let enrollment = VoprfEnrollment {
+        anchor_seal: crate::anchor::custody_anchor_seal(meta)?,
         share_format: VOPRF_SPDZ_SHARE_FORMAT,
         scheme: VOPRF_SPDZ_SCHEME,
         threshold,
@@ -1277,7 +1135,7 @@ fn voprf_spdz_eval(
         )?);
     }
 
-    let deterministic = args.flag("deterministic");
+    let deterministic = args.flag("deterministic-test-only");
     let eval_session = toprf_seed(
         deterministic,
         b"QSAG.CLI.TOPRF.DET.EVAL_SESSION.V1",
@@ -1312,18 +1170,47 @@ fn voprf_spdz_eval(
         )
         .map_err(refused)?
     };
-    let (client, request) = spdz_blind(
-        &public,
-        &[input.0.as_slice()],
-        eval_session,
-        counter,
-        &grants,
-    )
-    .map_err(|e| CliError::verify(format!("TOPRF mask grants rejected by the client: {e}")))?;
-    let outputs = session_state.evaluate(&request).map_err(refused)?;
-    let evaluation = client
-        .finalize(&outputs)
-        .map_err(|e| CliError::verify(format!("TOPRF client finalize failed: {e}")))?;
+    let participants = session_state.into_wire_parties().map_err(refused)?;
+    let channels = crate::quorum_wire::ceremony_channels(participants.len(), eval_session)?;
+    let mut client_links = Vec::with_capacity(participants.len());
+    let mut uplinks = Vec::with_capacity(participants.len());
+    for &party in &selected {
+        let id = cshake256_framed_32(
+            b"QSAG.CLI.TOPRF.CLIENT.LINK.V1",
+            &[&eval_session, &(party as u64).to_le_bytes()],
+        );
+        let [client, server] = crate::quorum_wire::ceremony_channels(2, id)?
+            .try_into()
+            .map_err(|_| CliError::state("invalid client link"))?;
+        client_links.push(client);
+        uplinks.push(server);
+    }
+    let evaluation = std::thread::scope(|scope| {
+        let jobs: Vec<_> = participants
+            .into_iter()
+            .zip(grants)
+            .zip(channels)
+            .zip(uplinks)
+            .map(|(((party, grant), mut peers), mut link)| {
+                scope.spawn(move || party.serve(grant, &mut peers, &mut link))
+            })
+            .collect();
+        let result = spdz_evaluate_wire(
+            &public,
+            &[input.0.as_slice()],
+            eval_session,
+            counter,
+            &selected,
+            &mut client_links,
+        );
+        // Closing client links wakes servers if a grant was refused before the request.
+        drop(client_links);
+        for job in jobs {
+            job.join().unwrap_or(Err(voprf::Error::Transport))?;
+        }
+        result
+    })
+    .map_err(refused)?;
     let pk = public.public_key();
     let prf_value = evaluation
         .value_for(&pk, &input.0)
@@ -1344,7 +1231,7 @@ fn voprf_spdz_eval(
         ),
         ("faulty_servers", Json::Array(Vec::new())),
     ]);
-    write_new(out_path, eval_doc.to_pretty().as_bytes(), true)?;
+    crate::cli::finish_output(reserved_output, eval_doc.to_pretty().as_bytes())?;
     if args.flag("json") {
         print!("{}", eval_doc.to_pretty());
     } else {
@@ -1353,41 +1240,6 @@ fn voprf_spdz_eval(
         );
     }
     Ok(())
-}
-
-fn run_voprf_dkg_threads(
-    session: [u8; 32],
-    entropies: &[Secret32; TOPRF_SERVERS],
-) -> Result<Vec<voprf::Server>, CliError> {
-    let cfg = voprf::Config::new(2, TOPRF_SERVERS)
-        .map_err(|e| CliError::usage(format!("TOPRF config failed: {e}")))?;
-    let hub = SharedToprfHub::new();
-    let results: Vec<Result<voprf::Server, voprf::Error>> = std::thread::scope(|s| {
-        let mut handles = Vec::with_capacity(TOPRF_SERVERS);
-        for (party, ent) in entropies.iter().enumerate() {
-            let hub_ref = Arc::clone(&hub);
-            let party_entropy = ent.0;
-            handles.push(s.spawn(move || {
-                let mut net = LocalToprfEndpoint {
-                    party,
-                    hub: Arc::clone(&hub_ref),
-                };
-                let res = voprf::dkg(cfg, party, session, party_entropy, &mut net);
-                if res.is_err() {
-                    hub_ref.abort_all();
-                }
-                res
-            }));
-        }
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or(Err(voprf::Error::Transport)))
-            .collect()
-    });
-    results
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| CliError::verify(format!("dealerless TOPRF DKG aborted: {e}")))
 }
 
 fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
@@ -1402,16 +1254,22 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
         "passphrase-file",
     ];
     opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
-    let mut flags = vec!["deterministic", "allow-unencrypted", "json", "help"];
+    let mut flags = vec![
+        "deterministic-test-only",
+        "allow-unencrypted",
+        "json",
+        "help",
+    ];
     flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
     let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag cred voprf-keygen --vault-dir <dir> --public-out <path> [--threshold 2 --parties 5] [--backend rss|shamir-spdz] [--max-evaluations <n>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <name> | --passphrase-file <path> | --allow-unencrypted] [--deterministic] [--json]\n  rss: replicated (2, 5), all five servers evaluate. shamir-spdz: any 2 <= threshold <= parties <= 64, any `threshold` servers evaluate (default when the committee is not (2, 5)).\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
+            "qsag cred voprf-keygen --vault-dir <dir> --public-out <path> [--threshold 2 --parties 5] [--backend shamir-spdz] [--max-evaluations <n>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <name> | --passphrase-file <path> | --allow-unencrypted] [--deterministic-test-only] [--json]\n  Shamir-SPDZ supports 2 <= threshold <= parties <= 64, any `threshold` servers evaluate.\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
         );
         return Ok(());
     }
     args.no_positionals()?;
+    crate::anchor::check_test_entropy(&args)?;
     let vault_dir = args.require("vault-dir")?;
     let public_out = args.require("public-out")?;
     let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
@@ -1431,159 +1289,31 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
         )));
     }
     let threshold = args.get_u64("threshold")?.unwrap_or(2);
-    let parties = args.get_u64("parties")?.unwrap_or(TOPRF_SERVERS as u64);
-    let replicated_shape = (threshold, parties) == (2, TOPRF_SERVERS as u64);
-    let spdz = match args.get("backend") {
-        None => !replicated_shape,
-        Some("rss") => false,
-        Some(VOPRF_SPDZ_BACKEND) => true,
-        Some(other) => {
-            return Err(CliError::usage(format!(
-                "unknown TOPRF --backend '{other}' (expected rss or shamir-spdz)"
-            )));
-        }
-    };
-    if !spdz && !replicated_shape {
-        return Err(CliError::usage(
-            "the replicated TOPRF backend supports only --threshold 2 --parties 5; use --backend shamir-spdz for other committees",
-        ));
+    let parties = args.get_u64("parties")?.unwrap_or(5);
+    if args
+        .get("backend")
+        .is_some_and(|name| name != VOPRF_SPDZ_BACKEND)
+    {
+        return Err(CliError::usage("expected --backend shamir-spdz"));
     }
     let passphrase = crate::envelope::passphrase(&args)?;
-    if passphrase.is_none() && !args.flag("allow-unencrypted") && !args.flag("deterministic") {
+    if passphrase.is_none() && !args.flag("allow-unencrypted") {
         return Err(CliError::usage(
             "TOPRF custody requires --passphrase-env or --passphrase-file (or explicit --allow-unencrypted)",
         ));
     }
     ensure_absent(&voprf_meta_path(vault_dir))?;
     ensure_absent(public_out)?;
-    if spdz {
-        return voprf_spdz_keygen(
-            &args,
-            threshold,
-            parties,
-            quota,
-            anchor_cfg.as_ref(),
-            passphrase.as_deref().map(Vec::as_slice),
-            vault_dir,
-            public_out,
-        );
-    }
-    private_dir(vault_dir, true)?;
-    preflight_voprf_party_files(vault_dir, TOPRF_SERVERS)?;
-
-    let deterministic = args.flag("deterministic");
-    let session = toprf_seed(
-        deterministic,
-        b"QSAG.CLI.TOPRF.DET.SESSION.V1",
-        &[b"voprf-keygen"],
-    )?;
-    let mut entropies: [Secret32; TOPRF_SERVERS] = core::array::from_fn(|_| Secret32::new([0; 32]));
-    for (party, entropy) in entropies.iter_mut().enumerate() {
-        entropy.0 = toprf_seed(
-            deterministic,
-            b"QSAG.CLI.TOPRF.DET.SEED.V1",
-            &[&(party as u64).to_le_bytes()],
-        )?;
-    }
-
-    let servers = run_voprf_dkg_threads(session, &entropies)?;
-    let commitment = servers[0].public_key().commitment();
-    for srv in &servers[1..] {
-        if srv.public_key().commitment() != commitment {
-            return Err(CliError::verify(
-                "TOPRF DKG servers disagreed on public commitment",
-            ));
-        }
-    }
-
-    let vault_anchor_mac = Secret32::new(toprf_seed(
-        deterministic,
-        b"QSAG.CLI.TOPRF.DET.ANCHOR_MAC.V1",
-        &[&commitment, &session],
-    )?);
-    let anchor_seal = match &anchor_cfg {
-        Some(cfg) => Some(VaultPartyGenAnchor::create(
-            cfg,
-            vault_dir,
-            "cred_voprf",
-            commitment,
-            &vault_anchor_mac.0,
-            TOPRF_SERVERS,
-        )?),
-        None => None,
-    };
-
-    let enrollment = VoprfEnrollment {
-        share_format: VOPRF_SHARE_FORMAT,
-        scheme: VOPRF_RSS_SCHEME,
-        threshold: 2,
-        parties: TOPRF_SERVERS,
-        session,
-        commitment,
+    voprf_spdz_keygen(
+        &args,
+        threshold,
+        parties,
         quota,
-    };
-    for (party, server) in servers.iter().enumerate() {
-        let counter_mac = Secret32::new(toprf_seed(
-            deterministic,
-            b"QSAG.CLI.TOPRF.DET.COUNTER_MAC.V1",
-            &[&commitment, &(party as u64).to_le_bytes()],
-        )?);
-        let payload = ZeroizingBuf::new(server.to_secret_bytes());
-        write_voprf_bundle(
-            vault_dir,
-            party,
-            &enrollment,
-            &counter_mac,
-            &vault_anchor_mac,
-            &payload.0,
-            passphrase.as_deref().map(Vec::as_slice),
-        )?;
-    }
-
-    let mut meta_fields = vec![
-        ("format", Json::str(VOPRF_META_FORMAT)),
-        ("share_format", Json::str(VOPRF_SHARE_FORMAT)),
-        ("threshold", Json::num(2)),
-        ("parties", Json::num(TOPRF_SERVERS)),
-        ("max_evaluations", Json::num(quota)),
-        ("session_id", Json::hex(&session)),
-        ("commitment", Json::hex(&commitment)),
-    ];
-    if let Some(seal) = anchor_seal {
-        meta_fields.push(("anchor_required", Json::Bool(true)));
-        meta_fields.push(("anchor_ceremony_seal", Json::hex(&seal)));
-    }
-    let meta = Json::object(meta_fields);
-    write_new(
-        &voprf_meta_path(vault_dir),
-        meta.to_pretty().as_bytes(),
-        true,
-    )?;
-
-    let pub_doc = Json::object(vec![
-        ("format", Json::str(VOPRF_PUB_FORMAT)),
-        ("scheme", Json::str(VOPRF_RSS_SCHEME)),
-        ("threshold", Json::num(2)),
-        ("parties", Json::num(TOPRF_SERVERS)),
-        ("commitment", Json::hex(&commitment)),
-    ]);
-    write_new(public_out, pub_doc.to_pretty().as_bytes(), false)?;
-
-    if args.flag("json") {
-        let report = Json::object(vec![
-            ("operation", Json::str("cred-voprf-keygen")),
-            ("vault_dir", Json::str(vault_dir)),
-            ("public_file", Json::str(public_out)),
-            ("commitment", Json::hex(&commitment)),
-        ]);
-        print!("{}", report.to_pretty());
-    } else {
-        println!(
-            "initialized (2, 5) dealerless TOPRF vault {vault_dir} (commitment {})",
-            to_hex(&commitment)
-        );
-    }
-    Ok(())
+        anchor_cfg.as_ref(),
+        passphrase.as_deref().map(Vec::as_slice),
+        vault_dir,
+        public_out,
+    )
 }
 
 fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
@@ -1599,16 +1329,17 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
         "passphrase-file",
     ];
     opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
-    let mut flags = vec!["deterministic", "json", "help"];
+    let mut flags = vec!["deterministic-test-only", "json", "help"];
     flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
     let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag cred voprf-eval --vault-dir <dir> --public <path> --counter <n> --in <path|-> --out <path> [--signers 0,1,2,3,4] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <name> | --passphrase-file <path>] [--deterministic] [--json]\n  Replicated vaults need all five servers. Shamir-SPDZ vaults evaluate with any `threshold` servers: --signers, or by default the first `threshold` share files present.\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
+            "qsag cred voprf-eval --vault-dir <dir> --public <path> --counter <n> --in <path|-> --out <path> [--signers 0,1,2,3,4] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <name> | --passphrase-file <path>] [--deterministic-test-only] [--json]\n  Shamir-SPDZ vaults evaluate with any `threshold` servers: --signers, or by default the first `threshold` share files present.\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
         );
         return Ok(());
     }
     args.no_positionals()?;
+    crate::anchor::check_test_entropy(&args)?;
     let vault_dir = args.require("vault-dir")?;
     let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
     require_anchor_or_waiver(
@@ -1646,218 +1377,9 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
             passphrase.as_deref().map(Vec::as_slice),
         );
     }
-    let session = from_hex_exact::<32>(meta.field_str("session_id")?, "session_id")?;
-    let commitment = from_hex_exact::<32>(meta.field_str("commitment")?, "commitment")?;
-    let quota = meta
-        .get("max_evaluations")
-        .and_then(Json::as_u64)
-        .unwrap_or(voprf::MAX_EVALUATIONS_PER_KEY);
-    let pub_commitment =
-        from_hex_exact::<32>(pub_json.field_str("commitment")?, "public commitment")?;
-    if commitment != pub_commitment {
-        return Err(CliError::verify(
-            "public file commitment does not match TOPRF vault",
-        ));
-    }
-    if meta.field_str("share_format")? != VOPRF_SHARE_FORMAT {
-        return Err(CliError::input("unsupported TOPRF share format"));
-    }
-
-    let pk = ToprfPublicKey::from_commitment(commitment);
-    let selected = parse_party_indices(args.get("signers"), TOPRF_SERVERS, TOPRF_SERVERS)?;
-    if selected != (0..TOPRF_SERVERS).collect::<Vec<_>>() {
-        return Err(CliError::state(
-            "the replicated TOPRF circuit requires all five servers; enroll with --backend shamir-spdz for exact-threshold evaluation",
-        ));
-    }
-    let enrollment = VoprfEnrollment {
-        share_format: VOPRF_SHARE_FORMAT,
-        scheme: VOPRF_RSS_SCHEME,
-        threshold: 2,
-        parties: TOPRF_SERVERS,
-        session,
-        commitment,
-        quota,
-    };
-    let mut locks = Vec::with_capacity(TOPRF_SERVERS);
-    let mut servers = Vec::with_capacity(TOPRF_SERVERS);
-    let mut counter_macs = Vec::with_capacity(TOPRF_SERVERS);
-    let mut agreed_anchor_mac: Option<Secret32> = None;
-    for party in selected {
-        let opened = load_voprf_bundle(
-            vault_dir,
-            party,
-            &enrollment,
-            passphrase.as_deref().map(Vec::as_slice),
-        )?;
-        if let Some(prev) = &agreed_anchor_mac {
-            if !ct_eq_bytes(&prev.0, &opened.vault_anchor_mac.0) {
-                return Err(CliError::state("TOPRF custodian anchor MAC mismatch"));
-            }
-        } else {
-            agreed_anchor_mac = Some(Secret32::new(opened.vault_anchor_mac.0));
-        }
-        servers.push(
-            voprf::Server::from_secret_bytes(&opened.server_bytes.0, &pk, party)
-                .map_err(|e| CliError::input(format!("invalid TOPRF share: {e}")))?,
-        );
-        counter_macs.push(opened.counter_mac);
-        locks.push(opened.lock);
-    }
-
-    let vault_anchor = match &anchor_cfg {
-        Some(cfg) => {
-            let root_mac = agreed_anchor_mac
-                .as_ref()
-                .ok_or_else(|| CliError::state("missing TOPRF anchor MAC"))?;
-            let va = VaultPartyGenAnchor::open(
-                cfg,
-                vault_dir,
-                &meta,
-                "cred_voprf",
-                commitment,
-                &root_mac.0,
-                TOPRF_SERVERS,
-            )?;
-            let hw = va
-                .lock()
-                .map_err(|_| CliError::state("TOPRF anchor mutex poisoned"))?
-                .high_water();
-            if hw.is_some_and(|prev| counter <= prev) {
-                return Err(CliError::state(format!(
-                    "TOPRF monotone counter {counter} refused by external anchor (high-water {:?})",
-                    hw
-                )));
-            }
-            Some(va)
-        }
-        None => None,
-    };
-
-    let mut stores = Vec::with_capacity(TOPRF_SERVERS);
-    for (party, mac_key) in counter_macs.iter().enumerate() {
-        let min_gen = match &vault_anchor {
-            Some(va) => va
-                .lock()
-                .map_err(|_| CliError::state("TOPRF anchor mutex poisoned"))?
-                .party_min_gen(party)?,
-            None => 0,
-        };
-        stores.push(FsToprfCounterStore::open_at_least(
-            &voprf_counter_path(vault_dir, party),
-            commitment,
-            party,
-            mac_key.0,
-            min_gen,
-            vault_anchor.clone(),
-        )?);
-    }
-
-    let deterministic = args.flag("deterministic");
-    let eval_session = if deterministic {
-        cshake256_framed_32(
-            b"QSAG.CLI.TOPRF.DET.EVAL_SESSION.V1",
-            &[&commitment, &counter.to_le_bytes()],
-        )
-    } else {
-        os_random_32()?
-    };
-    let client_entropy = Secret32::new(if deterministic {
-        cshake256_framed_32(
-            b"QSAG.CLI.TOPRF.DET.CLIENT.V1",
-            &[&commitment, &counter.to_le_bytes(), &input.0],
-        )
-    } else {
-        os_random_32()?
-    });
-
-    let (client, requests) = voprf::blind(
-        &pk,
-        &[input.0.as_slice()],
-        eval_session,
-        counter,
-        client_entropy.0,
-    )
-    .map_err(|e| match e {
-        voprf::Error::Counter | voprf::Error::Quota => format_voprf_eval_refusal(counter, e),
-        other => CliError::usage(format!("TOPRF blind failed: {other}")),
-    })?;
-
-    let hub = SharedToprfHub::new();
-    let eval_results: Vec<Result<voprf::Output, voprf::Error>> = std::thread::scope(|s| {
-        let mut handles = Vec::with_capacity(TOPRF_SERVERS);
-        for (((party, mut srv), mut store), req) in
-            servers.into_iter().enumerate().zip(stores).zip(requests)
-        {
-            let hub_ref = Arc::clone(&hub);
-            handles.push(s.spawn(move || {
-                let mut net = LocalToprfEndpoint {
-                    party,
-                    hub: Arc::clone(&hub_ref),
-                };
-                let res = srv.evaluate(req, &mut store, &mut net);
-                if res.is_err() {
-                    hub_ref.abort_all();
-                }
-                res
-            }));
-        }
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or(Err(voprf::Error::Transport)))
-            .collect()
-    });
-    drop(locks);
-
-    let mut outputs_vec = Vec::with_capacity(TOPRF_SERVERS);
-    for res in eval_results {
-        match res {
-            Ok(out) => outputs_vec.push(Some(out)),
-            Err(e) => return Err(format_voprf_eval_refusal(counter, e)),
-        }
-    }
-    let outputs_arr: [Option<voprf::Output>; TOPRF_SERVERS] = outputs_vec
-        .try_into()
-        .map_err(|_| CliError::verify("TOPRF output count mismatch"))?;
-    let evaluation = client
-        .finalize(outputs_arr)
-        .map_err(|e| CliError::verify(format!("TOPRF client finalize failed: {e}")))?;
-    let prf_value = evaluation
-        .value_for(&pk, &input.0)
-        .ok_or_else(|| CliError::verify("TOPRF evaluation missing bound input output"))?;
-
-    let eval_doc = Json::object(vec![
-        ("format", Json::str(VOPRF_EVAL_FORMAT)),
-        ("scheme", Json::str(VOPRF_RSS_SCHEME)),
-        ("commitment", Json::hex(&commitment)),
-        ("counter", Json::num(counter)),
-        ("session_id", Json::hex(&eval_session)),
-        ("prf_output", Json::hex(&prf_value)),
-        (
-            "faulty_servers",
-            Json::Array(
-                evaluation
-                    .faulty_servers
-                    .iter()
-                    .map(|p| Json::num(*p))
-                    .collect(),
-            ),
-        ),
-    ]);
-    write_new(out_path, eval_doc.to_pretty().as_bytes(), true)?;
-
-    if args.flag("json") {
-        print!("{}", eval_doc.to_pretty());
-    } else {
-        println!(
-            "evaluated (2, 5) TOPRF at counter {counter} -> {}",
-            out_path
-        );
-    }
-    Ok(())
+    Err(CliError::input("unsupported TOPRF custody format"))
 }
 
-// ---------------------------------------------------------------------------
 // Dealerless Threshold FIPS 204 ML-DSA (`44`, `65`, `87`)
 // ---------------------------------------------------------------------------
 
@@ -2315,16 +1837,22 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         "passphrase-file",
     ];
     opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
-    let mut flags = vec!["deterministic", "allow-unencrypted", "json", "help"];
+    let mut flags = vec![
+        "deterministic-test-only",
+        "allow-unencrypted",
+        "json",
+        "help",
+    ];
     flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
     let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag cred mldsa-keygen [--threshold <t>] [--parties <n>] [--level <44|65|87>] [--backend rss|shamir] --vault-dir <dir> --public-out <path> [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <PATH>] [--allow-unencrypted] [--deterministic] [--json]\n  rss: replicated key shares, at most 16 custodians. shamir: one Shamir share per custodian, at most 64 custodians and threshold 8 (default above 16). Both sign with >= 2t - 1 custodians.\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
+            "qsag cred mldsa-keygen [--threshold <t>] [--parties <n>] [--level <44|65|87>] [--backend rss|shamir] --vault-dir <dir> --public-out <path> [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <PATH>] [--allow-unencrypted] [--deterministic-test-only] [--json]\n  rss: replicated key shares, at most 16 custodians. shamir: one Shamir share per custodian, at most 64 custodians and threshold 8 (default above 16). Both sign with >= 2t - 1 custodians.\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
         );
         return Ok(());
     }
     args.no_positionals()?;
+    crate::anchor::check_test_entropy(&args)?;
     let vault_dir = args.require("vault-dir")?;
     let public_out = args.require("public-out")?;
     let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
@@ -2335,7 +1863,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         "anchor-dir",
     )?;
     let passphrase = crate::envelope::passphrase(&args)?;
-    if passphrase.is_none() && !args.flag("deterministic") && !args.flag("allow-unencrypted") {
+    if passphrase.is_none() && !args.flag("allow-unencrypted") {
         return Err(CliError::usage(
             "custodian enrollment requires --passphrase-env/--passphrase-file (or explicit --allow-unencrypted)",
         ));
@@ -2351,7 +1879,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     ensure_absent(&mldsa_meta_path(vault_dir))?;
     ensure_absent(public_out)?;
 
-    let deterministic = args.flag("deterministic");
+    let deterministic = args.flag("deterministic-test-only");
     let session_id = if deterministic {
         mldsa_deterministic_dkg_session(level_name, threshold, parties)
     } else {
@@ -2474,6 +2002,10 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         let enrollment_nonce = Secret32::new(os_random_32()?);
         let bundle = Json::object(vec![
             ("format", Json::str(share_format)),
+            (
+                "custody_anchor",
+                anchor_seal.map_or(Json::Null, |s| Json::hex(&s)),
+            ),
             ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
             ("scheme", Json::str(level_name)),
             ("party", Json::num(idx)),
@@ -2495,6 +2027,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     }
 
     let mut meta_fields = vec![
+        ("custody_model", Json::str(crate::cli::SINGLE_HOST_CUSTODY)),
         ("format", Json::str(MLDSA_META_FORMAT)),
         ("share_format", Json::str(share_format)),
         ("scheme", Json::str(level_name)),
@@ -2535,7 +2068,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         print!("{}", pub_doc.to_pretty());
     } else {
         println!(
-            "generated dealerless ({threshold}, {parties}) {level_name} vault in {vault_dir} (issuer digest {})",
+            "generated single-host ({threshold}, {parties}) {level_name} vault in {vault_dir} (issuer digest {})",
             to_hex(&issuer_digest)
         );
     }
@@ -2588,16 +2121,17 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         "passphrase-file",
     ];
     opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
-    let mut flags = vec!["deterministic", "json", "help"];
+    let mut flags = vec!["deterministic-test-only", "json", "help"];
     flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
     let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag cred mldsa-sign --vault-dir <dir> [--signers <i,j,..>] --epoch <n> --in <path|-> [--context-hex <hex>] --out <path> [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <PATH>] [--deterministic] [--json]\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
+            "qsag cred mldsa-sign --vault-dir <dir> [--signers <i,j,..>] --epoch <n> --in <path|-> [--context-hex <hex>] --out <path> [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <PATH>] [--deterministic-test-only] [--json]\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
         );
         return Ok(());
     }
     args.no_positionals()?;
+    crate::anchor::check_test_entropy(&args)?;
     let vault_dir = args.require("vault-dir")?;
     let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
     require_anchor_or_waiver(
@@ -2613,7 +2147,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         return Err(CliError::usage("--epoch u64::MAX is reserved"));
     }
     let out_path = args.require("out")?;
-    ensure_absent(out_path)?;
+    let reserved_output = crate::cli::reserve_output(out_path, false)?;
     private_dir(vault_dir, false)?;
 
     let msg = read_input_arg(&args)?;
@@ -2698,6 +2232,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
             MLDSA_BUNDLE_LIMIT,
             passphrase.as_deref().map(Vec::as_slice),
         )?;
+        crate::anchor::verify_custody_anchor(&bundle, crate::anchor::custody_anchor_seal(&meta)?)?;
         if bundle.field_u64("party")? != idx as u64
             || bundle.field_u64("threshold")? != threshold as u64
             || bundle.field_u64("parties")? != parties as u64
@@ -2811,7 +2346,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         quorum: quorum_ids.clone(),
     };
 
-    let deterministic = args.flag("deterministic");
+    let deterministic = args.flag("deterministic-test-only");
     let mut selected: Vec<(
         usize,
         ThresholdMlDsaSignerShare,
@@ -2929,7 +2464,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         ("context", Json::hex(&ctx)),
         ("signature", Json::hex(&sig_bytes)),
     ]);
-    write_new(out_path, sig_doc.to_pretty().as_bytes(), false)?;
+    crate::cli::finish_output(reserved_output, sig_doc.to_pretty().as_bytes())?;
 
     if args.flag("json") {
         let report = Json::object(vec![
@@ -3076,19 +2611,46 @@ mod local_share_tests {
     }
 
     #[test]
-    fn toprf_abort_refuses_future_phases() {
-        let hub = SharedToprfHub::new();
-        hub.abort_all();
-        let mut endpoint = LocalToprfEndpoint { party: 0, hub };
-        assert!(
-            voprf::Transport::exchange(
-                &mut endpoint,
-                [0; 32],
-                core::array::from_fn(|_| Vec::new())
-            )
-            .is_err()
-        );
-        assert!(voprf::Transport::broadcast(&mut endpoint, [1; 32], Vec::new()).is_err());
+    fn wire_mpc_delivers_private_rows_and_rejects_disagreement_about_the_round() {
+        for mismatch in [false, true] {
+            let channels = crate::quorum_wire::ceremony_channels(2, [0x8b; 32]).unwrap();
+            std::thread::scope(|scope| {
+                let peers = channels
+                    .into_iter()
+                    .enumerate()
+                    .map(|(party, mut endpoint)| {
+                        scope.spawn(move || {
+                            let info = RoundInfo {
+                                index: 9,
+                                phase: u8::from(mismatch && party == 1),
+                                kind: RoundKind::Input,
+                            };
+                            let data = vec![vec![party as u8, 0], vec![party as u8, 1]];
+                            let result = MpcTransport::exchange(
+                                &mut endpoint,
+                                info,
+                                data,
+                                vec![0xa0 + party as u8],
+                            );
+                            if mismatch {
+                                assert!(result.is_err());
+                            } else {
+                                let inbox = result.unwrap();
+                                assert!(inbox.private[party].is_empty());
+                                assert_eq!(
+                                    inbox.private[1 - party],
+                                    [(1 - party) as u8, party as u8]
+                                );
+                                assert_eq!(inbox.broadcast, [vec![0xa0], vec![0xa1]]);
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for peer in peers {
+                    peer.join().unwrap();
+                }
+            });
+        }
     }
 
     #[test]
