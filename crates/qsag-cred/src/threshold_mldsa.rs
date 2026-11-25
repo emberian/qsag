@@ -2081,19 +2081,17 @@ impl PendingResponse {
         self.gate
             .try_release_z_share_into(checks, &mut seal_key.0)
             .map_err(|_| ThresholdMlDsaError::ProtocolInvariantViolated)?;
-        let expected_tag = Self::ciphertext_tag(
-            &self.sealed_response,
-            &checks.req_session_id,
-            checks.req_attempt,
-        );
+        let context = self.gate.session_id();
+        let attempt = self.gate.attempt();
+        let expected_tag = Self::ciphertext_tag(&self.sealed_response, &context, attempt);
         if !ct_eq_bytes(&self.ciphertext_tag, &expected_tag) {
             return Err(ThresholdMlDsaError::ProtocolInvariantViolated);
         }
         apply_response_stream_cipher(
             &mut self.sealed_response,
             &seal_key,
-            &checks.req_session_id,
-            checks.req_attempt,
+            &context,
+            attempt,
             false,
         );
         Ok(core::mem::replace(
@@ -2279,7 +2277,21 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
     if share.next_epoch < burn.next_epoch(&burn_key_id, share.party_id)? {
         return Err(ThresholdMlDsaError::NoncePersistenceFailed);
     }
-    burn.enroll_parties(&burn_key_id, &share.pack.party_ids)?;
+    let mut cursor = if share.next_epoch == 0 {
+        qsag_verified::EpochLatch::new(u64::MAX, burn_key_id)
+    } else {
+        qsag_verified::EpochLatch::from_cursor(
+            share.next_epoch,
+            u64::MAX,
+            burn_key_id,
+            qsag_verified::LastBoundEpoch::Unset,
+        )
+        .map_err(|_| ThresholdMlDsaError::NoncePersistenceFailed)?
+    };
+    burn.enroll_parties(
+        &qsag_verified::EpochLatch::key_epoch_id(&cursor),
+        &share.pack.party_ids,
+    )?;
     let context = cshake256_framed_32(
         b"QSAG.TMLDSA.SIGN.CTX.V1",
         &[
@@ -2347,10 +2359,16 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
     };
 
     for attempt in 0..DEFAULT_MAX_REJECTION_ATTEMPTS {
-        let epoch = share.next_epoch;
-        share.next_epoch = epoch
-            .checked_add(1)
-            .ok_or(ThresholdMlDsaError::NoncePersistenceFailed)?;
+        let (next, epoch) = qsag_verified::epoch_latch_advance(
+            cursor,
+            qsag_verified::EpochRequest {
+                requested_epoch: share.next_epoch,
+                key_epoch_id: burn_key_id,
+            },
+        )
+        .map_err(|_| ThresholdMlDsaError::NoncePersistenceFailed)?;
+        cursor = next;
+        share.next_epoch = cursor.next_epoch();
         if !burn.reserve(share.party_id, epoch, &session.session_id, attempt) {
             return Err(ThresholdMlDsaError::NoncePersistenceFailed);
         }

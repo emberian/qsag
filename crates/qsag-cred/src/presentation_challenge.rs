@@ -62,6 +62,9 @@ pub enum ChallengeError {
 /// Returning `Ok` without durably removing the challenge from what will be accepted
 /// later makes every presentation replayable.
 pub trait PresentationChallenges {
+    /// Cheap read-only admission check. A successful proof must still consume the challenge.
+    fn is_live(&self, verifier_scope: &[u8], challenge: &[u8; 32]) -> bool;
+
     /// Called once per verification, after the proof and every statement check
     /// passed, with the scope the caller verified against and the challenge the
     /// presentation answers. Verification succeeds only if this returns `Ok`.
@@ -82,6 +85,10 @@ pub trait PresentationChallenges {
 pub struct ReplayNotPrevented<'a>(pub &'a [u8; 32]);
 
 impl PresentationChallenges for ReplayNotPrevented<'_> {
+    fn is_live(&self, _: &[u8], challenge: &[u8; 32]) -> bool {
+        self.0 == challenge
+    }
+
     fn consume(&mut self, _: &[u8], challenge: &[u8; 32]) -> Result<(), ChallengeError> {
         if challenge == self.0 {
             Ok(())
@@ -214,12 +221,12 @@ impl VerifierChallengeLedger {
         MemoryAt { ledger: self, now }
     }
 
-    fn consume_at(
-        &mut self,
+    fn live_index(
+        &self,
         verifier_scope: &[u8],
         challenge: &[u8; 32],
         now: u64,
-    ) -> Result<(), ChallengeError> {
+    ) -> Result<usize, ChallengeError> {
         let index = self
             .outstanding
             .binary_search_by(|entry| entry.challenge.cmp(challenge))
@@ -231,6 +238,16 @@ impl VerifierChallengeLedger {
         if now >= entry.expires_at {
             return Err(ChallengeError::Expired);
         }
+        Ok(index)
+    }
+
+    fn consume_at(
+        &mut self,
+        verifier_scope: &[u8],
+        challenge: &[u8; 32],
+        now: u64,
+    ) -> Result<(), ChallengeError> {
+        let index = self.live_index(verifier_scope, challenge, now)?;
         self.outstanding.remove(index);
         Ok(())
     }
@@ -242,6 +259,10 @@ struct MemoryAt<'a> {
 }
 
 impl PresentationChallenges for MemoryAt<'_> {
+    fn is_live(&self, scope: &[u8], challenge: &[u8; 32]) -> bool {
+        self.ledger.live_index(scope, challenge, self.now).is_ok()
+    }
+
     fn consume(
         &mut self,
         verifier_scope: &[u8],
@@ -494,6 +515,15 @@ struct FsAt<'a> {
 
 #[cfg(feature = "std")]
 impl PresentationChallenges for FsAt<'_> {
+    fn is_live(&self, scope: &[u8], challenge: &[u8; 32]) -> bool {
+        !self.ledger.failed
+            && self
+                .ledger
+                .memory
+                .live_index(scope, challenge, self.now)
+                .is_ok()
+    }
+
     fn consume(
         &mut self,
         verifier_scope: &[u8],
@@ -595,12 +625,16 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(b, c);
 
+        assert!(ledger.at(101).is_live(b"scope-a", &a));
+        assert!(!ledger.at(101).is_live(b"scope-b", &a));
+        assert!(!ledger.at(160).is_live(b"scope-a", &a));
         // Another scope is refused and leaves the challenge outstanding.
         assert_eq!(
             ledger.at(101).consume(b"scope-b", &a),
             Err(ChallengeError::WrongScope)
         );
         assert_eq!(ledger.at(101).consume(b"scope-a", &a), Ok(()));
+        assert!(!ledger.at(101).is_live(b"scope-a", &a));
         assert_eq!(
             ledger.at(101).consume(b"scope-a", &a),
             Err(ChallengeError::Unknown)

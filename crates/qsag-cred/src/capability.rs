@@ -1476,3 +1476,1157 @@ fn populate(
 /// Self-delimiting wire wrapper (`b"QSAGCAP1"`) around a `zk-Hem v2` [`ZkHemV2Proof`]
 /// for [`CapabilityRelation`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZkCapabilityBatchProof {
+    pub proof: ZkHemV2Proof,
+}
+
+impl ZkCapabilityBatchProof {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let inner = self.proof.to_bytes();
+        let mut out = Vec::with_capacity(CAPABILITY_WIRE_MAGIC.len() + inner.len());
+        out.extend_from_slice(CAPABILITY_WIRE_MAGIC);
+        out.extend_from_slice(&inner);
+        out
+    }
+
+    /// Strict canonical wire decoder; rejects wrong magic, wrong profile, non-canonical limbs,
+    /// or trailing bytes.
+    pub fn from_bytes(
+        bytes: &[u8],
+        relation: &CapabilityRelation,
+        profile: Profile,
+    ) -> Option<Self> {
+        if bytes.get(..8)? != CAPABILITY_WIRE_MAGIC {
+            return None;
+        }
+        let proof = ZkHemV2Proof::from_bytes(bytes.get(8..)?, &relation.shape)?;
+        (proof.profile == profile).then_some(Self { proof })
+    }
+}
+
+/// Precompiled witness-independent `zk-Hem` relation for `(batch_size, max_hops, issuer_depth, revocation_depth)`.
+#[derive(Clone, Debug)]
+pub struct CapabilityRelation {
+    params: CapabilityParams,
+    shape: Shape,
+}
+
+impl CapabilityRelation {
+    pub fn new(params: CapabilityParams) -> Result<Self, CapabilityZkError> {
+        Self::compile(params, true)
+    }
+
+    fn compile(params: CapabilityParams, scoped: bool) -> Result<Self, CapabilityZkError> {
+        if !params.valid() {
+            return Err(CapabilityZkError::InvalidParams);
+        }
+        let dummy_statement = CapabilityBatchStatement {
+            issuer_root: [F::ZERO; 4],
+            revocation_root: [F::ZERO; 4],
+            revocation_epoch: 0,
+            request: CapabilityRequest {
+                audience: [F::ZERO; 4],
+                resource: [F::ZERO; 4],
+                actions: 0,
+                amount: 0,
+                now: 0,
+            },
+            presentation_tags: if scoped {
+                vec![[F::ZERO; 4]; params.batch_size]
+            } else {
+                Vec::new()
+            },
+        };
+        let slots = vec![CapSlot::placeholder(params); params.batch_size];
+        let mut cs = ConstraintSystem::new();
+        populate(&mut cs, params, &dummy_statement, b"", &slots);
+        let (shape, mut z) = cs.finish_v2();
+        qsag_asm::volatile_fill(&mut z, F::ZERO);
+        Ok(Self { params, shape })
+    }
+
+    #[inline]
+    pub fn params(&self) -> CapabilityParams {
+        self.params
+    }
+
+    #[inline]
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+
+    fn statement_bytes(&self, context: &[u8]) -> Vec<u8> {
+        let mut out = qsag_agg::zk_hem::capability::BATCH_DOMAIN.to_vec();
+        out.extend_from_slice(CAPABILITY_WIRE_MAGIC);
+        // Relation revision. 2: the directory leaf binds `root_tag`, `final_tag` and the
+        // caveat count.
+        out.extend_from_slice(&2u32.to_le_bytes());
+        for n in [
+            self.params.batch_size as u64,
+            self.params.max_hops as u64,
+            self.params.issuer_depth as u64,
+            self.params.revocation_depth as u64,
+            context.len() as u64,
+        ] {
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        out.extend_from_slice(context);
+        out
+    }
+
+    fn validate_and_build_slots(
+        &self,
+        statement: &CapabilityBatchStatement,
+        inputs: &[CapabilityPresentationInput],
+        context: &[u8],
+    ) -> Result<Vec<CapSlot>, CapabilityZkError> {
+        if inputs.len() != self.params.batch_size
+            || 92 + 4 * statement.presentation_tags.len() != self.shape.num_public
+        {
+            return Err(CapabilityZkError::BatchLengthMismatch);
+        }
+        for pair in inputs.windows(2) {
+            if cmp_token_id(pair[0].capability.token_id(), pair[1].capability.token_id())
+                != Ordering::Less
+            {
+                return Err(CapabilityZkError::UnsortedOrDuplicateBatch);
+            }
+        }
+        let ctx = context_digest(context);
+        let mut slots = Vec::with_capacity(self.params.batch_size);
+        for (index, item) in inputs.iter().enumerate() {
+            item.capability.verify_native(&statement.request)?;
+            if let Some(want_pres) = statement.presentation_tags.get(index) {
+                let got_pres = compute_presentation_tag(
+                    &item.capability.final_tag,
+                    &item.capability.token_id,
+                    &ctx,
+                );
+                if got_pres != *want_pres {
+                    return Err(CapabilityZkError::StatementMismatch);
+                }
+            }
+            // Verify issuer directory path natively.
+            if item.issuer_index >= (1usize << self.params.issuer_depth)
+                || item.issuer_siblings.len() != self.params.issuer_depth
+            {
+                return Err(CapabilityZkError::InvalidIssuerOpening);
+            }
+            let mut mint_node = item.capability.mint_leaf();
+            for (level, sib) in item.issuer_siblings.iter().enumerate() {
+                let (l, r) = if ((item.issuer_index >> level) & 1) == 1 {
+                    (sib, &mint_node)
+                } else {
+                    (&mint_node, sib)
+                };
+                mint_node = mint_node_native(l, r, level);
+            }
+            if mint_node != statement.issuer_root {
+                return Err(CapabilityZkError::InvalidIssuerOpening);
+            }
+
+            // Verify SortedRevocationTree non-membership natively.
+            let nm = &item.non_membership;
+            if nm.left_index >= (1usize << self.params.revocation_depth) - 1
+                || nm.path_lo.len() != self.params.revocation_depth
+                || nm.path_hi.len() != self.params.revocation_depth
+                || cmp_token_id(&nm.revoked_lo, item.capability.token_id()) != Ordering::Less
+                || cmp_token_id(item.capability.token_id(), &nm.revoked_hi) != Ordering::Less
+            {
+                return Err(CapabilityZkError::InvalidRevocationWitness);
+            }
+            for (idx, key, path) in [
+                (nm.left_index, &nm.revoked_lo, &nm.path_lo),
+                (nm.left_index + 1, &nm.revoked_hi, &nm.path_hi),
+            ] {
+                let mut node = rev_leaf_native(key);
+                for (level, sib) in path.iter().enumerate() {
+                    let (l, r) = if ((idx >> level) & 1) == 1 {
+                        (sib, &node)
+                    } else {
+                        (&node, sib)
+                    };
+                    node = rev_node_native(l, r, level, statement.revocation_epoch);
+                }
+                if node != statement.revocation_root {
+                    return Err(CapabilityZkError::InvalidRevocationWitness);
+                }
+            }
+
+            slots.push(CapSlot::from_input(self.params, item)?);
+        }
+        Ok(slots)
+    }
+
+    /// Prove a batch of capabilities (`inputs` sorted in strictly ascending order of `token_id`).
+    pub fn prove(
+        &self,
+        statement: &CapabilityBatchStatement,
+        inputs: &[CapabilityPresentationInput],
+        context: &[u8],
+        profile: Profile,
+        seed: &[u8; 32],
+    ) -> Result<ZkCapabilityBatchProof, CapabilityZkError> {
+        let slots = self.validate_and_build_slots(statement, inputs, context)?;
+        let mut cs = ConstraintSystem::witness_only();
+        populate(&mut cs, self.params, statement, context, &slots);
+        let assignment = cs
+            .finish_assignment(&self.shape)
+            .ok_or(CapabilityZkError::InvalidParams)?;
+        let proof = v2::prove(
+            &self.shape,
+            assignment,
+            &self.statement_bytes(context),
+            profile,
+            seed,
+        )
+        .map_err(CapabilityZkError::Proof)?;
+        Ok(ZkCapabilityBatchProof { proof })
+    }
+
+    /// Verify a batched capability + non-revocation proof against `statement` and `context`.
+    pub fn verify(
+        &self,
+        statement: &CapabilityBatchStatement,
+        context: &[u8],
+        profile: Profile,
+        proof: &ZkCapabilityBatchProof,
+    ) -> bool {
+        if statement.presentation_tags.len() != self.params.batch_size {
+            return false;
+        }
+        v2::verify(
+            &self.shape,
+            &public_inputs_vec(statement, context),
+            &self.statement_bytes(context),
+            profile,
+            &proof.proof,
+        )
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    fn id(w0: u64, w1: u64, w2: u64, w3: u64) -> TokenId {
+        [f(w0), f(w1), f(w2), f(w3)]
+    }
+
+    struct BatchFixture {
+        params: CapabilityParams,
+        relation: CapabilityRelation,
+        rev_tree: SortedRevocationTree,
+        statement: CapabilityBatchStatement,
+        inputs: Vec<CapabilityPresentationInput>,
+    }
+
+    fn build_fixture(
+        batch_size: usize,
+        max_hops: usize,
+        iss_d: usize,
+        rev_d: usize,
+    ) -> BatchFixture {
+        let params = CapabilityParams {
+            batch_size,
+            max_hops,
+            issuer_depth: iss_d,
+            revocation_depth: rev_d,
+        };
+        let relation = CapabilityRelation::new(params).unwrap();
+        let issuer_key = [
+            f(0x0A11_CE01),
+            f(0x0A11_CE02),
+            f(0x0A11_CE03),
+            f(0x0A11_CE04),
+        ];
+        let audience = [f(10), f(20), f(30), f(40)];
+        let resource = [f(901), f(902), f(903), f(904)];
+        let request = CapabilityRequest {
+            audience,
+            resource,
+            actions: 0b0011,
+            amount: 500,
+            now: 1_700_000_000,
+        };
+
+        // Revoked tokens bracket every honest token in the sorted tree.
+        let revoked = vec![
+            id(0, 0, 0, 100),
+            id(0, 0, 0, 250),
+            id(0, 0, 0, 500),
+            id(0, 0, 1, 10),
+        ];
+        let rev_tree = SortedRevocationTree::new(rev_d, 42, &revoked).unwrap();
+
+        let mut caps = Vec::with_capacity(batch_size);
+        let mut mint_leaves = Vec::with_capacity(batch_size + 2);
+        mint_leaves.push([f(77); 4]); // padding distractor leaf at index 0
+        for b in 0..batch_size {
+            let tid = id(0, 0, 0, 110 + (b as u64) * 7);
+            assert!(!rev_tree.is_revoked(&tid));
+            let mut cap = BearerCapability::issue(&issuer_key, tid, audience).unwrap();
+            cap.attenuate(CapCaveat::Resource(resource)).unwrap();
+            cap.attenuate(CapCaveat::NotBefore(1_600_000_000)).unwrap();
+            if max_hops >= 3 {
+                cap.attenuate(CapCaveat::ExpiresAt(1_800_000_000)).unwrap();
+            }
+            if max_hops >= 4 {
+                cap.attenuate(CapCaveat::Actions(0b0111)).unwrap();
+            }
+            if max_hops >= 5 {
+                cap.attenuate(CapCaveat::MaxAmount(1_000 + b as u128))
+                    .unwrap();
+            }
+            mint_leaves.push(cap.mint_leaf());
+            caps.push((1 + b, cap));
+        }
+
+        let directory = CapabilityIssuerDirectory::new(iss_d, &mint_leaves).unwrap();
+        let mut inputs: Vec<CapabilityPresentationInput> = caps
+            .into_iter()
+            .map(|(iss_idx, cap)| {
+                let nm = rev_tree.prove_non_membership(cap.token_id()).unwrap();
+                assert!(rev_tree.verify_non_membership_native(cap.token_id(), &nm));
+                CapabilityPresentationInput {
+                    issuer_index: iss_idx,
+                    issuer_siblings: directory.opening(iss_idx).unwrap(),
+                    capability: cap,
+                    non_membership: nm,
+                }
+            })
+            .collect();
+
+        let statement = CapabilityBatchStatement::prepare_sorted(
+            directory.root(),
+            rev_tree.root(),
+            rev_tree.epoch(),
+            request,
+            &mut inputs,
+            b"challenge-ctx-v1",
+        )
+        .unwrap();
+
+        BatchFixture {
+            params,
+            relation,
+            rev_tree,
+            statement,
+            inputs,
+        }
+    }
+
+    fn synthesize_raw(
+        params: CapabilityParams,
+        statement: &CapabilityBatchStatement,
+        context: &[u8],
+        slots: &[CapSlot],
+    ) -> (Shape, Vec<F>) {
+        let mut cs = ConstraintSystem::new();
+        populate(&mut cs, params, statement, context, slots);
+        cs.finish_v2()
+    }
+
+    fn set_bit(z: &mut [F], bit: &Lc, value: F) {
+        assert_eq!(bit.terms().len(), 1);
+        let (index, coeff) = bit.terms()[0];
+        assert_eq!(coeff, F::ONE);
+        z[index as usize] = value;
+    }
+
+    #[test]
+    fn canonical_decomposition_rejects_mod_p_aliases_and_non_boolean_bits() {
+        for raw in [GOLDILOCKS_PRIME, GOLDILOCKS_PRIME + 1, u64::MAX] {
+            let mut cs = ConstraintSystem::new();
+            let value: Lc = cs.alloc(f(raw)).into();
+            let (bits, _, _) = canonical_bits_and_halves32(&mut cs, &value);
+            let after_products = cs.alloc(F::ZERO).index();
+            let (shape, mut z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            for (i, bit) in bits.iter().enumerate() {
+                set_bit(&mut z, bit, f((raw >> i) & 1));
+            }
+            // Recompute every high-ones multiplication as a malicious prover would;
+            // these aliases must fail the canonicality row, not stale intermediates.
+            z[after_products - 31..after_products].fill(F::ONE);
+            assert!(!shape.is_satisfied(&z), "alias {raw}");
+        }
+        let mut cs = ConstraintSystem::new();
+        let (bits, _, _) = canonical_bits_and_halves32(&mut cs, &Lc::constant(f(2)));
+        let (shape, mut z) = cs.finish();
+        set_bit(&mut z, &bits[0], f(2));
+        set_bit(&mut z, &bits[1], F::ZERO); // packing still equals 2
+        assert!(!shape.is_satisfied(&z));
+    }
+
+    #[test]
+    fn comparator_rejects_bit_flips_multiple_winners_and_non_boolean_gate() {
+        let mut cs = ConstraintSystem::new();
+        let gate: Lc = cs.alloc(F::ONE).into();
+        let a = [Lc::zero(), Lc::zero()];
+        let b = [Lc::zero(), Lc::constant(f(2))];
+        enforce_gated_cmp_limbs32(&mut cs, &gate, &a, &b, false);
+        let (shape, z) = cs.finish();
+        assert!(shape.is_satisfied(&z));
+        for index in 1..shape.mask_var_base {
+            let mut forged = z.clone();
+            forged[index] += F::ONE;
+            assert!(
+                !shape.is_satisfied(&forged),
+                "unbound comparator cell {index}"
+            );
+        }
+        let mut forged = z;
+        forged[1] = f(2); // gate
+        forged[2] = F::ONE; // win[0]
+        forged[3] = F::ONE; // win[1]
+        forged[4] = F::ZERO - F::ONE; // win[0] * (b[0] - a[0] - 1)
+        forged[5] = F::ONE; // win[1] * (b[1] - a[1] - 1)
+        forged[6..38].fill(F::ZERO); // sum of differences is zero
+        assert!(!shape.is_satisfied(&forged)); // only gate Booleanity blocks this
+
+        for allow_eq in [false, true] {
+            for gate in [0, 1] {
+                for (a, b) in [(0, 0), (0, u32::MAX), (u32::MAX, 0), (7, 8)] {
+                    let mut cs = ConstraintSystem::new();
+                    enforce_gated_cmp_limbs32(
+                        &mut cs,
+                        &Lc::constant(f(gate)),
+                        &[Lc::constant(f(a as u64))],
+                        &[Lc::constant(f(b as u64))],
+                        allow_eq,
+                    );
+                    let (shape, z) = cs.finish();
+                    assert_eq!(
+                        shape.is_satisfied(&z),
+                        gate == 0 || a < b || (allow_eq && a == b)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_indices_reject_nonadjacency_wraparound_and_native_overflow() {
+        for left in [0, 2, 6, 7] {
+            let mut cs = ConstraintSystem::new();
+            let (_, hi) = adjacent_index_bits(&mut cs, left, 3);
+            let (shape, z) = cs.finish();
+            assert_eq!(shape.is_satisfied(&z), left < 7);
+            for right in 0..8 {
+                let mut forged = z.clone();
+                for (i, bit) in hi.iter().enumerate() {
+                    set_bit(&mut forged, bit, f((right >> i) & 1));
+                }
+                assert_eq!(shape.is_satisfied(&forged), right == (left + 1) as u64);
+            }
+        }
+        let fx = build_fixture(1, 2, 2, 3);
+        for index in [usize::MAX, (1 << 3) - 1] {
+            let mut inputs = fx.inputs.clone();
+            inputs[0].non_membership.left_index = index;
+            assert!(!fx.rev_tree.verify_non_membership_native(
+                inputs[0].capability.token_id(),
+                &inputs[0].non_membership
+            ));
+            assert!(CapSlot::from_input(fx.params, &inputs[0]).is_err());
+            assert!(
+                fx.relation
+                    .validate_and_build_slots(&fx.statement, &inputs, b"challenge-ctx-v1")
+                    .is_err()
+            );
+        }
+        for depth in [0, 21, usize::MAX] {
+            assert!(SortedRevocationTree::new(depth, 0, &[]).is_err());
+        }
+        for sentinel in [SENTINEL_MIN_ID, SENTINEL_MAX_ID] {
+            assert!(SortedRevocationTree::new(2, 0, &[sentinel]).is_err());
+        }
+        assert!(SortedRevocationTree::new(1, 0, &[id(0, 0, 0, 1)]).is_err());
+        let empty = SortedRevocationTree::new(1, u64::MAX, &[]).unwrap();
+        assert!(!empty.is_revoked(&id(0, 0, 0, 1)));
+        for size in [0, MAX_CAP_BATCH + 1] {
+            assert!(
+                CapabilityRelation::new(CapabilityParams {
+                    batch_size: size,
+                    ..fx.params
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn stripping_and_retagging_caveats_cannot_open_enrolled_policy() {
+        let fx = build_fixture(1, 5, 2, 3);
+        for keep in 0..5 {
+            let mut forged = fx.inputs.clone();
+            let cap = &mut forged[0].capability;
+            cap.caveats.truncate(keep);
+            cap.final_tag = cap.root_tag;
+            for (hop, caveat) in cap.caveats.iter().enumerate() {
+                cap.final_tag = chain_step_native(&cap.final_tag, caveat, hop);
+            }
+            // The attacker can choose a matching presentation: this passed the old relation.
+            cap.verify_native(&fx.statement.request).unwrap();
+            let statement = CapabilityBatchStatement::prepare_sorted(
+                fx.statement.issuer_root,
+                fx.statement.revocation_root,
+                fx.statement.revocation_epoch,
+                fx.statement.request,
+                &mut forged,
+                b"challenge-ctx-v1",
+            )
+            .unwrap();
+            assert_eq!(
+                fx.relation
+                    .validate_and_build_slots(&statement, &forged, b"challenge-ctx-v1")
+                    .err(),
+                Some(CapabilityZkError::InvalidIssuerOpening)
+            );
+            let slots = [CapSlot::from_input(fx.params, &forged[0]).unwrap()];
+            let (shape, z) = synthesize_raw(fx.params, &statement, b"challenge-ctx-v1", &slots);
+            assert!(!shape.is_satisfied(&z));
+        }
+    }
+
+    /// Proves `cap` at directory index `index` and reports whether the relation is satisfied.
+    fn presents(
+        cap: &BearerCapability,
+        index: usize,
+        directory: &CapabilityIssuerDirectory,
+        request: CapabilityRequest,
+    ) -> bool {
+        let params = CapabilityParams {
+            batch_size: 1,
+            max_hops: 2,
+            issuer_depth: directory.depth(),
+            revocation_depth: 1,
+        };
+        let tree = SortedRevocationTree::new(1, 0, &[]).unwrap();
+        let mut inputs = [CapabilityPresentationInput {
+            capability: cap.clone(),
+            issuer_index: index,
+            issuer_siblings: directory.opening(index).unwrap(),
+            non_membership: tree.prove_non_membership(cap.token_id()).unwrap(),
+        }];
+        let statement = CapabilityBatchStatement::prepare_sorted(
+            directory.root(),
+            tree.root(),
+            0,
+            request,
+            &mut inputs,
+            b"lineage",
+        )
+        .unwrap();
+        let slots = [CapSlot::from_input(params, &inputs[0]).unwrap()];
+        let (shape, z) = synthesize_raw(params, &statement, b"lineage", &slots);
+        shape.is_satisfied(&z)
+    }
+
+    #[test]
+    fn delegate_cannot_open_enrolled_ancestors_or_unenrolled_attenuations() {
+        let issuer_key = [f(9); 4];
+        let token = id(0, 0, 0, 1);
+        let mut request = CapabilityRequest {
+            audience: [f(3); 4],
+            resource: [f(4); 4],
+            actions: 0b10,
+            amount: 0,
+            now: 0,
+        };
+        let c1 = CapCaveat::Actions(0b11);
+        let c2 = CapCaveat::Actions(0b01);
+
+        let alice = BearerCapability::issue(&issuer_key, token, request.audience).unwrap();
+        let mut once = alice.clone();
+        once.attenuate(c1).unwrap();
+        let mut bob = once.clone();
+        bob.attenuate(c2).unwrap();
+
+        // The authority rebuilds every leaf from its own key and the caveat list.
+        let mut rebuilt = BearerCapability::issue(&issuer_key, token, request.audience).unwrap();
+        rebuilt.attenuate(c1).unwrap();
+        rebuilt.attenuate(c2).unwrap();
+        assert_eq!(rebuilt.mint_leaf(), bob.mint_leaf());
+
+        // All three generations stay enrolled, and each presents its own leaf.
+        let leaves = [alice.mint_leaf(), once.mint_leaf(), bob.mint_leaf()];
+        let directory = CapabilityIssuerDirectory::new(2, &leaves).unwrap();
+        // `c2` forbids action bit 1: Alice may use it, Bob may not.
+        assert!(presents(&alice, 0, &directory, request));
+        assert!(presents(&once, 1, &directory, request));
+        assert!(!presents(&bob, 2, &directory, request));
+        request.actions = 0b01;
+        assert!(presents(&bob, 2, &directory, request));
+
+        // No caveat list Bob can chain from his `root_tag` opens any enrolled leaf, even
+        // for a request every caveat allows.
+        for caveats in [vec![], vec![c1], vec![c2], vec![c2, c1]] {
+            let mut forged = bob.clone();
+            forged.caveats = caveats;
+            forged.final_tag = forged.root_tag;
+            for (hop, caveat) in forged.caveats.iter().enumerate() {
+                forged.final_tag = chain_step_native(&forged.final_tag, caveat, hop);
+            }
+            forged.verify_native(&request).unwrap();
+            for index in 0..3 {
+                assert!(!presents(&forged, index, &directory, request));
+            }
+        }
+
+        // A further attenuation is unusable until the authority enrolls its leaf.
+        let mut carol = once.clone();
+        carol.attenuate(CapCaveat::NotBefore(0)).unwrap();
+        for index in 0..3 {
+            assert!(!presents(&carol, index, &directory, request));
+        }
+        let leaves = [leaves[0], leaves[1], leaves[2], carol.mint_leaf()];
+        let directory = CapabilityIssuerDirectory::new(2, &leaves).unwrap();
+        assert!(presents(&carol, 3, &directory, request));
+    }
+
+    fn check_caveat_boundary(caveat: CapCaveat, request: CapabilityRequest) {
+        let params = CapabilityParams {
+            batch_size: 1,
+            max_hops: 2,
+            issuer_depth: 1,
+            revocation_depth: 1,
+        };
+        let mut cap =
+            BearerCapability::issue(&[f(9); 4], id(0, 0, 0, 1), request.audience).unwrap();
+        cap.attenuate(caveat).unwrap();
+        let directory = CapabilityIssuerDirectory::new(1, &[cap.mint_leaf()]).unwrap();
+        let tree = SortedRevocationTree::new(1, 0, &[]).unwrap();
+        let nm = tree.prove_non_membership(cap.token_id()).unwrap();
+        let mut inputs = [CapabilityPresentationInput {
+            capability: cap,
+            issuer_index: 0,
+            issuer_siblings: directory.opening(0).unwrap(),
+            non_membership: nm,
+        }];
+        let statement = CapabilityBatchStatement::prepare_sorted(
+            directory.root(),
+            tree.root(),
+            0,
+            request,
+            &mut inputs,
+            b"boundary",
+        )
+        .unwrap();
+        let mut slots = [CapSlot::from_input(params, &inputs[0]).unwrap()];
+        // An inactive hop may contain any canonical payload, including values > 2^32.
+        slots[0].hops[1].payload = SENTINEL_MAX_ID;
+        let (shape, z) = synthesize_raw(params, &statement, b"boundary", &slots);
+        assert_eq!(
+            shape.is_satisfied(&z),
+            caveat.allows(&request),
+            "{caveat:?}, {request:?}"
+        );
+    }
+
+    #[test]
+    fn caveat_integer_boundaries_actions_and_inactive_hops() {
+        let mut req = CapabilityRequest {
+            audience: [f(3); 4],
+            resource: [f(4); 4],
+            actions: 0,
+            amount: 0,
+            now: 0,
+        };
+        for max in [
+            0,
+            (1u128 << 32) - 1,
+            1u128 << 32,
+            1u128 << 64,
+            1u128 << 96,
+            u128::MAX,
+        ] {
+            for amount in [max.saturating_sub(1), max, max.saturating_add(1), u128::MAX] {
+                req.amount = amount;
+                check_caveat_boundary(CapCaveat::MaxAmount(max), req);
+            }
+        }
+        for bound in [0, 1u64 << 32, GOLDILOCKS_PRIME, u64::MAX] {
+            for now in [bound.saturating_sub(1), bound, bound.saturating_add(1)] {
+                req.now = now;
+                check_caveat_boundary(CapCaveat::ExpiresAt(bound), req);
+                check_caveat_boundary(CapCaveat::NotBefore(bound), req);
+            }
+        }
+        for allowed in [0, 1, 1u64 << 32, 1u64 << 63, u64::MAX] {
+            for actions in [allowed, !allowed, u64::MAX] {
+                req.actions = actions;
+                check_caveat_boundary(CapCaveat::Actions(allowed), req);
+            }
+        }
+        check_caveat_boundary(CapCaveat::Resource(req.resource), req);
+        check_caveat_boundary(CapCaveat::Resource([F::ZERO; 4]), req);
+    }
+
+    #[test]
+    fn zero_through_eight_hops_and_overlong_attenuation() {
+        let params = CapabilityParams {
+            batch_size: 1,
+            max_hops: MAX_CAP_HOPS,
+            issuer_depth: 1,
+            revocation_depth: 1,
+        };
+        let relation = CapabilityRelation::new(params).unwrap();
+        let request = CapabilityRequest {
+            audience: [f(3); 4],
+            resource: [f(4); 4],
+            actions: 1,
+            amount: u128::MAX,
+            now: u64::MAX,
+        };
+        let tree = SortedRevocationTree::new(1, 0, &[]).unwrap();
+        let mut cap =
+            BearerCapability::issue(&[f(9); 4], id(0, 0, 0, 1), request.audience).unwrap();
+        for hops in 0..=MAX_CAP_HOPS {
+            let directory = CapabilityIssuerDirectory::new(1, &[cap.mint_leaf()]).unwrap();
+            let mut inputs = [CapabilityPresentationInput {
+                capability: cap.clone(),
+                issuer_index: 0,
+                issuer_siblings: directory.opening(0).unwrap(),
+                non_membership: tree.prove_non_membership(cap.token_id()).unwrap(),
+            }];
+            let statement = CapabilityBatchStatement::prepare_sorted(
+                directory.root(),
+                tree.root(),
+                0,
+                request,
+                &mut inputs,
+                b"hops",
+            )
+            .unwrap();
+            let slots = relation
+                .validate_and_build_slots(&statement, &inputs, b"hops")
+                .unwrap();
+            let (shape, z) = synthesize_raw(params, &statement, b"hops", &slots);
+            assert_eq!(&shape, relation.shape());
+            assert!(shape.is_satisfied(&z));
+            if hops < MAX_CAP_HOPS {
+                cap.attenuate(CapCaveat::Actions(1)).unwrap();
+            }
+        }
+        let saved = cap.clone();
+        assert_eq!(
+            cap.attenuate(CapCaveat::Actions(0)),
+            Err(CapabilityZkError::TooManyCaveats)
+        );
+        assert_eq!(cap, saved);
+        // Equality covers every secret word, the audience and the caveats.
+        for word in 0..12 {
+            let mut other = saved.clone();
+            let slot = match word / 4 {
+                0 => &mut other.token_id,
+                1 => &mut other.root_tag,
+                _ => &mut other.final_tag,
+            };
+            slot[word % 4] += F::ONE;
+            assert_ne!(cap, other);
+        }
+        let mut other = saved.clone();
+        other.audience[3] += F::ONE;
+        assert_ne!(cap, other);
+        let mut other = saved.clone();
+        other.caveats.pop();
+        assert_ne!(cap, other);
+    }
+
+    #[test]
+    fn raw_numeric_payload_overflow_is_rejected_even_with_matching_enrollment() {
+        let params = CapabilityParams {
+            batch_size: 1,
+            max_hops: 1,
+            issuer_depth: 1,
+            revocation_depth: 1,
+        };
+        let request = CapabilityRequest {
+            audience: [f(3); 4],
+            resource: [f(4); 4],
+            actions: 0,
+            amount: 0,
+            now: 0,
+        };
+        let tree = SortedRevocationTree::new(1, 0, &[]).unwrap();
+        // Commit to a deliberately malformed numeric payload, so enrollment and tag
+        // constraints succeed; only the numeric range constraints can reject it.
+        for kind in [1, 2, 4, 5] {
+            let mut slot = CapSlot::placeholder(params);
+            slot.root_tag = [f(9); 4];
+            slot.hops[0] = HopSlot {
+                active: true,
+                kind,
+                payload: [f(1u64 << 32), F::ZERO, F::ZERO, F::ZERO],
+            };
+            if kind == 1 {
+                slot.hops[0].payload[1] = F::ONE;
+            }
+            slot.final_tag = caveat_step_native(
+                CAP_STEP_TAG_DOM,
+                &slot.root_tag,
+                kind,
+                &slot.hops[0].payload,
+                0,
+            );
+            let leaf = mint_leaf_native(
+                &slot.token_id,
+                &request.audience,
+                &slot.root_tag,
+                &slot.final_tag,
+                1,
+            );
+            let directory = CapabilityIssuerDirectory::new(1, &[leaf]).unwrap();
+            slot.issuer_siblings = directory.opening(0).unwrap();
+            let nm = tree.prove_non_membership(&slot.token_id).unwrap();
+            slot.path_lo = nm.path_lo.clone();
+            slot.path_hi = nm.path_hi.clone();
+            let statement = CapabilityBatchStatement {
+                issuer_root: directory.root(),
+                revocation_root: tree.root(),
+                revocation_epoch: 0,
+                request,
+                presentation_tags: vec![compute_presentation_tag(
+                    &slot.final_tag,
+                    &slot.token_id,
+                    &context_digest(b"range"),
+                )],
+            };
+            let (shape, z) = synthesize_raw(params, &statement, b"range", &[slot]);
+            assert!(!shape.is_satisfied(&z), "kind {kind}");
+        }
+    }
+
+    #[test]
+    fn sorted_revocation_tree_proves_absent_and_rejects_revoked_and_sentinels() {
+        let r0 = id(0, 0, 0, 50);
+        let r1 = id(0, 0, 5, 0);
+        let r2 = id(1, 0, 0, 0);
+        let tree = SortedRevocationTree::new(4, 9, &[r2, r0, r1, r0]).unwrap();
+        assert_eq!(tree.revoked_count(), 3);
+
+        for revoked in [SENTINEL_MIN_ID, r0, r1, r2, SENTINEL_MAX_ID] {
+            assert!(tree.is_revoked(&revoked));
+            assert!(tree.prove_non_membership(&revoked).is_err());
+        }
+
+        for absent in [
+            id(0, 0, 0, 1),
+            id(0, 0, 0, 49),
+            id(0, 0, 0, 51),
+            id(0, 0, 4, u64::MAX - (1u64 << 32)),
+            id(2, 0, 0, 0),
+        ] {
+            assert!(!tree.is_revoked(&absent));
+            let w = tree.prove_non_membership(&absent).unwrap();
+            assert!(tree.verify_non_membership_native(&absent, &w));
+            assert!(!tree.verify_non_membership_native(&w.revoked_lo, &w));
+            assert!(!tree.verify_non_membership_native(&w.revoked_hi, &w));
+        }
+    }
+
+    #[test]
+    fn circuit_rejects_revoked_token_equal_to_lo_or_hi_and_tampered_caveat_chains() {
+        let fx = build_fixture(2, 5, 4, 5);
+        let honest_slots: Vec<CapSlot> = fx
+            .inputs
+            .iter()
+            .map(|inp| CapSlot::from_input(fx.params, inp).unwrap())
+            .collect();
+        let (shape, z) =
+            synthesize_raw(fx.params, &fx.statement, b"challenge-ctx-v1", &honest_slots);
+        assert_eq!(&shape, fx.relation.shape());
+        assert!(shape.is_satisfied(&z));
+
+        // 1. Revoked boundary attack (`token_id == revoked_lo` or `token_id == revoked_hi`):
+        //    even if a cheating prover witnesses an issuer-enrolled capability whose `token_id`
+        //    equals `revoked_lo`, the strict `<` gadget in `Shape` must reject!
+        let mut eq_lo = honest_slots.clone();
+        eq_lo[0].revoked_lo = eq_lo[0].token_id;
+        let (s_bad, z_bad) = synthesize_raw(fx.params, &fx.statement, b"challenge-ctx-v1", &eq_lo);
+        assert_eq!(&s_bad, fx.relation.shape());
+        assert!(!s_bad.is_satisfied(&z_bad));
+
+        let mut swapped = honest_slots.clone();
+        let lo = swapped[0].revoked_lo;
+        swapped[0].revoked_lo = swapped[0].revoked_hi;
+        swapped[0].revoked_hi = lo;
+        let (_, bad) = synthesize_raw(fx.params, &fx.statement, b"challenge-ctx-v1", &swapped);
+        assert!(!shape.is_satisfied(&bad));
+        let mut wrong_path = honest_slots.clone();
+        wrong_path[0].path_hi[0][0] += F::ONE;
+        let (_, bad) = synthesize_raw(fx.params, &fx.statement, b"challenge-ctx-v1", &wrong_path);
+        assert!(!shape.is_satisfied(&bad));
+
+        let mut eq_hi = honest_slots.clone();
+        eq_hi[0].revoked_hi = eq_hi[0].token_id;
+        let (_, z_bad) = synthesize_raw(fx.params, &fx.statement, b"challenge-ctx-v1", &eq_hi);
+        assert!(!shape.is_satisfied(&z_bad));
+
+        //Also check high-level API refusal when `token_id` is in `SortedRevocationTree`:
+        assert!(fx.rev_tree.is_revoked(&id(0, 0, 0, 100)));
+        assert_eq!(
+            fx.rev_tree
+                .prove_non_membership(&id(0, 0, 0, 100))
+                .unwrap_err(),
+            CapabilityZkError::TokenRevoked
+        );
+        let mut tampered_nm = fx.inputs.clone();
+        tampered_nm[0].non_membership.revoked_lo = *tampered_nm[0].capability.token_id();
+        assert_eq!(
+            fx.relation
+                .prove(
+                    &fx.statement,
+                    &tampered_nm,
+                    b"challenge-ctx-v1",
+                    Profile::TurboShakeJohnson400,
+                    &[7; 32],
+                )
+                .unwrap_err(),
+            CapabilityZkError::InvalidRevocationWitness
+        );
+
+        // 2. Tampered caveat chain: dropping or altering an intermediate caveat breaks `cur_tag == final_tag`.
+        let mut dropped_caveat = honest_slots.clone();
+        dropped_caveat[0].hops[2].active = false;
+        dropped_caveat[0].hops[2].kind = 0;
+        dropped_caveat[0].hops[2].payload = [F::ZERO; 4];
+        dropped_caveat[0].hops[3].active = false;
+        dropped_caveat[0].hops[3].kind = 0;
+        dropped_caveat[0].hops[4].active = false;
+        dropped_caveat[0].hops[4].kind = 0;
+        let (_, z_bad) = synthesize_raw(
+            fx.params,
+            &fx.statement,
+            b"challenge-ctx-v1",
+            &dropped_caveat,
+        );
+        assert!(!shape.is_satisfied(&z_bad));
+
+        let mut bad_chain_input = fx.inputs.clone();
+        bad_chain_input[0].capability.caveats[0] = CapCaveat::ExpiresAt(u64::MAX);
+        assert_eq!(
+            fx.relation
+                .prove(
+                    &fx.statement,
+                    &bad_chain_input,
+                    b"challenge-ctx-v1",
+                    Profile::TurboShakeJohnson400,
+                    &[7; 32],
+                )
+                .unwrap_err(),
+            CapabilityZkError::InvalidTag
+        );
+
+        // 3. Expired / exceeded-amount / disallowed-action request is rejected both natively and in-circuit.
+        let mut expired_stmt = fx.statement.clone();
+        expired_stmt.request.now = 1_800_000_000; // `ExpiresAt(1_800_000_000)` requires strict `now < t`!
+        let (_, z_bad) =
+            synthesize_raw(fx.params, &expired_stmt, b"challenge-ctx-v1", &honest_slots);
+        assert!(!shape.is_satisfied(&z_bad));
+
+        let mut over_amt = fx.statement.clone();
+        over_amt.request.amount = 1_001; // slot 0 has `MaxAmount(1_000)`!
+        let (_, z_bad) = synthesize_raw(fx.params, &over_amt, b"challenge-ctx-v1", &honest_slots);
+        assert!(!shape.is_satisfied(&z_bad));
+
+        let mut bad_act = fx.statement.clone();
+        bad_act.request.actions = 0b1001; // bit 3 not in `0b0111`!
+        let (_, z_bad) = synthesize_raw(fx.params, &bad_act, b"challenge-ctx-v1", &honest_slots);
+        assert!(!shape.is_satisfied(&z_bad));
+
+        // 4. Duplicate capability in batch (`token_id[0] == token_id[1]`) is rejected in-circuit.
+        let dup_slots = vec![honest_slots[0].clone(), honest_slots[0].clone()];
+        let mut dup_stmt = fx.statement.clone();
+        dup_stmt.presentation_tags[1] = dup_stmt.presentation_tags[0];
+        let (_, z_bad) = synthesize_raw(fx.params, &dup_stmt, b"challenge-ctx-v1", &dup_slots);
+        assert!(!shape.is_satisfied(&z_bad));
+    }
+
+    #[test]
+    fn batched_capability_proof_roundtrips_and_verifies() {
+        let profile = Profile::TurboShakeJohnson400;
+        let fx = build_fixture(2, 5, 6, 8);
+        let proof = fx
+            .relation
+            .prove(
+                &fx.statement,
+                &fx.inputs,
+                b"challenge-ctx-v1",
+                profile,
+                &[33; 32],
+            )
+            .unwrap();
+        let bytes = proof.to_bytes();
+        let decoded = ZkCapabilityBatchProof::from_bytes(&bytes, &fx.relation, profile).unwrap();
+        assert_eq!(decoded, proof);
+        assert_eq!(decoded.to_bytes(), bytes);
+        assert!(
+            fx.relation
+                .verify(&fx.statement, b"challenge-ctx-v1", profile, &decoded)
+        );
+        assert!(
+            ZkCapabilityBatchProof::from_bytes(&bytes, &fx.relation, Profile::CshakeJohnson400)
+                .is_none()
+        );
+
+        // Trailing byte and wrong magic are rejected.
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(ZkCapabilityBatchProof::from_bytes(&trailing, &fx.relation, profile).is_none());
+        for cut in (0..bytes.len()).step_by(997).chain([bytes.len() - 1]) {
+            assert!(
+                ZkCapabilityBatchProof::from_bytes(&bytes[..cut], &fx.relation, profile).is_none()
+            );
+        }
+        // First Fp5 limb (`row_mask_sum.0[0]`) starts after 8B wrapper magic + 10B v2 header + 32B tree_nonce + 50B root = 100.
+        for word in [GOLDILOCKS_PRIME, GOLDILOCKS_PRIME + 1, u64::MAX] {
+            let mut alias = bytes.clone();
+            alias[100..108].copy_from_slice(&word.to_le_bytes());
+            assert!(ZkCapabilityBatchProof::from_bytes(&alias, &fx.relation, profile).is_none());
+        }
+        let mut tampered = bytes.clone();
+        tampered[50] ^= 1; // canonical root mutation must fail verification
+        let tampered =
+            ZkCapabilityBatchProof::from_bytes(&tampered, &fx.relation, profile).unwrap();
+        assert!(
+            !fx.relation
+                .verify(&fx.statement, b"challenge-ctx-v1", profile, &tampered)
+        );
+        let mut wrong_magic = bytes;
+        wrong_magic[7] ^= 1;
+        assert!(ZkCapabilityBatchProof::from_bytes(&wrong_magic, &fx.relation, profile).is_none());
+
+        // Every public statement component is bound, including full-width integers.
+        for component in 0..8 {
+            let mut changed = fx.statement.clone();
+            match component {
+                0 => changed.issuer_root[0] += F::ONE,
+                1 => changed.request.audience[0] += F::ONE,
+                2 => changed.request.resource[0] += F::ONE,
+                3 => changed.request.actions ^= 1u64 << 63,
+                4 => changed.request.amount ^= 1u128 << 127,
+                5 => changed.request.now ^= 1u64 << 63,
+                6 => changed.revocation_epoch ^= 1u64 << 63,
+                _ => changed.presentation_tags.swap(0, 1),
+            }
+            assert!(
+                !fx.relation
+                    .verify(&changed, b"challenge-ctx-v1", profile, &decoded)
+            );
+        }
+        // Statement and context mutations fail verification.
+        assert!(
+            !fx.relation
+                .verify(&fx.statement, b"challenge-ctx-v2", profile, &decoded)
+        );
+        let mut wrong_rev = fx.statement.clone();
+        wrong_rev.revocation_root[0] += F::ONE;
+        assert!(
+            !fx.relation
+                .verify(&wrong_rev, b"challenge-ctx-v1", profile, &decoded)
+        );
+        let mut wrong_epoch = fx.statement.clone();
+        wrong_epoch.revocation_epoch += 1;
+        assert!(
+            !fx.relation
+                .verify(&wrong_epoch, b"challenge-ctx-v1", profile, &decoded)
+        );
+        let mut wrong_nullifier = fx.statement.clone();
+        wrong_nullifier.presentation_tags[1][2] += F::ONE;
+        assert!(
+            !fx.relation
+                .verify(&wrong_nullifier, b"challenge-ctx-v1", profile, &decoded)
+        );
+    }
+
+    #[test]
+    #[ignore = "measurement: run with --ignored --nocapture"]
+    fn bench_zk_capability_batch() {
+        for (batch_size, max_hops, iss_d, rev_d) in [
+            (
+                1usize,
+                MAX_CAP_HOPS,
+                DEFAULT_ISSUER_DEPTH,
+                DEFAULT_REVOCATION_DEPTH,
+            ),
+            (2usize, 4, 8, 12),
+            (
+                4usize,
+                MAX_CAP_HOPS,
+                DEFAULT_ISSUER_DEPTH,
+                DEFAULT_REVOCATION_DEPTH,
+            ),
+        ] {
+            for profile in Profile::ALL {
+                let fx = build_fixture(batch_size, max_hops, iss_d, rev_d);
+                let shape = fx.relation.shape();
+                let layout = v2::layout_of(shape).unwrap();
+                let median = |mut v: Vec<f64>| {
+                    v.sort_by(f64::total_cmp);
+                    v[v.len() / 2]
+                };
+                let mut prove_ms = Vec::new();
+                let mut proof = None;
+                for run in 0..3u8 {
+                    let t = std::time::Instant::now();
+                    proof = Some(
+                        fx.relation
+                            .prove(
+                                &fx.statement,
+                                &fx.inputs,
+                                b"challenge-ctx-v1",
+                                profile,
+                                &[40 + run; 32],
+                            )
+                            .unwrap(),
+                    );
+                    prove_ms.push(t.elapsed().as_secs_f64() * 1e3);
+                }
+                let proof = proof.unwrap();
+                let bytes = proof.to_bytes();
+                let time_verify = || {
+                    median(
+                        (0..5)
+                            .map(|_| {
+                                let t = std::time::Instant::now();
+                                let decoded = ZkCapabilityBatchProof::from_bytes(
+                                    &bytes,
+                                    &fx.relation,
+                                    profile,
+                                )
+                                .unwrap();
+                                assert!(fx.relation.verify(
+                                    &fx.statement,
+                                    b"challenge-ctx-v1",
+                                    profile,
+                                    &decoded
+                                ));
+                                t.elapsed().as_secs_f64() * 1e3
+                            })
+                            .collect(),
+                    )
+                };
+                let verify_all = time_verify();
+                let verify_one = qsag_agg::with_worker_limit(1, time_verify);
+                std::println!(
+                    "ZKHEM_CAPABILITY batch={batch_size} profile={profile:?} sbox_rows={} \
+                     rows=2^{} vars={} cells=2^{} blind_cells={} proof_bytes={} \
+                     proof_kib={:.2} prove_ms_median={:.1} verify_ms_all_workers={verify_all:.2} \
+                     verify_ms_1_worker={verify_one:.2} workers={}",
+                    shape.num_sbox,
+                    shape.log_rows,
+                    shape.num_vars,
+                    layout.log_cells,
+                    layout.blind_cells,
+                    bytes.len(),
+                    bytes.len() as f64 / 1024.0,
+                    median(prove_ms),
+                    qsag_agg::parallel_workers(),
+                );
+            }
+        }
+    }
+}
