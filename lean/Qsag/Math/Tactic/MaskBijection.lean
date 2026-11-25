@@ -1,17 +1,5 @@
 module
-/-
-# Qsag.Math.Tactic.MaskBijection — `SimpleEquiv` Pad Combinators and `mask_bijection_hop`
 
-**`by mask_bijection_hop` / `by mask_bijection_hop <equiv>`**: relational pad-bijection synthesizer
-discharging both `qsum` uniform-mask invariance goals AND existential coin-bijection simulation
-goals (`∀ w, ∃ Φ : SimpleEquiv R R, ∀ r, ...`, matching `ZkHemV2.CoinBijectionSimulated`) across:
-- XOR pads (`BitVec w`, `UInt64`, `Bool`),
-- Arbitrary `LawfulCommRing` additive shifts (`x + Δ` and `Δ + x`, covering `Goldilocks`,
-  `QuarticGoldilocks` / `GoldilocksExt4`, `QuinticGoldilocks`, and `TowerElem k`),
-- Nonzero `LawfulField` affine masks (`p + β * x` and `x * β + p`), and
-- Nested Cartesian products (`SimpleEquiv.prodCongr`),
-with `0 Classical.choice`.
--/
 
 public import Qsag.Tactic.AssuranceKit
 public import Qsag.Tactic.CathedralKit

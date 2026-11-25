@@ -1,35 +1,11 @@
 module
-/-
-# Qsag.Math.AlgebraicRepair — `RingIso` / `FieldIso` Proof-Repair Combinators & Field Carrier Bridges
 
-Constructive (`0 Classical.choice`, `LAW-M1`) algebraic equivalence and proof-repair infrastructure
-instantiating the `arXiv:2610.36669v1` paradigm across `Qsag`'s cryptographic rings and fields:
-
-1. **Generic `RingIso` & `FieldIso` Transport Combinators (`Qsag.Repair`)**:
-   - `RingIso.transportEquiv`: conjugates any `SimpleEquiv R R` pad bijection into `SimpleEquiv S S`,
-   - `RingIso.transport_qsum_invariance`: repairs uniform `qsum` pad-invariance theorems across `R ≃+* S`,
-   - `RingIso.transport_affine_eq` / `FieldIso.transport_inv_cancel`: repairs linear/affine/inverse
-     identities across isomorphic field representations without re-proving ring arithmetic.
-2. **Canonical `Qsag` Field Carrier Isomorphisms & Galois Automorphisms**:
-   - **`PackedTower k` & `towerPackedRingIso k`**: two-sided `RingIso (TowerElem k) (PackedTower k)`
-     connecting the recursive Wiedemann binary tower (`Tower128 = TowerElem 7`, `Tower256 = TowerElem 8`)
-     to flat `BitVec (2^k)` hardware XOR + carryless Karatsuba words,
-   - **`quarticToPolyFieldIso`**: `FieldIso QuarticGoldilocks GoldilocksField.GoldilocksExt4.Ext4Poly`
-     at Layer 2 (`Math`), enabling polynomial-basis ↔ tower-basis repair below `Protocol`,
-   - **`quinticFrobFieldIso`**: packages the order-5 Frobenius automorphism `QuinticGoldilocks.frob`
-     (`𝔽_p[X]/(X^5 - 3)`) as a `FieldIso QuinticGoldilocks QuinticGoldilocks`, transporting polynomial
-     roots and mask bijections across all five Galois conjugates.
-3. **1-Line `by mask_bijection_hop` & `#assert_no_scar` Demonstrations**:
-   Demonstrates automatic additive & existential pad-bijection synthesis across `Goldilocks`,
-   `QuarticGoldilocks`, `QuinticGoldilocks`, `Tower128`, and `BitVec 128`, plus `#assert_no_scar`
-   verification of scar-free polynomial evaluation repair from `QuarticGoldilocks` to `Ext4Poly`.
--/
 
 public import Qsag.Tactic.CathedralKit
 public import Qsag.Math.Tactic.MaskBijection
 public import Qsag.Math.PolyRing
 public import Qsag.Math.Gf2Pow128
-public import Qsag.Math.QuarticExt4
+public import Qsag.Math.GoldilocksEncoding
 public import Qsag.Math.QuinticExt5
 
 public section
@@ -181,22 +157,6 @@ def towerPackedRingIso (k : Nat) : RingIso (TowerElem k) (PackedTower k) where
 /-- Deployed `Tower128 ≃+* PackedTower 7` (`BitVec 128`) isomorphism. -/
 abbrev tower128PackedIso : RingIso Tower128 (PackedTower 7) := towerPackedRingIso 7
 
-/-! ## 3. `QuarticGoldilocks ≃+* Ext4Poly` & `QuinticGoldilocks` Order-5 Frobenius `FieldIso` -/
-
-/-- Layer-2 `FieldIso` from `QuarticGoldilocks` tower coordinates to polynomial-basis `Ext4Poly`. -/
-def quarticToPolyFieldIso :
-    FieldIso QuarticGoldilocks GoldilocksField.GoldilocksExt4.Ext4Poly where
-  toFun := GoldilocksField.GoldilocksExt4.towerToPoly
-  invFun := GoldilocksField.GoldilocksExt4.polyToTower
-  left_inv := GoldilocksField.GoldilocksExt4.polyToTower_towerToPoly
-  right_inv := GoldilocksField.GoldilocksExt4.towerToPoly_polyToTower
-  map_zero := GoldilocksField.GoldilocksExt4.towerToPoly_zero
-  map_one := GoldilocksField.GoldilocksExt4.towerToPoly_one
-  map_add := GoldilocksField.GoldilocksExt4.towerToPoly_add
-  map_neg := GoldilocksField.GoldilocksExt4.towerToPoly_neg
-  map_sub := GoldilocksField.GoldilocksExt4.towerToPoly_sub
-  map_mul := GoldilocksField.GoldilocksExt4.towerToPoly_mul
-  map_inv := GoldilocksField.GoldilocksExt4.towerToPoly_inv
 
 private theorem quintic_frob_neg (z : QuinticGoldilocks) :
     QuinticGoldilocks.frob (CommRingOps.neg z) = CommRingOps.neg (QuinticGoldilocks.frob z) := by
@@ -269,31 +229,12 @@ theorem evalQuadGeneric_zero {R : Type} [LawfulCommRing R] (c0 c1 c2 : R) :
   unfold evalQuadGeneric
   rw [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
 
-/-- Repaired `Ext4Poly` quadratic evaluator and zero-evaluation theorem: zero dependency on
-    `QuarticGoldilocks`! -/
-def ext4PolyEvalQuad (c0 c1 c2 x : GoldilocksField.GoldilocksExt4.Ext4Poly) :
-    GoldilocksField.GoldilocksExt4.Ext4Poly :=
-  evalQuadGeneric c0 c1 c2 x
-
-theorem ext4PolyEvalQuad_zero (c0 c1 c2 : GoldilocksField.GoldilocksExt4.Ext4Poly) :
-    ext4PolyEvalQuad c0 c1 c2 CommRingOps.zero = c0 :=
-  evalQuadGeneric_zero c0 c1 c2
-
-/-- Coherence across `quarticToPolyFieldIso`. -/
-theorem quartic_to_ext4Poly_evalQuad_coherence (c0 c1 c2 x : QuarticGoldilocks) :
-    quarticToPolyFieldIso.toFun (evalQuadGeneric c0 c1 c2 x) =
-      ext4PolyEvalQuad (quarticToPolyFieldIso.toFun c0) (quarticToPolyFieldIso.toFun c1)
-        (quarticToPolyFieldIso.toFun c2) (quarticToPolyFieldIso.toFun x) := by
-  unfold ext4PolyEvalQuad evalQuadGeneric
-  simp only [quarticToPolyFieldIso.map_add, quarticToPolyFieldIso.map_mul]
 
 /-- Left-inverse roundtrip for `towerPackedRingIso` (`TowerElem k ≃+* PackedTower k`). -/
 theorem towerPackedRingIso_left_inv (k : Nat) (x : TowerElem k) :
     (towerPackedRingIso k).invFun ((towerPackedRingIso k).toFun x) = x :=
   (towerPackedRingIso k).left_inv x
 
--- Compile-time scar audit: `ext4PolyEvalQuad` and `ext4PolyEvalQuad_zero` do NOT touch `QuarticGoldilocks`!
-#assert_no_scar Qsag.QuarticGoldilocks in ext4PolyEvalQuad ext4PolyEvalQuad_zero
 
 /-- 1-line `by mask_bijection_hop` uniform pad-invariance over `Goldilocks`. -/
 theorem mask_hop_goldilocks {C : Nat} (enum : SimpleEquiv (Fin C) Goldilocks)
@@ -302,12 +243,6 @@ theorem mask_hop_goldilocks {C : Nat} (enum : SimpleEquiv (Fin C) Goldilocks)
       qsum C (fun i => f (enum.toFun i)) := by
   mask_bijection_hop
 
-/-- 1-line `by mask_bijection_hop` uniform pad-invariance over `QuarticGoldilocks` (`GoldilocksExt4`). -/
-theorem mask_hop_quartic_ext4 {C : Nat} (enum : SimpleEquiv (Fin C) QuarticGoldilocks)
-    (delta : QuarticGoldilocks) (f : QuarticGoldilocks → Nat) :
-    qsum C (fun i => f (CommRingOps.add delta (enum.toFun i))) =
-      qsum C (fun i => f (enum.toFun i)) := by
-  mask_bijection_hop
 
 /-- 1-line `by mask_bijection_hop` uniform pad-invariance over `QuinticGoldilocks` (`Fp5`). -/
 theorem mask_hop_quintic_ext5 {C : Nat} (enum : SimpleEquiv (Fin C) QuinticGoldilocks)
@@ -325,30 +260,16 @@ theorem mask_hop_tower128_prod {C : Nat}
       qsum C (fun i => f (enum.toFun i)) := by
   mask_bijection_hop
 
-/-- 1-line `by mask_bijection_hop` existential coin-bijection simulation (`CoinBijectionSimulated`
-    shape) over `QuinticGoldilocks × QuarticGoldilocks`! -/
-theorem mask_hop_coin_bijection_quintic_quartic :
-    ∀ w : QuinticGoldilocks × QuarticGoldilocks,
-      ∃ Φ : SimpleEquiv (QuinticGoldilocks × QuarticGoldilocks)
-              (QuinticGoldilocks × QuarticGoldilocks),
-        ∀ r : QuinticGoldilocks × QuarticGoldilocks,
-          (CommRingOps.add w.1 r.1, CommRingOps.add r.2 w.2) = Φ.toFun r := by
-  mask_bijection_hop
 
-#verify_constructive
-  Qsag.Repair.transportEquiv_ringAdd_toFun
+#verify_constructive Qsag.Repair.transportEquiv_ringAdd_toFun
   Qsag.Repair.transport_qsum_pad_invariance
   Qsag.Repair.transport_affine_eq
   Qsag.Repair.transport_field_affine_cancel
   Qsag.Repair.towerPackedRingIso_left_inv
   Qsag.Repair.quintic_frob_preserves_poly_root
-  Qsag.Repair.ext4PolyEvalQuad_zero
-  Qsag.Repair.quartic_to_ext4Poly_evalQuad_coherence
   Qsag.Repair.mask_hop_goldilocks
-  Qsag.Repair.mask_hop_quartic_ext4
   Qsag.Repair.mask_hop_quintic_ext5
   Qsag.Repair.mask_hop_tower128_prod
-  Qsag.Repair.mask_hop_coin_bijection_quintic_quartic
 
 end Qsag.Repair
 end

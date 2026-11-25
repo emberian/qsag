@@ -465,7 +465,6 @@ theorem goldilocks_mul_eq_zero_iff (x y : Goldilocks) :
     · exact LawfulCommRing.zero_mul y
     · exact LawfulCommRing.mul_zero x
 
-/-! ## 3. Irreducibility of $v^4 - 7 \in \mathbb{F}_p[v]$ & Universal `GoldilocksExt4` Division -/
 
 private theorem sq_mul_sq_eq {R : Type} [LawfulCommRing R] (a b : R) :
     CommRingOps.mul (CommRingOps.mul a b) (CommRingOps.mul a b) =
