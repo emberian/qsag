@@ -146,9 +146,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use qsag_agg::field::Goldilocks;
+use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc, Shape};
 use qsag_agg::zk_hem::v2::params::Profile;
 use qsag_agg::zk_hem::v2::protocol::{self as protocol, ZkHemV2Proof};
-use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc, Shape};
 
 use super::blake2::{blake2b_256, blake2b_512_gadget, blake2s_256_block_gadget};
 use super::ecc::{PointTable, monomials, select_limbs};
@@ -302,17 +302,12 @@ pub fn enforce_on_curve(cs: &mut ConstraintSystem, f: &Field, u: &Elem, v: &Elem
 /// `u3 (1 + T) = nu` and `v3 (1 - T) = nv`. For points of the curve neither `1 + T` nor
 /// `1 - T` is zero, so each congruence has exactly one solution.
 fn close_addition(cs: &mut ConstraintSystem, f: &Field, t: &Elem, nu: &Num, nv: &Num) -> Pt {
-    let t_num = t.num();
-    let t_v = fq_value(cs, f, &t_num);
-    let u3_v = fq_value(cs, f, nu).mul(&Fq::ONE.add(&t_v).invert());
-    let v3_v = fq_value(cs, f, nv).mul(&Fq::ONE.sub(&t_v).invert());
-    let u3 = f.alloc(cs, &u3_v.to_bytes());
-    let u3t = Num::mul(cs, &u3.num(), &t_num);
-    f.enforce_zero(cs, &u3.num().add(&u3t).sub(nu));
-    let v3 = f.alloc(cs, &v3_v.to_bytes());
-    let v3t = Num::mul(cs, &v3.num(), &t_num);
-    f.enforce_zero(cs, &v3.num().sub(&v3t).sub(nv));
-    Pt::from_elems(&u3, &v3)
+    edwards_coordinates(cs, f, &Num::small(1).add(&t.num()), nu, nv)
+}
+
+fn edwards_coordinates(cs: &mut ConstraintSystem, f: &Field, d: &Num, nu: &Num, nv: &Num) -> Pt {
+    let (u, v) = crate::hem::curve::edwards_coordinates(cs, &f.0, d, nu, nv);
+    Pt::from_elems(&u.into(), &v.into())
 }
 
 /// The three products every addition shares: `u1 u2`, `v1 v2` and the numerator
@@ -348,19 +343,7 @@ pub fn double(cs: &mut ConstraintSystem, f: &Field, p: &Pt) -> Pt {
     let dn = Num::mul(cs, &v.sub(&u), &v.add(&u));
     let d = f.reduce(cs, &dn);
     let d_num = d.num();
-    let d_v = fq_value(cs, f, &d_num);
-    let two = Fq::ONE.double();
-    let u3_v = fq_value(cs, f, &uv).double().mul(&d_v.invert());
-    let v3_v = d_v
-        .add(&fq_value(cs, f, &uu).double())
-        .mul(&two.sub(&d_v).invert());
-    let u3 = f.alloc(cs, &u3_v.to_bytes());
-    let u3d = Num::mul(cs, &u3.num(), &d_num);
-    f.enforce_zero(cs, &u3d.sub(&uv.scale(2)));
-    let v3 = f.alloc(cs, &v3_v.to_bytes());
-    let v3d = Num::mul(cs, &v3.num(), &Num::small(2).sub(&d_num));
-    f.enforce_zero(cs, &v3d.sub(&d_num).sub(&uu.scale(2)));
-    Pt::from_elems(&u3, &v3)
+    edwards_coordinates(cs, f, &d_num, &uv.scale(2), &d_num.add(&uu.scale(2)))
 }
 
 // ----------------------------------------------------------------------------
@@ -384,14 +367,15 @@ pub struct FixedBase {
 impl FixedBase {
     fn new(base: &Point) -> Self {
         let mut windows = Vec::with_capacity(WINDOWS);
-        let mut p = *base;
+        let mut p = base.clone();
         for j in 0..WINDOWS {
             let nbits = WINDOW.min(Field::BITS - WINDOW * j);
             let mut points = Vec::with_capacity(1 << nbits);
             let mut cur = Point::IDENTITY;
             for _ in 0..1 << nbits {
+                let next = cur.add(&p);
                 points.push(cur);
-                cur = cur.add(&p);
+                cur = next;
             }
             let entries: Vec<[u8; ENTRY]> = Point::batch_to_affine(&points)
                 .iter()
@@ -1058,10 +1042,7 @@ pub fn synthesize_sapling_address(
 
 /// The statement bytes [`prove_sapling_address`] and [`verify_sapling_address`] hand to
 /// zk-Hem.
-pub fn sapling_address_transcript(
-    statement: &SaplingAddressStatement,
-    regime: Profile,
-) -> Vec<u8> {
+pub fn sapling_address_transcript(statement: &SaplingAddressStatement, regime: Profile) -> Vec<u8> {
     statement.transcript(regime)
 }
 
@@ -1298,19 +1279,19 @@ mod tests {
         .unwrap();
         // Generic, equal, opposite, zero and order-two operands: one law for all.
         for (i, (a, b)) in [
-            (p, q),
-            (p, p),
-            (p, minus_p),
-            (p, Point::IDENTITY),
-            (Point::IDENTITY, Point::IDENTITY),
-            (order_two, p),
-            (order_two, order_two),
+            (&p, &q),
+            (&p, &p),
+            (&p, &minus_p),
+            (&p, &Point::IDENTITY),
+            (&Point::IDENTITY, &Point::IDENTITY),
+            (&order_two, &p),
+            (&order_two, &order_two),
         ]
         .into_iter()
         .enumerate()
         {
             let mut cs = ConstraintSystem::new();
-            let (pa, pb) = (alloc_point(&mut cs, &f, &a), alloc_point(&mut cs, &f, &b));
+            let (pa, pb) = (alloc_point(&mut cs, &f, a), alloc_point(&mut cs, &f, b));
             let first = mark(&mut cs);
             let rows0 = cs.num_rows();
             let sum = add(&mut cs, &f, &pa, &pb);
@@ -1323,7 +1304,7 @@ mod tests {
                     cs.num_rows() - rows1
                 );
             }
-            assert_point(&mut cs, &f, &sum, &a.add(&b));
+            assert_point(&mut cs, &f, &sum, &a.add(b));
             assert_point(&mut cs, &f, &twice, &a.double());
             assert_bound(cs, first, 40);
         }
@@ -1741,8 +1722,8 @@ mod tests {
     #[test]
     fn registry_binding_identifies_the_address() {
         use super::super::recovery::LEGACY_TAG_ORCHARD_ADDRESS;
-        use crate::hem::relations::credential_identifier as zcash_legacy_identifier;
         use crate::hem::registry::KeyExposure;
+        use crate::hem::relations::credential_identifier as zcash_legacy_identifier;
         let st = statement(&SaplingKeySource::SpendingKey, &diversifier(3));
         let b = st.binding();
         assert_eq!(b.nullifier, st.nullifier());

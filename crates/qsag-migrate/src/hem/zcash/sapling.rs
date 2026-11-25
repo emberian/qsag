@@ -22,13 +22,10 @@ use super::ff1::ff1_aes256_encrypt_88;
 
 type Limbs = [u64; 4];
 
-/// `q_J`, the order of the Jubjub base field (the BLS12-381 scalar field).
-const Q: Limbs = [
-    0xffff_ffff_0000_0001,
-    0x53bd_a402_fffe_5bfe,
-    0x3339_d808_09a1_d805,
-    0x73ed_a753_299d_7d48,
-];
+use crate::bls12_381::BLS_R as Q;
+pub(super) use crate::bls12_381::FrBls381 as Fq;
+use crate::limbs;
+use qsag_asm::wipe::SecretBuffer;
 
 /// `r_J`, the order of the prime-order subgroup of Jubjub.
 const R_J: Limbs = [
@@ -38,234 +35,30 @@ const R_J: Limbs = [
     0x0e7d_b4ea_6533_afa9,
 ];
 
-/// `a - b`, and an all-ones mask if it borrowed.
-const fn limbs_sub(a: &Limbs, b: &Limbs) -> (Limbs, u64) {
-    let mut out = [0u64; 4];
-    let mut borrow = 0u64;
-    let mut i = 0;
-    while i < 4 {
-        let t = (a[i] as u128)
-            .wrapping_sub(b[i] as u128)
-            .wrapping_sub(borrow as u128);
-        out[i] = t as u64;
-        borrow = ((t >> 64) as u64) & 1;
-        i += 1;
-    }
-    (out, borrow.wrapping_neg())
-}
-
-/// `a + b`, and the carry (0 or 1).
-const fn limbs_add(a: &Limbs, b: &Limbs) -> (Limbs, u64) {
-    let mut out = [0u64; 4];
-    let mut carry = 0u64;
-    let mut i = 0;
-    while i < 4 {
-        let t = a[i] as u128 + b[i] as u128 + carry as u128;
-        out[i] = t as u64;
-        carry = (t >> 64) as u64;
-        i += 1;
-    }
-    (out, carry)
-}
-
-/// `a` where `mask` is all ones, `b` where it is zero.
-const fn limbs_select(mask: u64, a: &Limbs, b: &Limbs) -> Limbs {
-    let mut out = [0u64; 4];
-    let mut i = 0;
-    while i < 4 {
-        out[i] = (a[i] & mask) | (b[i] & !mask);
-        i += 1;
-    }
-    out
-}
-
-/// `(hi * 2^256 + a) - m` if that is not negative, else `a`; for a value below `2m`.
-const fn reduce_once(a: &Limbs, hi: u64, m: &Limbs) -> Limbs {
-    let (d, borrow) = limbs_sub(a, m);
-    limbs_select(hi.wrapping_neg() | !borrow, &d, a)
-}
-
-const fn add_mod(a: &Limbs, b: &Limbs, m: &Limbs) -> Limbs {
-    let (s, carry) = limbs_add(a, b);
-    reduce_once(&s, carry, m)
-}
-
-const fn sub_mod(a: &Limbs, b: &Limbs, m: &Limbs) -> Limbs {
-    let (d, borrow) = limbs_sub(a, b);
-    let masked = [m[0] & borrow, m[1] & borrow, m[2] & borrow, m[3] & borrow];
-    limbs_add(&d, &masked).0
-}
-
-/// `-q^-1 mod 2^64`.
-const Q_INV: u64 = {
-    // `q0^(2^63 - 1)` is the inverse of the odd `q0` modulo `2^64`.
-    let mut inv = 1u64;
-    let mut i = 0;
-    while i < 63 {
-        inv = inv.wrapping_mul(inv).wrapping_mul(Q[0]);
-        i += 1;
-    }
-    inv.wrapping_neg()
-};
-
-/// `2^k mod q`.
-const fn pow2_mod_q(k: usize) -> Limbs {
-    let mut x = [1u64, 0, 0, 0];
-    let mut i = 0;
-    while i < k {
-        x = add_mod(&x, &x, &Q);
-        i += 1;
-    }
-    x
-}
-
-const MONT_R: Limbs = pow2_mod_q(256);
-const MONT_R2: Limbs = pow2_mod_q(512);
-
-/// Montgomery multiplication modulo `q`: `a * b / 2^256`.
-const fn mont_mul(a: &Limbs, b: &Limbs) -> Limbs {
-    let mut t = [0u64; 6];
-    let mut i = 0;
-    while i < 4 {
-        let mut carry = 0u128;
-        let mut j = 0;
-        while j < 4 {
-            let x = t[j] as u128 + (a[j] as u128) * (b[i] as u128) + carry;
-            t[j] = x as u64;
-            carry = x >> 64;
-            j += 1;
-        }
-        let x = t[4] as u128 + carry;
-        t[4] = x as u64;
-        t[5] = (x >> 64) as u64;
-
-        let m = t[0].wrapping_mul(Q_INV);
-        let mut carry = (t[0] as u128 + (m as u128) * (Q[0] as u128)) >> 64;
-        let mut j = 1;
-        while j < 4 {
-            let x = t[j] as u128 + (m as u128) * (Q[j] as u128) + carry;
-            t[j - 1] = x as u64;
-            carry = x >> 64;
-            j += 1;
-        }
-        let x = t[4] as u128 + carry;
-        t[3] = x as u64;
-        t[4] = t[5] + ((x >> 64) as u64);
-        i += 1;
-    }
-    reduce_once(&[t[0], t[1], t[2], t[3]], t[4], &Q)
-}
-
-fn limbs_from_bytes(bytes: &[u8; 32]) -> Limbs {
-    let mut out = [0u64; 4];
-    for (limb, chunk) in out.iter_mut().zip(bytes.chunks_exact(8)) {
-        *limb = u64::from_le_bytes(chunk.try_into().expect("8 bytes"));
-    }
-    out
-}
-
-fn limbs_to_bytes(limbs: &Limbs) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (chunk, limb) in out.chunks_exact_mut(8).zip(limbs) {
-        chunk.copy_from_slice(&limb.to_le_bytes());
-    }
-    out
-}
-
-/// `q_J`, little-endian.
-pub(super) const BASE_MODULUS_LE: [u8; 32] = limbs_to_le_bytes(&Q);
-/// `r_J`, little-endian.
-pub(super) const SCALAR_MODULUS_LE: [u8; 32] = limbs_to_le_bytes(&R_J);
-
-const fn limbs_to_le_bytes(limbs: &Limbs) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let mut i = 0;
-    while i < 32 {
-        out[i] = (limbs[i / 8] >> (8 * (i % 8))) as u8;
-        i += 1;
-    }
-    out
-}
-
-/// An element of the Jubjub base field, in Montgomery form and fully reduced.
-#[derive(Clone, Copy)]
-pub(super) struct Fq(Limbs);
-
-impl PartialEq for Fq {
-    fn eq(&self, other: &Self) -> bool {
-        crate::limbs::ct_eq(self.0, other.0)
-    }
-}
-
-impl Eq for Fq {}
+pub(super) const BASE_MODULUS_LE: [u8; 32] = limbs::to_le_bytes(Q);
+pub(super) const SCALAR_MODULUS_LE: [u8; 32] = limbs::to_le_bytes(R_J);
 
 impl Fq {
-    pub(super) const ZERO: Fq = Fq([0; 4]);
-    pub(super) const ONE: Fq = Fq(MONT_R);
-
-    /// The element with the given canonical little-endian limbs (below `q`).
-    const fn from_raw(limbs: Limbs) -> Fq {
-        Fq(mont_mul(&limbs, &MONT_R2))
+    pub(super) fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        Self::from_le_bytes(bytes)
     }
-
-    pub(super) fn from_bytes(bytes: &[u8; 32]) -> Option<Fq> {
-        let limbs = limbs_from_bytes(bytes);
-        let (_, borrow) = limbs_sub(&limbs, &Q);
-        (borrow != 0).then(|| Fq::from_raw(limbs))
+    pub(super) fn to_bytes(&self) -> [u8; 32] {
+        self.to_le_bytes()
     }
-
-    pub(super) fn to_bytes(self) -> [u8; 32] {
-        limbs_to_bytes(&mont_mul(&self.0, &[1, 0, 0, 0]))
+    pub(super) fn add(&self, rhs: &Self) -> Self {
+        self.add_mod(rhs)
     }
-
-    pub(super) fn add(&self, rhs: &Fq) -> Fq {
-        Fq(add_mod(&self.0, &rhs.0, &Q))
+    pub(super) fn sub(&self, rhs: &Self) -> Self {
+        self.sub_mod(rhs)
     }
-
-    pub(super) fn sub(&self, rhs: &Fq) -> Fq {
-        Fq(sub_mod(&self.0, &rhs.0, &Q))
+    pub(super) fn mul(&self, rhs: &Self) -> Self {
+        self.mul_mod(rhs)
     }
-
-    pub(super) fn neg(&self) -> Fq {
-        Fq::ZERO.sub(self)
+    pub(super) fn neg(&self) -> Self {
+        self.neg_mod()
     }
-
-    pub(super) const fn mul(&self, rhs: &Fq) -> Fq {
-        Fq(mont_mul(&self.0, &rhs.0))
-    }
-
-    pub(super) fn square(&self) -> Fq {
-        self.mul(self)
-    }
-
-    pub(super) fn double(&self) -> Fq {
-        self.add(self)
-    }
-
-    /// `self^exp` for a public exponent.
-    fn pow(&self, exp: &Limbs) -> Fq {
-        let mut acc = Fq::ONE;
-        for i in (0..256).rev() {
-            acc = acc.square();
-            if (exp[i / 64] >> (i % 64)) & 1 == 1 {
-                acc = acc.mul(self);
-            }
-        }
-        acc
-    }
-
-    /// The inverse, or zero for zero.
-    pub(super) fn invert(&self) -> Fq {
-        const Q_MINUS_2: Limbs = [Q[0] - 2, Q[1], Q[2], Q[3]];
-        self.pow(&Q_MINUS_2)
-    }
-
-    fn select(mask: u64, a: &Fq, b: &Fq) -> Fq {
-        Fq(limbs_select(mask, &a.0, &b.0))
-    }
-
-    fn is_odd(&self) -> bool {
-        self.to_bytes()[0] & 1 == 1
+    pub(super) fn invert(&self) -> Self {
+        self.inv_or_zero()
     }
 
     /// Fixed-schedule Tonelli-Shanks for `q - 1 = 2^32 * t`.
@@ -276,14 +69,14 @@ impl Fq {
         let mut c = ROOT_OF_UNITY;
         let minus_one = Fq::ONE.neg();
         for r in (2..=32).rev() {
-            let mut d = b;
+            let mut d = b.clone();
             for _ in 0..r - 2 {
                 d = d.square();
             }
-            let take = core::hint::black_box(0u64.wrapping_sub((d == minus_one) as u64));
+            let take = d == minus_one;
             let c2 = c.square();
-            x = Fq::select(take, &x.mul(&c), &x);
-            b = Fq::select(take, &b.mul(&c2), &b);
+            x = Fq::select(take, x.mul(&c), x);
+            b = Fq::select(take, b.mul(&c2), b);
             c = c2;
         }
         (x.square() == *self).then_some(x)
@@ -307,17 +100,18 @@ const ROOT_OF_UNITY: Fq = Fq::from_raw([
 ]);
 
 /// `d_J = -10240 / 10241`.
-pub(super) const JUBJUB_D: Fq = Fq::from_raw([
+const D_WORDS: Limbs = [
     0x0106_5fd6_d634_3eb1,
     0x292d_7f6d_3757_9d26,
     0xf5fd_9207_e6bd_7fd4,
     0x2a93_18e7_4bfa_2b48,
-]);
-const JUBJUB_2D: Fq = Fq(add_mod(&JUBJUB_D.0, &JUBJUB_D.0, &Q));
+];
+pub(super) const JUBJUB_D: Fq = Fq::from_raw(D_WORDS);
+const JUBJUB_2D: Fq = Fq::from_raw(limbs::add_mod(D_WORDS, D_WORDS, Q));
 
 /// A point of Jubjub, `-u^2 + v^2 = 1 + d u^2 v^2`, in extended coordinates
 /// `(U : V : Z : T)` with `u = U/Z`, `v = V/Z`, `T = UV/Z`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct Point {
     u: Fq,
     v: Fq,
@@ -357,12 +151,12 @@ impl Point {
         self.add(self)
     }
 
-    fn select(mask: u64, a: &Point, b: &Point) -> Point {
+    fn select(choice: bool, a: &Point, b: &Point) -> Point {
         Point {
-            u: Fq::select(mask, &a.u, &b.u),
-            v: Fq::select(mask, &a.v, &b.v),
-            z: Fq::select(mask, &a.z, &b.z),
-            t: Fq::select(mask, &a.t, &b.t),
+            u: Fq::select_ref(choice, &a.u, &b.u),
+            v: Fq::select_ref(choice, &a.v, &b.v),
+            z: Fq::select_ref(choice, &a.z, &b.z),
+            t: Fq::select_ref(choice, &a.t, &b.t),
         }
     }
 
@@ -373,8 +167,8 @@ impl Point {
         for i in (0..256).rev() {
             acc = acc.double();
             let sum = acc.add(self);
-            let bit = u64::from((scalar[i / 8] >> (i % 8)) & 1);
-            acc = Point::select(bit.wrapping_neg(), &sum, &acc);
+            let bit = (scalar[i / 8] >> (i % 8)) & 1 != 0;
+            acc = Point::select(bit, &sum, &acc);
         }
         acc
     }
@@ -388,7 +182,7 @@ impl Point {
     }
 
     /// The affine coordinates `(u, v)`.
-    pub(super) fn to_affine(self) -> (Fq, Fq) {
+    pub(super) fn to_affine(&self) -> (Fq, Fq) {
         let zinv = self.z.invert();
         (self.u.mul(&zinv), self.v.mul(&zinv))
     }
@@ -399,7 +193,7 @@ impl Point {
         let mut prefix = alloc::vec::Vec::with_capacity(points.len());
         let mut acc = Fq::ONE;
         for p in points {
-            prefix.push(acc);
+            prefix.push(acc.clone());
             acc = acc.mul(&p.z);
         }
         let mut inv = acc.invert();
@@ -413,7 +207,7 @@ impl Point {
     }
 
     /// `repr_J`.
-    pub(super) fn to_bytes(self) -> [u8; 32] {
+    pub(super) fn to_bytes(&self) -> [u8; 32] {
         let zinv = self.z.invert();
         let u = self.u.mul(&zinv);
         let v = self.v.mul(&zinv);
@@ -435,13 +229,13 @@ impl Point {
         let num = v2.sub(&Fq::ONE);
         let den = Fq::ONE.add(&JUBJUB_D.mul(&v2));
         let root = num.mul(&den.invert()).sqrt()?;
-        let flip = core::hint::black_box(0u64.wrapping_sub((root.is_odd() ^ sign) as u64));
-        let u = Fq::select(flip, &root.neg(), &root);
+        let flip = root.is_odd() ^ sign;
+        let u = Fq::select(flip, root.neg(), root);
         Some(Point {
+            t: u.mul(&v),
             u,
             v,
             z: Fq::ONE,
-            t: u.mul(&v),
         })
     }
 }
@@ -466,16 +260,19 @@ pub fn to_scalar(wide: &[u8; 64]) -> [u8; 32] {
             (acc[2] << 1) | (acc[1] >> 63),
             (acc[3] << 1) | (acc[2] >> 63),
         ];
-        acc = reduce_once(&acc, 0, &R_J);
+        acc = limbs::reduce_once(acc, false, R_J);
     }
-    let bytes = limbs_to_bytes(&acc);
+    let bytes = limbs::to_le_bytes(acc);
     qsag_asm::volatile_fill(&mut acc, 0);
     bytes
 }
 
 /// `(a + b) mod r_J` for `a, b < r_J`.
 fn scalar_add(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    limbs_to_bytes(&add_mod(&limbs_from_bytes(a), &limbs_from_bytes(b), &R_J))
+    let a = SecretBuffer(limbs::from_le_bytes(a));
+    let b = SecretBuffer(limbs::from_le_bytes(b));
+    let sum = SecretBuffer(limbs::add_mod(*a, *b, R_J));
+    limbs::to_le_bytes(*sum)
 }
 
 fn is_zero(bytes: &[u8; 32]) -> bool {
@@ -508,7 +305,7 @@ pub fn jubjub_add(p: &[u8; 32], q: &[u8; 32]) -> Option<[u8; 32]> {
 /// point (`J^(r)*`).
 pub fn jubjub_is_prime_order(point: &[u8; 32]) -> bool {
     Point::from_bytes(point)
-        .is_some_and(|p| !p.is_identity() && p.mul(&limbs_to_bytes(&R_J)).is_identity())
+        .is_some_and(|p| !p.is_identity() && p.mul(&limbs::to_le_bytes(R_J)).is_identity())
 }
 
 /// The uniform random string of the group hash (specification section 5.9).
@@ -525,7 +322,7 @@ pub(super) fn group_hash_point(personal: &[u8; 8], message: &[u8]) -> Option<Poi
 /// `D` over `URS || M`, decoded as a point and multiplied by the cofactor; `None` if the
 /// digest does not decode or the result is the zero point.
 pub fn jubjub_group_hash(personal: &[u8; 8], message: &[u8]) -> Option<[u8; 32]> {
-    group_hash_point(personal, message).map(Point::to_bytes)
+    group_hash_point(personal, message).map(|p| p.to_bytes())
 }
 
 fn find_group_hash_point(personal: &[u8; 8], message: &[u8]) -> Point {
@@ -770,7 +567,13 @@ struct ChildParts {
 
 impl Drop for ChildParts {
     fn drop(&mut self) {
-        for field in [&mut self.i_ask, &mut self.i_nsk, &mut self.ovk, &mut self.dk, &mut self.chain_code] {
+        for field in [
+            &mut self.i_ask,
+            &mut self.i_nsk,
+            &mut self.ovk,
+            &mut self.dk,
+            &mut self.chain_code,
+        ] {
             wipe(field);
         }
     }
@@ -835,7 +638,7 @@ impl SaplingExtendedSpendingKey {
 
     /// The validity conditions of ZIP 32: `ask` and `ivk` are not zero.
     fn checked(self) -> Option<Self> {
-        let valid = !is_zero(&self.ask) && !is_zero(&self.to_extended_fvk().ivk());
+        let valid = !is_zero(&self.ask) && !is_zero(&SecretBuffer(self.to_extended_fvk().ivk()));
         valid.then_some(self)
     }
 
@@ -990,7 +793,7 @@ impl SaplingExtendedFullViewingKey {
             ovk: parts.ovk,
             dk: parts.dk,
         };
-        let valid = !ak.is_identity() && !is_zero(&child.ivk());
+        let valid = !ak.is_identity() && !is_zero(&SecretBuffer(child.ivk()));
         valid.then_some(child)
     }
 
@@ -1046,7 +849,7 @@ impl SaplingExtendedFullViewingKey {
 
     /// The raw payment address `d_j || pk_d` at index `j`; `None` if `d_j` is invalid.
     pub fn address(&self, index: &[u8; 11]) -> Option<[u8; 43]> {
-        payment_address(&self.ivk(), &self.diversifier(index)?)
+        payment_address(&SecretBuffer(self.ivk()), &self.diversifier(index)?)
     }
 }
 
@@ -1079,15 +882,15 @@ pub(super) mod tests {
         assert!(JUBJUB_D.mul(&fq(10241)) == fq(10240).neg());
         assert!(JUBJUB_2D == JUBJUB_D.double());
         // q - 1 = 2^32 * t, and the exponent constant is (t - 1) / 2.
-        let (q_minus_1, _) = limbs_sub(&Q, &[1, 0, 0, 0]);
+        let (q_minus_1, _) = limbs::sbb(Q, [1, 0, 0, 0]);
         let mut t = [0u64; 4];
         for i in 0..4 {
             let above = if i < 3 { q_minus_1[i + 1] << 32 } else { 0 };
             t[i] = (q_minus_1[i] >> 32) | above;
         }
         assert_eq!(q_minus_1[0] & 0xffff_ffff, 0);
-        let (twice, carry) = limbs_add(&T_MINUS_1_OVER_2, &T_MINUS_1_OVER_2);
-        assert_eq!((limbs_add(&twice, &[1, 0, 0, 0]).0, carry), (t, 0));
+        let (twice, carry) = limbs::adc(T_MINUS_1_OVER_2, T_MINUS_1_OVER_2);
+        assert_eq!((limbs::adc(twice, [1, 0, 0, 0]).0, carry), (t, false));
         // The root of unity has order exactly 2^32.
         let mut x = ROOT_OF_UNITY;
         for _ in 0..31 {
@@ -1102,12 +905,12 @@ pub(super) mod tests {
         one[0] = 1;
         assert_eq!(Fq::ONE.to_bytes(), one);
         assert!(Fq::from_bytes(&one) == Some(Fq::ONE));
-        assert_eq!(Q[0].wrapping_mul(Q_INV), u64::MAX);
+        assert!(Fq::from_bytes(&BASE_MODULUS_LE).is_none());
         // Inversion and the canonical range.
         let x = fq(0x1234_5678_9abc_def1).mul(&JUBJUB_D);
         assert!(x.mul(&x.invert()) == Fq::ONE);
-        assert!(Fq::from_bytes(&limbs_to_bytes(&Q)).is_none());
-        assert!(Fq::from_bytes(&limbs_to_bytes(&q_minus_1)) == Some(Fq::ONE.neg()));
+        assert!(Fq::from_bytes(&limbs::to_le_bytes(Q)).is_none());
+        assert!(Fq::from_bytes(&limbs::to_le_bytes(q_minus_1)) == Some(Fq::ONE.neg()));
         assert!(Fq::from_bytes(&[0xff; 32]).is_none());
     }
 
@@ -1134,7 +937,7 @@ pub(super) mod tests {
     #[test]
     fn to_scalar_reduces() {
         let mut wide = [0u8; 64];
-        wide[..32].copy_from_slice(&limbs_to_bytes(&R_J));
+        wide[..32].copy_from_slice(&SCALAR_MODULUS_LE);
         assert_eq!(to_scalar(&wide), [0; 32]);
         wide[0] += 5;
         let mut five = [0u8; 32];
@@ -1144,12 +947,12 @@ pub(super) mod tests {
         let mut pow256 = [0u8; 64];
         pow256[32] = 1;
         let reduced = to_scalar(&pow256);
-        let (r_minus_1, _) = limbs_sub(&R_J, &[1, 0, 0, 0]);
+        let (r_minus_1, _) = limbs::sbb(R_J, [1, 0, 0, 0]);
         let mut plus_one = [0u8; 64];
         plus_one[0] = 1;
         plus_one[32] = 1;
         assert_eq!(
-            scalar_add(&limbs_to_bytes(&r_minus_1), &to_scalar(&plus_one)),
+            scalar_add(&limbs::to_le_bytes(r_minus_1), &to_scalar(&plus_one)),
             reduced
         );
         assert_ne!(reduced, [0; 32]);
@@ -1198,9 +1001,9 @@ pub(super) mod tests {
         assert_eq!(g.add(&Point::IDENTITY).to_bytes(), g.to_bytes());
         assert_eq!(Point::IDENTITY.to_bytes(), JUBJUB_IDENTITY);
         // [r_J] G is the zero point and [r_J - 1] G + G as well.
-        let (r_minus_1, _) = limbs_sub(&R_J, &[1, 0, 0, 0]);
-        assert!(g.mul(&limbs_to_bytes(&R_J)).is_identity());
-        let neg_g = g.mul(&limbs_to_bytes(&r_minus_1));
+        let (r_minus_1, _) = limbs::sbb(R_J, [1, 0, 0, 0]);
+        assert!(g.mul(&limbs::to_le_bytes(R_J)).is_identity());
+        let neg_g = g.mul(&limbs::to_le_bytes(r_minus_1));
         assert!(!neg_g.is_identity());
         assert!(neg_g.add(&g).is_identity());
         // [5] G by repeated addition, and [2] G by the scalar route.
@@ -1222,8 +1025,8 @@ pub(super) mod tests {
     #[test]
     fn point_decoding_rejects_and_accepts_as_specified() {
         // v = q is not canonical.
-        assert!(Point::from_bytes(&limbs_to_bytes(&Q)).is_none());
-        assert_eq!(jubjub_scalar_mul(&[1; 32], &limbs_to_bytes(&Q)), None);
+        assert!(Point::from_bytes(&limbs::to_le_bytes(Q)).is_none());
+        assert_eq!(jubjub_scalar_mul(&[1; 32], &limbs::to_le_bytes(Q)), None);
         assert_eq!(jubjub_add(&JUBJUB_IDENTITY, &[0xff; 32]), None);
         // About half of all v have no u: count over small v.
         let mut off_curve = 0;
@@ -1244,8 +1047,8 @@ pub(super) mod tests {
         assert_eq!(p.to_bytes(), JUBJUB_IDENTITY);
         // The zero point and the point of order two are not in J^(r)*.
         assert!(!jubjub_is_prime_order(&JUBJUB_IDENTITY));
-        let (q_minus_1, _) = limbs_sub(&Q, &[1, 0, 0, 0]);
-        let order_two = limbs_to_bytes(&q_minus_1);
+        let (q_minus_1, _) = limbs::sbb(Q, [1, 0, 0, 0]);
+        let order_two = limbs::to_le_bytes(q_minus_1);
         assert!(Point::from_bytes(&order_two).is_some());
         assert!(!jubjub_is_prime_order(&order_two));
         assert!(jubjub_is_prime_order(&spend_auth_base()));
@@ -1623,7 +1426,7 @@ pub(super) mod tests {
         assert!(fvk.child(ZIP32_HARDENED - 1).is_some());
         // A viewing key whose ak is not a point.
         let mut broken = fvk.clone();
-        broken.ak = limbs_to_bytes(&Q);
+        broken.ak = limbs::to_le_bytes(Q);
         assert_eq!(broken.child(1), None);
         let mut broken = fvk.clone();
         broken.nk = [0xff; 32];

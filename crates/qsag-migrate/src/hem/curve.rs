@@ -33,8 +33,8 @@
 //! synthesis panics.
 //!
 //! This is the single-auxiliary-modulus-free end of the design space described in
-//! `paperbin/foreign-field-plonk.pdf` (Ambrona, Firsov, Querejeta-Azurmendi, Section 1 and
-//! the discussion of [LB22]): they check the integer identity modulo the native modulus
+//! `[AFQ22]` ("Foreign-Field Arithmetic in PLONK", Ambrona, Firsov, Querejeta-Azurmendi,
+//! Section 1 and the discussion of `[LB22]`): they check the integer identity modulo the native modulus
 //! and auxiliary moduli and bound its magnitude. That residue-number variant was costed
 //! for this system and not adopted. With 64-bit Goldilocks, residues modulo auxiliary
 //! moduli near `2^35` (the largest for which a 32-term sum of 2^22-bounded coefficients
@@ -334,18 +334,7 @@ fn run<H: Host + ?Sized, R>(host: &mut H, body: impl FnOnce(&mut Ctx) -> R) -> R
 // Fixed-width integers (branch-free where a witness can reach them)
 // ============================================================================
 
-#[inline(always)]
-fn adc(a: u64, b: u64, c: u64) -> (u64, u64) {
-    let t = a as u128 + b as u128 + c as u128;
-    (t as u64, (t >> 64) as u64)
-}
-
-#[inline(always)]
-fn sbb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
-    let t = (a as u128).wrapping_sub(b as u128 + borrow as u128);
-    (t as u64, ((t >> 64) as u64) & 1)
-}
-
+use crate::limbs::{adc_word as adc, sbb_word as sbb};
 #[inline(always)]
 fn mac(acc: u64, a: u64, b: u64, c: u64) -> (u64, u64) {
     let t = acc as u128 + (a as u128) * (b as u128) + c as u128;
@@ -365,34 +354,25 @@ fn big4(a: &[u64; 4]) -> Big {
 }
 
 fn big_add(a: &Big, b: &Big) -> (Big, u64) {
-    let mut out = [0u64; NW];
-    let mut c = 0;
-    for i in 0..NW {
-        (out[i], c) = adc(a[i], b[i], c);
-    }
-    (out, c)
+    let (sum, carry) = crate::limbs::adc(*a, *b);
+    (sum, carry as u64)
 }
 
 fn big_sub(a: &Big, b: &Big) -> (Big, u64) {
-    let mut out = [0u64; NW];
-    let mut c = 0;
-    for i in 0..NW {
-        (out[i], c) = sbb(a[i], b[i], c);
-    }
-    (out, c)
+    let (diff, borrow) = crate::limbs::sbb(*a, *b);
+    (diff, borrow as u64)
 }
 
 /// `a` where `mask` is all ones, `b` where it is zero.
 #[inline(always)]
 fn big_select(mask: u64, a: &Big, b: &Big) -> Big {
-    core::array::from_fn(|i| (a[i] & mask) | (b[i] & !mask))
+    core::array::from_fn(|i| qsag_accel::ct::ct_select_mask_u64(mask, a[i], b[i]))
 }
 
 /// All ones if `a == 0`.
 #[inline(always)]
 fn big_zero_mask(a: &Big) -> u64 {
-    let or = a.iter().fold(0, |acc, &w| acc | w);
-    ((or | or.wrapping_neg()) >> 63).wrapping_sub(1)
+    qsag_accel::ct::ct_eq_mask_u64(a.iter().fold(0, |x, &y| x | y), 0)
 }
 
 /// Little-endian bytes, at most `8 * NW` of them.
@@ -406,11 +386,7 @@ fn big_from_bytes(bytes: &[u8]) -> Big {
 }
 
 fn big_to_bytes(a: &Big) -> [u8; 8 * NW] {
-    let mut out = [0u8; 8 * NW];
-    for i in 0..NW {
-        out[8 * i..8 * i + 8].copy_from_slice(&a[i].to_le_bytes());
-    }
-    out
+    crate::limbs::to_le_bytes(*a)
 }
 
 fn big_bitlen(a: &Big) -> usize {
@@ -429,21 +405,11 @@ fn wide_from(a: &Big) -> Wide {
 }
 
 fn wide_add(a: &Wide, b: &Wide) -> Wide {
-    let mut out = [0u64; WIDE];
-    let mut c = 0;
-    for i in 0..WIDE {
-        (out[i], c) = adc(a[i], b[i], c);
-    }
-    out
+    crate::limbs::adc(*a, *b).0
 }
 
 fn wide_sub(a: &Wide, b: &Wide) -> Wide {
-    let mut out = [0u64; WIDE];
-    let mut c = 0;
-    for i in 0..WIDE {
-        (out[i], c) = sbb(a[i], b[i], c);
-    }
-    out
+    crate::limbs::sbb(*a, *b).0
 }
 
 /// Low `64 * WIDE` bits of the product.
@@ -504,17 +470,17 @@ fn wide_divrem(n: &Wide, d: &Big) -> (Wide, Big) {
 }
 
 fn wide_to_bytes(a: &Wide) -> [u8; 8 * WIDE] {
-    let mut out = [0u8; 8 * WIDE];
-    for i in 0..WIDE {
-        out[8 * i..8 * i + 8].copy_from_slice(&a[i].to_le_bytes());
-    }
-    out
+    crate::limbs::to_le_bytes(*a)
 }
 
 /// Field element of a small signed public integer.
-fn f_int(v: i128) -> F {
+pub(super) fn f_int(v: i128) -> F {
     let m = F::from_u128_reduced(v.unsigned_abs());
-    if v < 0 { -m } else { m }
+    F::from_u64_reduced(qsag_accel::ct::ct_select_u64(
+        v < 0,
+        (-m).to_canonical_u64(),
+        m.to_canonical_u64(),
+    ))
 }
 
 // ============================================================================
@@ -546,6 +512,10 @@ pub struct Modulus {
 
 impl Modulus {
     fn build(p: Big, sparse: Vec<(usize, i64)>) -> Self {
+        Self::build_with_folds(p, sparse, big_bitlen(&p).div_ceil(8) + 8)
+    }
+
+    fn build_with_folds(p: Big, sparse: Vec<(usize, i64)>, high_coefficients: usize) -> Self {
         assert!(p[0] & 1 == 1 && big_bitlen(&p) > 128, "unsupported modulus");
         let mut inv = 1u64;
         for _ in 0..6 {
@@ -604,7 +574,7 @@ impl Modulus {
         for _ in 0..8 * m.limbs {
             v = m.madd(&v, &v);
         }
-        for _ in 0..m.limbs + 8 {
+        for _ in 0..high_coefficients {
             let bytes = big_to_bytes(&v);
             let mut digits = Vec::new();
             let mut carry = 0i64;
@@ -636,6 +606,21 @@ impl Modulus {
             .map(|(k, &b)| (k, b as i64))
             .collect();
         Self::build(big_from_bytes(p_le), sparse)
+    }
+
+    /// Zcash relations keep up to 200 byte coefficients before modular reduction.
+    pub(super) fn zcash(p_le: &[u8; 32]) -> Self {
+        assert!(
+            p_le[0] & 1 == 1 && (1..128).contains(&p_le[31]),
+            "modulus must be odd and between 2^248 and 2^255"
+        );
+        let sparse = p_le
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b != 0)
+            .map(|(k, &b)| (k, i64::from(b)))
+            .collect();
+        Self::build_with_folds(big_from_bytes(p_le), sparse, 200 - 32)
     }
 
     /// `2^256 - 2^32 - 977`.
@@ -1018,18 +1003,7 @@ pub struct Element {
 
 impl Element {
     fn poly(&self) -> Poly {
-        let nbits = self.bits_le.len();
-        Poly(
-            self.bytes_le
-                .iter()
-                .enumerate()
-                .map(|(i, lc)| Coef {
-                    lc: lc.clone(),
-                    lo: 0,
-                    hi: (1i128 << (nbits - 8 * i).min(8)) - 1,
-                })
-                .collect(),
-        )
+        Lazy::from_bounded_limbs(&self.bytes_le, self.bits_le.len()).0
     }
 
     /// The value as an unreduced operand.
@@ -1122,6 +1096,46 @@ fn alloc_bits(cs: &mut Ctx, source: SourceId, value_le: &[u8], nbits: usize) -> 
 pub struct Lazy(Poly);
 
 impl Lazy {
+    pub(super) fn zero() -> Self {
+        Self(Poly::default())
+    }
+
+    pub(super) fn small(v: i64) -> Self {
+        Self(Poly(vec![Coef::constant(v.into())]))
+    }
+
+    /// Little-endian bytes already constrained by the caller.
+    pub(super) fn from_limbs(limbs: &[Lc]) -> Self {
+        Self(byte_poly(limbs))
+    }
+
+    pub(super) fn limb_forms(&self) -> Vec<Lc> {
+        self.0.0.iter().map(|c| c.lc.clone()).collect()
+    }
+
+    pub(super) fn mul(cs: &mut impl Host, a: &Self, b: &Self) -> Self {
+        if a.0.0.is_empty() || b.0.0.is_empty() {
+            return Self::zero();
+        }
+        // Public byte constants yield a linear map, with no multiplication witnesses.
+        for (factor, other) in [(a, b), (b, a)] {
+            if factor
+                .0
+                .0
+                .iter()
+                .all(|c| c.lo == c.hi && (0..=255).contains(&c.lo))
+            {
+                let bytes = factor.0.0.iter().map(|c| c.lo as u8).collect::<Vec<_>>();
+                return Self(other.0.mul_const(&bytes));
+            }
+        }
+        run(cs, |cs| Self(mul_poly(cs, &a.0, &b.0)))
+    }
+
+    pub(super) fn square(cs: &mut impl Host, a: &Self) -> Self {
+        Self::mul(cs, a, a)
+    }
+
     /// A public constant, little-endian.
     pub fn constant(value_le: &[u8]) -> Self {
         Self(Poly::constant_bytes(value_le))
@@ -1148,6 +1162,21 @@ impl Lazy {
         ))
     }
 
+    pub(super) fn from_bounded_limbs(limbs: &[Lc], nbits: usize) -> Self {
+        debug_assert_eq!(limbs.len(), nbits.div_ceil(8));
+        Self(Poly(
+            limbs
+                .iter()
+                .enumerate()
+                .map(|(i, lc)| Coef {
+                    lc: lc.clone(),
+                    lo: 0,
+                    hi: (1i128 << (nbits - 8 * i).min(8)) - 1,
+                })
+                .collect(),
+        ))
+    }
+
     pub fn add(&self, rhs: &Lazy) -> Lazy {
         Lazy(self.0.add(&rhs.0))
     }
@@ -1157,8 +1186,8 @@ impl Lazy {
     }
 
     /// Multiply by a small public integer.
-    pub fn scale(&self, k: i32) -> Lazy {
-        Lazy(self.0.scale(k as i64))
+    pub fn scale(&self, k: impl Into<i64>) -> Lazy {
+        Lazy(self.0.scale(k.into()))
     }
 }
 
@@ -1170,15 +1199,21 @@ fn reduce_poly(cs: &mut Ctx, m: &Modulus, a: &Poly) -> Element {
     out
 }
 
+pub(super) fn alloc_integer(cs: &mut impl Host, value: &[u8], bits: usize) -> Element {
+    run(cs, |cs| {
+        let source = cs.source(|| Source::Input { bits: bits as u32 });
+        alloc_int(cs, source, value, bits)
+    })
+}
+
+pub(super) fn enforce_bound(cs: &mut impl Host, bits: &[Lc], bound: &[u8]) {
+    run(cs, |cs| enforce_le_const(cs, bits, bound))
+}
+
 impl Modulus {
     /// A fresh witness of [`Self::bits`] bits holding `value_le mod 2^bits`.
     pub fn alloc(&self, cs: &mut impl Host, value_le: &[u8]) -> Element {
-        run(cs, |cs| {
-            let source = cs.source(|| Source::Input {
-                bits: self.bits as u32,
-            });
-            alloc_int(cs, source, value_le, self.bits)
-        })
+        alloc_integer(cs, value_le, self.bits)
     }
 
     /// The canonical residue of `a` under the current assignment, little-endian, one byte
@@ -1215,14 +1250,22 @@ impl Modulus {
     }
 
     /// `a <= p - 1`, which makes `a` the unique representative of its residue.
+    pub(super) fn enforce_canonical_bits(&self, cs: &mut impl Host, bits: &[Lc]) {
+        run(cs, |cs| canonical_bits(cs, self, bits))
+    }
+
     pub fn enforce_canonical(&self, cs: &mut impl Host, a: &Element) {
         run(cs, |cs| canonical(cs, self, a))
     }
 }
 
 fn canonical(cs: &mut Ctx, m: &Modulus, a: &Element) {
+    canonical_bits(cs, m, &a.bits_le);
+}
+
+fn canonical_bits(cs: &mut Ctx, m: &Modulus, bits: &[Lc]) {
     let (pm1, _) = big_sub(&m.p, &big(1));
-    enforce_le_const(cs, &a.bits_le, &big_to_bytes(&pm1));
+    enforce_le_const(cs, bits, &big_to_bytes(&pm1));
 }
 
 /// The integer `a` as a fresh witness of `bits` bits: an exact equality, with no modulus.
@@ -2030,8 +2073,15 @@ fn window_point(cs: &mut Ctx, table: &WindowTable, bits: &[Lc]) -> (Poly, Poly) 
 /// `(xt, yt) = (x1, -y1)` the first equation reads `0 = 2 yt`, which no point of odd order
 /// satisfies. So a `complete` step is exact for every pair of points of odd order whose sum
 /// is not the identity, and unsatisfiable when it is.
-fn add_step(cs: &mut Ctx, curve: &Curve, acc: &Acc, xt: &Poly, yt: &Poly, complete: bool) -> Acc {
-    let f = &curve.f;
+fn add_step(
+    cs: &mut Ctx,
+    model: (&Modulus, u64, u64),
+    acc: &Acc,
+    xt: &Poly,
+    yt: &Poly,
+    complete: bool,
+) -> Acc {
+    let (f, a2_word, a4_word) = model;
     let x1 = f.poly_value(cs, &acc.x);
     let y1 = f.poly_value(cs, &acc.y);
     let x2 = f.poly_value(cs, xt);
@@ -2042,25 +2092,25 @@ fn add_step(cs: &mut Ctx, curve: &Curve, acc: &Acc, xt: &Poly, yt: &Poly, comple
         let num = f.madd(
             &f.madd(
                 &f.mmul(&f.small(3), &f.mmul(&x1, &x1)),
-                &f.mmul(&f.small(2 * curve.a2), &x1),
+                &f.mmul(&f.small(2 * a2_word), &x1),
             ),
-            &f.small(curve.a4),
+            &f.small(a4_word),
         );
         let tangent = f.mmul(&num, &f.inv(&f.madd(&y1, &y1)));
         lam = big_select(big_zero_mask(&dx), &tangent, &lam);
     }
     let x3 = f.msub(
-        &f.msub(&f.msub(&f.mmul(&lam, &lam), &f.small(curve.a2)), &x1),
+        &f.msub(&f.msub(&f.mmul(&lam, &lam), &f.small(a2_word)), &x1),
         &x2,
     );
     cs.hints.divisions += 1;
-    let a2 = Poly::constant_bytes(&curve.a2.to_le_bytes()[..3]);
+    let a2 = Poly::constant_bytes(&a2_word.to_le_bytes()[..3]);
     let source = if complete {
         // Where the two points share `x` the slope is the tangent at the accumulator.
         let tangent_linear = acc
             .x
-            .mul_const(&(2 * curve.a2).to_le_bytes()[..3])
-            .add(&Poly::constant_bytes(&curve.a4.to_le_bytes()[..1]));
+            .mul_const(&(2 * a2_word).to_le_bytes()[..3])
+            .add(&Poly::constant_bytes(&a4_word.to_le_bytes()[..1]));
         cs.source(|| Source::Slope {
             num: int_coefs(&yt.sub(&acc.y)),
             den: int_coefs(&xt.sub(&acc.x)),
@@ -2100,8 +2150,8 @@ fn add_step(cs: &mut Ctx, curve: &Curve, acc: &Acc, xt: &Poly, yt: &Poly, comple
         let t3 = mul_poly(cs, &acc.x, &x3_p.add(&acc.x.scale(2)).add(xt));
         let linear = acc
             .x
-            .mul_const(&(2 * curve.a2).to_le_bytes()[..3])
-            .add(&Poly::constant_bytes(&curve.a4.to_le_bytes()[..1]));
+            .mul_const(&(2 * a2_word).to_le_bytes()[..3])
+            .add(&Poly::constant_bytes(&a4_word.to_le_bytes()[..1]));
         enforce_zero_mod(cs, f, &t1.scale(2).add(&t2).sub(&t3).sub(&linear));
     }
 
@@ -2111,6 +2161,57 @@ fn add_step(cs: &mut Ctx, curve: &Curve, acc: &Acc, xt: &Poly, yt: &Poly, comple
         y: back.sub(yt),
         x_element: Some(x3),
     }
+}
+
+/// Affine coordinates with denominators `d` and `2 - d` in the complete
+/// twisted Edwards addition law with a = -1. Its addition and doubling
+/// formulas guarantee both denominators are nonzero on curve points.
+pub(super) fn edwards_coordinates(
+    cs: &mut impl Host,
+    f: &Modulus,
+    d: &Lazy,
+    u_numerator: &Lazy,
+    v_numerator: &Lazy,
+) -> (Element, Element) {
+    run(cs, |cs| {
+        let mut quotient = |numerator: &Lazy, denominator: &Lazy| {
+            let n = f.poly_value(cs, &numerator.0);
+            let d = f.poly_value(cs, &denominator.0);
+            let value = f.canon(&f.mmul(&n, &f.inv(&d)));
+            let hint = residue_source(cs, f, &[], &numerator.0, Some(&denominator.0));
+            cs.hints.divisions += 1;
+            let result = alloc_int(cs, hint, &big_to_bytes(&value), f.bits);
+            let product = mul_poly(cs, &result.poly(), &denominator.0);
+            enforce_zero_mod(cs, f, &product.sub(&numerator.0));
+            result
+        };
+        let u = quotient(u_numerator, d);
+        let v = quotient(v_numerator, &Lazy::small(2).sub(d));
+        (u, v)
+    })
+}
+
+/// Affine chord or tangent for a short Weierstrass curve with a = 0.
+pub(super) fn short_weierstrass_sum(
+    cs: &mut impl Host,
+    f: &Modulus,
+    p: (&Lazy, &Lazy),
+    q: (&Lazy, &Lazy),
+    tangent: bool,
+) -> (Element, Lazy) {
+    run(cs, |cs| {
+        let acc = Acc {
+            x: p.0.0.clone(),
+            y: p.1.0.clone(),
+            x_element: None,
+        };
+        let sum = add_step(cs, (f, 0, 0), &acc, &q.0.0, &q.1.0, tangent);
+        (
+            sum.x_element
+                .expect("affine sum allocates its x coordinate"),
+            Lazy(sum.y),
+        )
+    })
 }
 
 /// `[k] G` for the Boolean little-endian scalar bits: the final `x` (a reduced witness) and
@@ -2127,7 +2228,9 @@ fn fixed_base_mul(cs: &mut Ctx, curve: &Curve, scalar_bits_le: &[Lc]) -> Acc {
                 y: yt,
                 x_element: None,
             },
-            Some(prev) if table.signed => add_step(cs, curve, &prev, &xt, &yt, false),
+            Some(prev) if table.signed => {
+                add_step(cs, (&curve.f, curve.a2, curve.a4), &prev, &xt, &yt, false)
+            }
             // The unsigned window's point has `y` in limbs, so it takes the accumulator
             // role and the tangent equation needs no reduction of the running `y`.
             Some(prev) => {
@@ -2136,7 +2239,14 @@ fn fixed_base_mul(cs: &mut Ctx, curve: &Curve, scalar_bits_le: &[Lc]) -> Acc {
                     y: yt,
                     x_element: None,
                 };
-                add_step(cs, curve, &last, &prev.x, &prev.y, true)
+                add_step(
+                    cs,
+                    (&curve.f, curve.a2, curve.a4),
+                    &last,
+                    &prev.x,
+                    &prev.y,
+                    true,
+                )
             }
         });
     }
@@ -2159,7 +2269,14 @@ fn add_to_fixed_base(
         y: py.clone(),
         x_element: None,
     };
-    add_step(cs, curve, &point, &multiple.x, &multiple.y, true)
+    add_step(
+        cs,
+        (&curve.f, curve.a2, curve.a4),
+        &point,
+        &multiple.x,
+        &multiple.y,
+        true,
+    )
 }
 
 /// A field element in its canonical representation.
@@ -2235,7 +2352,7 @@ pub fn secp256k1_point_add(cs: &mut impl Host, p: &AffinePoint, q: &AffinePoint)
                 x_element: None,
             };
             let (qx, qy) = (narrow(cs, &q.x), narrow(cs, &q.y));
-            let sum = add_step(cs, curve, &acc, &qx, &qy, true);
+            let sum = add_step(cs, (&curve.f, curve.a2, curve.a4), &acc, &qx, &qy, true);
             AffinePoint {
                 x: Lazy(sum.x),
                 y: reduce_poly(cs, f, &sum.y).lazy(),

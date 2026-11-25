@@ -58,14 +58,14 @@ impl HashDomain {
 
     /// The starting point `Q(D)`.
     pub fn q(&self) -> Point {
-        self.q
+        self.q.clone()
     }
 
     /// `SinsemillaHashToPoint`; `None` is `⊥`.
     pub fn hash_to_point(&self, bits: &[bool]) -> Option<Point> {
         assert!(bits.len() <= K * C, "Sinsemilla message too long");
         let table = s_table();
-        let mut acc = self.q;
+        let mut acc = self.q.clone();
         let mut valid = true;
         for chunk in bits.chunks(K) {
             let index = chunk
@@ -115,12 +115,12 @@ impl CommitDomain {
     }
 
     pub fn q(&self) -> Point {
-        self.m.q
+        self.m.q.clone()
     }
 
     /// The randomness base `R`.
     pub fn r(&self) -> Point {
-        self.r
+        self.r.clone()
     }
 
     /// `SinsemillaCommit_r(D, M)`; `None` is `⊥`. The last addition is the complete one.

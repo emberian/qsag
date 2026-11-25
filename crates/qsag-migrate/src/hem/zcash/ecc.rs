@@ -34,10 +34,7 @@ use super::poseidon;
 
 type F = Goldilocks;
 
-fn f_int(v: i64) -> F {
-    let m = F::from_u64_reduced(v.unsigned_abs());
-    if v < 0 { F::ZERO - m } else { m }
-}
+use crate::hem::curve::f_int;
 
 fn const_value(lc: &Lc) -> Option<F> {
     match lc.terms() {
@@ -151,7 +148,7 @@ impl PointTable {
                         .iter()
                         .enumerate()
                         .filter(|&(s, _)| coef[(h << low_bits) | s] != 0)
-                        .map(|(s, m)| (f_int(coef[(h << low_bits) | s] as i64), m))
+                        .map(|(s, m)| (f_int(coef[(h << low_bits) | s] as i128), m))
                         .collect();
                     Lc::combine(&parts)
                 })
@@ -344,56 +341,40 @@ pub fn add(
         );
         enforce_limbs_differ(cs, &a.x, &b.x);
     }
-    let mut a = a.clone();
-    a.relax(cs, f);
-    let ((ax, ay), (bx, by)) = (a.values(cs, f), b.values(cs, f));
-    let lam_v = (by - ay) * (bx - ax).invert();
-    let x3_v = lam_v.square() - ax - bx;
-    let lam = f.alloc(cs, &lam_v.to_bytes()).num();
-    let (axn, bxn) = (a.x_num(), b.x_num());
-    let t = Num::mul(cs, &lam, &bxn.sub(&axn));
-    f.enforce_zero(cs, &t.sub(&b.y).add(&a.y));
-    let x3 = f.alloc(cs, &x3_v.to_bytes());
-    let lam2 = Num::square(cs, &lam);
-    f.enforce_zero(cs, &lam2.sub(&axn).sub(&bxn).sub(&x3.num()));
-    if canonical {
-        f.enforce_canonical(cs, &x3);
-    }
-    let y3 = Num::mul(cs, &lam, &axn.sub(&x3.num())).sub(&a.y);
-    Pt {
-        x: x3.limbs,
-        x_bits: Some(x3.bits),
-        x_canonical: canonical,
-        y: y3,
-        lazy: a.lazy + 1,
-    }
+    affine_sum(cs, f, a, b, false, canonical)
 }
 
-/// `2 a`. Pallas has no point with `y = 0`, so the tangent slope is unique.
+/// Double a Pallas point using its unique tangent.
 pub fn double(cs: &mut ConstraintSystem, f: &Field, a: &Pt, canonical: bool) -> Pt {
-    let mut a = a.clone();
-    a.relax(cs, f);
-    let (ax, ay) = a.values(cs, f);
-    let lam_v = ax.square() * Fp::from_u64(3) * ay.double().invert();
-    let x3_v = lam_v.square() - ax.double();
-    let lam = f.alloc(cs, &lam_v.to_bytes()).num();
-    let axn = a.x_num();
-    let t = Num::mul(cs, &lam, &a.y.scale(2));
-    let xx = Num::square(cs, &axn);
-    f.enforce_zero(cs, &t.sub(&xx.scale(3)));
-    let x3 = f.alloc(cs, &x3_v.to_bytes());
-    let lam2 = Num::square(cs, &lam);
-    f.enforce_zero(cs, &lam2.sub(&axn.scale(2)).sub(&x3.num()));
+    affine_sum(cs, f, a, a, true, canonical)
+}
+
+fn affine_sum(
+    cs: &mut ConstraintSystem,
+    f: &Field,
+    a: &Pt,
+    b: &Pt,
+    tangent: bool,
+    canonical: bool,
+) -> Pt {
+    let mut right = b.clone();
+    right.relax(cs, f);
+    let (x, y) = crate::hem::curve::short_weierstrass_sum(
+        cs,
+        &f.0,
+        (&a.x_num(), &a.y),
+        (&right.x_num(), &right.y),
+        tangent,
+    );
     if canonical {
-        f.enforce_canonical(cs, &x3);
+        f.0.enforce_canonical(cs, &x);
     }
-    let y3 = Num::mul(cs, &lam, &axn.sub(&x3.num())).sub(&a.y);
     Pt {
-        x: x3.limbs,
-        x_bits: Some(x3.bits),
+        x: x.bytes_le,
+        x_bits: Some(x.bits_le),
         x_canonical: canonical,
-        y: y3,
-        lazy: a.lazy + 1,
+        y,
+        lazy: right.lazy + 1,
     }
 }
 
@@ -420,7 +401,7 @@ pub struct FixedBase {
 impl FixedBase {
     pub fn new(base: &Point) -> Self {
         let mut windows = Vec::with_capacity(WINDOWS);
-        let mut p = *base;
+        let mut p = base.clone();
         let mut offset = Point::IDENTITY;
         let affine = |points: &[Point]| -> Vec<(Fp, Fp)> {
             Point::batch_to_affine(points)
@@ -434,8 +415,9 @@ impl FixedBase {
             let mut cur = two_p;
             let mut points = Vec::with_capacity(1 << WINDOW);
             for _ in 0..1 << WINDOW {
+                let next = cur.add(&p);
                 points.push(cur);
-                cur = cur.add(&p);
+                cur = next;
             }
             windows.push(affine(&points));
             for _ in 0..WINDOW {
@@ -446,8 +428,9 @@ impl FixedBase {
         let mut cur = offset.neg();
         let mut points = Vec::with_capacity(1 << last_bits);
         for _ in 0..1 << last_bits {
+            let next = cur.add(&p);
             points.push(cur);
-            cur = cur.add(&p);
+            cur = next;
         }
         windows.push(affine(&points));
         Self { windows }
@@ -552,8 +535,8 @@ fn var_base_offset() -> Fq {
     let mut pow = Fq::ONE;
     let mut ones = Fq::ZERO;
     for _ in 0..VAR_DIGITS {
-        ones = ones + pow;
-        pow = pow * eight;
+        ones = ones.add_mod(&pow);
+        pow = pow.mul_mod(&eight);
     }
     pow.double() + ones
 }
@@ -579,7 +562,7 @@ pub fn var_base_mul(
     let k_num = Num::from_bits(k_bits);
     let offset = var_base_offset();
     let k_value = Fq::from_bytes(&fq.value(cs, &k_num)).expect("canonical residue");
-    let s = fq.alloc(cs, &(k_value - offset).to_bytes());
+    let s = fq.alloc(cs, &k_value.sub_mod(&offset).to_bytes());
     fq.enforce_zero(
         cs,
         &s.num().add(&Num::constant(&offset.to_bytes())).sub(&k_num),
@@ -775,7 +758,7 @@ mod tests {
     fn sample_scalar(i: u64) -> Fq {
         let mut x = Fq::from_u64(0x1234_5678_9abc_def1 ^ i);
         for _ in 0..5 {
-            x = x * x + Fq::from_u64(i + 1);
+            x = x.square() + Fq::from_u64(i + 1);
         }
         x
     }
