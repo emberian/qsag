@@ -211,6 +211,7 @@ fn run_hem_finality_section(shards: usize, per_shard: usize) {
     .unwrap();
     let s0_prove_ms = t_s0.elapsed().as_secs_f64() * 1_000.0;
     assert!(verify_hem_quintic_128(
+        HemQuinticProfile::TurboShake400,
         &policies[0].quorum_keys,
         &s0_mode,
         &s0_proof
@@ -272,7 +273,9 @@ fn run_hem_finality_section(shards: usize, per_shard: usize) {
 }
 
 fn main() {
-    println!("=== Solana Alpenglow Quintic Fp5 (`QSAGHQM2` / `QSAGHEM\\x04`, DKT26 < 2^-128 QROM) ===");
+    println!(
+        "=== Solana Alpenglow Quintic Fp5 (`QSAGHQM2` / `QSAGHEM\\x04`, DKT26 < 2^-128 QROM) ==="
+    );
     run_votor_fts_section(64);
     run_hem_finality_section(2, 32);
 }

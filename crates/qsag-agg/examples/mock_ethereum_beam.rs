@@ -179,6 +179,7 @@ fn run_beam_hierarchy_bench(label: &str, subnet_specs: &[(u64, AggSigProfile, us
     .expect("quintic subnet proof");
     let sub_prove_ms = t_sub.elapsed().as_secs_f64() * 1_000.0;
     assert!(verify_hem_quintic_128(
+        HemQuinticProfile::TurboShake400,
         &policies[0].quorum_keys,
         &sub0_mode,
         &sub0_proof
@@ -283,7 +284,9 @@ fn run_dvt_cluster_bench() {
 }
 
 fn main() {
-    println!("=== Ethereum Beam Chain Quintic Fp5 (`QSAGHQM2` / `QSAGHEM\\x04`, DKT26 < 2^-128 QROM) ===");
+    println!(
+        "=== Ethereum Beam Chain Quintic Fp5 (`QSAGHQM2` / `QSAGHEM\\x04`, DKT26 < 2^-128 QROM) ==="
+    );
     run_beam_hierarchy_bench(
         "4x32 JortsPoseidon2",
         &[
