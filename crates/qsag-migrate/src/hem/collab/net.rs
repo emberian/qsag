@@ -46,16 +46,11 @@
 //! # What it assumes
 //!
 //! * **Pairwise secrets provisioned out of band.** `keys[p]` is a uniform 32-byte secret
-//!   known to this custodian and custodian `p` only. This module contains no key
-//!   exchange. A deployment takes the secret from what its custodians already have: a
-//!   key enrolled for each pair when the custody group is formed, or the exported key
-//!   of the mutually authenticated key agreement its operators already run between the
-//!   custodians' hosts (a post-quantum one if the witness must stay private from a
-//!   later quantum adversary), bound to both custodians' identities. The same long-term
-//!   secret may serve many sessions, because every key in use is derived from it
-//!   together with the session id and the direction; whoever keeps the long-term
-//!   secret can re-derive the keys of past sessions, so erase it or rotate it when
-//!   earlier sessions must stay private after a later compromise.
+//!   known to this custodian and custodian `p` only. TCP custodians authenticate
+//!   the quorum channel's ephemeral hybrid handshake with these secrets. The
+//!   lower-level [`Framed::new`] directly provisions session keys.
+//! * **Fresh private entropy.** Generate an independent 32-byte ephemeral seed on
+//!   each host for each handshake, including retries.
 //! * **A fresh session id per mesh.** Sequence numbers start at zero whenever endpoints
 //!   are created. Two meshes with the same pairwise secret and the same session id use
 //!   the same keystream, so the session id must never repeat for a pair (take it from a
@@ -64,6 +59,7 @@
 //!   thread channel or a TCP stream.
 
 use alloc::vec::Vec;
+use qsag_core::wipe::SecretBuffer;
 
 use qsag_quorum::wire_channel::{
     self as wire, ConfidentialWireChannel, TransportError, WireTransport,
@@ -72,6 +68,8 @@ use qsag_quorum::wire_channel::{
 /// Round tag of every sealed frame of this transport (`"QSCF"`). It is MAC-bound, so a
 /// frame of another protocol run over the same channel construction is not a frame here.
 pub const ROUND_TAG: u32 = u32::from_be_bytes(*b"QSCF");
+// Obsolete static-PSK confirmation is incompatible with the hybrid mesh.
+const PSK_CONFIRMATION: u32 = u32::from_be_bytes(*b"QSHS");
 /// Largest frame a [`Link`] is asked to carry.
 pub const MAX_SEALED_FRAME_BYTES: usize = wire::MAX_FRAME_PAYLOAD;
 /// Bytes a sealed frame adds to its fragment: header, mode byte and tag.
@@ -98,6 +96,8 @@ pub enum NetError {
         peer: usize,
     },
     PayloadTooLarge,
+    /// The channel implementation offered static PSK confirmation only.
+    ForwardSecrecyUnavailable,
 }
 
 /// One custodian's links to the others.
@@ -107,6 +107,40 @@ pub trait Transport {
     fn send(&mut self, to: usize, payload: &[u8]) -> Result<(), NetError>;
     /// Blocks until the next message from `from` arrives.
     fn recv(&mut self, from: usize) -> Result<Vec<u8>, NetError>;
+
+    /// Receive a protocol message with a public size limit.
+    fn recv_bounded(&mut self, from: usize, limit: usize) -> Result<Vec<u8>, NetError> {
+        let bytes = SecretBuffer(self.recv(from)?);
+        if bytes.len() > limit {
+            return Err(NetError::PayloadTooLarge);
+        }
+        Ok(bytes.into_inner())
+    }
+}
+
+/// Broadcasts take sender turns so even a message larger than a socket buffer
+/// always has a peer reading it. Results include the local contribution.
+pub(super) fn exchange<T: Transport>(
+    net: &mut T,
+    payload: SecretBuffer<Vec<u8>>,
+    limit: usize,
+) -> Result<SecretBuffer<Vec<Vec<u8>>>, NetError> {
+    if net.me() >= net.parties() {
+        return Err(NetError::UnknownPeer { peer: net.me() });
+    }
+    let mut all = SecretBuffer(Vec::with_capacity(net.parties()));
+    for sender in 0..net.parties() {
+        if sender == net.me() {
+            for peer in (0..net.parties()).filter(|&peer| peer != sender) {
+                net.send(peer, &payload)?;
+            }
+            all.push(Vec::new());
+        } else {
+            all.push(net.recv_bounded(sender, limit)?);
+        }
+    }
+    all[net.me()] = payload.into_inner();
+    Ok(all)
 }
 
 /// A [`Link`] can carry no more frames.
@@ -148,7 +182,15 @@ impl<L: Link> WireTransport for Links<L> {
         self.links.len()
     }
 
-    fn send_frame(&mut self, to: usize, _round: u32, sealed: &[u8]) -> Result<(), TransportError> {
+    fn send_frame(&mut self, to: usize, round: u32, sealed: &[u8]) -> Result<(), TransportError> {
+        // The PSK-only confirmation has no ephemeral contribution. Reject it before
+        // any authentication token or custody data can leave the process.
+        if round == PSK_CONFIRMATION {
+            return Err(TransportError::RoundTagMismatch {
+                expected: ROUND_TAG,
+                got: round,
+            });
+        }
         self.link(to)?
             .send_frame(sealed)
             .map_err(|LinkClosed| TransportError::Closed { peer: to })
@@ -161,8 +203,14 @@ impl<L: Link> WireTransport for Links<L> {
     fn recv_authenticated_envelope(
         &mut self,
         from: usize,
-        _round: u32,
+        round: u32,
     ) -> Result<Vec<u8>, TransportError> {
+        if round == PSK_CONFIRMATION {
+            return Err(TransportError::RoundTagMismatch {
+                expected: ROUND_TAG,
+                got: round,
+            });
+        }
         self.link(from)?
             .recv_frame()
             .map_err(|LinkClosed| TransportError::Closed { peer: from })
@@ -173,9 +221,14 @@ fn net_error(e: TransportError, peer: usize) -> NetError {
     match e {
         TransportError::UnknownPeer { peer } => NetError::UnknownPeer { peer },
         TransportError::PayloadTooLarge => NetError::PayloadTooLarge,
-        TransportError::Closed { .. }
-        | TransportError::Timeout { .. }
-        | TransportError::SequenceExhausted => NetError::Closed { peer },
+        TransportError::Closed { peer } | TransportError::Timeout { peer } => {
+            NetError::Closed { peer }
+        }
+        TransportError::SequenceExhausted => NetError::Closed { peer },
+        TransportError::RoundTagMismatch {
+            got: PSK_CONFIRMATION,
+            ..
+        } => NetError::ForwardSecrecyUnavailable,
         TransportError::Malformed
         | TransportError::SessionMismatch
         | TransportError::AuthenticationFailed
@@ -187,6 +240,11 @@ fn net_error(e: TransportError, peer: usize) -> NetError {
 
 /// The sealed [`Transport`] over one [`Link`] per peer; see the module documentation for
 /// what it guarantees and assumes.
+///
+/// The public-session-derived mesh is confined to unit tests.
+/// ```compile_fail
+/// use qsag_migrate::hem::collab::net::channel_mesh;
+/// ```
 pub struct Framed<L: Link> {
     channel: ConfidentialWireChannel<Links<L>>,
     /// Fragments of the message being received from each peer.
@@ -194,6 +252,44 @@ pub struct Framed<L: Link> {
 }
 
 impl<L: Link> Framed<L> {
+    /// Establish one authenticated session with each configured peer.
+    pub fn establish_pq_hybrid(
+        deployment_id: [u8; 32],
+        session: [u8; 32],
+        me: usize,
+        links: Vec<Option<L>>,
+        mut static_psks: Vec<[u8; 32]>,
+        mut ephemeral_seed: [u8; 32],
+    ) -> Result<Self, NetError> {
+        let n = links.len();
+        let valid = (2..=u16::MAX as usize).contains(&n)
+            && me < n
+            && static_psks.len() == n
+            && links
+                .iter()
+                .enumerate()
+                .all(|(i, link)| link.is_some() == (i != me));
+        if !valid {
+            static_psks
+                .iter_mut()
+                .for_each(qsag_core::wipe::wipe_bytes32);
+            qsag_core::wipe::wipe_bytes32(&mut ephemeral_seed);
+            return Err(NetError::BadFrame { peer: me });
+        }
+        let channel = ConfidentialWireChannel::establish_pq_hybrid(
+            Links { me, links },
+            deployment_id,
+            session,
+            static_psks,
+            ephemeral_seed,
+        );
+        qsag_core::wipe::wipe_bytes32(&mut ephemeral_seed);
+        Ok(Self {
+            channel: channel.map_err(|e| net_error(e, me))?,
+            partial: (0..n).map(|_| Vec::new()).collect(),
+        })
+    }
+
     /// `links[p]` must be `Some` exactly for `p != me`, and `keys[p]` is the secret this
     /// party shares with `p` alone (`keys[me]` is ignored). `session` must be new for
     /// these keys. `keys` is erased before this returns.
@@ -245,9 +341,11 @@ impl<L: Link> Transport for Framed<L> {
         if payload.len() > MAX_MESSAGE_BYTES {
             return Err(NetError::PayloadTooLarge);
         }
-        let mut fragment = qsag_core::wipe::SecretScratch::with_capacity(1 + payload.len().min(MAX_FRAGMENT_BYTES));
+        let mut fragment = qsag_core::wipe::SecretScratch::with_capacity(
+            1 + payload.len().min(MAX_FRAGMENT_BYTES),
+        );
         let mut rest = payload;
-        let sent = loop {
+        loop {
             let (data, tail) = rest.split_at(rest.len().min(MAX_FRAGMENT_BYTES));
             fragment.clear();
             fragment.push(u8::from(!tail.is_empty()));
@@ -259,11 +357,15 @@ impl<L: Link> Transport for Framed<L> {
                 break Ok(());
             }
             rest = tail;
-        };
-        sent
+        }
     }
 
     fn recv(&mut self, from: usize) -> Result<Vec<u8>, NetError> {
+        self.recv_bounded(from, MAX_MESSAGE_BYTES)
+    }
+
+    fn recv_bounded(&mut self, from: usize, limit: usize) -> Result<Vec<u8>, NetError> {
+        let limit = limit.min(MAX_MESSAGE_BYTES);
         loop {
             // A refused frame leaves the channel and `partial[from]` as they were.
             let mut fragment = self
@@ -276,7 +378,7 @@ impl<L: Link> Transport for Framed<L> {
                     if more <= 1
                         && (more == 0 || data.len() == MAX_FRAGMENT_BYTES)
                         && !(more == 0 && data.is_empty() && !partial.is_empty())
-                        && partial.len() + data.len() <= MAX_MESSAGE_BYTES =>
+                        && partial.len() + data.len() <= limit =>
                 {
                     qsag_core::wipe::secret_vec_extend_from_slice(partial, data);
                     Some(more == 1)
@@ -311,6 +413,24 @@ mod with_std {
     pub struct ChannelLink {
         tx: Sender<Vec<u8>>,
         rx: Receiver<Vec<u8>>,
+    }
+
+    impl ChannelLink {
+        /// Two ends of a bidirectional raw link. Session keys are established by the caller.
+        pub fn pair() -> (Self, Self) {
+            let (to_b, from_a) = channel();
+            let (to_a, from_b) = channel();
+            (
+                Self {
+                    tx: to_b,
+                    rx: from_b,
+                },
+                Self {
+                    tx: to_a,
+                    rx: from_a,
+                },
+            )
+        }
     }
 
     impl Link for ChannelLink {
@@ -351,8 +471,107 @@ mod with_std {
         }
     }
 
+    /// Bind our advertised address and connect to each lower-indexed custodian.
+    pub fn connect_tcp_stream_mesh(
+        deployment_id: [u8; 32],
+        session: [u8; 32],
+        me: usize,
+        addrs: &[std::net::SocketAddr],
+        static_psks: Vec<[u8; 32]>,
+        mut ephemeral_seed: [u8; 32],
+        timeout: std::time::Duration,
+    ) -> std::io::Result<Framed<StreamLink<std::net::TcpStream>>> {
+        use std::io::{Error, ErrorKind};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+        let keys = SecretBuffer(static_psks);
+        let seed = SecretBuffer(ephemeral_seed);
+        qsag_core::wipe::wipe_bytes32(&mut ephemeral_seed);
+        let invalid = || Error::new(ErrorKind::InvalidInput, "invalid custodian mesh");
+        if !(2..=u16::MAX as usize).contains(&addrs.len())
+            || me >= addrs.len()
+            || keys.len() != addrs.len()
+            || timeout.is_zero()
+            || addrs
+                .iter()
+                .enumerate()
+                .any(|(i, a)| addrs[..i].contains(a))
+        {
+            return Err(invalid());
+        }
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(invalid)?;
+        let remaining = || {
+            deadline
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| Error::new(ErrorKind::TimedOut, "custodian mesh setup timed out"))
+        };
+        let retry = || -> std::io::Result<()> {
+            std::thread::sleep(remaining()?.min(Duration::from_millis(10)));
+            Ok(())
+        };
+        let configure = |stream: &TcpStream| {
+            stream.set_nodelay(true)?;
+            stream.set_read_timeout(Some(timeout))?;
+            stream.set_write_timeout(Some(timeout))
+        };
+        let listener = TcpListener::bind(addrs[me])?;
+        listener.set_nonblocking(true)?;
+        let mut links: Vec<_> = (0..addrs.len()).map(|_| None).collect();
+        for (peer, addr) in addrs[..me].iter().enumerate() {
+            let mut stream = loop {
+                match TcpStream::connect_timeout(addr, remaining()?) {
+                    Ok(s) => break s,
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            ErrorKind::ConnectionRefused | ErrorKind::Interrupted
+                        ) =>
+                    {
+                        retry()?
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            configure(&stream)?;
+            stream.write_all(&(me as u16).to_le_bytes())?;
+            links[peer] = Some(StreamLink(stream));
+        }
+        for _ in me + 1..addrs.len() {
+            let mut stream = loop {
+                remaining()?;
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(e)
+                        if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) =>
+                    {
+                        retry()?
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            // BSD sockets inherit the listener's nonblocking flag on accept.
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(remaining()?))?;
+            let mut route = [0; 2];
+            stream.read_exact(&mut route)?;
+            let peer = u16::from_le_bytes(route) as usize;
+            if peer <= me || peer >= links.len() || links[peer].is_some() {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "invalid custodian route",
+                ));
+            }
+            configure(&stream)?;
+            links[peer] = Some(StreamLink(stream));
+        }
+        Framed::establish_pq_hybrid(deployment_id, session, me, links, keys.into_inner(), *seed)
+            .map_err(|e| Error::other(std::format!("custodian handshake failed: {e:?}")))
+    }
+
     /// The pairwise secret [`channel_mesh`] gives the pair `lo < hi`. Anyone who knows the
     /// session id can compute it.
+    #[cfg(test)]
     fn in_process_pairwise_key(session: &[u8; 32], lo: usize, hi: usize) -> [u8; 32] {
         let mut xof = qsag_core::sponge::keccak::Cshake256Xof::new(
             b"QSAG.MIGRATE.COLLAB.IN_PROCESS_LINK_KEY/v1",
@@ -366,10 +585,8 @@ mod with_std {
     }
 
     /// Sealed transports of `parties` custodians joined pairwise by thread channels, in
-    /// party order, for tests and for custodians that are threads of one process. The
-    /// pairwise secrets are derived from `session` alone, so they protect nothing once the
-    /// frames leave the process: custodians on separate hosts call [`Framed::new`] with
-    /// provisioned secrets.
+    /// party order. The test keys are derived from the public session ID.
+    #[cfg(test)]
     pub fn channel_mesh(session: [u8; 32], parties: usize) -> Vec<Framed<ChannelLink>> {
         let mut links: Vec<Vec<Option<ChannelLink>>> = (0..parties)
             .map(|_| (0..parties).map(|_| None).collect())
@@ -378,16 +595,9 @@ mod with_std {
         let mut a = 0;
         while let Some((row_a, rest)) = rows.split_first_mut() {
             for (offset, row_b) in rest.iter_mut().enumerate() {
-                let (tx_ab, rx_ab) = channel();
-                let (tx_ba, rx_ba) = channel();
-                row_a[a + 1 + offset] = Some(ChannelLink {
-                    tx: tx_ab,
-                    rx: rx_ba,
-                });
-                row_b[a] = Some(ChannelLink {
-                    tx: tx_ba,
-                    rx: rx_ab,
-                });
+                let (left, right) = ChannelLink::pair();
+                row_a[a + 1 + offset] = Some(left);
+                row_b[a] = Some(right);
             }
             rows = rest;
             a += 1;
@@ -469,6 +679,58 @@ mod tests {
 
     const SESSION: [u8; 32] = [7u8; 32];
     const BAD: Result<Vec<u8>, NetError> = Err(NetError::BadFrame { peer: 0 });
+
+    /// #tooth A session with the same deployment, session ID and pairwise PSK
+    /// must derive different traffic keys when either custodian changes its coins.
+    #[test]
+    fn hybrid_traffic_keys_depend_on_both_ephemeral_seeds() {
+        struct Recording(ChannelLink, Arc<Mutex<Vec<u8>>>);
+        impl Link for Recording {
+            fn send_frame(&mut self, frame: &[u8]) -> Result<(), LinkClosed> {
+                if frame.starts_with(b"QSWF") {
+                    *self.1.lock().unwrap() = frame.to_vec();
+                }
+                self.0.send_frame(frame)
+            }
+            fn recv_frame(&mut self) -> Result<Vec<u8>, LinkClosed> {
+                self.0.recv_frame()
+            }
+        }
+        let capture = |a, b| {
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+            let (left, right) = ChannelLink::pair();
+            std::thread::scope(|s| {
+                let left = Recording(left, Arc::clone(&recorded));
+                s.spawn(move || {
+                    let mut net = Framed::establish_pq_hybrid(
+                        [1; 32],
+                        SESSION,
+                        0,
+                        alloc::vec![None, Some(left)],
+                        alloc::vec![[3;32];2],
+                        [a; 32],
+                    )
+                    .unwrap();
+                    net.send(1, b"custody").unwrap();
+                });
+                let mut net = Framed::establish_pq_hybrid(
+                    [1; 32],
+                    SESSION,
+                    1,
+                    alloc::vec![Some(right), None],
+                    alloc::vec![[3;32];2],
+                    [b; 32],
+                )
+                .unwrap();
+                assert_eq!(net.recv(0).unwrap(), b"custody");
+            });
+            Arc::try_unwrap(recorded).unwrap().into_inner().unwrap()
+        };
+        let first = capture(5, 6);
+        assert!(!first.is_empty());
+        assert_ne!(first, capture(7, 6));
+        assert_ne!(first, capture(5, 8));
+    }
 
     /// Every pair holds the same secret, so only the derivation separates links.
     fn one_key(_: usize, _: usize) -> [u8; 32] {

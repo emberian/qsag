@@ -104,13 +104,11 @@
 //!
 //! # Review: the base correlation, and selective failure across batches
 //!
-//! Written by a second reader of this file (not its author) against the code and the
-//! papers. Papers, in `/Users/ember/paperbin/`: **MASCOT**,
-//! `2016-keller-orsini-scholl-mascot-2016-505`; **KOS**,
-//! `2015-keller-orsini-scholl-actively-secure-ot-extension-kos-2015-546`; **Roy**,
-//! `2022-roy-softspokenot-2022-192` (revision of 2025-11-18:
-//! `2022-roy-softspokenot-2022-192-rev20251118`). "Theorem" below means a statement proven in a
-//! paper; "claim" means an argument of this module that no paper states in this form.
+//! References: **MASCOT** `[KOS16]` (Keller, Orsini, Scholl, CCS 2016, ePrint 2016/505);
+//! **KOS** `[KOS15]` (Keller, Orsini, Scholl, CRYPTO 2015, ePrint 2015/546); **Roy**
+//! `[Roy22]` (Roy, *SoftSpokenOT*, CRYPTO 2022, ePrint 2022/192, rev. 2025-11-18).
+//! "Theorem" below means a statement proven in a cited paper; "claim" means an argument
+//! of this module that no paper states in this form.
 //!
 //! ## What the 192 base OTs are, and why the count is not a security parameter
 //!
@@ -261,6 +259,10 @@
 
 #![allow(clippy::needless_range_loop, clippy::type_complexity)]
 
+#[path = "prep_wire.rs"]
+mod wire;
+pub use wire::run_party_preprocessing;
+
 use alloc::{vec, vec::Vec};
 
 use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256};
@@ -329,6 +331,7 @@ pub enum PrepError {
     /// The party count, the mesh and the generators do not describe one quorum of 2 to
     /// 64 members, or the demand cannot be allocated.
     InvalidConfiguration,
+    Transport(super::net::NetError),
     /// A check failed: some member deviated. All keys and material of the run are erased.
     Check(Check),
 }
@@ -2217,7 +2220,7 @@ mod tests {
         let (triples, randoms) = prover::prover_demand(&shape, regime).unwrap();
         let demand = PrepDemand {
             triples,
-            randoms: randoms + assignment.len(),
+            randoms: randoms + assignment.len() + qsag_agg::zk_hem::v2::params::LIMBS,
         };
         let started = Instant::now();
         let (mut mesh, mut rngs) = setup(60 + parties as u8, parties);
