@@ -11,7 +11,10 @@ const TURBO: [u64; 25] = turboshake256_static_midstate(TREE);
 const GL_DOMAIN: u64 = u64::from_le_bytes(*b"HQM2TREE");
 
 pub(super) trait Hash<const N: usize>: CanopyHash<N> {
+    const PROFILE: HemQuinticProfile;
     fn hash(self, input: &[u8]) -> [u8; N];
+    #[cfg(feature = "vulkan")]
+    fn gpu_profile(self) -> qsag_accel::vulkan::CanopyProfile<'static>;
     fn canonical(digest: &[u8; N]) -> bool;
     fn leaf(self, stage: usize, index: usize, symbols: &[u8]) -> [u8; N] {
         let mut frame = Vec::with_capacity(6 + symbols.len());
@@ -26,10 +29,15 @@ pub(super) trait Hash<const N: usize>: CanopyHash<N> {
 pub(super) struct Turbo;
 
 impl Hash<50> for Turbo {
+    const PROFILE: HemQuinticProfile = HemQuinticProfile::TurboShake400;
     fn hash(self, input: &[u8]) -> [u8; 50] {
         let mut out = [0; 50];
         turboshake256_from_midstate_into(&TURBO, input, &mut out);
         out
+    }
+    #[cfg(feature = "vulkan")]
+    fn gpu_profile(self) -> qsag_accel::vulkan::CanopyProfile<'static> {
+        qsag_accel::vulkan::CanopyProfile::HemTurbo(&TURBO)
     }
     fn canonical(_: &[u8; 50]) -> bool {
         true
@@ -66,11 +74,16 @@ fn encode_gl24_digest(d: qsag_whir_verified::Gl24Digest) -> [u8; 56] {
 }
 
 impl Hash<56> for Gl24 {
+    const PROFILE: HemQuinticProfile = HemQuinticProfile::Poseidon2Gl24;
     fn hash(self, input: &[u8]) -> [u8; 56] {
         poseidon2_gl24_hash56(GL_DOMAIN, &[TREE, input].concat())
     }
+    #[cfg(feature = "vulkan")]
+    fn gpu_profile(self) -> qsag_accel::vulkan::CanopyProfile<'static> {
+        qsag_accel::vulkan::CanopyProfile::HemGl24
+    }
     fn canonical(digest: &[u8; 56]) -> bool {
-        qsag_whir_verified::decode_canonical_gl24_digest(digest).is_some()
+        qsag_whir_verified::decode_canonical_gl24_at(digest, 0).is_some()
     }
 }
 

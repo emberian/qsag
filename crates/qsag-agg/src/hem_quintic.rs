@@ -105,12 +105,7 @@ impl HemQuinticProfile {
 
     /// Canonical 56-byte (`Poseidon2Gl24`) Canopy root digest on `QSAG.HEM.QUINTIC.TREE/v2`.
     pub fn gl24_canopy_root(stage: u8, depth: u8, top: &[u8; 56]) -> [u8; 56] {
-        <tree::Gl24 as crate::zk_hem::v2::hash::CanopyHash<56>>::root(
-            tree::Gl24,
-            stage,
-            depth,
-            top,
-        )
+        <tree::Gl24 as crate::zk_hem::v2::hash::CanopyHash<56>>::root(tree::Gl24, stage, depth, top)
     }
 }
 
@@ -121,6 +116,8 @@ pub enum Error {
     Signature,
     InconsistentTrace,
     TranscriptLimit,
+    #[cfg(feature = "vulkan")]
+    Vulkan(qsag_accel::vulkan::VulkanError),
 }
 
 /// A framed proof. Decoding the envelope is structural. Verification consumes the complete
@@ -185,7 +182,10 @@ fn take<const N: usize>(input: &mut &[u8]) -> Option<[u8; N]> {
 }
 
 fn read_e(input: &mut &[u8]) -> Option<E> {
-    E::from_le_bytes_canonical(take(input)?)
+    let bytes = input.split_off(..40)?;
+    Some(E::from_verified(
+        qsag_whir_verified::decode_canonical_fp5_at(bytes, 0)?,
+    ))
 }
 fn read_es<const K: usize>(input: &mut &[u8]) -> Option<[E; K]> {
     let mut out = [E::ZERO; K];
@@ -288,6 +288,37 @@ pub fn prove_hem_quintic_128(
     mode: &SigningMode<'_>,
     sigs: &[ValidatorSignature],
 ) -> Result<HemQuinticProof, Error> {
+    prove_inner(
+        profile,
+        pks,
+        bitmap,
+        mode,
+        sigs,
+        #[cfg(feature = "vulkan")]
+        None,
+    )
+}
+
+#[cfg(feature = "vulkan")]
+pub fn prove_hem_quintic_128_with_vulkan(
+    gpu: &qsag_accel::vulkan::VulkanFp5Session<'_>,
+    profile: HemQuinticProfile,
+    pks: &[ValidatorPublicKey],
+    bitmap: &SignerBitmap,
+    mode: &SigningMode<'_>,
+    sigs: &[ValidatorSignature],
+) -> Result<HemQuinticProof, Error> {
+    prove_inner(profile, pks, bitmap, mode, sigs, Some(gpu))
+}
+
+fn prove_inner(
+    profile: HemQuinticProfile,
+    pks: &[ValidatorPublicKey],
+    bitmap: &SignerBitmap,
+    mode: &SigningMode<'_>,
+    sigs: &[ValidatorSignature],
+    #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
+) -> Result<HemQuinticProof, Error> {
     let st = statement(profile, pks, bitmap, mode)?;
     if sigs.len() != st.signers.len()
         || !st
@@ -309,8 +340,20 @@ pub fn prove_hem_quintic_128(
         }
     }
     let payload = match profile {
-        HemQuinticProfile::TurboShake400 => whir::prove(tree::Turbo, st, rows),
-        HemQuinticProfile::Poseidon2Gl24 => whir::prove(tree::Gl24, st, rows),
+        HemQuinticProfile::TurboShake400 => whir::prove(
+            tree::Turbo,
+            st,
+            rows,
+            #[cfg(feature = "vulkan")]
+            gpu,
+        ),
+        HemQuinticProfile::Poseidon2Gl24 => whir::prove(
+            tree::Gl24,
+            st,
+            rows,
+            #[cfg(feature = "vulkan")]
+            gpu,
+        ),
     }?;
     Ok(HemQuinticProof {
         profile,
@@ -319,17 +362,21 @@ pub fn prove_hem_quintic_128(
     })
 }
 
-/// Verify a decoded public proof against the ordered committee and signing mode.
-/// On success, the set bits of `proof.bitmap` identify the signing validators.
+/// Verify a decoded public proof against the expected sponge profile, ordered committee, and
+/// signing mode. On success, the set bits of `proof.bitmap` identify the signing validators.
 pub fn verify_hem_quintic_128(
+    expected_profile: HemQuinticProfile,
     pks: &[ValidatorPublicKey],
     mode: &SigningMode<'_>,
     proof: &HemQuinticProof,
 ) -> bool {
-    let Ok(st) = statement(proof.profile, pks, &proof.bitmap, mode) else {
+    if proof.profile != expected_profile {
+        return false;
+    }
+    let Ok(st) = statement(expected_profile, pks, &proof.bitmap, mode) else {
         return false;
     };
-    match proof.profile {
+    match expected_profile {
         HemQuinticProfile::TurboShake400 => whir::verify(tree::Turbo, st, &proof.payload),
         HemQuinticProfile::Poseidon2Gl24 => whir::verify(tree::Gl24, st, &proof.payload),
     }

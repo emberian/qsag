@@ -223,7 +223,7 @@ pub(super) fn prove(
     Some(col_claim(&mut st.transcript, cols, rx))
 }
 
-pub(super) fn verify(st: &mut Statement, input: &mut &[u8]) -> Option<(Vec<E>, E)> {
+pub(super) fn verify(st: &mut Statement, input: &mut &[u8]) -> Option<((Vec<E>, E), E)> {
     let (tau, gamma) = challenges(st);
     let c = &st.circuit;
     let weights = RowWeights::new(&c.unique_ops, gamma);
@@ -231,15 +231,21 @@ pub(super) fn verify(st: &mut Statement, input: &mut &[u8]) -> Option<(Vec<E>, E
         return None;
     }
     let inactive_weights = build_inactive_weights(gamma, weights.count());
-    let mut claim = E::ZERO;
+    let mut challenges = [const { qsag_whir_verified::fp5_zero() }; 20];
+    let challenges = challenges.get_mut(..tau.len())?;
+    let round_bytes = input.split_off(..360 * challenges.len())?;
     let mut rx = Vec::with_capacity(tau.len());
-    for _ in &tau {
-        rx.push(step_round(
-            &mut st.transcript,
-            &read_es(input)?,
-            &mut claim,
-        )?);
+    for (slot, bytes) in challenges.iter_mut().zip(round_bytes.as_chunks::<360>().0) {
+        st.transcript.absorb(b"ROW_VALUES", bytes);
+        let r = st.transcript.squeeze_fp5(b"ROW_POINT");
+        *slot = r.to_verified();
+        rx.push(r);
     }
+    let claim = E::from_verified(qsag_whir_verified::verify_qsaghqm2_row_rounds_at(
+        round_bytes,
+        0,
+        challenges,
+    )?);
     let cols = read_es::<NUM_TRACE_COLS>(input)?;
     let mut row = vec![E::ZERO; SELECTORS + c.unique_ops.len()];
     row[..NUM_TRACE_COLS].copy_from_slice(&cols);
@@ -284,5 +290,5 @@ pub(super) fn verify(st: &mut Statement, input: &mut &[u8]) -> Option<(Vec<E>, E
     ) {
         return None;
     }
-    Some(col_claim(&mut st.transcript, &cols, rx))
+    Some((col_claim(&mut st.transcript, &cols, rx), claim))
 }

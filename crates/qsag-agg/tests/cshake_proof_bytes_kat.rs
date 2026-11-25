@@ -68,10 +68,13 @@ fn hem_quintic_proof_bytes_are_deterministic_and_canonical() {
         let p_b = prove_hem_quintic_128(profile, &pks, &bitmap, &mode, &sigs).unwrap();
         let bytes_a = p_a.to_bytes();
         let bytes_b = p_b.to_bytes();
-        assert_eq!(bytes_a, bytes_b, "HemQuinticProof must be 100% deterministic");
+        assert_eq!(
+            bytes_a, bytes_b,
+            "HemQuinticProof must be 100% deterministic"
+        );
         assert_eq!(&bytes_a[..8], b"QSAGHQM2");
         let decoded = HemQuinticProof::from_bytes(&bytes_a).unwrap();
-        assert!(verify_hem_quintic_128(&pks, &mode, &decoded));
+        assert!(verify_hem_quintic_128(profile, &pks, &mode, &decoded));
         println!(
             "KAT quintic profile={profile:?} len={} digest={}",
             bytes_a.len(),

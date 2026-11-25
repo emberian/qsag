@@ -26,7 +26,12 @@ fn exercise(scheme: AggSigProfile, profile: HemQuinticProfile, n: usize) {
         .collect();
     let bitmap = SignerBitmap::from_active_indices(n as u32, &(0..n).collect::<Vec<_>>()).unwrap();
     let proof = prove_hem_quintic_128(profile, &pks, &bitmap, &mode, &sigs).unwrap();
-    assert!(verify_hem_quintic_128(&pks, &mode, &proof));
+    assert!(verify_hem_quintic_128(profile, &pks, &mode, &proof));
+    let other_profile = match profile {
+        HemQuinticProfile::TurboShake400 => HemQuinticProfile::Poseidon2Gl24,
+        HemQuinticProfile::Poseidon2Gl24 => HemQuinticProfile::TurboShake400,
+    };
+    assert!(!verify_hem_quintic_128(other_profile, &pks, &mode, &proof));
     let bytes = proof.to_bytes();
     assert_eq!(HemQuinticProof::from_bytes(&bytes).unwrap(), proof);
     assert!(HemQuinticProof::from_bytes(&bytes[..bytes.len() - 1]).is_none());
@@ -39,10 +44,16 @@ fn exercise(scheme: AggSigProfile, profile: HemQuinticProfile, n: usize) {
     }
     let mut different_keys = pks.clone();
     different_keys[0].pk_seed[2] += F::ONE;
-    assert!(!verify_hem_quintic_128(&different_keys, &mode, &proof));
+    assert!(!verify_hem_quintic_128(
+        profile,
+        &different_keys,
+        &mode,
+        &proof
+    ));
     let mut different_messages = refs.clone();
     different_messages[0] = &[0, 16];
     assert!(!verify_hem_quintic_128(
+        profile,
         &pks,
         &SigningMode::PerSignerMessages(&different_messages),
         &proof
@@ -70,13 +81,30 @@ fn exercise(scheme: AggSigProfile, profile: HemQuinticProfile, n: usize) {
         let mut bad = proof.clone();
         bad.payload[offset] ^= 1;
         assert!(
-            !verify_hem_quintic_128(&pks, &mode, &bad),
+            !verify_hem_quintic_128(profile, &pks, &mode, &bad),
             "mutation at {offset}"
         );
     }
+    let columns = digest + 360 * st.circuit.log_rows();
+    for offset in [digest + 352, columns + 40 * (NUM_TRACE_COLS - 1) + 32] {
+        let mut bad = proof.clone();
+        bad.payload[offset..offset + 8].copy_from_slice(&GOLDILOCKS_PRIME.to_le_bytes());
+        assert!(!verify_hem_quintic_128(profile, &pks, &mode, &bad));
+    }
     let mut bad = proof.clone();
-    bad.payload[digest..digest + 8].copy_from_slice(&GOLDILOCKS_PRIME.to_le_bytes());
-    assert!(!verify_hem_quintic_128(&pks, &mode, &bad));
+    bad.payload[digest] ^= 1;
+    assert!(!verify_hem_quintic_128(profile, &pks, &mode, &bad));
+    if profile == HemQuinticProfile::Poseidon2Gl24 {
+        let mut bad = proof.clone();
+        let last = bad.payload.len() - 8;
+        bad.payload[last..].copy_from_slice(&GOLDILOCKS_PRIME.to_le_bytes());
+        assert!(!verify_hem_quintic_128(profile, &pks, &mode, &bad));
+    }
+    let mut bad = proof.clone();
+    bad.payload.push(0);
+    assert!(!verify_hem_quintic_128(profile, &pks, &mode, &bad));
+    bad.payload.truncate(proof.payload.len() - 1);
+    assert!(!verify_hem_quintic_128(profile, &pks, &mode, &bad));
 }
 
 #[test]
@@ -210,18 +238,19 @@ fn tooth_sparse_committee_wire_vectors() {
         let bytes = proof.to_bytes();
         assert_eq!(bytes.len(), length);
         assert_eq!(qsag_accel::sha2::sha256(&bytes), expected_hash);
-        assert!(verify_hem_quintic_128(&pks, &mode, &proof));
+        assert!(verify_hem_quintic_128(profile, &pks, &mode, &proof));
         let mut changed = pks.clone();
         changed[1] = pks[0];
-        assert!(!verify_hem_quintic_128(&changed, &mode, &proof));
+        assert!(!verify_hem_quintic_128(profile, &changed, &mode, &proof));
         assert!(!verify_hem_quintic_128(
+            profile,
             &pks,
             &SigningMode::PerSignerMessages(&[msg.as_slice(); 3]),
             &proof
         ));
         let mut substituted = proof;
         substituted.bitmap = SignerBitmap::from_active_indices(4, &[0, 1, 3]).unwrap();
-        assert!(!verify_hem_quintic_128(&pks, &mode, &substituted));
+        assert!(!verify_hem_quintic_128(profile, &pks, &mode, &substituted));
     }
 }
 
@@ -263,13 +292,25 @@ fn tooth_inactive_slot_noncanonical_witness_rejected_by_prover_and_verifier() {
             populate_inactive_signer_rows(slot, &[]);
         }
     }
-    let honest_payload = whir::prove(tree::Turbo, base_st, honest_rows.clone()).unwrap();
+    let honest_payload = whir::prove(
+        tree::Turbo,
+        base_st,
+        honest_rows.clone(),
+        #[cfg(feature = "vulkan")]
+        None,
+    )
+    .unwrap();
     let honest_proof = HemQuinticProof {
         profile: HemQuinticProfile::TurboShake400,
         bitmap: bitmap.clone(),
         payload: honest_payload,
     };
-    assert!(verify_hem_quintic_128(&pks, &mode, &honest_proof));
+    assert!(verify_hem_quintic_128(
+        HemQuinticProfile::TurboShake400,
+        &pks,
+        &mode,
+        &honest_proof
+    ));
 
     // Three distinct inactive-slot witness stuffings that previously satisfied all active gates:
     // (0) `COL_AUX` blinding limbs on slot 3,
@@ -295,7 +336,13 @@ fn tooth_inactive_slot_noncanonical_witness_rejected_by_prover_and_verifier() {
         }
         let st_bad = statement(HemQuinticProfile::TurboShake400, &pks, &bitmap, &mode).unwrap();
         assert_eq!(
-            whir::prove(tree::Turbo, st_bad, stuffed.clone()),
+            whir::prove(
+                tree::Turbo,
+                st_bad,
+                stuffed.clone(),
+                #[cfg(feature = "vulkan")]
+                None
+            ),
             Err(Error::InconsistentTrace),
             "case {case}: prover sumcheck must reject non-zero inactive-slot trace"
         );
@@ -305,8 +352,7 @@ fn tooth_inactive_slot_noncanonical_witness_rejected_by_prover_and_verifier() {
         // multilinear column evaluation `cols` of `stuffed` at `rx`: `rows::verify` must reject!
         let mut st_forged =
             statement(HemQuinticProfile::TurboShake400, &pks, &bitmap, &mode).unwrap();
-        let mut st_ver =
-            statement(HemQuinticProfile::TurboShake400, &pks, &bitmap, &mode).unwrap();
+        let mut st_ver = statement(HemQuinticProfile::TurboShake400, &pks, &bitmap, &mode).unwrap();
         let log_rows = st_forged.circuit.log_rows();
         for _ in 0..log_rows {
             let _ = st_forged.transcript.squeeze_fp5(b"TAU");
@@ -492,4 +538,50 @@ fn tooth_lean_cross_kat_v2_quintic_gl24_turbo400_golden_anchors() {
         tr_persig.squeeze_distinct_indices(b"QUERY", 64, 6),
         [2, 26, 31, 47, 50, 56]
     );
+}
+
+#[test]
+#[cfg(feature = "vulkan")]
+#[ignore = "requires an audited Vulkan device"]
+fn vulkan_wire_parity_hqm2() {
+    let backend = qsag_accel::VulkanSpirvBackend::try_new_audited().unwrap();
+    let session = backend.fp5_session().unwrap();
+    let msg = b"quintic GPU parity";
+    let mode = SigningMode::SharedMessage(msg);
+    for n in [1, 8] {
+        let mut keys: Vec<_> = (0..n)
+            .map(|i| {
+                ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[11; 32], i)
+            })
+            .collect();
+        let pks: Vec<_> = keys.iter().map(|k| k.pk).collect();
+        let sigs: Vec<_> = keys
+            .iter_mut()
+            .map(|k| k.sign_stateful_for_unit_test(msg, 0).unwrap())
+            .collect();
+        let bitmap =
+            SignerBitmap::from_active_indices(n, &(0..n as usize).collect::<Vec<_>>()).unwrap();
+        for profile in [
+            HemQuinticProfile::TurboShake400,
+            HemQuinticProfile::Poseidon2Gl24,
+        ] {
+            let start = std::time::Instant::now();
+            let cpu = prove_hem_quintic_128(profile, &pks, &bitmap, &mode, &sigs).unwrap();
+            let cpu_time = start.elapsed();
+            let before = backend.gpu_submission_count();
+            let start = std::time::Instant::now();
+            let gpu =
+                prove_hem_quintic_128_with_vulkan(&session, profile, &pks, &bitmap, &mode, &sigs)
+                    .unwrap();
+            let gpu_time = start.elapsed();
+            assert!(backend.gpu_submission_count() > before);
+            assert!(cpu.to_bytes() == gpu.to_bytes());
+            assert!(verify_hem_quintic_128(profile, &pks, &mode, &gpu));
+            std::println!(
+                "{n} signer(s) {profile:?} {} bytes, CPU {cpu_time:?}, GPU {gpu_time:?}",
+                gpu.to_bytes().len()
+            );
+        }
+    }
+    assert_eq!(backend.cpu_fallback_count(), 0);
 }
