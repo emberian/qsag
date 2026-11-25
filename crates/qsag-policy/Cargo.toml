@@ -15,7 +15,6 @@ std = [
     "alloc",
     "qsag-accel/std",
     "qsag-addr/std",
-    "dep:qsag-core",
     "qsag-core/std",
 ]
 
@@ -25,5 +24,5 @@ qsag-fts = { path = "../qsag-fts", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false, features = ["alloc"] }
 qsag-accel = { path = "../qsag-accel", default-features = false }
 qsag-addr = { path = "../qsag-addr", default-features = false }
-# The external rollback anchor contract (`ExternalMonotoneAnchor`) of the durable stores.
-qsag-core = { path = "../qsag-core", default-features = false, optional = true }
+# Guard provisioning uses committed OT. Durable stores also use the core rollback anchor.
+qsag-core = { path = "../qsag-core", default-features = false }
