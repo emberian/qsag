@@ -180,6 +180,7 @@ class InstructionStream(list):
         super().__init__()
         self.addresses = []
         self.relocations = {}
+        self.got_address_loads = set()
 
 
 def parse_objdump_functions(
@@ -243,6 +244,12 @@ def parse_objdump_functions(
             ops_clean = re.sub(r"\s+(?:#\s|//).*$", "", ops)
             ops_clean = re.sub(r"\s+<.+>$", "", ops_clean).strip()
             ins_idx = len(funcs[current_sym])
+            # A full-width RIP-relative load of a relocated GOT entry reads the
+            # linker's address, not the object at that address.
+            if (mnem == "mov" and linked_vma is not None
+                    and linked_vma in getattr(vma_resolver, "got_address_slots", ())
+                    and re.fullmatch(r"(?:r(?:ax|bx|cx|dx|si|di|bp|sp)|r(?:[89]|1[0-5])),\s*(?:qword ptr )?\[rip\s*[+-]\s*(?:0x)?[0-9a-f]+\]", ops_clean.lower())):
+                funcs[current_sym].got_address_loads.add(ins_idx)
             if linked_target:
                 cur_base = re.sub(r"\s*\(@0x[0-9a-fA-F]+\)$", "", current_sym)
                 target_base = re.sub(r"\+0x[0-9a-fA-F]+$", "", linked_target)
@@ -564,15 +571,18 @@ def is_branchless_portable_primitive(sym: str) -> bool:
 
 
 PROTOCOL_RUST_MODULES = (
-    "qsag_hd::linear_module::",
+    "qsag_hd::seeds::",
+    "qsag_hd::inventory::",
+    "qsag_core::preprocessing::",
+    "qsag_core::fips205::",
+    "qsag_agg::zk_hem::",
+    "qsag::codec::",
     "qsag_core::rss256::",
     "qsag_core::wots_c::",
     "qsag_quorum::dzk::",
 )
 PROTOCOL_FLAT_PRIMITIVES = (
-    "ct_reduce_mod_q_",
-    "const_reduce_mod_q_",
-    "::mod_q_",
+    "::ct_ge_u32_mask64",
     "Gf128::add",
     "Gf128::mul",
     "Gf128::from_bytes",
@@ -586,10 +596,10 @@ def has_flat_kernel_abi(sym: str) -> bool:
     """True when `sym` obeys the flat-slice / scalar primitive kernel entry ABI of `rust_errors`.
 
     All `qsag_asm::*` kernels, flat `SecretBuffer`/`SecretScratch` destructors, and scalar/flat
-    arithmetic helpers in protocol crates use the full taint screen by default. Higher-level
-    protocol functions in `PROTOCOL_RUST_MODULES` pass struct/Vec descriptors or public protocol
-    state; in default mode they enforce upper-YMM/ZMM hygiene, vector-wipe rules, and zero
-    hardware dividers or gathers (`--strict-rust-branches` applies `rust_errors` to them too).
+    arithmetic helpers in protocol crates use `rust_errors` (`--strict-rust-branches` upgrades
+    non-scalar flat kernels to strict conditional-branch taint). Higher-level protocol functions
+    in `PROTOCOL_RUST_MODULES` pass struct/Vec descriptors or public protocol state and enforce
+    upper-YMM/ZMM hygiene, vector-wipe rules, and zero hardware dividers or gathers.
     """
     outer = outer_rust_symbol(sym)
     if not any(m in outer for m in PROTOCOL_RUST_MODULES):
@@ -608,6 +618,14 @@ def protocol_instruction_errors(sym: str, instrs: list[tuple[str, str]], machine
             errors.append(f"{sym}[{idx}]: forbidden divider `{mnemonic} {operands}`")
         if machine == 62 and mnemonic in X86_GATHER_MNEMONICS:
             errors.append(f"{sym}[{idx}]: gather requires an address contract `{mnemonic} {operands}`")
+    # Fixed-size slices and a public box parameter. Apply the control-flow and
+    # address taint checks to both the trial decision and oblivious routing.
+    # Register selects are intentional; conditional memory operands are still
+    # subject to the secret-address check.
+    if any('qsag_core::preprocessing::rlwe_proof::' + name in sym
+           for name in ('pack_gaussian_trials', 'compact')):
+        errors.extend(rust_errors(sym, instrs, strict=True, machine=machine,
+                                  allow_register_select=True))
     return errors
 
 
@@ -627,7 +645,7 @@ def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]], stri
             errors.append(f"{sym}[{idx}]: call/return with dirty upper YMM/ZMM state")
     body_errors = (
         rust_errors(sym, instrs, strict, machine=62)
-        if (strict or has_flat_kernel_abi(sym))
+        if has_flat_kernel_abi(sym)
         else protocol_instruction_errors(sym, instrs, 62)
     )
     return errors + vector_wipe_errors(sym, instrs, 62) + body_errors
@@ -641,7 +659,7 @@ def audit_compiled_rust_aarch64_symbol(sym: str, instrs: list[tuple[str, str]], 
     """
     body_errors = (
         rust_errors(sym, instrs, strict, machine=183)
-        if (strict or has_flat_kernel_abi(sym))
+        if has_flat_kernel_abi(sym)
         else protocol_instruction_errors(sym, instrs, 183)
     )
     return vector_wipe_errors(sym, instrs, 183) + body_errors
@@ -1430,12 +1448,23 @@ BITSLICE = {
          'qsag_asm_gf2_128_mul_acc_vpclmul'],
     183: ['qsag_asm_transpose64x256_neon', 'qsag_asm_gf2_128_mul_acc_pmull'],
 }
-RUST_MODULES = ('qsag_hd::linear_module::', 'qsag_asm::aarch64_simd::',
+RUST_MODULES = ('qsag_hd::seeds::', 'qsag_hd::inventory::',
+                'qsag_core::preprocessing::', 'qsag_core::fips205::', 'qsag_asm::aarch64_simd::',
                 'qsag_asm::linear_map::',
+                'qsag_agg::zk_hem::', 'qsag::codec::',
                 'qsag_core::rss256::', 'qsag_core::wots_c::', 'qsag_quorum::dzk::',
                 'qsag_asm::bitslice::', 'qsag_asm::portable::',
                 'qsag_asm::avx512::', 'qsag_asm::gf256_simd::',
                 'qsag_asm::sha2_hw::', 'qsag_asm::ntt_simd::')
+
+
+def rust_modules_for_machine(machine: int) -> tuple[str, ...]:
+    excluded = (
+        {'qsag_asm::aarch64_simd::'}
+        if machine == 62
+        else {'qsag_asm::avx512::', 'qsag_asm::gf256_simd::'}
+    )
+    return tuple(m for m in RUST_MODULES if m not in excluded)
 
 
 # Required out-of-line SIMD entrypoints in the release qsag-asm archive. A
@@ -1527,6 +1556,13 @@ def is_rust_crypto_symbol(symbol):
         return False
     if secret_guard_drop_kind(symbol) == 'flat':
         return True
+    # Only the seed expander and the hex codec are secret kernels in scope
+    # here. The same namespaces also contain public proof geometry and JSON.
+    if 'qsag_agg::zk_hem::' in outer:
+        return ('qsag_agg::zk_hem::SeedStream::' in outer
+                or 'qsag_agg::zk_hem::seed_stream_' in outer)
+    if 'qsag::codec::' in outer:
+        return any('qsag::codec::' + name in outer for name in ('to_hex', 'from_hex'))
     return ('qsag_asm::' in outer or any(module in outer for module in RUST_MODULES)
             or 'gf2_128_mul_acc_batch' in outer)
 
@@ -1548,7 +1584,7 @@ def conditional(mnemonic):
             or mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz'))
 
 
-def rust_errors(symbol, instructions, strict=False, machine=None):
+def rust_errors(symbol, instructions, strict=False, machine=None, allow_register_select=False):
     """Instruction taint screen, with explicit public pointer/length ABI assumptions.
 
     Buffer contents are secret; pointer and length arguments are public. Scalar
@@ -1596,7 +1632,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
         return 64 if 'zmm' in operand else 32 if 'ymm' in operand else 16 if 'xmm' in operand else 8
     is_clmul64_acc = 'gf2_64x128_clmul_acc' in clean_sym or '::clmul_64x128_acc_' in clean_sym
     scalar = (not is_clmul64_acc) and (is_branchless_portable_primitive(clean_sym) or any(
-        name in clean_sym for name in ('ct_reduce_mod_q_', '::mod_q_', 'goldilocks_',
+        name in clean_sym for name in ('ct_ge_u32_mask64', 'goldilocks_',
                                        'wiedemann_', 'clmul', 'tower_mul', 'tower_scale')))
     taint = ({f'x{i}' for i in range(8)} if arm else
              {'rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9'}) if scalar else set()
@@ -1738,7 +1774,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
             if conditional(mnemonic) and (strict or scalar) and branch_secret:
                 fail('secret-tainted conditional branch')
             selection_sources = parts[1:] if arm else parts
-            if (mnemonic.startswith('cmov') or mnemonic in AARCH64_CSEL_MNEMONICS) and (
+            if not allow_register_select and (mnemonic.startswith('cmov') or mnemonic in AARCH64_CSEL_MNEMONICS) and (
                     flags or any(secret(p) for p in selection_sources)):
                 fail('secret-tainted conditional selection')
             variable = (mnemonic in X86_BMI2_VAR_SHIFT_MNEMONICS | AARCH64_VAR_SHIFT_MNEMONICS or
@@ -1777,6 +1813,15 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                                                  'raw_vec::handle_error', 'capacity_overflow',
                                                  '_Unwind_Resume')):
                     successors = []
+                    continue
+                # libc returns the public address of this thread's errno slot.
+                # Keep the loaded value tainted. No destination or buffer bytes
+                # are declassified by this pointer-return contract.
+                if re.fullmatch(r'_{2,3}(?:errno_location|errno|error)(?:@[^ ]+|[-+]0x[0-9a-f]+)?', relocation):
+                    result_reg = 'x0' if arm else 'rax'
+                    taint.discard(result_reg)
+                    public_pointer.discard(result_reg)
+                    flags = True
                     continue
                 alloc_fn = re.search(
                     r'(?:^|[^A-Za-z0-9_])(malloc|calloc|__rust_alloc|__rust_alloc_zeroed|__rust_realloc)(?:@|$|[^A-Za-z0-9_])',
@@ -1848,7 +1893,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                 mnemonic in ('vpxor', 'vpxorq', 'vpxord', 'vxorps', 'vxorpd', 'eor', 'sub') and len(parts) == 3 and parts[1] == parts[2])
             if arm and mnemonic in ('ins', 'bfi', 'bfxil', 'sli', 'sri', 'bsl', 'bit', 'bif'):
                 value |= secret(parts[0])
-            if zero:
+            if zero or i in getattr(instructions, 'got_address_loads', ()):
                 value = False
             if not arm and dst and canon_x86_gpr(parts[0]) and not (
                     parts[0] == dst or parts[0].startswith('e') or re.fullmatch(r'r[0-9]+d', parts[0])):
@@ -1996,7 +2041,7 @@ def self_tests():
     count += 9
     count += vector_wipe_self_tests()
     for mnemonic in ('div', 'idiv', 'udiv', 'sdiv', 'fdiv', 'jne', 'b.eq', 'cbz', 'cbnz', 'tbz', 'tbnz'):
-        assert rust_errors('qsag_hd::linear_module::ct_reduce_mod_q_u64', [(mnemonic, '')])
+        assert rust_errors('qsag_core::fips205::ct_ge_u32_mask64', [(mnemonic, '')])
         count += 1
     for kind in (1, 2, 3):
         for machine in BITSLICE:
@@ -2119,6 +2164,19 @@ def self_tests():
     assert rust_errors('buffer_probe', prefix + [('imul', 'rax, rcx')] + sink, True, 62)
     assert rust_errors('buffer_probe', prefix + [('imul', 'r8, rax, 200'),
         ('mov', 'r9, [rsi + r8]')], True, 62)
+    assert is_rust_crypto_symbol('<qsag_core::preprocessing::rlwe_proof::GaussianSampler8x>::sample_box')
+    assert is_rust_crypto_symbol('<qsag_agg::zk_hem::SeedStream>::next_base')
+    assert is_rust_crypto_symbol('qsag::codec::to_hex_zeroizing')
+    assert not is_rust_crypto_symbol('qsag::codec::Parser::number')
+    count += 4
+    trial = 'qsag_core::preprocessing::rlwe_proof::pack_gaussian_trials'
+    for machine, bad in [
+        (62, [('mov', 'eax, [rdi]'), ('test', 'eax, eax'), ('jne', '0x18'), ('ret', '')]),
+        (183, [('ldr', 'w1, [x0]'), ('cbnz', 'w1, 0x18'), ('ret', '')]),
+    ]:
+        assert any('secret-tainted conditional branch' in e
+                   for e in protocol_instruction_errors(trial, bad, machine))
+        count += 1
     assert is_rust_crypto_symbol('qsag_asm::keccak_f1600_batch_with_backend')
     # Guard destructors are screened; other drop glue is storage management.
     vec_guard = 'core::ptr::drop_glue::<qsag_asm::wipe::SecretBuffer<alloc::vec::Vec<u8>>>'
@@ -2194,6 +2252,31 @@ def self_tests():
         count += 3
     # Public-sized heap allocation allows OOM null check while keeping buffer contents secret;
     # secret-sized heap allocation is rejected.
+    def resolve_got(vma):
+        return 'mutable_object' if vma == 0x180 else None
+    resolve_got.got_address_slots = {0x180}
+    got_disasm = """0000000000000100 <probe>:
+ 100: 48 8b 0d 79 00 00 00	mov rcx, qword ptr [rip + 0x79] # 0x180 <mutable_object>
+ 107: 48 8b 01	mov rax, qword ptr [rcx]
+ 10a: c3	ret
+"""
+    got_stream = parse_objdump_functions(got_disasm, resolve_got)['probe']
+    assert got_stream.got_address_loads == {0}
+    assert not rust_errors('probe', got_stream, True, 62)
+    got_stream[2] = ('mov', 'edx, [rax]')
+    assert any('secret-tainted memory address' in e for e in rust_errors('probe', got_stream, True, 62))
+    unrelocated = parse_objdump_functions(got_disasm)['probe']
+    assert any('secret-tainted memory address' in e for e in rust_errors('probe', unrelocated, True, 62))
+    count += 3
+    errno_read = InstructionStream()
+    errno_read.extend([('call', '0x400'), ('mov', 'ecx, [rax]'), ('ret', '')])
+    errno_read.addresses = [0, 4, 8]
+    errno_read.relocations[0] = '__errno_location@GLIBC_2.2.5'
+    assert not rust_errors('buffer_probe', errno_read, True, 62)
+    errno_read[2:] = [('mov', 'eax, [rcx]'), ('ret', '')]
+    errno_read.addresses.append(12)
+    assert any('secret-tainted memory address' in e for e in rust_errors('buffer_probe', errno_read, True, 62))
+    count += 2
     malloc_oom_stream = InstructionStream()
     malloc_oom_stream.extend([('mov', 'edi, 64'), ('call', '0x400'), ('test', 'rax, rax'), ('je', '0x14'), ('ret', '')])
     malloc_oom_stream.addresses = [0, 4, 8, 12, 16, 20]
@@ -2239,7 +2322,15 @@ def self_tests():
     assert audit_compiled_rust_x86_symbol(proto_sym, [('vpgatherdd', 'ymm0, [rdi + ymm1*4], ymm2'), ('vzeroupper', ''), ('ret', '')], False)
     assert audit_compiled_rust_x86_symbol(proto_sym, [('vpxor', 'ymm0, ymm0, ymm0'), ('ret', '')], False)
     assert audit_compiled_rust_aarch64_symbol('qsag_quorum::dzk::prove', [('udiv', 'x0, x1, x2'), ('ret', '')], False)
-    count += 11
+    assert 'qsag_asm::aarch64_simd::' not in rust_modules_for_machine(62)
+    assert 'qsag_asm::avx512::' not in rust_modules_for_machine(183)
+    assert 'qsag_asm::gf256_simd::' not in rust_modules_for_machine(183)
+    struct_branch_stream = InstructionStream()
+    struct_branch_stream.extend([('mov', 'rax, [rdi + 8]'), ('test', 'rax, rax'), ('je', '0x8'), ('ret', '')])
+    struct_branch_stream.addresses = [0, 4, 7, 8]
+    assert not audit_compiled_rust_x86_symbol(proto_sym, struct_branch_stream, True)
+    assert audit_compiled_rust_x86_symbol('qsag_asm::portable::probe', struct_branch_stream, True)
+    count += 16
     return count
 
 
@@ -2275,7 +2366,10 @@ def build_linked_elf_vma_resolver(data: bytes, executable: str, path: Path):
         return buf[pos:end].decode('utf-8', 'replace') if end != -1 else ''
 
     rodata_ranges = []
+    got_ranges = []
     for sh_name, _, sh_addr, _, sh_size, _, _ in sections:
+        if cstr(shstr, sh_name) in ('.got', '.got.plt'):
+            got_ranges.append((sh_addr, sh_addr + sh_size))
         if cstr(shstr, sh_name).startswith('.rodata') and sh_addr and sh_size:
             rodata_ranges.append((sh_addr, sh_addr + sh_size))
 
@@ -2335,6 +2429,8 @@ def build_linked_elf_vma_resolver(data: bytes, executable: str, path: Path):
     def resolve(vma: int) -> str | None:
         return got_map.get(vma) or lookup_direct(vma)
 
+    resolve.got_address_slots = {addr for addr in got_map
+                                 if any(lo <= addr and addr + 8 <= hi for lo, hi in got_ranges)}
     return resolve
 
 
@@ -2409,19 +2505,19 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
             continue
         audited.append(symbol)
     missing = [s for s in expected if not functions.get(s)]
+    arch_modules = rust_modules_for_machine(machine)
     asm_base = kernel_audit.EXPECTED_X86_SYMBOLS if machine == 62 else kernel_audit.EXPECTED_AARCH64_SYMBOLS
     has_asm_surface = (
-        kind in (2, 3)
-        or any(s in functions for s in asm_base)
+        any(s in functions for s in asm_base)
         or any(outer_rust_symbol(s).startswith(('qsag_asm::bitslice::', 'qsag_asm::portable::'))
                for s in functions)
         or 'bitslice' in path.name
     )
-    if require_bitslice and has_asm_surface:
+    if kind == 1 and require_bitslice and has_asm_surface:
         errors.extend(f'missing required bitslice kernel: {s}' for s in BITSLICE[machine] if s in missing)
-    if kind in (2, 3):
-        errors.extend(f'missing required linked assembly kernel: {symbol}' for symbol in missing)
     for module in require_namespaces:
+        if kind in (2, 3) and module not in arch_modules:
+            continue
         if not any(module in symbol for symbol in audited):
             errors.append(f'missing required Rust namespace: {module}')
     if require_simd:
@@ -2433,7 +2529,7 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
     for symbol in audited:
         print(f'  audited: {symbol}')
     print(f'  absent assembly symbols: {", ".join(missing) or "none"}')
-    for module in RUST_MODULES:
+    for module in arch_modules:
         if not any(module in s for s in audited):
             print(f'  absent Rust namespace: {module}')
     print(f'  Rust conditional instructions inspected: {branches}; protocol control flow requires dataflow review')
@@ -2443,8 +2539,8 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
     print(f'  {nested_guard_drops} secret-guard destructors own nested heap buffers and are not screened')
     for error in errors:
         print(f'  FAIL: {error}', file=sys.stderr)
-    present = sum(any(module in symbol for symbol in audited) for module in RUST_MODULES)
-    print(f'  instruction screen: {"FAIL" if errors else "PASS"} ({present}/{len(RUST_MODULES)} Rust namespaces present)')
+    present = sum(any(module in symbol for symbol in audited) for module in arch_modules)
+    print(f'  instruction screen: {"FAIL" if errors else "PASS"} ({present}/{len(arch_modules)} Rust namespaces present)')
     return not errors
 
 
