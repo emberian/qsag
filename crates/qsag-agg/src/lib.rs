@@ -3,7 +3,7 @@
 //! (`#![no_std]` + `alloc`, `#![forbid(unsafe_code)]`, `[DKT26]` `< 2^{-128}` QROM).
 //!
 //! All public aggregation, zero-knowledge, and recursive proof formats operate exclusively over
-//! the quintic extension $\mathbb{F}_{p^5} = \mathbb{F}_p[X]/(X^5 - 3)$ ($p = 2^{64} - 2^{32} + 1$,
+//! the quintic extension $\mathbb{F}_{p^5} = \mathbb{F}_p\[X\]/(X^5 - 3)$ ($p = 2^{64} - 2^{32} + 1$,
 //! $|\mathbb{F}_{p^5}| > 2^{319.99}$) at `< 2^{-128}` QROM security:
 //! - **Public $K$-to-$1$ Committee Aggregation (`QSAGHQM2`)**: [`prove_hem_quintic_128`] and
 //!   [`verify_hem_quintic_128`] over [`HemQuinticProfile::TurboShake400`] (`400`-bit digests) or
@@ -14,7 +14,7 @@
 //!   [`HemQuinticProof`] batches to a Poseidon2-committed [`PreparedPolicyRegistry`].
 //! - **Committed-Mask Zero-Knowledge SNARK (`QSAGZKH2` / `QSAGZKS2`)**: [`zk_hem::v2`] (`256`-bit
 //!   per-leaf salts, `32`-byte per-tree nonces, `5` Stage-0 OOD masks, `[DKT26]` Theorem 5.12),
-//!   backing [`zk_hem::blind_vc`], [`zk_hem::multisig`], and [`zk_hem::capability`].
+//!   backing [`zk_hem::multisig`] and credential presentations in `qsag-cred`.
 //! - **Succinct Binary Recursive IVC (`QSAGIVC1`)**: [`prove_ivc_tree`] and [`verify_ivc_tree`]
 //!   producing constant `639,673`-byte `[DKT26]` `< 2^{-128}` QROM proofs ([`SuccinctIvcProof`]).
 
@@ -24,6 +24,11 @@
 extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
+
+#[cfg(feature = "vulkan")]
+mod vulkan;
+#[cfg(feature = "vulkan")]
+pub use hem_quintic::prove_hem_quintic_128_with_vulkan;
 
 pub mod arithmetize;
 pub mod field;
@@ -38,18 +43,18 @@ mod profile;
 #[cfg(feature = "std")]
 mod prover_admission;
 pub mod recursive;
+#[cfg(feature = "std")]
+use prover_admission::prover_parallel_jobs;
 pub use recursive::{
-    FixedPathWhirW24, HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate, IvcPolicyRegistry,
-    IvcRowCensus, IvcShard, IvcStepConfig, IvcSubtreeStatement, IvcTableCommitment,
-    IvcTreeStepRelation, MAX_HIERARCHY_SHARDS, PreparedPolicyRegistry, ShardHemBatch,
-    ShardHemPolicy, ShardHemWitness, SuccinctIvcProof, SuccinctIvcStep, checked_sum_usize,
-    compute_framed_message_digest, compute_policy_registry_root, encode_policy_registry,
-    hierarchical_hem_message, ivc_signing_message, prove_hierarchical_hem,
+    FixedPathWhirW24, HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate, IVC_BITMAP_BYTES,
+    IvcPolicyRegistry, IvcRowCensus, IvcShard, IvcStepConfig, IvcSubtreeStatement,
+    IvcTableCommitment, IvcTreeStepRelation, MAX_HIERARCHY_SHARDS, PreparedPolicyRegistry,
+    ShardHemBatch, ShardHemPolicy, ShardHemWitness, SuccinctIvcProof, SuccinctIvcStep,
+    checked_sum_usize, compute_framed_message_digest, compute_policy_registry_root,
+    encode_policy_registry, hierarchical_hem_message, ivc_signing_message, prove_hierarchical_hem,
     prove_hierarchical_hem_prepared, prove_ivc_tree, verify_hierarchical_hem,
     verify_hierarchical_hem_prepared, verify_ivc_tree,
 };
-#[cfg(feature = "std")]
-use prover_admission::prover_parallel_jobs;
 pub mod sig;
 pub mod sponge;
 pub mod trace;
@@ -149,7 +154,7 @@ pub(crate) fn base_parallel_workers() -> usize {
 /// [`with_worker_limit`].
 #[cfg(feature = "std")]
 #[inline]
-pub(crate) fn parallel_workers() -> usize {
+pub fn parallel_workers() -> usize {
     let base = base_parallel_workers();
     let cap = WORKER_LIMIT_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
     if cap == 0 { base } else { base.min(cap) }
@@ -295,6 +300,8 @@ pub const DEFAULT_MAX_SHARD_SIGNERS_CORDUROY: usize =
 /// Errors returned by [`prove_hierarchical_hem`] or canonical hierarchy wire deserialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HemAggError {
+    #[cfg(feature = "vulkan")]
+    Vulkan(qsag_accel::vulkan::VulkanError),
     EmptySigners,
     CommitteeMismatch,
     DuplicateValidatorOrProfileMismatch,
@@ -341,19 +348,15 @@ mod tests {
             HemQuinticProfile::TurboShake400,
             HemQuinticProfile::Poseidon2Gl24,
         ] {
-            let proof = prove_hem_quintic_128(
-                profile,
-                &pks,
-                &bitmap,
-                &mode,
-                &[sig0.clone(), sig1.clone()],
-            )
-            .unwrap();
+            let proof =
+                prove_hem_quintic_128(profile, &pks, &bitmap, &mode, &[sig0.clone(), sig1.clone()])
+                    .unwrap();
             assert_eq!(proof.num_signers(), 2);
             let wire = proof.to_bytes();
             let decoded = HemQuinticProof::from_bytes(&wire).unwrap();
-            assert!(verify_hem_quintic_128(&pks, &mode, &decoded));
+            assert!(verify_hem_quintic_128(profile, &pks, &mode, &decoded));
             assert!(!verify_hem_quintic_128(
+                profile,
                 &pks,
                 &SigningMode::PerSignerMessages(&[msg1, msg0]),
                 &decoded

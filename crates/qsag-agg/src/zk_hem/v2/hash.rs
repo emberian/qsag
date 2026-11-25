@@ -63,6 +63,14 @@ impl Hasher {
     }
 
     #[inline]
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn tree_midstate(self) -> &'static [u64; 25] {
+        if self.turbo {
+            &TURBO_TREE_MIDSTATE
+        } else {
+            &TREE_MIDSTATE
+        }
+    }
     fn tree(self, input: &[u8]) -> Digest {
         let mut out = [0u8; DIGEST_BYTES];
         self.tree_into(input, &mut out);
@@ -232,6 +240,16 @@ impl<const N: usize> CanopyTree<N> {
         }
     }
 
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn from_heap(hasher: impl CanopyHash<N>, stage: u8, nodes: Vec<[u8; N]>) -> Self {
+        let log_leaves = (nodes.len() / 2).trailing_zeros() as usize;
+        let root = hasher.root(stage, log_leaves as u8, &nodes[1]);
+        Self {
+            log_leaves,
+            nodes,
+            root,
+        }
+    }
     pub fn root(&self) -> [u8; N] {
         self.root
     }

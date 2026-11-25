@@ -1,4 +1,4 @@
-//! Quintic extension of Goldilocks, $\mathbb{F}_{p^5} = \mathbb{F}_p[X]/(X^5 - 3)$ with
+//! Quintic extension of Goldilocks, $\mathbb{F}_{p^5} = \mathbb{F}_p\[X\]/(X^5 - 3)$ with
 //! $p = 2^{64} - 2^{32} + 1$: the challenge field of zk-Hem v2 ($|\mathbb{F}_{p^5}| > 2^{319.99}$).
 //!
 //! Irreducibility: $5 \mid p - 1$ and $3^{(p-1)/5} = \zeta_5 \ne 1$, so `3` is not a fifth power in
@@ -17,9 +17,9 @@ use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use qsag_core::field::goldilocks::GOLDILOCKS_EPSILON as EPSILON;
 
-use crate::field::{GOLDILOCKS_PRIME, Goldilocks};
 #[cfg(test)]
 use crate::field::GoldilocksOps;
+use crate::field::{GOLDILOCKS_PRIME, Goldilocks};
 
 /// The constant `3` of the defining binomial $X^5 - 3$.
 pub const FP5_W: Goldilocks = Goldilocks::from_u64_reduced(3);
@@ -93,7 +93,7 @@ impl WideAcc {
     }
 }
 
-/// `a * b + c` in $\mathbb{F}_p[X]/(X^5 - w)$ for a small public `w` (`1 + 4 w <= 2^6 - 1`):
+/// `a * b + c` in $\mathbb{F}_p\[X\]/(X^5 - w)$ for a small public `w` (`1 + 4 w <= 2^6 - 1`):
 /// coefficient `k` is `sum_{i+j=k} a_i b_j + w * sum_{i+j=k+5} a_i b_j`. The field uses `w = 3`;
 /// the tests run the same code with `w = 2` to exhibit a zero divisor.
 #[inline(always)]
@@ -123,20 +123,35 @@ const fn mul_add_binomial(
     out
 }
 
-/// Element $c_0 + c_1 X + c_2 X^2 + c_3 X^3 + c_4 X^4$ of $\mathbb{F}_p[X]/(X^5 - 3)$, limbs
+/// Element $c_0 + c_1 X + c_2 X^2 + c_3 X^3 + c_4 X^4$ of $\mathbb{F}_p\[X\]/(X^5 - 3)$, limbs
 /// `[c0, c1, c2, c3, c4]`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Fp5(pub [Goldilocks; 5]);
 
+impl From<Fp5> for qsag_whir_verified::Fp5 {
+    fn from(value: Fp5) -> Self {
+        value.to_verified()
+    }
+}
+
+impl From<qsag_whir_verified::Fp5> for Fp5 {
+    fn from(value: qsag_whir_verified::Fp5) -> Self {
+        Self::from_verified(value)
+    }
+}
+
+impl qsag_core::wipe::SecretWipe for Fp5 {
+    fn secret_wipe(&mut self) {
+        self.0.secret_wipe();
+    }
+    fn wipe_slice(items: &mut [Self]) {
+        qsag_asm::volatile_fill(items, Self::ZERO);
+    }
+}
+
 impl Fp5 {
-    pub const ZERO: Self = Self([Goldilocks::ZERO; 5]);
-    pub const ONE: Self = Self([
-        Goldilocks::ONE,
-        Goldilocks::ZERO,
-        Goldilocks::ZERO,
-        Goldilocks::ZERO,
-        Goldilocks::ZERO,
-    ]);
+    pub const ZERO: Self = Self::from_verified(qsag_whir_verified::fp5_zero());
+    pub const ONE: Self = Self::from_verified(qsag_whir_verified::fp5_one());
     /// The adjoined root `X` (`X^5 = 3`).
     pub const X: Self = Self([
         Goldilocks::ZERO,
@@ -245,7 +260,7 @@ impl Fp5 {
     /// probability $1 - (p / 2^{64})^5 < 2^{-29.6}$.
     #[inline]
     pub fn from_le_bytes_canonical(bytes: [u8; 40]) -> Option<Self> {
-        qsag_whir_verified::decode_canonical_fp5(&bytes).map(Self::from_verified)
+        qsag_whir_verified::decode_canonical_fp5(&bytes).map(Self::from)
     }
 
     /// Rejection-free sampling from 120 uniform bytes: limb `i` is the 192-bit little-endian
@@ -264,57 +279,34 @@ impl Fp5 {
     }
 
     #[inline(always)]
-    pub const fn mul_base(self, s: Goldilocks) -> Self {
-        let z = WideAcc::ZERO;
-        let [c0, c1, c2, c3, c4] = self.0;
-        Self([
-            z.add_mul(c0, s, 1).reduce(),
-            z.add_mul(c1, s, 1).reduce(),
-            z.add_mul(c2, s, 1).reduce(),
-            z.add_mul(c3, s, 1).reduce(),
-            z.add_mul(c4, s, 1).reduce(),
-        ])
+    pub fn mul_base(self, s: Goldilocks) -> Self {
+        qsag_whir_verified::fp5_scale(self.into(), s.to_canonical_u64()).into()
     }
 
     #[inline(always)]
-    pub const fn const_add(self, rhs: Self) -> Self {
-        let (a, b) = (self.0, rhs.0);
-        Self([
-            a[0].const_add(b[0]),
-            a[1].const_add(b[1]),
-            a[2].const_add(b[2]),
-            a[3].const_add(b[3]),
-            a[4].const_add(b[4]),
-        ])
+    pub fn const_add(self, rhs: Self) -> Self {
+        qsag_whir_verified::fp5_add(self.into(), rhs.into()).into()
     }
 
     #[inline(always)]
-    pub const fn const_sub(self, rhs: Self) -> Self {
-        let (a, b) = (self.0, rhs.0);
-        Self([
-            a[0].const_sub(b[0]),
-            a[1].const_sub(b[1]),
-            a[2].const_sub(b[2]),
-            a[3].const_sub(b[3]),
-            a[4].const_sub(b[4]),
-        ])
+    pub fn const_sub(self, rhs: Self) -> Self {
+        qsag_whir_verified::fp5_sub(self.into(), rhs.into()).into()
     }
 
     #[inline(always)]
-    pub const fn const_neg(self) -> Self {
-        Self::ZERO.const_sub(self)
+    pub fn const_neg(self) -> Self {
+        qsag_whir_verified::fp5_neg(self.into()).into()
     }
 
     #[inline(always)]
-    pub const fn double(self) -> Self {
+    pub fn double(self) -> Self {
         self.const_add(self)
     }
 
-    /// Product in $\mathbb{F}_p[X]/(X^5 - 3)$: the twenty-five 128-bit products are accumulated
-    /// exactly and each coefficient is reduced once.
+    /// Multiplication in the extracted quintic field.
     #[inline(always)]
-    pub const fn const_mul(self, rhs: Self) -> Self {
-        self.mul_add(rhs, Self::ZERO)
+    pub fn const_mul(self, rhs: Self) -> Self {
+        qsag_whir_verified::fp5_mul(self.into(), rhs.into()).into()
     }
 
     /// `self * rhs + addend` with one reduction per coefficient.
@@ -344,8 +336,8 @@ impl Fp5 {
 
     /// Frobenius endomorphism $\phi(x) = x^p$: $c_i \mapsto \zeta_5^i c_i$.
     #[inline(always)]
-    pub const fn frobenius(self) -> Self {
-        self.frobenius_pow(1)
+    pub fn frobenius(self) -> Self {
+        qsag_whir_verified::fp5_frobenius(self.into()).into()
     }
 
     /// $\phi^k(x) = x^{p^k}$ for a public `k` (taken modulo 5): $c_i \mapsto \zeta_5^{i k} c_i$.
@@ -366,7 +358,7 @@ impl Fp5 {
     /// $x^{p + p^2 + p^3 + p^4} = \phi(x) \phi^2(x) \phi^3(x) \phi^4(x)$ in two multiplications:
     /// with $t = \phi(x) \cdot \phi^2(x)$ it is $t \cdot \phi^2(t)$.
     #[inline(always)]
-    const fn conjugate_product(self) -> Self {
+    fn conjugate_product(self) -> Self {
         let f1 = self.frobenius_pow(1);
         let t = f1.const_mul(f1.frobenius_pow(1));
         t.const_mul(t.frobenius_pow(2))
@@ -387,40 +379,40 @@ impl Fp5 {
 
     /// Absolute norm $\mathrm{N}(x) = x^{1 + p + p^2 + p^3 + p^4} \in \mathbb{F}_p$.
     #[inline(always)]
-    pub const fn norm_to_base(self) -> Goldilocks {
+    pub fn norm_to_base(self) -> Goldilocks {
         self.mul_c0(self.conjugate_product())
     }
 
     /// Alias of [`Self::norm_to_base`].
     #[inline(always)]
-    pub const fn norm(self) -> Goldilocks {
+    pub fn norm(self) -> Goldilocks {
         self.norm_to_base()
     }
 
     /// Branchless fixed-work Itoh-Tsujii inverse $x^{p + p^2 + p^3 + p^4} / \mathrm{N}(x)$
     /// (`0 -> 0`): two extension multiplications, one base-field inversion, one scaling.
     #[inline]
-    pub const fn inv(self) -> Self {
+    pub fn inv(self) -> Self {
         let conj = self.conjugate_product();
         conj.mul_base(self.mul_c0(conj).inv_or_zero())
     }
 
     /// Alias of [`Self::inv`].
     #[inline]
-    pub const fn inverse(self) -> Self {
+    pub fn inverse(self) -> Self {
         self.inv()
     }
 
     /// Total fixed-work inverse hint mapping `0 -> 0` without panicking, for R1CS witness
     /// synthesis paired with a multiplicative `x * inv == 1` constraint.
     #[inline]
-    pub const fn inv_or_zero(self) -> Self {
+    pub fn inv_or_zero(self) -> Self {
         self.inv()
     }
 
     /// Public-exponent binary exponentiation.
     #[inline]
-    pub const fn pow(self, mut exp: u64) -> Self {
+    pub fn pow(self, mut exp: u64) -> Self {
         let mut base = self;
         let mut acc = Self::ONE;
         while exp > 0 {
@@ -435,7 +427,7 @@ impl Fp5 {
 
     /// Public-exponent binary exponentiation for an exponent given as little-endian `u64` limbs.
     #[inline]
-    pub const fn pow_limbs(self, exp: &[u64]) -> Self {
+    pub fn pow_limbs(self, exp: &[u64]) -> Self {
         let mut base = self;
         let mut acc = Self::ONE;
         let mut i = 0;
@@ -938,30 +930,27 @@ mod tests {
             let b = rng.fp5();
             let s = rng.base();
             assert_eq!(
-                Fp5::from_verified(qsag_whir_verified::fp5_add(a.to_verified(), b.to_verified())),
+                Fp5::from(qsag_whir_verified::fp5_add(a.into(), b.into())),
                 a + b
             );
             assert_eq!(
-                Fp5::from_verified(qsag_whir_verified::fp5_sub(a.to_verified(), b.to_verified())),
+                Fp5::from(qsag_whir_verified::fp5_sub(a.into(), b.into())),
                 a - b
             );
+            assert_eq!(Fp5::from(qsag_whir_verified::fp5_neg(a.into())), -a);
             assert_eq!(
-                Fp5::from_verified(qsag_whir_verified::fp5_neg(a.to_verified())),
-                -a
-            );
-            assert_eq!(
-                Fp5::from_verified(qsag_whir_verified::fp5_scale(
-                    a.to_verified(),
+                Fp5::from(qsag_whir_verified::fp5_scale(
+                    a.into(),
                     s.to_canonical_u64()
                 )),
                 a.mul_base(s)
             );
             assert_eq!(
-                Fp5::from_verified(qsag_whir_verified::fp5_mul(a.to_verified(), b.to_verified())),
+                Fp5::from(qsag_whir_verified::fp5_mul(a.into(), b.into())),
                 a * b
             );
             assert_eq!(
-                Fp5::from_verified(qsag_whir_verified::fp5_frobenius(a.to_verified())),
+                Fp5::from(qsag_whir_verified::fp5_frobenius(a.into())),
                 a.frobenius()
             );
 
@@ -976,39 +965,39 @@ mod tests {
             let f = (a + b).mul_base(inv_two);
             let g = (a - b).mul_base(inv_two.const_mul(x.inv()));
             let expected_fold = g + (alpha + beta.mul_base(x.square())) * (f + theta * g);
-            let verified_fold = Fp5::from_verified(qsag_whir_verified::cwyz_duet_fold_fp5(
-                a.to_verified(),
-                b.to_verified(),
+            let verified_fold = Fp5::from(qsag_whir_verified::cwyz_duet_fold_fp5(
+                a.into(),
+                b.into(),
                 inv_two.const_mul(x.inv()).to_canonical_u64(),
                 inv_two.to_canonical_u64(),
                 x.square().to_canonical_u64(),
-                theta.to_verified(),
-                alpha.to_verified(),
-                beta.to_verified(),
+                theta.into(),
+                alpha.into(),
+                beta.into(),
             ));
             assert_eq!(verified_fold, expected_fold);
             assert!(qsag_whir_verified::verify_cwyz_duet_fold_step_fp5(
-                a.to_verified(),
-                b.to_verified(),
+                a.into(),
+                b.into(),
                 inv_two.const_mul(x.inv()).to_canonical_u64(),
                 inv_two.to_canonical_u64(),
                 x.square().to_canonical_u64(),
-                theta.to_verified(),
-                alpha.to_verified(),
-                beta.to_verified(),
-                expected_fold.to_verified(),
+                theta.into(),
+                alpha.into(),
+                beta.into(),
+                expected_fold.into(),
             ));
             let bad_fold = expected_fold + Fp5::X;
             assert!(!qsag_whir_verified::verify_cwyz_duet_fold_step_fp5(
-                a.to_verified(),
-                b.to_verified(),
+                a.into(),
+                b.into(),
                 inv_two.const_mul(x.inv()).to_canonical_u64(),
                 inv_two.to_canonical_u64(),
                 x.square().to_canonical_u64(),
-                theta.to_verified(),
-                alpha.to_verified(),
-                beta.to_verified(),
-                bad_fold.to_verified(),
+                theta.into(),
+                alpha.into(),
+                beta.into(),
+                bad_fold.into(),
             ));
 
             // Bridge claim step parity against `pcs::next_claim`
@@ -1017,17 +1006,17 @@ mod tests {
             let phi = rng.fp5();
             let next = crate::zk_hem::v2::pcs::next_claim(&wire, claim, phi, [theta, alpha, beta]);
             assert!(qsag_whir_verified::verify_cwyz_bridge_claim_step_fp5(
-                wire[0].to_verified(),
-                wire[1].to_verified(),
-                wire[2].to_verified(),
-                wire[3].to_verified(),
-                wire[4].to_verified(),
-                claim.to_verified(),
-                phi.to_verified(),
-                theta.to_verified(),
-                alpha.to_verified(),
-                beta.to_verified(),
-                next.to_verified(),
+                wire[0].into(),
+                wire[1].into(),
+                wire[2].into(),
+                wire[3].into(),
+                wire[4].into(),
+                claim.into(),
+                phi.into(),
+                theta.into(),
+                alpha.into(),
+                beta.into(),
+                next.into(),
             ));
         }
     }
