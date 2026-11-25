@@ -315,12 +315,17 @@ fn agg_checks(report: &mut Report, kat: &Json) -> Result<(), CliError> {
         )
         .ok()?;
         Some(
-            verify_hem_quintic_128(&committee, &SigningMode::SharedMessage(message), &proof)
-                && !verify_hem_quintic_128(
-                    &committee,
-                    &SigningMode::SharedMessage(b"other"),
-                    &proof,
-                ),
+            verify_hem_quintic_128(
+                HemQuinticProfile::TurboShake400,
+                &committee,
+                &SigningMode::SharedMessage(message),
+                &proof,
+            ) && !verify_hem_quintic_128(
+                HemQuinticProfile::TurboShake400,
+                &committee,
+                &SigningMode::SharedMessage(b"other"),
+                &proof,
+            ),
         )
     });
     report.check(

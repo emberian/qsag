@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::cli::{
     Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, read_bounded_file,
-    read_input, write_new,
+    read_input,
 };
 use crate::codec::{Json, from_hex_exact};
 use crate::keys::{PUBLIC_FORMAT, SECRET_FORMAT, derive, derive_secret, load_json, scheme_of};
@@ -416,7 +416,10 @@ fn quintic_proof_file(committee: &[ValidatorPublicKey], proof: &HemQuinticProof)
     Json::object(vec![
         ("format", Json::str(QUINTIC_FORMAT)),
         ("scheme", Json::str(Scheme::AggCommittee.name())),
-        ("hem_profile", Json::str(quintic_profile_name(proof.profile))),
+        (
+            "hem_profile",
+            Json::str(quintic_profile_name(proof.profile)),
+        ),
         (
             "committee_root",
             Json::hex(&compute_committee_root(committee)),
@@ -586,6 +589,7 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::usage("missing required option --message (or --in)"))?;
     let message = read_input(msg_arg)?;
     let out_path = args.require("out")?;
+    let reserved_output = crate::cli::reserve_output(out_path, false)?;
     let mode = SigningMode::SharedMessage(&message);
 
     let (committee, proof) = if let Some(sigs_spec) = args.get("sigs") {
@@ -892,13 +896,13 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             .map_err(|e| CliError::verify(format!("quintic aggregation failed: {e:?}")))?;
         (committee, proof)
     };
-    if !verify_hem_quintic_128(&committee, &mode, &proof) {
+    if !verify_hem_quintic_128(quintic, &committee, &mode, &proof) {
         return Err(CliError::verify(
             "the produced quintic aggregate does not verify",
         ));
     }
     let file = quintic_proof_file(&committee, &proof);
-    write_new(out_path, file.to_pretty().as_bytes(), false)?;
+    crate::cli::finish_output(reserved_output, file.to_pretty().as_bytes())?;
     if args.flag("json") {
         print!("{}", file.to_pretty());
     } else {
@@ -913,19 +917,27 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
 }
 
 const VERIFY_AGG_HELP: &str = "\
-qsag verify-aggregate --pubkeys <pk1,pk2,..|committee> --message <file|-> --proof <path> [--json]
-qsag verify-agg       --public  <committee|pk1,pk2,..> --in      <file|-> --proof <path> [--json]
+qsag verify-aggregate --pubkeys <pk1,pk2,..|committee> --message <file|-> --proof <path> (--min-signers K | --allow-any-subset) [--json]
+qsag verify-agg       --public  <committee|pk1,pk2,..> --in      <file|-> --proof <path> (--min-signers K | --allow-any-subset) [--json]
 
 Verify a Quintic Fp5 (`QSAGHQM2`) aggregate proof against public keys and a message. Exit code 0
-means valid; exit code 2 means invalid. Use --hem-profile quintic-turbo or quintic-gl24 to pin an
-exact Canopy profile. The signer set is read from the proof and reported.
+requires the signer count and proof profile to match. Exit code 2 means verification failed.
+The expected profile defaults to quintic-turbo. Use --hem-profile quintic-gl24 for GL24 proofs.
 ";
 
 pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["public", "pubkeys", "in", "message", "proof", "hem-profile"],
-        &["json", "help"],
+        &[
+            "public",
+            "pubkeys",
+            "in",
+            "message",
+            "proof",
+            "hem-profile",
+            "min-signers",
+        ],
+        &["json", "help", "allow-any-subset"],
     )?;
     if args.flag("help") {
         print!("{VERIFY_AGG_HELP}");
@@ -940,6 +952,15 @@ pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
     if args.get("in").is_some() && args.get("message").is_some() {
         return Err(CliError::usage("pass either --message or --in, not both"));
     }
+    let min_signers = match (args.get_u64("min-signers")?, args.flag("allow-any-subset")) {
+        (Some(k @ 1..), false) => k,
+        (None, true) => 1,
+        _ => {
+            return Err(CliError::usage(
+                "supply --min-signers K (K >= 1) or --allow-any-subset",
+            ));
+        }
+    };
     let pub_arg = args
         .get("pubkeys")
         .or_else(|| args.get("public"))
@@ -951,11 +972,12 @@ pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
     let committee = load_public_validators(pub_arg)?;
     let message = read_input(msg_arg)?;
     let mode = SigningMode::SharedMessage(&message);
-    let expected_profile = parse_quintic_profile(&args)?;
+    let expected_profile =
+        parse_quintic_profile(&args)?.unwrap_or(HemQuinticProfile::TurboShake400);
     let proof = load_quintic_proof(args.require("proof")?)?;
     let signers = proof.bitmap.active_indices();
-    let valid = expected_profile.is_none_or(|p| proof.profile == p)
-        && verify_hem_quintic_128(&committee, &mode, &proof);
+    let valid = signers.len() as u64 >= min_signers
+        && verify_hem_quintic_128(expected_profile, &committee, &mode, &proof);
     if args.flag("json") {
         let verdict = Json::object(vec![
             ("valid", Json::Bool(valid)),
