@@ -72,6 +72,9 @@ use crate::cli::{
 use crate::codec::{Json, from_hex, from_hex_exact, to_hex};
 use crate::vault::{Vault, set};
 
+#[path = "migrate_collab.rs"]
+mod migrate_collab;
+
 const MIGRATE_HELP: &str = "\
 qsag migrate <subcommand> [options]
 
@@ -81,6 +84,7 @@ crates/qsag-migrate/SECURITY.md.
 
   claim     derive the statement (legacy value, nullifier, target) from a legacy secret file
             (alias: commit)
+  collab    split-secret | prep | prove with a quorum of custodians
   prove     prove a statement
   verify    verify a proof against the epoch, domain and target the verifier expects;
             --register records it in a registry in the same step
@@ -1367,23 +1371,22 @@ fn derive_zcash(
             } else {
                 OrchardScope::External
             };
-            let d: [u8; 11] =
-                match (args.get("diversifier"), args.get_u64("diversifier-index")?) {
-                    (Some(_), Some(_)) => {
-                        return Err(CliError::usage(
-                            "cannot combine --diversifier and --diversifier-index",
-                        ));
-                    }
-                    (Some(hex), None) => from_hex_exact::<11>(hex, "--diversifier")?,
-                    (None, idx_opt) => {
-                        let fvk = orchard_fvk(&key_source, &key_witness).ok_or_else(|| {
-                            CliError::input("legacy secret is not a valid Orchard key")
-                        })?;
-                        let mut j = [0u8; 11];
-                        j[..8].copy_from_slice(&idx_opt.unwrap_or(0).to_le_bytes());
-                        fvk.diversifier(&j, scope)
-                    }
-                };
+            let d: [u8; 11] = match (args.get("diversifier"), args.get_u64("diversifier-index")?) {
+                (Some(_), Some(_)) => {
+                    return Err(CliError::usage(
+                        "cannot combine --diversifier and --diversifier-index",
+                    ));
+                }
+                (Some(hex), None) => from_hex_exact::<11>(hex, "--diversifier")?,
+                (None, idx_opt) => {
+                    let fvk = orchard_fvk(&key_source, &key_witness).ok_or_else(|| {
+                        CliError::input("legacy secret is not a valid Orchard key")
+                    })?;
+                    let mut j = [0u8; 11];
+                    j[..8].copy_from_slice(&idx_opt.unwrap_or(0).to_le_bytes());
+                    fvk.diversifier(&j, scope)
+                }
+            };
             let witness = AddressWitness {
                 key: key_witness,
                 internal,
@@ -1547,9 +1550,11 @@ fn derive_zcash(
                     } else {
                         json.field_hex("seed")?
                     };
-                    let sk: [u8; 32] = sk_buf.0.as_slice().try_into().map_err(|_| {
-                        CliError::input("spending_key must be 32 bytes of hex")
-                    })?;
+                    let sk: [u8; 32] = sk_buf
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| CliError::input("spending_key must be 32 bytes of hex"))?;
                     (
                         OrchardKeySource::SpendingKey,
                         OrchardKeyWitness::SpendingKey(sk),
@@ -1621,7 +1626,10 @@ fn derive_zcash(
             };
 
             let internal = args.flag("internal")
-                || json.get("internal").and_then(Json::as_bool).unwrap_or(false);
+                || json
+                    .get("internal")
+                    .and_then(Json::as_bool)
+                    .unwrap_or(false);
             let alpha = from_hex_exact::<32>(json.field_str("alpha")?, "alpha")?;
             let value = json.field_u64("value")?;
             let rho_bytes = from_hex_exact::<32>(json.field_str("rho")?, "rho")?;
@@ -1649,9 +1657,8 @@ fn derive_zcash(
                 let mut j = [0u8; 11];
                 j[..8].copy_from_slice(&idx.to_le_bytes());
                 let d = fvk.diversifier(&j, scope);
-                fvk.address(&d, scope).ok_or_else(|| {
-                    CliError::input("could not derive Ironwood recipient address")
-                })?
+                fvk.address(&d, scope)
+                    .ok_or_else(|| CliError::input("could not derive Ironwood recipient address"))?
             };
             let note = OrchardNote {
                 recipient,
@@ -1660,54 +1667,49 @@ fn derive_zcash(
                 rseed,
                 version: NoteVersion::V3,
             };
-            let position = u32::try_from(
-                json.get("position")
-                    .and_then(Json::as_u64)
-                    .unwrap_or(0),
-            )
-            .map_err(|_| CliError::input("position exceeds u32::MAX"))?;
+            let position = u32::try_from(json.get("position").and_then(Json::as_u64).unwrap_or(0))
+                .map_err(|_| CliError::input("position exceeds u32::MAX"))?;
 
-            let path: [[u8; 32]; rehash::DEPTH] = if let Some(arr) =
-                json.get("merkle_path").and_then(Json::as_array)
-            {
-                if arr.len() != rehash::DEPTH {
-                    return Err(CliError::input(format!(
-                        "merkle_path must have {} siblings (got {})",
-                        rehash::DEPTH,
-                        arr.len()
-                    )));
-                }
-                let mut siblings = [[0u8; 32]; rehash::DEPTH];
-                for (slot, item) in siblings.iter_mut().zip(arr) {
-                    let hex = item
-                        .as_str()
-                        .ok_or_else(|| CliError::input("merkle_path entries must be hex strings"))?;
-                    *slot = from_hex_exact::<32>(hex, "merkle_path sibling")?;
-                }
-                siblings
-            } else if let Some(arr) = json.get("leaves").and_then(Json::as_array) {
-                let mut leaves = Vec::with_capacity(arr.len());
-                for item in arr {
-                    let hex = item
-                        .as_str()
-                        .ok_or_else(|| CliError::input("leaves entries must be 64-hex strings"))?;
-                    leaves.push(from_hex_exact::<32>(hex, "leaf")?);
-                }
-                rehash::witness(&leaves, position)
-                    .ok_or_else(|| CliError::input("position out of range for leaves"))?
-                    .0
-            } else if position == 0 {
-                let cmx = note
-                    .cmx()
-                    .ok_or_else(|| CliError::input("note commitment is invalid"))?
-                    .to_bytes();
-                let leaf = rehash::leaf_hash(&cmx, &rho_bytes);
-                rehash::witness(&[leaf], 0).expect("single leaf").0
-            } else {
-                return Err(CliError::input(
-                    "Ironwood witness with position > 0 requires merkle_path or leaves",
-                ));
-            };
+            let path: [[u8; 32]; rehash::DEPTH] =
+                if let Some(arr) = json.get("merkle_path").and_then(Json::as_array) {
+                    if arr.len() != rehash::DEPTH {
+                        return Err(CliError::input(format!(
+                            "merkle_path must have {} siblings (got {})",
+                            rehash::DEPTH,
+                            arr.len()
+                        )));
+                    }
+                    let mut siblings = [[0u8; 32]; rehash::DEPTH];
+                    for (slot, item) in siblings.iter_mut().zip(arr) {
+                        let hex = item.as_str().ok_or_else(|| {
+                            CliError::input("merkle_path entries must be hex strings")
+                        })?;
+                        *slot = from_hex_exact::<32>(hex, "merkle_path sibling")?;
+                    }
+                    siblings
+                } else if let Some(arr) = json.get("leaves").and_then(Json::as_array) {
+                    let mut leaves = Vec::with_capacity(arr.len());
+                    for item in arr {
+                        let hex = item.as_str().ok_or_else(|| {
+                            CliError::input("leaves entries must be 64-hex strings")
+                        })?;
+                        leaves.push(from_hex_exact::<32>(hex, "leaf")?);
+                    }
+                    rehash::witness(&leaves, position)
+                        .ok_or_else(|| CliError::input("position out of range for leaves"))?
+                        .0
+                } else if position == 0 {
+                    let cmx = note
+                        .cmx()
+                        .ok_or_else(|| CliError::input("note commitment is invalid"))?
+                        .to_bytes();
+                    let leaf = rehash::leaf_hash(&cmx, &rho_bytes);
+                    rehash::witness(&[leaf], 0).expect("single leaf").0
+                } else {
+                    return Err(CliError::input(
+                        "Ironwood witness with position > 0 requires merkle_path or leaves",
+                    ));
+                };
 
             let spend_auth_sig = match args.get("spend-auth-sig") {
                 Some(hex) => Some(from_hex_exact::<64>(hex, "--spend-auth-sig")?),
@@ -1774,13 +1776,12 @@ fn derive_zcash(
                 let secret = read_legacy_secret(secret_path, SecretForm::Key32)?;
                 let key: [u8; 32] = secret.0.as_slice().try_into().expect("32 bytes");
                 let witness = OwnershipWitness::secp256k1_key(&key);
-                let stmt =
-                    TransparentStatement::derive_hidden(network, encoding, &witness, pq, domain, epoch)
-                        .ok_or_else(|| {
-                            CliError::input(
-                                "legacy secret is not a valid secp256k1 key (must be in 1..n)",
-                            )
-                        })?;
+                let stmt = TransparentStatement::derive_hidden(
+                    network, encoding, &witness, pq, domain, epoch,
+                )
+                .ok_or_else(|| {
+                    CliError::input("legacy secret is not a valid secp256k1 key (must be in 1..n)")
+                })?;
                 return Ok((
                     LoadedStatement {
                         statement: Statement::ZcashTransparent(stmt),
@@ -1810,9 +1811,8 @@ fn derive_zcash(
                 Some(p) => parse_path(p)?,
                 None if !extended_root => {
                     let account = parse_u32_option(args, "account")?.unwrap_or(0);
-                    bip44_path(network, account, 0, 0).ok_or_else(|| {
-                        CliError::usage("--account must be below 2^31")
-                    })?
+                    bip44_path(network, account, 0, 0)
+                        .ok_or_else(|| CliError::usage("--account must be below 2^31"))?
                 }
                 None => {
                     return Err(CliError::usage(
@@ -1867,13 +1867,12 @@ fn derive_zcash(
                 },
                 path: spec,
             };
-            let stmt =
-                TransparentStatement::derive(network, encoding, source, &witness, pq, domain, epoch)
-                    .ok_or_else(|| {
-                        CliError::input(
-                            "legacy secret does not derive a valid Zcash transparent address",
-                        )
-                    })?;
+            let stmt = TransparentStatement::derive(
+                network, encoding, source, &witness, pq, domain, epoch,
+            )
+            .ok_or_else(|| {
+                CliError::input("legacy secret does not derive a valid Zcash transparent address")
+            })?;
             Ok((
                 LoadedStatement {
                     statement: Statement::ZcashTransparent(stmt),
@@ -2047,8 +2046,8 @@ n is public. --merkle-root is the secret-side script tree root of a Taproot scri
     }
     args.no_positionals()?;
     let (loaded, _witness, _secret) = derive(&args)?;
-    let members = statement_members(&loaded.statement, &loaded.target_text)
-        .map_err(CliError::input)?;
+    let members =
+        statement_members(&loaded.statement, &loaded.target_text).map_err(CliError::input)?;
     let doc = document(CLAIM_FORMAT, members);
     if let Some(out) = args.get("out") {
         write_new(out, doc.to_pretty().as_bytes(), false)?;
@@ -2144,9 +2143,9 @@ fn map_recovery_error(err: RecoveryError) -> CliError {
         RecoveryError::MalformedStatement | RecoveryError::WitnessMismatch => {
             CliError::input(format!("Zcash migration witness error: {err:?}"))
         }
-        RecoveryError::SignatureRequired => CliError::usage(
-            "--kind ironwood with --root qsk requires --spend-auth-sig <128-hex>",
-        ),
+        RecoveryError::SignatureRequired => {
+            CliError::usage("--kind ironwood with --root qsk requires --spend-auth-sig <128-hex>")
+        }
         RecoveryError::BadSignature => {
             CliError::input("Zcash spend authorization signature does not verify under rk")
         }
@@ -2162,11 +2161,9 @@ fn prove_statement_bytes(
     seed: &[u8; 32],
 ) -> Result<Vec<u8>, CliError> {
     match (statement, witness) {
-        (Statement::Ownership(s), Witness::Ownership(w)) => {
-            prove_ownership(s, w, REGIME, seed)
-                .map(|p| p.to_bytes())
-                .map_err(map_ownership_error)
-        }
+        (Statement::Ownership(s), Witness::Ownership(w)) => prove_ownership(s, w, REGIME, seed)
+            .map(|p| p.to_bytes())
+            .map_err(map_ownership_error),
         (
             Statement::ZcashIronwood(s),
             Witness::ZcashIronwood {
@@ -2176,11 +2173,9 @@ fn prove_statement_bytes(
         ) => prove_recovery(s, witness, REGIME, seed, spend_auth_sig.as_ref())
             .map(|p| p.to_bytes())
             .map_err(map_recovery_error),
-        (Statement::ZcashOrchard(s), Witness::ZcashOrchard(w)) => {
-            prove_address(s, w, REGIME, seed)
-                .map(|p| p.to_bytes())
-                .map_err(map_recovery_error)
-        }
+        (Statement::ZcashOrchard(s), Witness::ZcashOrchard(w)) => prove_address(s, w, REGIME, seed)
+            .map(|p| p.to_bytes())
+            .map_err(map_recovery_error),
         (Statement::ZcashSapling(s), Witness::ZcashSapling(w)) => {
             prove_sapling_address(s, w, REGIME, seed)
                 .map(|p| p.to_bytes())
@@ -2196,9 +2191,26 @@ fn prove_statement_bytes(
 }
 
 fn verify_statement_bytes(statement: &Statement, bytes: &[u8]) -> Option<bool> {
+    use qsag_agg::zk_hem::v2::protocol::{MAGIC, MAGIC_SPLIT, ZkHemV2Proof, ZkHemV2SplitProof};
     match statement {
+        Statement::Ownership(s) if bytes.starts_with(&MAGIC_SPLIT) => {
+            let shape = ownership_shape(s)?;
+            let proof = ZkHemV2SplitProof::from_bytes(bytes, &shape)?;
+            Some(qsag_migrate::hem::collab::verify_threshold_ownership(
+                s, REGIME, &proof,
+            ))
+        }
         Statement::Ownership(s) => {
-            OwnershipProof::from_bytes(bytes, s).map(|p| verify_ownership(s, REGIME, &p))
+            let proof = if bytes.starts_with(&MAGIC) {
+                let shape = ownership_shape(s)?;
+                OwnershipProof {
+                    regime: REGIME,
+                    proof: ZkHemV2Proof::from_bytes(bytes, &shape)?,
+                }
+            } else {
+                OwnershipProof::from_bytes(bytes, s)?
+            };
+            Some(verify_ownership(s, REGIME, &proof))
         }
         Statement::ZcashIronwood(s) => {
             RecoveryProof::from_bytes(bytes, s).map(|p| verify_recovery(s, REGIME, &p))
@@ -2206,12 +2218,28 @@ fn verify_statement_bytes(statement: &Statement, bytes: &[u8]) -> Option<bool> {
         Statement::ZcashOrchard(s) => {
             AddressProof::from_bytes(bytes, s).map(|p| verify_address(s, REGIME, &p))
         }
-        Statement::ZcashSapling(s) => SaplingAddressProof::from_bytes(bytes, s)
-            .map(|p| verify_sapling_address(s, REGIME, &p)),
+        Statement::ZcashSapling(s) => {
+            SaplingAddressProof::from_bytes(bytes, s).map(|p| verify_sapling_address(s, REGIME, &p))
+        }
         Statement::ZcashTransparent(s) => {
             TransparentProof::from_bytes(bytes, s).map(|p| verify_transparent(s, REGIME, &p))
         }
     }
+}
+
+fn write_proof_document(loaded: &LoadedStatement, bytes: &[u8], out: &str) -> Result<(), CliError> {
+    let mut members =
+        statement_members(&loaded.statement, &loaded.target_text).map_err(CliError::input)?;
+    members.extend([
+        ("regime", Json::str(REGIME_NAME)),
+        ("proof_bytes", Json::num(bytes.len())),
+        ("proof", Json::str(to_base64(bytes))),
+    ]);
+    write_new(
+        out,
+        document(PROOF_FORMAT, members).to_pretty().as_bytes(),
+        false,
+    )
 }
 
 fn prove(raw: &[String]) -> Result<(), CliError> {
@@ -2249,23 +2277,10 @@ migration domain. --deterministic derives the proof randomness from the secret a
             "the generated migration proof does not verify; nothing was written",
         ));
     }
-    let mut members =
-        statement_members(statement, &loaded.target_text).map_err(CliError::input)?;
-    members.extend([
-        ("regime", Json::str(REGIME_NAME)),
-        ("proof_bytes", Json::num(bytes.len())),
-        ("proof", Json::str(to_base64(&bytes))),
-    ]);
-    write_new(
-        out_path,
-        document(PROOF_FORMAT, members).to_pretty().as_bytes(),
-        false,
-    )?;
+    write_proof_document(&loaded, &bytes, out_path)?;
     if args.flag("json") {
         let mut report = vec![("operation", Json::str("migrate-prove"))];
-        report.extend(
-            statement_members(statement, &loaded.target_text).map_err(CliError::input)?,
-        );
+        report.extend(statement_members(statement, &loaded.target_text).map_err(CliError::input)?);
         report.extend([
             ("regime", Json::str(REGIME_NAME)),
             ("proof_bytes", Json::num(bytes.len())),
@@ -2347,8 +2362,19 @@ fn load_verified(path: &str, expected: &Expectation) -> Result<LoadedStatement, 
         .get("proof")
         .and_then(Json::as_str)
         .ok_or_else(|| CliError::verify("migration proof file has no proof"))?;
-    let cap = max_proof_bytes(statement)
-        .ok_or_else(|| CliError::verify("statement has no ownership relation"))?;
+    // The first 16 base64 characters encode the magic, profile and committer count.
+    let prefix = encoded.get(..16).and_then(from_base64);
+    let cap = match (statement, prefix.as_deref()) {
+        (Statement::Ownership(s), Some(h))
+            if h.starts_with(&qsag_agg::zk_hem::v2::protocol::MAGIC_SPLIT) =>
+        {
+            h.get(10).and_then(|&n| {
+                bounds::max_split_proof_bytes(REGIME, ownership_shape(s)?.as_ref(), usize::from(n))
+            })
+        }
+        _ => max_proof_bytes(statement),
+    }
+    .ok_or_else(|| CliError::verify("statement has no ownership relation"))?;
     if encoded.len() > base64_len(cap) {
         return Err(CliError::verify(format!(
             "proof is larger than any proof of this statement ({cap} bytes)"
@@ -2946,11 +2972,12 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         "claim" | "commit" => claim(rest),
+        "collab" => migrate_collab::run(rest),
         "prove" => prove(rest),
         "verify" => verify(rest),
         "registry" => registry(rest),
         other => Err(CliError::usage(format!(
-            "unknown migrate subcommand '{other}' (expected claim, prove, verify, or registry)"
+            "unknown migrate subcommand '{other}' (expected claim, collab, prove, verify, or registry)"
         ))),
     }
 }
@@ -3226,10 +3253,7 @@ mod tests {
         for statement in [&public, &hidden, &extended] {
             assert!(std::ptr::eq(kind_of(statement).unwrap(), kind));
             let text = target().encode().unwrap();
-            let doc = document(
-                CLAIM_FORMAT,
-                statement_members(statement, &text).unwrap(),
-            );
+            let doc = document(CLAIM_FORMAT, statement_members(statement, &text).unwrap());
             assert_eq!(
                 load_statement(&doc, CLAIM_FORMAT, &[]).unwrap().statement,
                 *statement
@@ -3276,10 +3300,7 @@ mod tests {
     fn statement_documents_round_trip_and_reject_any_other_content() {
         let text = target().encode().unwrap();
         for (kind, statement, _) in statements() {
-            let doc = document(
-                CLAIM_FORMAT,
-                statement_members(&statement, &text).unwrap(),
-            );
+            let doc = document(CLAIM_FORMAT, statement_members(&statement, &text).unwrap());
             let loaded = load_statement(&doc, CLAIM_FORMAT, &[]).unwrap();
             assert_eq!(loaded.statement, statement, "{}", kind.name);
             assert_eq!(loaded.target, target());
@@ -3306,10 +3327,7 @@ mod tests {
         }
         let (_, statement, _) = statements().remove(0);
         let other = address(8).encode().unwrap();
-        let doc = document(
-            CLAIM_FORMAT,
-            statement_members(&statement, &other).unwrap(),
-        );
+        let doc = document(CLAIM_FORMAT, statement_members(&statement, &other).unwrap());
         let err = load_statement(&doc, CLAIM_FORMAT, &[]).err().unwrap();
         assert!(err.contains("commits to"), "{err}");
     }
@@ -3402,7 +3420,12 @@ mod tests {
             println!("{}: proof {len} bytes, bound {cap} bytes", kind.name);
             assert!(len <= cap, "{}: {len} > {cap}", kind.name);
             assert!(cap < 2 * len, "{}: bound {cap} for {len}", kind.name);
-            assert_eq!(verify_statement_bytes(&statement, &bytes), Some(true), "{}", kind.name);
+            assert_eq!(
+                verify_statement_bytes(&statement, &bytes),
+                Some(true),
+                "{}",
+                kind.name
+            );
         }
     }
 }
