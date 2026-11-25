@@ -77,7 +77,7 @@ use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::boxed::Box;
 use std::collections::BTreeMap;
 use std::fs::{self, File, TryLockError};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::vec;
 
@@ -776,7 +776,7 @@ impl NullifierRegistry {
         lock_exclusive(&file)?;
         let identity = descriptor_identity(&file)?;
         let mut registry = Self::empty(path, file, identity, mac_key);
-        File::open("/dev/urandom")?.read_exact(&mut registry.genesis)?;
+        qsag_accel::fill_os_random(&mut registry.genesis)?;
         let mut header = vec![0u8; HEADER_LEN];
         header[..8].copy_from_slice(MAGIC);
         header[8..40].copy_from_slice(&registry.genesis);

@@ -38,9 +38,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use qsag_agg::field::Goldilocks;
+use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc, Shape};
 use qsag_agg::zk_hem::v2::params::Profile;
 use qsag_agg::zk_hem::v2::protocol::{self as protocol, ZkHemV2Error, ZkHemV2Proof};
-use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc, Shape};
 
 use super::blake2::{blake2b_256, blake2b_512, blake2b_512_gadget};
 use super::blake3;
@@ -202,7 +202,10 @@ impl Drop for KeyWitness {
         match self {
             Self::SpendingKey(sk) => wipe(sk),
             Self::Zip32Seed(seed) => wipe(seed),
-            Self::QuantumSpendingKey { qsk, .. } => wipe(qsk),
+            Self::QuantumSpendingKey { qsk, nk, .. } => {
+                wipe(qsk);
+                wipe(nk);
+            }
         }
     }
 }
@@ -220,12 +223,12 @@ fn resolve_keys(source: &KeySource, witness: &KeyWitness) -> Option<Keys> {
         let ask = orchard::h_ask(sk);
         let ak_point = orchard::spend_auth_base().mul(&ask);
         (!ask.is_zero()).then(|| Keys {
-            ak_point,
             fvk: FullViewingKey {
                 ak: ak_point.extract(),
                 nk: orchard::h_nk(sk),
                 rivk: orchard::h_rivk(sk),
             },
+            ak_point,
             ask: Some(ask),
         })
     };
@@ -344,6 +347,7 @@ impl Inputs {
 impl Drop for Inputs {
     fn drop(&mut self) {
         wipe(&mut self.secret);
+        wipe(&mut self.nk);
         wipe(&mut self.alpha);
         wipe(&mut self.rseed);
     }
@@ -722,10 +726,10 @@ fn evaluate_note(source: &KeySource, w: &RecoveryWitness) -> Option<NoteEvaluati
     } else {
         orchard::Scope::External
     };
-    let ivk = keys.fvk.ivk(scope)?;
+    let ivk = qsag_core::wipe::SecretBuffer(keys.fvk.ivk(scope)?);
     let d: [u8; 11] = w.note.recipient[..11].try_into().ok()?;
     let g_d = orchard::diversify_hash(&d);
-    if g_d.mul(&Fq::from_base(ivk)).to_bytes() != w.note.pk_d() {
+    if g_d.mul(&Fq::from_base(*ivk)).to_bytes() != w.note.pk_d() {
         return None;
     }
     let cm = w.note.commitment()?;
@@ -1312,11 +1316,7 @@ pub fn prove_address(
 }
 
 /// Verify an address ownership proof under the regime the verifier requires.
-pub fn verify_address(
-    statement: &AddressStatement,
-    regime: Profile,
-    proof: &AddressProof,
-) -> bool {
+pub fn verify_address(statement: &AddressStatement, regime: Profile, proof: &AddressProof) -> bool {
     if proof.regime != regime || proof.key_tag != statement.key_source.tag() {
         return false;
     }
@@ -1378,7 +1378,7 @@ mod tests {
     fn alpha(i: u64) -> [u8; 32] {
         let mut x = Fq::from_u64(0xfeed_face_cafe_beef ^ i);
         for _ in 0..5 {
-            x = x * x + Fq::from_u64(i + 5);
+            x = x.square() + Fq::from_u64(i + 5);
         }
         x.to_bytes()
     }
@@ -1393,7 +1393,7 @@ mod tests {
                 // an independent spend authorizing key.
                 let ask = orchard::spend_authorizing_key(&sk(3)).unwrap();
                 KeyWitness::QuantumSpendingKey {
-                    qsk: orchard::h_qsk(&sk(1)),
+                    qsk: *orchard::h_qsk(&sk(1)),
                     ak: orchard::redpallas_public_key(&ask),
                     nk: orchard::h_nk(&sk(1)).to_bytes(),
                 }
@@ -2011,11 +2011,7 @@ mod tests {
             assert!(!verify_recovery(&other, REGIME, &proof), "{other:?}");
         }
         // Another regime, a bad signature, tampered proof bytes.
-        assert!(!verify_recovery(
-            &st,
-            Profile::CshakeJohnson400,
-            &proof
-        ));
+        assert!(!verify_recovery(&st, Profile::CshakeJohnson400, &proof));
         let mut bad = proof.clone();
         bad.spend_auth_sig[40] ^= 1;
         assert!(!verify_recovery(&st, REGIME, &bad));

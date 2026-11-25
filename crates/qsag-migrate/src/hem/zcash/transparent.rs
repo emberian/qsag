@@ -291,10 +291,7 @@ impl TransparentProof {
         let regime = Profile::from_wire_tag(regime)?;
         let shape = ownership_shape(&statement.ownership)?;
         let proof = ZkHemV2Proof::from_bytes(rest, &shape)?;
-        (proof.profile == regime).then_some(Self {
-            regime,
-            proof,
-        })
+        (proof.profile == regime).then_some(Self { regime, proof })
     }
 }
 
@@ -613,11 +610,7 @@ mod tests {
             ] {
                 assert!(!verify_transparent(&other, REGIME, &proof), "{other:?}");
             }
-            assert!(!verify_transparent(
-                &st,
-                Profile::CshakeJohnson400,
-                &proof
-            ));
+            assert!(!verify_transparent(&st, Profile::CshakeJohnson400, &proof));
             for at in [8, bytes.len() / 2, bytes.len() - 1] {
                 let mut tampered = bytes.clone();
                 tampered[at] ^= 1;

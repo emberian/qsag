@@ -16,12 +16,11 @@
 //!   Zcash transaction, and the message its spend authorization signature covers is this
 //!   crate's statement encoding ([`recovery::RecoveryStatement::sighash`]).
 //!
-//! The sources are filed in `paperbin` as `zcash-protocol-spec-v2026.9.0-nu7`,
-//! `zcash-zip-2005-ironwood-quantum-recoverability`, `zcash-zip-0229-v6-transaction-format`,
-//! `zcash-zip-0258-nu6.3-deployment`, `zcash-zip-0032-shielded-hd-wallets`,
-//! `zcash-zip-0316-unified-addresses`, `zcash-zip-0224-orchard`,
-//! `zcash-ironwood-book-quantum-recoverability` and
-//! `zcash-zips-issue-1302-zip-2007-transparent-quantum-recoverability`.
+//! Normative references: `[Zcash-NU7]` (Zcash Protocol Specification v2026.9.0),
+//! `[ZIP-2005]` (Ironwood Quantum Recoverability), `[ZIP-229]` (v6 Transaction Format),
+//! `[ZIP-258]` (NU6.3 Deployment), `[ZIP-32]` (Shielded Hierarchical Deterministic Wallets),
+//! `[ZIP-316]` (Unified Addresses and Viewing Keys), `[ZIP-224]` (Orchard Shielded Protocol),
+//! and `[ZIP-2007]` (Transparent Quantum Recoverability).
 //!
 //! # Which funds can be migrated with a post-quantum proof, and which cannot
 //!

@@ -13,7 +13,7 @@
 //! # Row costs
 //!
 //! Linear maps of bits (rotations, shifts, complement, XOR with a constant) are free. Every
-//! function of three bits costs one row (see [`OneRow`]): XOR3, Maj, Ch, the Keccak `chi`
+//! function of three bits costs one row (see `OneRow`): XOR3, Maj, Ch, the Keccak `chi`
 //! step and both RIPEMD-160 OR-XOR functions. A modular sum of `n` words costs one row per
 //! result bit plus `ceil(log2 n)` carry rows per 32-bit limb. Operations on constant bits
 //! fold away, so padding and initial values add no rows. The row structure depends only on
@@ -1168,7 +1168,7 @@ pub fn hash160(cs: &mut ConstraintSystem, message: &[Lc]) -> Vec<Lc> {
 // Keccak
 // ============================================================================
 
-/// Keccak-f[1600] on lanes `state[x + 5y]`: 3,840 rows per round on a non-constant state
+/// `Keccak-f[1600]` on lanes `state[x + 5y]`: 3,840 rows per round on a non-constant state
 /// (640 for the column parities, 1,600 for theta, 1,600 for chi).
 pub fn keccak_f1600(cs: &mut ConstraintSystem, state: &mut [Word; 25]) {
     assert!(state.iter().all(|lane| lane.width() == 64), "lane width");

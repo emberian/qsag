@@ -2,9 +2,8 @@
 //! nullifiers, the note commitment tree, ZIP 32 derivation and RedPallas signatures.
 //!
 //! Section numbers refer to the Zcash protocol specification v2026.9.0 \[NU7\]
-//! (`paperbin/zcash-protocol-spec-v2026.9.0-nu7`); "ZIP 2005" is "Ironwood Quantum
-//! Recoverability" (status Final, activated with NU6.3;
-//! `paperbin/zcash-zip-2005-ironwood-quantum-recoverability`).
+//! (`[Zcash-NU7]`); "ZIP 2005" is "Ironwood Quantum Recoverability" (`[ZIP-2005]`,
+//! status Final, activated with NU6.3).
 //!
 //! | here | specification |
 //! |---|---|
@@ -24,7 +23,7 @@
 //! with the `orchard` crate in `validation/zcash`.
 
 use alloc::vec::Vec;
-use qsag_core::wipe::{SecretBuffer, SecretScratch};
+use qsag_core::wipe::{SecretBuffer, SecretScratch, SecretWipe};
 
 use super::blake2::{Blake2b, blake2b_256, blake2b_512};
 use super::blake3;
@@ -112,9 +111,9 @@ pub fn h_rivk(sk: &[u8; 32]) -> Fq {
 }
 
 /// `H^qsk(sk) = truncate_32(PRF^expand_sk([0x0C]))` (ZIP 2005).
-pub fn h_qsk(sk: &[u8; 32]) -> [u8; 32] {
+pub fn h_qsk(sk: &[u8; 32]) -> qsag_core::wipe::SecretBytes<32> {
     let mut wide = prf_expand(sk, &[&[0x0c]]);
-    let out: [u8; 32] = wide[..32].try_into().unwrap();
+    let out = SecretBuffer(wide[..32].try_into().unwrap());
     wipe(&mut wide);
     out
 }
@@ -126,15 +125,18 @@ pub fn h_qk(qsk: &[u8; 32]) -> [u8; 32] {
 
 /// `H^rivk_ext_qk(ak, nk) = ToScalar(PRF^expand_qk([0x0D] || ak || nk))` (ZIP 2005).
 pub fn h_rivk_ext(qk: &[u8; 32], ak: &Fp, nk: &Fp) -> Fq {
-    to_scalar(prf_expand(qk, &[&[0x0d], &ak.to_bytes(), &nk.to_bytes()]))
+    to_scalar(prf_expand(
+        qk,
+        &[&[0x0d], &ak.to_bytes(), &SecretBuffer(nk.to_bytes())[..]],
+    ))
 }
 
 /// `H^rivk_int_rivk(ak, nk) = ToScalar(PRF^expand_rivk([0x83] || ak || nk))` (ZIP 32,
 /// Orchard internal key derivation).
 pub fn h_rivk_int(rivk_ext: &Fq, ak: &Fp, nk: &Fp) -> Fq {
     to_scalar(prf_expand(
-        &rivk_ext.to_bytes(),
-        &[&[0x83], &ak.to_bytes(), &nk.to_bytes()],
+        &SecretBuffer(rivk_ext.to_bytes())[..],
+        &[&[0x83], &ak.to_bytes(), &SecretBuffer(nk.to_bytes())[..]],
     ))
 }
 
@@ -146,7 +148,7 @@ fn append_bits(bits: &mut SecretScratch<bool>, bytes: &[u8], count: usize) {
 pub fn commit_ivk(ak: &Fp, nk: &Fp, rivk: &Fq) -> Option<Fp> {
     let mut bits = SecretScratch::new();
     append_bits(&mut bits, &ak.to_bytes(), 255);
-    append_bits(&mut bits, &nk.to_bytes(), 255);
+    append_bits(&mut bits, &SecretBuffer(nk.to_bytes())[..], 255);
     commit_ivk_domain()
         .short_commit(&bits, rivk)
         .filter(|ivk| !ivk.is_zero())
@@ -160,7 +162,7 @@ pub fn spend_authorizing_key(sk: &[u8; 32]) -> Option<Fq> {
         return None;
     }
     let (_, y) = spend_auth_base().mul(&ask).to_affine()?;
-    Some(Fq::select(y.is_odd(), -ask, ask))
+    Some(Fq::select(y.is_odd(), ask.neg_mod(), ask))
 }
 
 /// Which incoming viewing key of a full viewing key.
@@ -181,11 +183,24 @@ pub fn diversify_hash(d: &[u8; 11]) -> Point {
 }
 
 /// An Orchard full viewing key `(ak, nk, rivk)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FullViewingKey {
     pub ak: Fp,
     pub nk: Fp,
     pub rivk: Fq,
+}
+
+impl core::fmt::Debug for FullViewingKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("FullViewingKey([REDACTED])")
+    }
+}
+
+impl Drop for FullViewingKey {
+    fn drop(&mut self) {
+        self.nk.secret_wipe();
+        // FqPallas erases rivk in its own Drop.
+    }
 }
 
 impl FullViewingKey {
@@ -210,9 +225,9 @@ impl FullViewingKey {
     /// `rivk = H^rivk_ext_qk(ak, nk)` with `qk = H^qk(H^qsk(sk))`.
     pub fn from_qsk(sk: &[u8; 32], ak: &Fp) -> Option<Self> {
         let nk = h_nk(sk);
-        let mut qsk = h_qsk(sk);
+        let qsk = h_qsk(sk);
         let qk = SecretBuffer(h_qk(&qsk));
-        wipe(&mut qsk);
+        drop(qsk);
         Self {
             ak: *ak,
             nk,
@@ -222,7 +237,9 @@ impl FullViewingKey {
     }
 
     fn validated(self) -> Option<Self> {
-        (self.ivk(Scope::External).is_some() && self.ivk(Scope::Internal).is_some()).then_some(self)
+        (SecretBuffer(self.ivk(Scope::External)).is_some()
+            && SecretBuffer(self.ivk(Scope::Internal)).is_some())
+        .then_some(self)
     }
 
     /// `ak || nk || rivk`, the raw encoding (5.6.4.4) and the Orchard item of a unified
@@ -230,8 +247,8 @@ impl FullViewingKey {
     pub fn to_bytes(&self) -> [u8; 96] {
         let mut out = [0u8; 96];
         out[..32].copy_from_slice(&self.ak.to_bytes());
-        out[32..64].copy_from_slice(&self.nk.to_bytes());
-        out[64..].copy_from_slice(&self.rivk.to_bytes());
+        out[32..64].copy_from_slice(&SecretBuffer(self.nk.to_bytes())[..]);
+        out[64..].copy_from_slice(&SecretBuffer(self.rivk.to_bytes())[..]);
         out
     }
 
@@ -254,7 +271,7 @@ impl FullViewingKey {
     /// The `Commit^ivk` randomness of a scope.
     pub fn rivk(&self, scope: Scope) -> Fq {
         match scope {
-            Scope::External => self.rivk,
+            Scope::External => self.rivk.clone(),
             Scope::Internal => h_rivk_int(&self.rivk, &self.ak, &self.nk),
         }
     }
@@ -267,8 +284,12 @@ impl FullViewingKey {
     /// `(dk, ovk)` of a scope: `PRF^expand_rivk([0x82] || ak || nk)` split in halves.
     pub fn dk_ovk(&self, scope: Scope) -> ([u8; 32], [u8; 32]) {
         let wide = SecretBuffer(prf_expand(
-            &self.rivk(scope).to_bytes(),
-            &[&[0x82], &self.ak.to_bytes(), &self.nk.to_bytes()],
+            &SecretBuffer(self.rivk(scope).to_bytes())[..],
+            &[
+                &[0x82],
+                &self.ak.to_bytes(),
+                &SecretBuffer(self.nk.to_bytes())[..],
+            ],
         ));
         (
             wide[..32].try_into().unwrap(),
@@ -284,8 +305,8 @@ impl FullViewingKey {
 
     /// The raw address `d || pk_d` for a diversifier.
     pub fn address(&self, d: &[u8; 11], scope: Scope) -> Option<[u8; 43]> {
-        let ivk = self.ivk(scope)?;
-        let pk_d = diversify_hash(d).mul(&Fq::from_base(ivk));
+        let ivk = SecretBuffer(self.ivk(scope)?);
+        let pk_d = diversify_hash(d).mul(&Fq::from_base(*ivk));
         let mut out = [0u8; 43];
         out[..11].copy_from_slice(d);
         out[11..].copy_from_slice(&pk_d.to_bytes());
@@ -640,10 +661,10 @@ pub fn redpallas_public_key(sk: &Fq) -> [u8; 32] {
 /// `SpendAuthSig^Orchard.Sign` (RedDSA, 5.4.7): `randomness` is 80 uniform secret bytes.
 pub fn redpallas_sign(sk: &Fq, message: &[u8], randomness: &[u8; 80]) -> [u8; 64] {
     let vk = redpallas_public_key(sk);
-    let nonce = SecretBuffer(h_star(&[randomness, &vk, message]));
+    let nonce = h_star(&[randomness, &vk, message]);
     let r = spend_auth_base().mul(&nonce).to_bytes();
     let c = h_star(&[&r, &vk, message]);
-    let s = *nonce + c * *sk;
+    let s = nonce.add_mod(&c.mul_mod(sk));
     let mut out = [0u8; 64];
     out[..32].copy_from_slice(&r);
     out[32..].copy_from_slice(&s.to_bytes());
@@ -681,6 +702,7 @@ mod tests {
             let ask = spend_authorizing_key(&sk).unwrap();
             assert_eq!(ask.to_bytes(), hex32(tv.ask));
             let fvk = FullViewingKey::from_spending_key(&sk).unwrap();
+            assert_eq!(alloc::format!("{fvk:?}"), "FullViewingKey([REDACTED])");
             assert_eq!(fvk.ak.to_bytes(), hex32(tv.ak));
             assert_eq!(redpallas_public_key(&ask), hex32(tv.ak));
             assert_eq!(fvk.nk.to_bytes(), hex32(tv.nk));
@@ -703,7 +725,10 @@ mod tests {
             let (dk, ovk) = fvk.dk_ovk(Scope::Internal);
             assert_eq!(dk, hex32(tv.internal_dk));
             assert_eq!(ovk, hex32(tv.internal_ovk));
-            assert_eq!(FullViewingKey::from_bytes(&fvk.to_bytes()), Some(fvk));
+            assert_eq!(
+                FullViewingKey::from_bytes(&fvk.to_bytes()).as_ref(),
+                Some(&fvk)
+            );
 
             // The vectors' notes use the lead byte 0x02 derivation of rcm.
             let note = Note {
@@ -830,7 +855,7 @@ mod tests {
             bad[at] ^= 1;
             assert!(!redpallas_verify(&vk, b"message", &bad), "byte {at}");
         }
-        let other = redpallas_public_key(&(ask + Fq::ONE));
+        let other = redpallas_public_key(&ask.add_mod(&Fq::ONE));
         assert!(!redpallas_verify(&other, b"message", &sig));
         // A rerandomized key verifies a signature made with the rerandomized secret.
         let alpha = Fq::from_u64(123_456_789);
@@ -859,6 +884,6 @@ mod tests {
         let qk = h_qk(&h_qsk(&sk));
         assert_eq!(qsk.rivk, h_rivk_ext(&qk, &legacy.ak, &legacy.nk));
         assert_ne!(qsk.rivk, h_rivk_ext(&qk, &legacy.nk, &legacy.ak));
-        assert_ne!(h_qsk(&sk), sk);
+        assert_ne!(*h_qsk(&sk), sk);
     }
 }

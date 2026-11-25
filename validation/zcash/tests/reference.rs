@@ -82,8 +82,8 @@ fn keys_and_addresses_agree() {
         let ours = native::FullViewingKey::from_spending_key(&bytes).expect("a valid key");
         assert_eq!(ours.to_bytes(), reference.to_bytes());
         assert_eq!(
-            native::FullViewingKey::from_bytes(&reference.to_bytes()),
-            Some(ours)
+            native::FullViewingKey::from_bytes(&reference.to_bytes()).as_ref(),
+            Some(&ours)
         );
 
         // The spend authorizing key has the reference's verification key.
@@ -232,11 +232,12 @@ fn redpallas_signatures_cross_verify() {
         let reference_alpha = pallas::Scalar::from_repr(alpha.to_bytes()).unwrap();
         let signing = SpendAuthorizingKey::from(&sk).randomize(&reference_alpha);
         let rk: [u8; 32] = (&redpallas::VerificationKey::from(&signing)).into();
-        assert_eq!(native::redpallas_public_key(&(ask + alpha)), rk);
+        let randomized = ask + alpha;
+        assert_eq!(native::redpallas_public_key(&randomized), rk);
         let message: [u8; 40] = stream.bytes();
 
         // Ours verifies under the reference.
-        let ours = native::redpallas_sign(&(ask + alpha), &message, &stream.bytes());
+        let ours = native::redpallas_sign(&randomized, &message, &stream.bytes());
         let vk = redpallas::VerificationKey::<redpallas::SpendAuth>::try_from(rk).unwrap();
         assert!(
             vk.verify(&message, &redpallas::Signature::from(ours))

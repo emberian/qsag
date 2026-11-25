@@ -133,9 +133,9 @@ use alloc::vec::Vec;
 use qsag_accel::keccak::{cshake256_framed_32, keccak256 as keccak256_native};
 use qsag_accel::sha2 as sha2_native;
 use qsag_agg::field::Goldilocks;
+use qsag_agg::zk_hem::relation::{ConstraintSystem, Def, Definitions, Lc, Shape, Source};
 use qsag_agg::zk_hem::v2::params::Profile;
 use qsag_agg::zk_hem::v2::protocol::{self as protocol, ZkHemV2Error, ZkHemV2Proof};
-use qsag_agg::zk_hem::relation::{ConstraintSystem, Def, Definitions, Lc, Shape, Source};
 
 use super::curve::{
     Element, Lazy, Modulus, bls12_381_enforce_scalar_range, bls12_381_g1_fixed_base_mul,
@@ -764,9 +764,12 @@ impl KeySource {
         };
         match self {
             Self::Secp256k1Key | Self::Ed25519Seed | Self::Bls12381Key => true,
-            Self::Bip32 { path, .. } => spec_ok(path, false),
+            Self::Bip32 { root, path } => {
+                spec_ok(path, false)
+                    && !matches!((root, path), (Bip32Root::ExtendedKey, PathSpec::Public(p)) if p.is_empty())
+            }
             Self::Slip10 { path } => spec_ok(path, true),
-            Self::Bip32Ed25519 { path } => path.len() <= MAX_PATH_DEPTH,
+            Self::Bip32Ed25519 { path } => (1..=MAX_PATH_DEPTH).contains(&path.len()),
         }
     }
 
@@ -920,13 +923,18 @@ impl Drop for Evaluated {
 }
 
 /// The path a witness takes through `spec`; `None` when it does not fit.
-fn resolve_path<'a>(spec: &'a PathSpec, witness: &'a OwnershipWitness) -> Option<&'a [u32]> {
-    match spec {
-        PathSpec::Public(path) => Some(path),
+fn resolve_path<'a>(
+    spec: &'a PathSpec,
+    witness: &'a OwnershipWitness,
+    require_child: bool,
+) -> Option<&'a [u32]> {
+    let path = match spec {
+        PathSpec::Public(path) => Some(path.as_slice()),
         PathSpec::Hidden { max_depth } => {
-            (witness.path.len() <= usize::from(*max_depth)).then_some(&witness.path)
+            (witness.path.len() <= usize::from(*max_depth)).then_some(witness.path.as_slice())
         }
-    }
+    }?;
+    (!require_child || !path.is_empty()).then_some(path)
 }
 
 fn bip32_root_node(root: Bip32Root, secret: &[u8]) -> Option<HdNode> {
@@ -971,7 +979,7 @@ fn evaluate(lock: Lock, source: &KeySource, witness: &OwnershipWitness) -> Optio
         KeySource::Bip32 { root: start, path } => {
             let node = bip32_descend(
                 bip32_root_node(*start, secret)?,
-                resolve_path(path, witness)?,
+                resolve_path(path, witness, *start == Bip32Root::ExtendedKey)?,
             )?;
             Some(Evaluated {
                 credential: secp256k1_credential(lock, &node.private_key, root)?,
@@ -996,7 +1004,7 @@ fn evaluate(lock: Lock, source: &KeySource, witness: &OwnershipWitness) -> Optio
             if !SEED_BYTES.contains(&secret.len()) {
                 return None;
             }
-            let node = slip10_ed25519_derive(secret, resolve_path(path, witness)?)?;
+            let node = slip10_ed25519_derive(secret, resolve_path(path, witness, false)?)?;
             Some(Evaluated {
                 credential: Credential::Ed25519Key(ed25519_public_key(&node.private_key)),
                 nullifier_secret: node.private_key,
@@ -1555,6 +1563,11 @@ fn credential_gadget(
         KeySource::Bip32 { root, path } => {
             let (node, nullifier_secret) = bip32_root(cs, *root, witness.secret);
             let steps = alloc_steps(cs, path, witness.path, false);
+            if *root == Bip32Root::ExtendedKey
+                && let Some(Step::Hidden { active, .. }) = steps.first()
+            {
+                cs.enforce_equal(active, &Lc::constant(F::ONE));
+            }
             let order = Modulus::secp256k1_order();
             let leaf = bip32_descend_gadget(cs, &order, node, &steps);
             (
@@ -1774,7 +1787,11 @@ pub fn ownership_auxiliary_inputs(
     }
     match (statement.lock, merkle_root) {
         (Lock::TaprootScriptTree, Some(root)) => {
-            out.push((0..256).map(|i| (root[i / 8] >> (i % 8)) & 1 == 1).collect());
+            out.push(
+                (0..256)
+                    .map(|i| (root[i / 8] >> (i % 8)) & 1 == 1)
+                    .collect(),
+            );
         }
         (Lock::TaprootScriptTree, None) | (_, Some(_)) => return None,
         _ => {}
@@ -2536,11 +2553,7 @@ pub fn prove_batch(
 
 /// Verify a batch proof. On `true`, [`BatchStatement::bindings`] is what the registry
 /// should record.
-pub fn verify_batch(
-    batch: &BatchStatement,
-    regime: Profile,
-    proof: &OwnershipProof,
-) -> bool {
+pub fn verify_batch(batch: &BatchStatement, regime: Profile, proof: &OwnershipProof) -> bool {
     let (Some(shape), Some(public_inputs)) = (batch_shape(batch), batch.public_inputs()) else {
         return false;
     };
@@ -2756,6 +2769,25 @@ mod tests {
         )
         .unwrap();
         (batch, witness)
+    }
+
+    #[test]
+    fn extended_keys_require_a_child() {
+        for path in [PathSpec::Public(vec![]), PathSpec::Hidden { max_depth: 0 }] {
+            assert!(
+                !KeySource::Bip32 {
+                    root: Bip32Root::ExtendedKey,
+                    path
+                }
+                .is_well_formed()
+            );
+        }
+        assert!(!KeySource::Bip32Ed25519 { path: vec![] }.is_well_formed());
+        let hidden = PathSpec::Hidden { max_depth: 2 };
+        let root = OwnershipWitness::extended_key(&bip32_master(&seed(32)).unwrap());
+        assert!(resolve_path(&hidden, &root, true).is_none());
+        let child = root.with_path(&[1]);
+        assert_eq!(resolve_path(&hidden, &child, true), Some(&[1][..]));
     }
 
     #[test]
