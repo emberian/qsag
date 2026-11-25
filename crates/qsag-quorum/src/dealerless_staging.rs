@@ -60,8 +60,9 @@ use qsag_core::field::tower::{
 use qsag_core::field::tower::{Tower128, wipe_tower128};
 use qsag_core::preprocessing::{
     OT_EXT_F4_SLICES, OT_EXT_SUBSPACE_BITS, OtExtCheckKey, OtMesh, PartyPrivateRng,
-    PreprocessError, blind_open_additive_gf128_poly, run_dealerless_pi_triple_f2_additive_with_fault,
-    softspoken_f4_slice_setup_receiver, softspoken_f4_slice_setup_sender_ct,
+    PreprocessError, blind_open_additive_gf128_poly,
+    run_dealerless_pi_triple_f2_additive_with_fault, softspoken_f4_slice_setup_receiver,
+    softspoken_f4_slice_setup_sender_ct,
 };
 use qsag_core::sponge::keccak::{Cshake256Xof, KECCAK_ROUND_CONSTANTS};
 use qsag_core::wipe::{
@@ -809,8 +810,7 @@ impl PairwiseSubfieldVole {
                 })
                 .collect();
             {
-                let mut outs: Vec<&mut [u64]> =
-                    g_owner.iter_mut().map(Vec::as_mut_slice).collect();
+                let mut outs: Vec<&mut [u64]> = g_owner.iter_mut().map(Vec::as_mut_slice).collect();
                 expand_u64_streams_x8(&owner_msgs, &mut outs, backend);
             }
 
@@ -911,8 +911,7 @@ impl PairwiseSubfieldVole {
         for col in 0..OT_EXT_SUBSPACE_BITS {
             let mut t_hash = key.hash(&t_cols[col]);
             let mut q_hash = key.hash(&q_cols[col]);
-            let d_bit =
-                ((black_box(self.delta_holder[col / 128]) >> (col % 128)) & 1) as u64;
+            let d_bit = ((black_box(self.delta_holder[col / 128]) >> (col % 128)) & 1) as u64;
             let mask = bit_mask128(d_bit);
             for lane in 0..2 {
                 diff |= q_hash[lane] ^ t_hash[lane] ^ (mask & x_hash[lane]);
@@ -922,10 +921,14 @@ impl PairwiseSubfieldVole {
         }
         wipe_u128s(&mut x_hash);
 
-        let mut t_rows =
-            SecretBuffer(transpose_128_cols_to_u128_rows(&t_cols[..128], payload_words));
-        let mut q_rows =
-            SecretBuffer(transpose_128_cols_to_u128_rows(&q_cols[..128], payload_words));
+        let mut t_rows = SecretBuffer(transpose_128_cols_to_u128_rows(
+            &t_cols[..128],
+            payload_words,
+        ));
+        let mut q_rows = SecretBuffer(transpose_128_cols_to_u128_rows(
+            &q_cols[..128],
+            payload_words,
+        ));
         for col in t_cols.iter_mut() {
             wipe_u64s(col);
         }

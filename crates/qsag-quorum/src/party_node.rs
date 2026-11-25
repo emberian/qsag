@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Single-party protocol nodes: each value of these types is one party, holds only that
 //! party's secrets, and talks to its peers through a [`WireTransport`].
 //!
@@ -47,6 +48,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use qsag_verified::VerifiedRssPoisonLatch;
 
 use qsag_asm::{KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS};
 use qsag_core::belt_latch::DurableWal;
@@ -564,6 +566,18 @@ pub trait PoisonJournal {
     fn is_poisoned(&self, session_id: &[u8; 32]) -> bool;
 }
 
+impl<J: PoisonJournal> PoisonJournal for &mut J {
+    fn reserve_session(&mut self, id: &[u8; 32]) -> Result<(), NodeError> {
+        (**self).reserve_session(id)
+    }
+    fn mark_poisoned(&mut self, id: &[u8; 32]) -> Result<(), NodeError> {
+        (**self).mark_poisoned(id)
+    }
+    fn is_poisoned(&self, id: &[u8; 32]) -> bool {
+        (**self).is_poisoned(id)
+    }
+}
+
 /// Volatile [`PoisonJournal`], restricted to tests and `testing-ephemeral`. It forgets
 /// every reservation at process exit, so a restarted party would reuse its session masks;
 /// production nodes take `poison_journal::FsDurablePoisonAndSessionJournal`.
@@ -895,7 +909,7 @@ pub struct IsolatedRss256Party<T: WireTransport, J: PoisonJournal> {
     /// Opening rounds started in this session; each gets its own release guard.
     open_round: u64,
     record: GateRecord,
-    verified_latch: Option<qsag_verified::VerifiedRssPoisonLatch>,
+    verified_latch: Option<VerifiedRssPoisonLatch>,
     unverified: bool,
     poisoned: bool,
     journal_failed: bool,
@@ -963,16 +977,29 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         if keys.party >= 3 || transport.party() != keys.party || transport.parties() != 3 {
             return Err(NodeError::InvalidParameters);
         }
+        #[cfg(feature = "std")]
+        let rng = {
+            let mut fresh = qsag_core::wipe::SecretBuffer([0; 32]);
+            qsag_asm::fill_os_random(&mut fresh[..])
+                .map_err(|_| NodeError::Transport(TransportError::AuthenticationFailed))?;
+            let seed = qsag_core::wipe::SecretBuffer(h32(
+                b"QSAG.RSS.PRIVATE.COINS/v1",
+                &[&keys.rng_seed, &fresh[..]],
+            ));
+            SeedRng::new(&seed, &session_id)
+        };
+        #[cfg(not(feature = "std"))]
+        let rng = SeedRng::new(&keys.rng_seed, &session_id);
         let poisoned = journal.is_poisoned(&session_id);
         if !poisoned {
             journal.reserve_session(&session_id)?;
         }
         let verified_latch = if poisoned {
-            qsag_verified::VerifiedRssPoisonLatch::new_clean()
+            VerifiedRssPoisonLatch::new_clean()
                 .record_check_result(false)
                 .0
         } else {
-            qsag_verified::VerifiedRssPoisonLatch::new_clean()
+            VerifiedRssPoisonLatch::new_clean()
         };
         Ok(Self {
             party: keys.party,
@@ -982,7 +1009,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             mac_keys: keys
                 .mac_keys
                 .map(|key| h32(b"QSAG.RSS.SESSION.MAC/v1", &[&key, &session_id])),
-            rng: SeedRng::new(&keys.rng_seed, &session_id),
+            rng,
             transport,
             journal,
             states: Vec::new(),
@@ -1008,7 +1035,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             || self
                 .verified_latch
                 .as_ref()
-                .is_none_or(qsag_verified::VerifiedRssPoisonLatch::is_poisoned)
+                .is_none_or(VerifiedRssPoisonLatch::is_poisoned)
     }
 
     /// True while gates exist that no barrier has accepted.
@@ -1017,7 +1044,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             || self
                 .verified_latch
                 .as_ref()
-                .is_none_or(qsag_verified::VerifiedRssPoisonLatch::is_unverified)
+                .is_none_or(|latch| latch.is_unverified() || latch.pending_relations() != 0)
     }
 
     pub fn state_count(&self) -> usize {
@@ -1031,7 +1058,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
 
     /// Production WAL/session-mediated state enrollment directly from a scheme-bound
     /// [`RssKeyShare256`] and a public 200-byte (`[u64; 25]`) framing template (`R-Ex-10`),
-    /// without constructing or exposing any external [`SharePair`].
+    /// without constructing or exposing any external `SharePair`.
     pub fn enroll_rss_key_block(
         &mut self,
         key_share: &RssKeyShare256,
@@ -1115,7 +1142,11 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
     fn poison(&mut self) -> Result<(), NodeError> {
         self.poisoned = true;
         if let Some(latch) = self.verified_latch.take() {
-            self.verified_latch = Some(latch.record_check_result(false).0);
+            self.verified_latch = Some(
+                latch
+                    .step(qsag_verified::RssLatchStepInput::RecordCheckResult { check_ok: false })
+                    .0,
+            );
         }
         let persisted = self.journal.mark_poisoned(&self.session_id);
         self.journal_failed |= persisted.is_err();
@@ -2501,8 +2532,13 @@ mod tests {
                     wals,
                 )
                 .unwrap();
-                let wire =
-                    ConfidentialWireChannel::new(endpoint, [0xDA; 32], SESSION, vec![[0xA7; 32]; 2]).unwrap();
+                let wire = ConfidentialWireChannel::new(
+                    endpoint,
+                    [0xDA; 32],
+                    SESSION,
+                    vec![[0xA7; 32]; 2],
+                )
+                .unwrap();
                 IsolatedJortsParty::new(custodian, wire).unwrap()
             })
             .collect();

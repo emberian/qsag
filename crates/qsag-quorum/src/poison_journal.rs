@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Authenticated append-only session journal with permanent sidecar inode lock.
 //!
 //! One locked journal lineage owns one MPC party's session history. Recovery fails closed on
@@ -59,6 +60,9 @@ const RECORD_BYTES: usize = 73;
 const STATE_ALLOCATED: u8 = 0;
 const STATE_POISONED: u8 = 1;
 const STATE_CONSUMED: u8 = 2;
+// This authenticated record carries the installed share commitment in its ID field.
+// It leaves the active session and its state intact.
+const SHARE_CHECKPOINT: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JournalOpenMode {
@@ -101,9 +105,7 @@ fn fill_lock_nonce(
     ino: u64,
 ) -> Result<[u8; 24], NodeError> {
     let mut raw = [0u8; 24];
-    File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut raw))
-        .map_err(|_| NodeError::Journal)?;
+    qsag_asm::fill_os_random(&mut raw).map_err(|_| NodeError::Journal)?;
     let mixed = mac32(
         key,
         b"QSAG.POISON.LOCK_NONCE/v2",
@@ -134,6 +136,7 @@ pub struct FsDurablePoisonAndSessionJournal {
     tag: [u8; 32],
     failed: bool,
     records: u64,
+    share_checkpoint: Option<[u8; 32]>,
     anchor: Option<Box<dyn ExternalMonotoneAnchor>>,
 }
 
@@ -189,8 +192,43 @@ impl FsDurablePoisonAndSessionJournal {
             JournalOpenMode::RecoverExisting,
             Some(anchor),
         )?;
+        if journal.state == STATE_POISONED {
+            return Err(NodeError::Journal);
+        }
         journal.advance_session(session)?;
         Ok(journal)
+    }
+
+    /// Authenticate the existing head at daemon startup without reserving a session.
+    pub fn recover_head_anchored(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        anchor: Box<dyn ExternalMonotoneAnchor>,
+    ) -> Result<Self, NodeError> {
+        let head = Self::open_inner(
+            path.as_ref(),
+            key,
+            None,
+            JournalOpenMode::RecoverExisting,
+            Some(anchor),
+        )?;
+        if head.state == STATE_POISONED {
+            return Err(NodeError::Journal);
+        }
+        Ok(head)
+    }
+
+    /// Latest authenticated share installation, retained across subsequent ceremonies.
+    pub fn share_checkpoint(&self) -> Option<[u8; 32]> {
+        self.share_checkpoint
+    }
+
+    /// Commit the recoverable, already-fsynced share before replacing the custody file.
+    pub fn commit_share(&mut self, commitment: [u8; 32]) -> Result<(), NodeError> {
+        if self.failed || self.state == STATE_POISONED {
+            return Err(NodeError::Journal);
+        }
+        self.persist(self.generation, commitment, SHARE_CHECKPOINT)
     }
 
     fn open_inner(
@@ -314,6 +352,7 @@ impl FsDurablePoisonAndSessionJournal {
             tag: [0; 32],
             failed: false,
             records: 0,
+            share_checkpoint: None,
             anchor,
         };
         if mode == JournalOpenMode::CreateNew {
@@ -338,7 +377,7 @@ impl FsDurablePoisonAndSessionJournal {
                     let id: [u8; 32] = core::array::from_fn(|i| record[8 + i]);
                     let state = record[40];
                     let tag = core::array::from_fn(|i| record[41 + i]);
-                    if state > STATE_CONSUMED
+                    if state > SHARE_CHECKPOINT
                         || !mac32_verify(
                             &journal.key,
                             DOMAIN,
@@ -356,6 +395,8 @@ impl FsDurablePoisonAndSessionJournal {
                     let valid = if index == 0 {
                         seen_sessions.push(id);
                         generation == 0 && state == STATE_ALLOCATED
+                    } else if state == SHARE_CHECKPOINT {
+                        generation == journal.generation && journal.state != STATE_POISONED
                     } else if generation == journal.generation {
                         id == journal.session
                             && matches!(
@@ -383,8 +424,12 @@ impl FsDurablePoisonAndSessionJournal {
                         return Err(NodeError::Journal);
                     }
                     journal.generation = generation;
-                    journal.session = id;
-                    journal.state = state;
+                    if state == SHARE_CHECKPOINT {
+                        journal.share_checkpoint = Some(id);
+                    } else {
+                        journal.session = id;
+                        journal.state = state;
+                    }
                     journal.tag = tag;
                 }
                 journal.records = length / RECORD_BYTES as u64;
@@ -605,8 +650,12 @@ impl FsDurablePoisonAndSessionJournal {
         // The record is durable; its effect is released only once the anchor holds it.
         self.commit_anchor()?;
         self.generation = generation;
-        self.session = session;
-        self.state = state;
+        if state == SHARE_CHECKPOINT {
+            self.share_checkpoint = Some(session);
+        } else {
+            self.session = session;
+            self.state = state;
+        }
         self.tag = tag;
         self.failed = false;
         Ok(())

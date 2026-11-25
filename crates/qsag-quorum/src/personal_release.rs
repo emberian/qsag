@@ -102,9 +102,14 @@ pub enum PersonalReleaseError {
     /// The ceremony session was already reserved or poisoned in the party's [`PoisonJournal`].
     SessionPoisoned,
     /// Peer `party` aborted the wire ceremony.
-    PeerAborted { party: u16 },
+    PeerAborted {
+        party: u16,
+    },
     /// Peer `from` sent an unparseable payload in `round`.
-    MalformedWireMessage { from: u16, round: u32 },
+    MalformedWireMessage {
+        from: u16,
+        round: u32,
+    },
     Transport(TransportError),
     Policy(QuorumPolicyError),
     Access(AccessError),
@@ -217,7 +222,7 @@ impl PersonalReleaseContext {
     }
 
     /// Session identifier of the authenticated evaluation, bound to the latch binding.
-    pub fn mpc_session_id(&self) -> [u8; 32]{
+    pub fn mpc_session_id(&self) -> [u8; 32] {
         let mut framed = [0u8; 40];
         framed[..8].copy_from_slice(b"QPRS0002");
         framed[8..].copy_from_slice(&self.record().binding());
@@ -371,9 +376,8 @@ impl PartyOtEndpoint {
                                 round: ROUND_PREL_OT_CRS_COM,
                             },
                         )?;
-                        let (crs_s0, crs_sh) = BaseOtCrsSenderRound0::respond(
-                            ot_sid, sender, receiver, &crs_com, rng,
-                        );
+                        let (crs_s0, crs_sh) =
+                            BaseOtCrsSenderRound0::respond(ot_sid, sender, receiver, &crs_com, rng);
                         wire.send_frame(receiver, ROUND_PREL_OT_CRS_SH, &crs_sh.to_bytes())?;
                         let open_raw = recv_wire(wire, roster, receiver, ROUND_PREL_OT_CRS_OPEN)?;
                         let crs_open = BaseOtCrsOpenMsg::from_bytes(&open_raw).ok_or(
@@ -382,9 +386,8 @@ impl PartyOtEndpoint {
                                 round: ROUND_PREL_OT_CRS_OPEN,
                             },
                         )?;
-                        let s_crs_coin = crs_s0
-                            .verify_and_derive_crs_coin(&crs_open)
-                            .map_err(|e| {
+                        let s_crs_coin =
+                            crs_s0.verify_and_derive_crs_coin(&crs_open).map_err(|e| {
                                 PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(e))
                             })?;
 
@@ -480,14 +483,14 @@ impl PartyOtEndpoint {
             )));
         }
         if self.me == receiver {
-            let recv_ch = self.receivers[sender].as_mut().ok_or(
-                PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
+            let recv_ch = self.receivers[sender]
+                .as_mut()
+                .ok_or(PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
                     PreprocessError::ChannelPoisoned {
                         sender_id: sender,
                         receiver_id: receiver,
                     },
-                )),
-            )?;
+                )))?;
             let (pending, u_msg) = recv_ch.round1_send_u_cols(my_choices, rng);
             let u_bytes = u_msg.to_bytes();
             wire.send_frame(sender, ROUND_PREL_KOS_U, &u_bytes)?;
@@ -513,14 +516,14 @@ impl PartyOtEndpoint {
             );
             Ok(Some((LocalSendPads(Vec::new()), LocalRecvPads(pads))))
         } else if self.me == sender {
-            let send_ch = self.senders[receiver].as_mut().ok_or(
-                PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
+            let send_ch = self.senders[receiver]
+                .as_mut()
+                .ok_or(PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
                     PreprocessError::ChannelPoisoned {
                         sender_id: sender,
                         receiver_id: receiver,
                     },
-                )),
-            )?;
+                )))?;
             let u_raw = recv_wire(wire, &self.roster, receiver, ROUND_PREL_KOS_U)?;
             let u_msg = KosOtUColsMsg::from_bytes(&u_raw).ok_or(
                 PersonalReleaseError::MalformedWireMessage {
@@ -631,13 +634,14 @@ impl PartyOtEndpoint {
                 &(additional as u64).to_be_bytes(),
             ],
         );
-        self.ext2_blind_serial = self.ext2_blind_serial.checked_add(1).ok_or(
-            PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
-                PreprocessError::VaultExhausted {
-                    kind: "personal_release_ext2_blind",
-                },
-            )),
-        )?;
+        self.ext2_blind_serial =
+            self.ext2_blind_serial
+                .checked_add(1)
+                .ok_or(PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
+                    PreprocessError::VaultExhausted {
+                        kind: "personal_release_ext2_blind",
+                    },
+                )))?;
 
         const WORDS_PER_ITEM: usize = 10;
         const BITS_PER_ITEM: usize = 64 * WORDS_PER_ITEM;
@@ -662,7 +666,8 @@ impl PartyOtEndpoint {
                 for (sender, receiver) in [(a, b), (b, a)] {
                     let pads = self.run_directed_kos(wire, sender, receiver, &choices, rng)?;
                     if self.me == sender {
-                        let (send_pads, _) = pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
+                        let (send_pads, _) =
+                            pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
                         let mut frame = SecretBuffer(Vec::with_capacity(total_bits * 32));
                         for (k, &s_val) in r_shares.iter().enumerate() {
                             let base_bit = k * BITS_PER_ITEM;
@@ -689,7 +694,8 @@ impl PartyOtEndpoint {
                         );
                         wire.send_frame(receiver, ROUND_PREL_OLE_CT, &frame)?;
                     } else if self.me == receiver {
-                        let (_, recv_pads) = pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
+                        let (_, recv_pads) =
+                            pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
                         let raw = recv_wire(wire, &self.roster, sender, ROUND_PREL_OLE_CT)?;
                         if raw.len() != total_bits * 32 {
                             self.poison_and_wipe();
@@ -1087,7 +1093,10 @@ fn joint_coin_over_wire<T: WireTransport>(
         }
         all_coms_flat.extend_from_slice(&com_frames[p]);
     }
-    let echo_digest = h32(b"personal-release/coin-echo", &[session_id, label, &all_coms_flat]);
+    let echo_digest = h32(
+        b"personal-release/coin-echo",
+        &[session_id, label, &all_coms_flat],
+    );
     let mut open_payload = SecretBuffer([0u8; 64]);
     open_payload[0..32].copy_from_slice(&*my_share);
     open_payload[32..64].copy_from_slice(&echo_digest);
@@ -1173,7 +1182,10 @@ fn commit_and_open_ext2_over_wire<T: WireTransport>(
         }
         all_coms_flat.extend_from_slice(&coms[p]);
     }
-    let echo = h32(b"personal-release/ext2-open-echo", &[session_id, &all_coms_flat]);
+    let echo = h32(
+        b"personal-release/ext2-open-echo",
+        &[session_id, &all_coms_flat],
+    );
     let mut open_frame = SecretBuffer([0u8; 80]);
     open_frame[0..16].copy_from_slice(&*share_be);
     open_frame[16..48].copy_from_slice(&*salt);
@@ -1188,12 +1200,11 @@ fn commit_and_open_ext2_over_wire<T: WireTransport>(
                 round: ROUND_PREL_OPEN,
             });
         }
-        let sh = decode_ext2_be(&opens[p][0..16]).ok_or(
-            PersonalReleaseError::MalformedWireMessage {
+        let sh =
+            decode_ext2_be(&opens[p][0..16]).ok_or(PersonalReleaseError::MalformedWireMessage {
                 from: roster[p],
                 round: ROUND_PREL_OPEN,
-            },
-        )?;
+            })?;
         let mut peer_echo = [0u8; 32];
         peer_echo.copy_from_slice(&opens[p][48..80]);
         if !ct_eq_bytes32(&peer_echo, &echo) {
@@ -1435,10 +1446,7 @@ fn apply_mi_local(st: &mut [LocalAuthWire; 12]) {
     for lane in st.iter() {
         s = s.add(*lane);
     }
-    st[0] = st[0]
-        .scale(Goldilocks::from_u64_reduced(64))
-        .neg()
-        .add(s);
+    st[0] = st[0].scale(Goldilocks::from_u64_reduced(64)).neg().add(s);
     st[1] = st[1].add(s);
     let mut d = Goldilocks::TWO;
     for lane in st.iter_mut().skip(2) {
@@ -1497,7 +1505,10 @@ fn commit_open_and_check_goldilocks_over_wire<T: WireTransport>(
         }
         all_coms_flat.extend_from_slice(&coms[p]);
     }
-    let echo = h32(b"personal-release/gl-batch-echo", &[session_id, &all_coms_flat]);
+    let echo = h32(
+        b"personal-release/gl-batch-echo",
+        &[session_id, &all_coms_flat],
+    );
 
     let mut open_payload = SecretBuffer(Vec::with_capacity(count * 8 + 64));
     open_payload.extend_from_slice(&share_bytes);
@@ -1552,7 +1563,10 @@ fn commit_open_and_check_goldilocks_over_wire<T: WireTransport>(
     for &v in &opened {
         open_bytes.extend_from_slice(&v.to_be_bytes());
     }
-    let open_digest = h32(b"personal-release/gl-batch-dig", &[session_id, phase.as_bytes(), &open_bytes]);
+    let open_digest = h32(
+        b"personal-release/gl-batch-dig",
+        &[session_id, phase.as_bytes(), &open_bytes],
+    );
     let fold_coin = joint_coin_over_wire(
         wire,
         roster,
@@ -1626,19 +1640,22 @@ fn pairwise_gilboa_ole_over_wire<T: WireTransport>(
                 for (sender, receiver) in [(a, b), (b, a)] {
                     let pads = ot.run_directed_kos(wire, sender, receiver, &r_words, rng)?;
                     if wire.party() == sender {
-                        let (send_pads, _) = pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
+                        let (send_pads, _) =
+                            pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
                         let mut frame = SecretBuffer(Vec::with_capacity(total_bits * 16));
                         for k in 0..count {
                             let vj = v_me[start + k];
                             let base_bit = k * BITS_PER_ITEM;
                             for bit_off in 0..BITS_PER_ITEM {
                                 let bit = base_bit + bit_off;
-                                let pad0 = Goldilocks::from_bytes24_unbiased(
-                                    &core::array::from_fn(|i| send_pads[bit].0[i]),
-                                );
-                                let pad1 = Goldilocks::from_bytes24_unbiased(
-                                    &core::array::from_fn(|i| send_pads[bit].1[i]),
-                                );
+                                let pad0 =
+                                    Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| {
+                                        send_pads[bit].0[i]
+                                    }));
+                                let pad1 =
+                                    Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| {
+                                        send_pads[bit].1[i]
+                                    }));
                                 let mask = rng.next_goldilocks();
                                 sender_masks[receiver][bit] = mask;
                                 let ct0 = pad0 - mask;
@@ -1658,7 +1675,8 @@ fn pairwise_gilboa_ole_over_wire<T: WireTransport>(
                         );
                         wire.send_frame(receiver, ROUND_PREL_OLE_CT, &frame)?;
                     } else if wire.party() == receiver {
-                        let (_, recv_pads) = pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
+                        let (_, recv_pads) =
+                            pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
                         let raw = recv_wire(wire, roster, sender, ROUND_PREL_OLE_CT)?;
                         if raw.len() != total_bits * 16 {
                             ot.poison_and_wipe();
@@ -1696,9 +1714,10 @@ fn pairwise_gilboa_ole_over_wire<T: WireTransport>(
                                 ct0.to_canonical_u64()
                                     ^ (mask64 & (ct0.to_canonical_u64() ^ ct1.to_canonical_u64())),
                             );
-                            let pad_c = Goldilocks::from_bytes24_unbiased(&core::array::from_fn(
-                                |i| recv_pads[bit][i],
-                            ));
+                            let pad_c =
+                                Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| {
+                                    recv_pads[bit][i]
+                                }));
                             recv_terms[sender][bit] = sel - pad_c;
                         }
                     }
@@ -1806,11 +1825,7 @@ fn authenticate_goldilocks_batch_over_wire<T: WireTransport>(
         u_target.push(r_pad_me[0]);
         u_target.push(r_pad_me[1]);
 
-        let r_words = SecretBuffer(
-            (0..m_words)
-                .map(|_| rng.next_u64())
-                .collect::<Vec<u64>>(),
-        );
+        let r_words = SecretBuffer((0..m_words).map(|_| rng.next_u64()).collect::<Vec<u64>>());
         let mut raw_sum = SecretBuffer(vec![GoldilocksExt2::ZERO; m_bits]);
         for (s, slot) in raw_sum.iter_mut().enumerate() {
             let bit_val = (r_words[s / 64] >> (s % 64)) & 1;
@@ -1823,7 +1838,8 @@ fn authenticate_goldilocks_batch_over_wire<T: WireTransport>(
                 for (sender, receiver) in [(a, b), (b, a)] {
                     let pads = ot.run_directed_kos(wire, sender, receiver, &r_words, rng)?;
                     if wire.party() == sender {
-                        let (send_pads, _) = pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
+                        let (send_pads, _) =
+                            pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
                         let mut frame = SecretBuffer(Vec::with_capacity(m_bits * 32));
                         for (s, acc) in raw_sum.iter_mut().enumerate() {
                             let pad0 = decode_pad48_ext2(&send_pads[s].0);
@@ -1846,7 +1862,8 @@ fn authenticate_goldilocks_batch_over_wire<T: WireTransport>(
                         );
                         wire.send_frame(receiver, ROUND_PREL_OLE_CT, &frame)?;
                     } else if wire.party() == receiver {
-                        let (_, recv_pads) = pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
+                        let (_, recv_pads) =
+                            pads.ok_or(PersonalReleaseError::LaneRosterMismatch)?;
                         let raw = recv_wire(wire, roster, sender, ROUND_PREL_OLE_CT)?;
                         if raw.len() != m_bits * 32 {
                             ot.poison_and_wipe();
@@ -1879,8 +1896,8 @@ fn authenticate_goldilocks_batch_over_wire<T: WireTransport>(
                                 },
                             )?;
                             let choice = (r_words[s / 64] >> (s % 64)) & 1;
-                            *acc += ct_select_ext2(choice, ct0, ct1)
-                                - decode_pad48_ext2(&recv_pads[s]);
+                            *acc +=
+                                ct_select_ext2(choice, ct0, ct1) - decode_pad48_ext2(&recv_pads[s]);
                         }
                     }
                 }
@@ -1951,10 +1968,12 @@ fn authenticate_goldilocks_batch_over_wire<T: WireTransport>(
             let mut acc1_hi = 0u64;
             for (s, &h_val) in h_row.iter().enumerate() {
                 let h = h_val as u128;
-                let (n0, ov0) = acc0_lo.overflowing_add((raw_sum[s].c0.to_canonical_u64() as u128) * h);
+                let (n0, ov0) =
+                    acc0_lo.overflowing_add((raw_sum[s].c0.to_canonical_u64() as u128) * h);
                 acc0_lo = n0;
                 acc0_hi += ov0 as u64;
-                let (n1, ov1) = acc1_lo.overflowing_add((raw_sum[s].c1.to_canonical_u64() as u128) * h);
+                let (n1, ov1) =
+                    acc1_lo.overflowing_add((raw_sum[s].c1.to_canonical_u64() as u128) * h);
                 acc1_lo = n1;
                 acc1_hi += ov1 as u64;
             }
@@ -1966,15 +1985,8 @@ fn authenticate_goldilocks_batch_over_wire<T: WireTransport>(
                 alpha_me.mul_base(diff_sum[idx]) + GoldilocksExt2::new(comb_c0, comb_c1);
         }
 
-        let chk_coin = joint_coin_over_wire(
-            wire,
-            roster,
-            &blk_sid,
-            b"pimac-chk",
-            &lhl_coin,
-            true,
-            rng,
-        )?;
+        let chk_coin =
+            joint_coin_over_wire(wire, roster, &blk_sid, b"pimac-chk", &lhl_coin, true, rng)?;
         let mut chk_xof = Cshake256Xof::new_shake256();
         chk_xof.absorb(b"personal-release/pimac-chis");
         chk_xof.absorb(&chk_coin);
@@ -1988,15 +2000,8 @@ fn authenticate_goldilocks_batch_over_wire<T: WireTransport>(
             *z_me += chi.mul_base(x_me[start + k]);
             *z_mac_me += chi * blk_macs[k];
         }
-        let z_open = commit_and_open_ext2_over_wire(
-            wire,
-            roster,
-            &blk_sid,
-            b"pimac-z",
-            0,
-            *z_me,
-            rng,
-        )?;
+        let z_open =
+            commit_and_open_ext2_over_wire(wire, roster, &blk_sid, b"pimac-z", 0, *z_me, rng)?;
         let d_me = SecretBuffer(*z_mac_me - alpha_me * z_open);
         ot.blind_check_zero_ext2(wire, &blk_sid, "personal_release_pimac", *d_me, rng)?;
         out.extend_from_slice(&blk_macs[..count]);
@@ -2127,13 +2132,7 @@ fn generate_pow7_tuples_over_wire<T: WireTransport>(
     auth_pack.extend_from_slice(&r1_vals);
 
     let all_macs = authenticate_goldilocks_batch_over_wire(
-        wire,
-        ot,
-        roster,
-        session_id,
-        alpha_me,
-        &auth_pack,
-        rng,
+        wire, ot, roster, session_id, alpha_me, &auth_pack, rng,
     )?;
 
     let wire_at = |slot: usize, k: usize| LocalAuthWire {
@@ -2455,7 +2454,9 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
     ) -> Result<BeltLatchRecord, PersonalReleaseError> {
         let own_context = self.latch.key_epoch_context();
         if ctx.deployment_id != self.deployment_id
-            || self.enrolled_key.is_some_and(|key| key != (ctx.pk_seed, ctx.commitment))
+            || self
+                .enrolled_key
+                .is_some_and(|key| key != (ctx.pk_seed, ctx.commitment))
             || ctx.key_epoch_context != *own_context
             || ctx.policy_digest != self.latch.system().policy_digest(own_context)
             || ctx.program_digest != self.program_digest
@@ -2595,16 +2596,15 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
                 corrupt_after_auth,
             ),
             None => {
-                let mut ot = match PartyOtEndpoint::establish_over_wire(
-                    mpc_sid, &roster, &mut wire, rng,
-                ) {
-                    Ok(ep) => ep,
-                    Err(err) => {
-                        let _ = journal.mark_poisoned(&mpc_sid);
-                        send_abort_all(&mut wire);
-                        return Err(err);
-                    }
-                };
+                let mut ot =
+                    match PartyOtEndpoint::establish_over_wire(mpc_sid, &roster, &mut wire, rng) {
+                        Ok(ep) => ep,
+                        Err(err) => {
+                            let _ = journal.mark_poisoned(&mpc_sid);
+                            send_abort_all(&mut wire);
+                            return Err(err);
+                        }
+                    };
                 // Pre-stage all 16 `GoldilocksExt2` blinding triples in 1 batched OT pass!
                 if let Err(err) = ot.prestage_ext2_blinding(&mut wire, 16, rng) {
                     ot.poison_and_wipe();
@@ -2687,15 +2687,7 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
         journal: &mut J,
         corrupt_after_auth: bool,
     ) -> Result<HemDigest4, PersonalReleaseError> {
-        let res = self.run_wire_mpc_core(
-            ctx,
-            roster,
-            mpc_sid,
-            wire,
-            ot,
-            rng,
-            corrupt_after_auth,
-        );
+        let res = self.run_wire_mpc_core(ctx, roster, mpc_sid, wire, ot, rng, corrupt_after_auth);
         if let Err(ref err) = res {
             ot.poison_and_wipe();
             if !matches!(err, PersonalReleaseError::CommitmentMismatch) {
@@ -2802,20 +2794,13 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
 
         let auth_sid = h32(b"personal-release/input-auth", &[&spdz_sid]);
         let x_macs = authenticate_goldilocks_batch_over_wire(
-            wire,
-            ot,
-            roster,
-            &auth_sid,
-            *alpha_me,
-            &*x_me,
-            rng,
+            wire, ot, roster, &auth_sid, *alpha_me, &*x_me, rng,
         )?;
-        let mut in0: SecretBuffer<[LocalAuthWire; 4]> = SecretBuffer(core::array::from_fn(|i| {
-            LocalAuthWire {
+        let mut in0: SecretBuffer<[LocalAuthWire; 4]> =
+            SecretBuffer(core::array::from_fn(|i| LocalAuthWire {
                 val: x_me[i],
                 mac: x_macs[i],
-            }
-        }));
+            }));
         drop((x_me, x_macs));
         if corrupt_after_auth {
             in0[0].val += Goldilocks::ONE;
@@ -3556,20 +3541,39 @@ mod tests {
             let (mut endpoints, _) = InMemoryWireMesh::connect(2, [47; 32]);
             let mut wire = endpoints.pop().unwrap(); // Party 1, receiver on the first OT.
             let mut ot = PartyOtEndpoint {
-                me: 1, parties: 2, roster: vec![0, 1], session_id: [47; 32],
-                senders: vec![None, None], receivers: vec![None, None], transcript: [9; 32],
+                me: 1,
+                parties: 2,
+                roster: vec![0, 1],
+                session_id: [47; 32],
+                senders: vec![None, None],
+                receivers: vec![None, None],
+                transcript: [9; 32],
                 ext2_blind_pool: vec![WireExt2BlindTriple {
-                    r: GoldilocksExt2::ONE, a: GoldilocksExt2::ONE, c: GoldilocksExt2::ONE,
-                }], ext2_blind_cursor: 0, ext2_blind_serial: 0, poisoned: false,
+                    r: GoldilocksExt2::ONE,
+                    a: GoldilocksExt2::ONE,
+                    c: GoldilocksExt2::ONE,
+                }],
+                ext2_blind_cursor: 0,
+                ext2_blind_serial: 0,
+                poisoned: false,
                 tamper_next_ext2_c: None,
             };
             let mut rng = PartyPrivateRng::from_seed([48; 32], b"failed-refill");
-            let error = ot.prestage_ext2_blinding(&mut wire, additional, &mut rng).unwrap_err();
+            let error = ot
+                .prestage_ext2_blinding(&mut wire, additional, &mut rng)
+                .unwrap_err();
             if additional == usize::MAX {
-                assert!(matches!(error, PersonalReleaseError::Transport(TransportError::PayloadTooLarge)));
+                assert!(matches!(
+                    error,
+                    PersonalReleaseError::Transport(TransportError::PayloadTooLarge)
+                ));
             } else {
-                assert!(matches!(error, PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
-                    PreprocessError::ChannelPoisoned { .. }))));
+                assert!(matches!(
+                    error,
+                    PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
+                        PreprocessError::ChannelPoisoned { .. }
+                    ))
+                ));
             }
             assert!(ot.poisoned);
             assert!(ot.ext2_blind_pool.is_empty());
@@ -3717,7 +3721,8 @@ mod tests {
         )
         .unwrap();
         fx_bad.parties[2] =
-            PersonalReleaseParty::new([0xDA; 32], latch(&fx_bad.system, 2, KEY_EPOCH), bad_input).unwrap();
+            PersonalReleaseParty::new([0xDA; 32], latch(&fx_bad.system, 2, KEY_EPOCH), bad_input)
+                .unwrap();
         let bundle: Vec<_> = fx_bad
             .parties
             .into_iter()
@@ -4039,13 +4044,9 @@ mod tests {
         let endpoint0 = endpoints.remove(0);
         let mut wire_keys = party0.derive_wire_keys(&ctx).unwrap();
         let raw_keys = core::mem::take(&mut wire_keys.0);
-        let mut wire0 = MacSealedWireChannel::new_encrypted(
-            endpoint0,
-            party0.deployment_id,
-            mpc_sid,
-            raw_keys,
-        )
-        .unwrap();
+        let mut wire0 =
+            MacSealedWireChannel::new_encrypted(endpoint0, party0.deployment_id, mpc_sid, raw_keys)
+                .unwrap();
         let mut poisoned_ot = PartyOtEndpoint {
             me: 0,
             parties: 3,
