@@ -63,9 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cnf_rss {
         run_cnf_example()?;
     } else {
-        println!(
-            "\n(3-of-5 isolated CNF stage skipped; rerun with `-- --cnf-rss-3of5`)"
-        );
+        println!("\n(3-of-5 isolated CNF stage skipped; rerun with `-- --cnf-rss-3of5`)");
     }
     println!("Total: {:?}", started.elapsed());
     Ok(())
@@ -200,10 +198,7 @@ fn run_cnf_example() -> Result<(), Box<dyn std::error::Error>> {
         party.slh_sign(&params, msg, ctx, &pk, None)
     });
     let sig_vec = sigs.into_iter().collect::<Result<Vec<_>, _>>()?;
-    let sig = sig_vec
-        .first()
-        .ok_or("missing signing output")?
-        .clone();
+    let sig = sig_vec.first().ok_or("missing signing output")?.clone();
     for peer_sig in &sig_vec[1..] {
         assert_eq!(peer_sig, &sig);
     }
