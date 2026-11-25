@@ -651,7 +651,7 @@ fn e2e_zkhem_v2_migration_proofs_from_upstream_crates_and_adversarial_rejection(
     //    NOT in prime-order `G_1`! Verify both `blstrs` and `qsag_migrate::BlsG1Point` reject it!
     let torsion_pt = BlsG1Point {
         x: FpBls381::ZERO,
-        y: FpBls381([2, 0, 0, 0, 0, 0]),
+        y: FpBls381::from_u64(2),
         z: FpBls381::ONE,
     };
     assert!(!torsion_pt.is_in_g1_subgroup(), "(0, 2) must fail G_1 subgroup check");

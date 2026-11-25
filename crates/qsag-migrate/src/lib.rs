@@ -21,9 +21,9 @@ extern crate alloc;
 extern crate std;
 
 pub mod bls12_381;
+pub mod classical;
 pub mod ed25519_ct;
 pub mod hem;
-pub mod classical;
 pub(crate) mod limbs;
 pub mod pallas;
 pub mod scalar;
@@ -34,9 +34,7 @@ pub use bls12_381::{
     compute_bls_0x00_withdrawal_credentials,
 };
 pub use classical::{ClassicalCommitmentKind, ClassicalOwnershipWitness, HardenedChainStep};
-pub use pallas::{
-    FpPallas, FqPallas, PallasCommitmentKind, PallasOwnershipWitness, PallasPoint,
-};
+pub use pallas::{FpPallas, FqPallas, PallasCommitmentKind, PallasOwnershipWitness, PallasPoint};
 pub use scalar::{ScalarGroup, SpendingScalar};
 
 #[cfg(test)]

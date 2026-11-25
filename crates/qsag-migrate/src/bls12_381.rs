@@ -122,153 +122,45 @@ pub const BLS_G1_GY: [u64; 6] = [
 /// Subgroup tag separating `BLS12-381` validator scalars from `secp256k1` (1), `Ed25519` (2), and `Pallas` (3, 4).
 pub const NULLIFIER_TAG_BLS12_381_G1: u64 = 5;
 
-/// Canonical element of the `BLS12-381` base field `F_p` (`0 <= self < p`).
-#[derive(Clone, Copy, Debug, Eq)]
-pub struct FpBls381(pub [u64; 6]);
+/// A reduced Montgomery residue modulo [`BLS_P`].
+#[derive(Clone, Copy, Eq)]
+pub struct FpBls381([u64; 6]);
 
-impl PartialEq for FpBls381 {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        limbs::ct_eq(self.0, other.0)
-    }
-}
+limbs::montgomery_field!(FpBls381, 6, 48, BLS_P, BLS_P_INV, BLS_P_R2, BLS_P_MINUS_2);
 
 impl FpBls381 {
-    pub const ZERO: Self = Self([0; 6]);
-    pub const ONE: Self = Self([1, 0, 0, 0, 0, 0]);
-    pub const B: Self = Self([4, 0, 0, 0, 0, 0]);
-    /// `3 * b = 12` for `y^2 = x^3 + 4`.
-    pub const B3: Self = Self([12, 0, 0, 0, 0, 0]);
-
-    fn from_limbs(value: [u64; 6]) -> Option<Self> {
-        if limbs::lt(value, BLS_P) {
-            Some(Self(value))
-        } else {
-            None
-        }
-    }
-
-    pub fn from_le_bytes(bytes: &[u8; 48]) -> Option<Self> {
-        Self::from_limbs(limbs::from_le_bytes(bytes))
-    }
-
-    pub fn from_be_bytes(bytes: &[u8; 48]) -> Option<Self> {
-        Self::from_limbs(limbs::from_be_bytes(bytes))
-    }
-
-    pub fn to_le_bytes(self) -> [u8; 48] {
-        limbs::to_le_bytes(self.0)
-    }
-
-    pub fn to_be_bytes(self) -> [u8; 48] {
-        limbs::to_be_bytes(self.0)
-    }
-
-    #[inline]
-    pub fn ct_select(choice: bool, t: Self, f: Self) -> Self {
-        Self(limbs::ct_select(choice, t.0, f.0))
-    }
-
-    #[inline]
-    pub fn is_zero(self) -> bool {
-        limbs::is_zero(self.0)
-    }
-
-    /// IETF / Zcash `BLS12-381` `A_flag`: returns `true` iff `self > -self mod p` (`self >= (p + 1) / 2`).
-    #[inline]
-    pub fn lexicographically_largest(self) -> bool {
-        !limbs::lt(self.0, BLS_P_HALF_CEIL)
-    }
-
-    #[inline]
     pub fn add_mod(self, rhs: Self) -> Self {
-        Self(limbs::add_mod(self.0, rhs.0, BLS_P))
+        self.sum(&rhs)
     }
-
-    #[inline]
     pub fn sub_mod(self, rhs: Self) -> Self {
-        Self(limbs::sub_mod(self.0, rhs.0, BLS_P))
+        self.difference(&rhs)
     }
-
-    #[inline]
-    pub fn neg_mod(self) -> Self {
-        Self(limbs::neg_mod(self.0, BLS_P))
-    }
-
-    #[inline]
     pub fn mul_mod(self, rhs: Self) -> Self {
-        let m1 = limbs::mont_mul(self.0, rhs.0, BLS_P, BLS_P_INV);
-        Self(limbs::mont_mul(m1, BLS_P_R2, BLS_P, BLS_P_INV))
+        self.product(&rhs)
     }
 
-    #[inline]
+    pub const B: Self = Self::from_u64(4);
+    pub const B3: Self = Self::from_u64(12);
+    pub fn ct_select(choice: bool, t: Self, f: Self) -> Self {
+        Self::select(choice, t, f)
+    }
     pub fn sq(self) -> Self {
-        self.mul_mod(self)
+        self.square()
     }
-
-    #[inline]
-    fn pow_ct(base: [u64; 6], exp: [u64; 6]) -> [u64; 6] {
-        limbs::mont_pow(base, exp, BLS_P, BLS_P_INV, BLS_P_R2)
+    pub fn lexicographically_largest(self) -> bool {
+        !limbs::lt(self.canonical_words(), BLS_P_HALF_CEIL)
     }
-
-    /// Constant-time Fermat inversion `a^(p - 2) mod p` (`0 -> 0`).
-    pub fn inv_or_zero(self) -> Self {
-        Self(Self::pow_ct(self.0, BLS_P_MINUS_2))
-    }
-
-    /// Constant-time square root `a^((p + 1) / 4) mod p` (`p ≡ 3 (mod 4)`).
     pub fn sqrt_ct(self) -> Option<Self> {
-        let cand = Self(Self::pow_ct(self.0, BLS_P_PLUS_1_DIV_4));
-        if cand.sq() == self { Some(cand) } else { None }
+        let cand = self.pow(&BLS_P_PLUS_1_DIV_4);
+        (cand.sq() == self).then_some(cand)
     }
 }
 
-impl core::ops::Add for FpBls381 {
-    type Output = Self;
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        self.add_mod(rhs)
-    }
-}
-impl core::ops::Sub for FpBls381 {
-    type Output = Self;
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        self.sub_mod(rhs)
-    }
-}
-impl core::ops::Mul for FpBls381 {
-    type Output = Self;
-    #[inline]
-    fn mul(self, rhs: Self) -> Self {
-        self.mul_mod(rhs)
-    }
-}
-impl core::ops::Neg for FpBls381 {
-    type Output = Self;
-    #[inline]
-    fn neg(self) -> Self {
-        self.neg_mod()
-    }
-}
-
-/// Canonical `BLS12-381` scalar `0 <= sk < r`, zeroized on `Drop`.
+/// A reduced Montgomery residue modulo [`BLS_R`].
 #[derive(Clone, Eq)]
-pub struct FrBls381(pub [u64; 4]);
+pub struct FrBls381([u64; 4]);
 
-impl PartialEq for FrBls381 {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        limbs::ct_eq(self.0, other.0)
-    }
-}
-
-impl fmt::Debug for FrBls381 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("FrBls381").field(&"<REDACTED>").finish()
-    }
-}
-
+limbs::montgomery_field!(FrBls381, 4, 32, BLS_R, BLS_R_INV, BLS_R_R2, BLS_R_MINUS_2);
 impl Drop for FrBls381 {
     fn drop(&mut self) {
         ct_zeroize_u64s(&mut self.0);
@@ -276,74 +168,24 @@ impl Drop for FrBls381 {
 }
 
 impl FrBls381 {
-    pub const ZERO: Self = Self([0; 4]);
-    pub const ONE: Self = Self([1, 0, 0, 0]);
-
-    fn from_limbs(mut value: [u64; 4]) -> Option<Self> {
-        if limbs::lt(value, BLS_R) {
-            Some(Self(value))
-        } else {
-            ct_zeroize_u64s(&mut value);
-            None
-        }
+    pub(crate) fn select_ref(choice: bool, a: &Self, b: &Self) -> Self {
+        Self(limbs::ct_select(choice, a.0, b.0))
     }
 
-    pub fn from_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        Self::from_limbs(limbs::from_le_bytes(bytes))
-    }
-
-    pub fn from_be_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        Self::from_limbs(limbs::from_be_bytes(bytes))
-    }
-
-    /// Parse an IETF / EIP-2333 big-endian `BLS12-381` secret scalar `sk ∈ [1, r - 1]`.
-    pub fn from_nonzero_be_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let s = Self::from_be_bytes(bytes)?;
-        if s.is_zero() { None } else { Some(s) }
-    }
-
-    pub fn from_nonzero_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let s = Self::from_le_bytes(bytes)?;
-        if s.is_zero() { None } else { Some(s) }
-    }
-
-    pub fn to_le_bytes(&self) -> [u8; 32] {
-        limbs::to_le_bytes(self.0)
-    }
-
-    pub fn to_be_bytes(&self) -> [u8; 32] {
-        limbs::to_be_bytes(self.0)
-    }
-
-    #[inline]
-    pub fn is_zero(&self) -> bool {
-        limbs::is_zero(self.0)
-    }
-
-    #[inline]
     pub fn add_mod(&self, rhs: &Self) -> Self {
-        Self(limbs::add_mod(self.0, rhs.0, BLS_R))
+        self.sum(rhs)
     }
-
-    #[inline]
     pub fn sub_mod(&self, rhs: &Self) -> Self {
-        Self(limbs::sub_mod(self.0, rhs.0, BLS_R))
+        self.difference(rhs)
     }
-
-    #[inline]
     pub fn mul_mod(&self, rhs: &Self) -> Self {
-        let m1 = limbs::mont_mul(self.0, rhs.0, BLS_R, BLS_R_INV);
-        Self(limbs::mont_mul(m1, BLS_R_R2, BLS_R, BLS_R_INV))
+        self.product(rhs)
     }
-
-    pub fn inv_or_zero(&self) -> Self {
-        Self(limbs::mont_pow(
-            self.0,
-            BLS_R_MINUS_2,
-            BLS_R,
-            BLS_R_INV,
-            BLS_R_R2,
-        ))
+    pub fn from_nonzero_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        Self::from_le_bytes(bytes).filter(|s| !s.is_zero())
+    }
+    pub fn from_nonzero_be_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        Self::from_be_bytes(bytes).filter(|s| !s.is_zero())
     }
 
     pub fn compute_nullifier(&self, migration_domain: &[u8; 32]) -> [u64; 4] {
@@ -385,8 +227,8 @@ impl BlsG1Point {
 
     /// Official IETF / Ethereum Beacon `G_1` generator of prime order `r`.
     pub const GENERATOR: Self = Self {
-        x: FpBls381(BLS_G1_GX),
-        y: FpBls381(BLS_G1_GY),
+        x: FpBls381::from_raw(BLS_G1_GX),
+        y: FpBls381::from_raw(BLS_G1_GY),
         z: FpBls381::ONE,
     };
 
@@ -482,7 +324,8 @@ impl BlsG1Point {
     }
 
     pub fn scalar_mul_ct(&self, scalar: &FrBls381) -> Self {
-        self.scalar_mul_limbs_ct(&scalar.0)
+        let words = qsag_asm::wipe::SecretBuffer(scalar.canonical_words());
+        self.scalar_mul_limbs_ct(&words[..])
     }
 
     pub fn generator_mul_ct(scalar: &FrBls381) -> Self {
@@ -624,10 +467,9 @@ impl fmt::Debug for BlsOwnershipWitness {
 impl BlsOwnershipWitness {
     /// Construct from an IETF / EIP-2333 big-endian 32-byte `BLS12-381` secret key `sk ∈ [1, r - 1]`.
     pub fn from_secret_scalar_be(sk_be: [u8; 32]) -> Option<Self> {
-        let _ = FrBls381::from_nonzero_be_bytes(&sk_be)?;
-        Some(Self {
-            sk_be: RedactedSecret::new(sk_be),
-        })
+        let sk_be = RedactedSecret::new(sk_be);
+        FrBls381::from_nonzero_be_bytes(sk_be.expose())?;
+        Some(Self { sk_be })
     }
 
     /// Construct from a little-endian 32-byte `BLS12-381` secret key `sk ∈ [1, r - 1]`.

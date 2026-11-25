@@ -109,101 +109,44 @@ pub const PASTA_PALLAS_GY: [u64; 4] = [2, 0, 0, 0];
 pub const NULLIFIER_TAG_PALLAS_AK: u64 = 3;
 pub const NULLIFIER_TAG_PALLAS_RK: u64 = 4;
 
-/// Canonical element of the Pallas base field `F_p` (`0 <= self < p`).
-#[derive(Clone, Copy, Debug, Eq)]
-pub struct FpPallas(pub [u64; 4]);
+/// A reduced Montgomery residue modulo [`PALLAS_P`].
+#[derive(Clone, Copy, Eq)]
+pub struct FpPallas([u64; 4]);
 
-impl PartialEq for FpPallas {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        limbs::ct_eq(self.0, other.0)
-    }
-}
+limbs::montgomery_field!(
+    FpPallas,
+    4,
+    32,
+    PALLAS_P,
+    PALLAS_P_INV,
+    PALLAS_P_R2,
+    PALLAS_P_MINUS_2
+);
 
 impl FpPallas {
-    pub const ZERO: Self = Self([0; 4]);
-    pub const ONE: Self = Self([1, 0, 0, 0]);
-    /// `3 * b = 15` for `y^2 = x^3 + 5`.
-    pub const B3: Self = Self([15, 0, 0, 0]);
-    pub const B: Self = Self([5, 0, 0, 0]);
-
-    pub fn from_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let value = limbs::from_le_bytes(bytes);
-        if limbs::lt(value, PALLAS_P) {
-            Some(Self(value))
-        } else {
-            None
-        }
-    }
-
-    pub fn to_le_bytes(self) -> [u8; 32] {
-        limbs::to_le_bytes(self.0)
-    }
-
-    #[inline]
-    pub fn ct_select(choice: bool, t: Self, f: Self) -> Self {
-        Self(limbs::ct_select(choice, t.0, f.0))
-    }
-
-    #[inline]
-    pub fn is_zero(self) -> bool {
-        limbs::is_zero(self.0)
-    }
-
-    #[inline]
-    pub fn is_odd(self) -> bool {
-        (self.0[0] & 1) == 1
-    }
-
-    #[inline]
     pub fn add_mod(self, rhs: Self) -> Self {
-        Self(limbs::add_mod(self.0, rhs.0, PALLAS_P))
+        self.sum(&rhs)
     }
-
-    #[inline]
     pub fn sub_mod(self, rhs: Self) -> Self {
-        Self(limbs::sub_mod(self.0, rhs.0, PALLAS_P))
+        self.difference(&rhs)
     }
-
-    #[inline]
-    pub fn neg_mod(self) -> Self {
-        Self(limbs::neg_mod(self.0, PALLAS_P))
-    }
-
-    #[inline]
     pub fn mul_mod(self, rhs: Self) -> Self {
-        let m1 = limbs::mont_mul(self.0, rhs.0, PALLAS_P, PALLAS_P_INV);
-        Self(limbs::mont_mul(m1, PALLAS_P_R2, PALLAS_P, PALLAS_P_INV))
+        self.product(&rhs)
     }
 
-    #[inline]
+    pub const B: Self = Self::from_u64(5);
+    pub const B3: Self = Self::from_u64(15);
+    pub fn ct_select(choice: bool, t: Self, f: Self) -> Self {
+        Self::select(choice, t, f)
+    }
     pub fn sq(self) -> Self {
-        self.mul_mod(self)
+        self.square()
     }
-
-    /// Constant-time Fermat inversion `a^(p - 2) mod p` (`0 -> 0`).
-    pub fn inv_or_zero(self) -> Self {
-        Self(limbs::mont_pow(
-            self.0,
-            PALLAS_P_MINUS_2,
-            PALLAS_P,
-            PALLAS_P_INV,
-            PALLAS_P_R2,
-        ))
-    }
-
-    /// Constant-time 32-adic Tonelli-Shanks square root in `F_p`.
     pub fn sqrt_ct(self) -> Option<Self> {
-        let w = Self(limbs::mont_pow(
-            self.0,
-            PALLAS_S_MINUS_1_HALF,
-            PALLAS_P,
-            PALLAS_P_INV,
-            PALLAS_P_R2,
-        ));
+        let w = self.pow(&PALLAS_S_MINUS_1_HALF);
         let mut x = self.mul_mod(w);
         let mut b = x.mul_mod(w);
-        let mut c = Self(PALLAS_ROOT_OF_UNITY);
+        let mut c = Self::from_raw(PALLAS_ROOT_OF_UNITY);
         let minus_one = Self::ONE.neg_mod();
         for r in (2..=32).rev() {
             let mut d = b;
@@ -220,52 +163,19 @@ impl FpPallas {
     }
 }
 
-impl core::ops::Add for FpPallas {
-    type Output = Self;
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        self.add_mod(rhs)
-    }
-}
-impl core::ops::Sub for FpPallas {
-    type Output = Self;
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        self.sub_mod(rhs)
-    }
-}
-impl core::ops::Mul for FpPallas {
-    type Output = Self;
-    #[inline]
-    fn mul(self, rhs: Self) -> Self {
-        self.mul_mod(rhs)
-    }
-}
-impl core::ops::Neg for FpPallas {
-    type Output = Self;
-    #[inline]
-    fn neg(self) -> Self {
-        self.neg_mod()
-    }
-}
-
-/// Canonical element of the Pallas scalar field `F_q` (`0 <= self < q`), wiped on `Drop`.
+/// A reduced Montgomery residue modulo [`PALLAS_Q`].
 #[derive(Clone, Eq)]
-pub struct FqPallas(pub [u64; 4]);
+pub struct FqPallas([u64; 4]);
 
-impl PartialEq for FqPallas {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        limbs::ct_eq(self.0, other.0)
-    }
-}
-
-impl fmt::Debug for FqPallas {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("FqPallas").field(&"<REDACTED>").finish()
-    }
-}
-
+limbs::montgomery_field!(
+    FqPallas,
+    4,
+    32,
+    PALLAS_Q,
+    PALLAS_Q_INV,
+    PALLAS_Q_R2,
+    PALLAS_Q_MINUS_2
+);
 impl Drop for FqPallas {
     fn drop(&mut self) {
         ct_zeroize_u64s(&mut self.0);
@@ -273,66 +183,17 @@ impl Drop for FqPallas {
 }
 
 impl FqPallas {
-    pub const ZERO: Self = Self([0; 4]);
-    pub const ONE: Self = Self([1, 0, 0, 0]);
-
-    pub fn from_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let mut value = limbs::from_le_bytes(bytes);
-        if limbs::lt(value, PALLAS_Q) {
-            Some(Self(value))
-        } else {
-            ct_zeroize_u64s(&mut value);
-            None
-        }
-    }
-
-    pub fn from_nonzero_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let s = Self::from_le_bytes(bytes)?;
-        if s.is_zero() { None } else { Some(s) }
-    }
-
-    pub fn to_le_bytes(&self) -> [u8; 32] {
-        limbs::to_le_bytes(self.0)
-    }
-
-    pub fn to_be_bytes(&self) -> [u8; 32] {
-        limbs::to_be_bytes(self.0)
-    }
-
-    #[inline]
-    pub fn is_zero(&self) -> bool {
-        limbs::is_zero(self.0)
-    }
-
-    #[inline]
     pub fn add_mod(&self, rhs: &Self) -> Self {
-        Self(limbs::add_mod(self.0, rhs.0, PALLAS_Q))
+        self.sum(rhs)
     }
-
-    #[inline]
     pub fn sub_mod(&self, rhs: &Self) -> Self {
-        Self(limbs::sub_mod(self.0, rhs.0, PALLAS_Q))
+        self.difference(rhs)
     }
-
-    #[inline]
-    pub fn neg_mod(&self) -> Self {
-        Self(limbs::neg_mod(self.0, PALLAS_Q))
-    }
-
-    #[inline]
     pub fn mul_mod(&self, rhs: &Self) -> Self {
-        let m1 = limbs::mont_mul(self.0, rhs.0, PALLAS_Q, PALLAS_Q_INV);
-        Self(limbs::mont_mul(m1, PALLAS_Q_R2, PALLAS_Q, PALLAS_Q_INV))
+        self.product(rhs)
     }
-
-    pub fn inv_or_zero(&self) -> Self {
-        Self(limbs::mont_pow(
-            self.0,
-            PALLAS_Q_MINUS_2,
-            PALLAS_Q,
-            PALLAS_Q_INV,
-            PALLAS_Q_R2,
-        ))
+    pub fn from_nonzero_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        Self::from_le_bytes(bytes).filter(|s| !s.is_zero())
     }
 
     pub fn compute_nullifier(&self, tag: u64, migration_domain: &[u8; 32]) -> [u64; 4] {
@@ -348,6 +209,52 @@ impl FqPallas {
         let out = poseidon2_hash_limbs(NULLIFIER_DOMAIN, &input);
         ct_zeroize_u64s(&mut input);
         out
+    }
+}
+
+// Zcash ToBase/ToScalar interpret the 64-byte input as lo + 2^256 hi.
+// Both summands must enter the destination field's Montgomery domain.
+macro_rules! pasta_encoding {
+    ($field:ident) => {
+        impl $field {
+            pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
+                Self::from_le_bytes(bytes)
+            }
+            pub fn to_bytes(&self) -> [u8; 32] {
+                self.to_le_bytes()
+            }
+            pub fn from_bytes_reduced(bytes: &[u8; 32]) -> Self {
+                let words = qsag_asm::wipe::SecretBuffer(limbs::from_le_bytes(bytes));
+                Self::from_raw(*words)
+            }
+            pub fn from_bytes_wide(bytes: &[u8; 64]) -> Self {
+                let [lo, hi] = bytes.as_chunks::<32>().0 else {
+                    unreachable!()
+                };
+                let lo = Self::from_bytes_reduced(lo);
+                let hi = Self::from_bytes_reduced(hi);
+                lo + Self::from_raw(hi.0)
+            }
+            pub fn invert(&self) -> Self {
+                self.inv_or_zero()
+            }
+        }
+    };
+}
+pasta_encoding!(FpPallas);
+pasta_encoding!(FqPallas);
+
+impl FpPallas {
+    pub fn sqrt(self) -> Option<Self> {
+        self.sqrt_ct()
+    }
+}
+
+impl FqPallas {
+    /// p < q, so the canonical base-field representative fits in the scalar field.
+    pub fn from_base(x: FpPallas) -> Self {
+        let words = qsag_asm::wipe::SecretBuffer(x.canonical_words());
+        Self::from_raw(*words)
     }
 }
 
@@ -374,17 +281,83 @@ impl PallasPoint {
 
     /// Official Zcash Orchard `SpendAuthG` generator (`GroupHash^Pallas("z.cash:Orchard", "G")`).
     pub const ORCHARD_SPEND_AUTH_G: Self = Self {
-        x: FpPallas(ORCHARD_SPEND_AUTH_GX),
-        y: FpPallas(ORCHARD_SPEND_AUTH_GY),
+        x: FpPallas::from_raw(ORCHARD_SPEND_AUTH_GX),
+        y: FpPallas::from_raw(ORCHARD_SPEND_AUTH_GY),
         z: FpPallas::ONE,
     };
 
     /// Pasta cycle standard generator `(-1, 2)`.
     pub const PASTA_GENERATOR: Self = Self {
-        x: FpPallas(PASTA_PALLAS_GX),
-        y: FpPallas(PASTA_PALLAS_GY),
+        x: FpPallas::from_raw(PASTA_PALLAS_GX),
+        y: FpPallas::from_raw(PASTA_PALLAS_GY),
         z: FpPallas::ONE,
     };
+
+    /// Affine coordinates must satisfy the Pallas curve equation.
+    pub fn from_affine(x: FpPallas, y: FpPallas) -> Option<Self> {
+        (y.square() == x.square() * x + FpPallas::B).then_some(Self {
+            x,
+            y,
+            z: FpPallas::ONE,
+        })
+    }
+
+    pub(crate) fn incomplete_add_defined(&self, rhs: &Self) -> bool {
+        !self.is_identity() & !rhs.is_identity() & (self.x * rhs.z != rhs.x * self.z)
+    }
+
+    pub fn add(&self, rhs: &Self) -> Self {
+        self.complete_add(rhs)
+    }
+    pub fn double(&self) -> Self {
+        self.complete_add(self)
+    }
+    pub fn neg(&self) -> Self {
+        self.neg_point()
+    }
+    pub fn mul(&self, k: &FqPallas) -> Self {
+        self.scalar_mul_ct(k)
+    }
+    pub fn extract(&self) -> FpPallas {
+        self.x * self.z.invert()
+    }
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.to_compressed_bytes()
+    }
+    pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        if *bytes == [0; 32] {
+            Some(Self::IDENTITY)
+        } else {
+            Self::from_nonidentity_bytes(bytes)
+        }
+    }
+    pub fn from_bytes_nonidentity(bytes: &[u8; 32]) -> Option<Self> {
+        Self::from_nonidentity_bytes(bytes)
+    }
+
+    /// Affine coordinates of many points with one inversion; `None` for the identity.
+    /// Public points only.
+    pub fn batch_to_affine(points: &[Self]) -> alloc::vec::Vec<Option<(FpPallas, FpPallas)>> {
+        let mut prefix = alloc::vec::Vec::with_capacity(points.len());
+        let mut acc = FpPallas::ONE;
+        for p in points {
+            prefix.push(acc);
+            if !p.z.is_zero() {
+                acc = acc * p.z;
+            }
+        }
+        let mut inv = acc.invert();
+        let mut out = alloc::vec![None; points.len()];
+        for (i, p) in points.iter().enumerate().rev() {
+            if p.z.is_zero() {
+                continue;
+            }
+            let zi = inv * prefix[i];
+            inv = inv * p.z;
+            out[i] = Some((p.x * zi, p.y * zi));
+        }
+        out
+    }
 
     pub fn wipe(&mut self) {
         ct_zeroize_u64s(&mut self.x.0);
@@ -478,7 +451,8 @@ impl PallasPoint {
     }
 
     pub fn scalar_mul_ct(&self, scalar: &FqPallas) -> Self {
-        self.scalar_mul_limbs_ct(&scalar.0)
+        let words = qsag_asm::wipe::SecretBuffer(scalar.canonical_words());
+        self.scalar_mul_limbs_ct(&words)
     }
 
     /// Constant-time `[scalar] SpendAuthG`.
@@ -497,9 +471,8 @@ impl PallasPoint {
     /// Canonical 32-byte Zcash Pasta / RedPallas encoding: LE `x` in bits `0..254`, `y & 1` in bit `255`.
     /// Returns `[0u8; 32]` for the identity point.
     pub fn to_compressed_bytes(&self) -> [u8; 32] {
-        let Some((x, y)) = self.to_affine() else {
-            return [0u8; 32];
-        };
+        let zi = self.z.invert();
+        let (x, y) = (self.x * zi, self.y * zi);
         let mut out = x.to_le_bytes();
         out[31] |= (y.is_odd() as u8) << 7;
         out
@@ -590,24 +563,27 @@ impl fmt::Debug for PallasOwnershipWitness {
 impl PallasOwnershipWitness {
     /// Construct from a canonical nonzero Orchard spend-authorizing scalar `ask` (`1 <= ask < q`, LE bytes).
     pub fn from_spend_auth_scalar_le(ask_le: [u8; 32]) -> Option<Self> {
-        let _ = FqPallas::from_nonzero_le_bytes(&ask_le)?;
+        let ask_le = RedactedSecret::new(ask_le);
+        FqPallas::from_nonzero_le_bytes(ask_le.expose())?;
         Some(Self {
-            ask_le: RedactedSecret::new(ask_le),
+            ask_le,
             alpha_le: None,
         })
     }
 
     /// Construct a RedPallas rerandomized action witness `(ask, alpha)` for `rk = [ask + alpha] SpendAuthG`.
     pub fn from_rerandomized_le(ask_le: [u8; 32], alpha_le: [u8; 32]) -> Option<Self> {
-        let ask = FqPallas::from_nonzero_le_bytes(&ask_le)?;
-        let alpha = FqPallas::from_le_bytes(&alpha_le)?;
+        let ask_le = RedactedSecret::new(ask_le);
+        let alpha_le = RedactedSecret::new(alpha_le);
+        let ask = FqPallas::from_nonzero_le_bytes(ask_le.expose())?;
+        let alpha = FqPallas::from_le_bytes(alpha_le.expose())?;
         let rsk = ask.add_mod(&alpha);
         if rsk.is_zero() {
             return None;
         }
         Some(Self {
-            ask_le: RedactedSecret::new(ask_le),
-            alpha_le: Some(RedactedSecret::new(alpha_le)),
+            ask_le,
+            alpha_le: Some(alpha_le),
         })
     }
 
@@ -675,5 +651,55 @@ impl PallasOwnershipWitness {
         let ok = qsag_accel::ct::ct_eq_bytes(&actual, target.compressed_bytes());
         ct_zeroize_bytes(&mut actual);
         ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pasta_montgomery_constants_and_root_of_unity() {
+        let mut two128 = [0u8; 32];
+        two128[16] = 1;
+        for (modulus, inv, minus_two, r, r2) in [
+            (
+                PALLAS_P,
+                PALLAS_P_INV,
+                PALLAS_P_MINUS_2,
+                FpPallas::ONE.0,
+                PALLAS_P_R2,
+            ),
+            (
+                PALLAS_Q,
+                PALLAS_Q_INV,
+                PALLAS_Q_MINUS_2,
+                FqPallas::ONE.0,
+                PALLAS_Q_R2,
+            ),
+        ] {
+            assert_eq!(modulus[0].wrapping_mul(inv), u64::MAX);
+            assert_eq!(limbs::sbb(modulus, minus_two), ([2, 0, 0, 0], false));
+            assert_eq!(limbs::mont_mul(limbs::one(), r2, modulus, inv), r);
+        }
+        assert_eq!(
+            FpPallas::from_le_bytes(&two128)
+                .unwrap()
+                .square()
+                .canonical_words(),
+            FpPallas::ONE.0
+        );
+        assert_eq!(
+            FqPallas::from_le_bytes(&two128)
+                .unwrap()
+                .square()
+                .canonical_words(),
+            FqPallas::ONE.0
+        );
+        let mut root = FpPallas::from_raw(PALLAS_ROOT_OF_UNITY);
+        for _ in 0..31 {
+            root = root.square();
+        }
+        assert_eq!(root, -FpPallas::ONE);
     }
 }

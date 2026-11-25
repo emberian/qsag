@@ -14,29 +14,42 @@ pub(crate) const fn one<const N: usize>() -> [u64; N] {
     out
 }
 
+/// Single-word addition with a 0/1 carry.
+#[inline]
+pub(crate) const fn adc_word(a: u64, b: u64, carry: u64) -> (u64, u64) {
+    let sum = a as u128 + b as u128 + carry as u128;
+    (sum as u64, (sum >> 64) as u64)
+}
+
+/// Single-word subtraction with a 0/1 borrow.
+#[inline]
+pub(crate) const fn sbb_word(a: u64, b: u64, borrow: u64) -> (u64, u64) {
+    let diff = (a as u128).wrapping_sub(b as u128 + borrow as u128);
+    (diff as u64, ((diff >> 64) as u64) & 1)
+}
+
 /// `a + b mod 2^(64 N)` and the carry out.
 #[inline]
-pub(crate) fn adc<const N: usize>(a: [u64; N], b: [u64; N]) -> ([u64; N], bool) {
+pub(crate) const fn adc<const N: usize>(a: [u64; N], b: [u64; N]) -> ([u64; N], bool) {
     let mut out = [0u64; N];
-    let mut carry = 0u128;
-    for i in 0..N {
-        let cur = (a[i] as u128) + (b[i] as u128) + carry;
-        out[i] = cur as u64;
-        carry = cur >> 64;
+    let mut carry = 0;
+    let mut i = 0;
+    while i < N {
+        (out[i], carry) = adc_word(a[i], b[i], carry);
+        i += 1;
     }
     (out, carry != 0)
 }
 
 /// `a - b mod 2^(64 N)` and the borrow out (`true` iff `a < b`).
 #[inline]
-pub(crate) fn sbb<const N: usize>(a: [u64; N], b: [u64; N]) -> ([u64; N], bool) {
+pub(crate) const fn sbb<const N: usize>(a: [u64; N], b: [u64; N]) -> ([u64; N], bool) {
     let mut out = [0u64; N];
     let mut borrow = 0u64;
-    for i in 0..N {
-        let (d1, b1) = a[i].overflowing_sub(b[i]);
-        let (d2, b2) = d1.overflowing_sub(borrow);
-        out[i] = d2;
-        borrow = (b1 as u64) | (b2 as u64);
+    let mut i = 0;
+    while i < N {
+        (out[i], borrow) = sbb_word(a[i], b[i], borrow);
+        i += 1;
     }
     (out, borrow != 0)
 }
@@ -49,14 +62,16 @@ pub(crate) fn lt<const N: usize>(a: [u64; N], b: [u64; N]) -> bool {
 
 /// `if_true` when `choice`, else `if_false`, selected limb by limb with a mask.
 #[inline]
-pub(crate) fn ct_select<const N: usize>(
+pub(crate) const fn ct_select<const N: usize>(
     choice: bool,
     if_true: [u64; N],
     if_false: [u64; N],
 ) -> [u64; N] {
     let mut out = [0u64; N];
-    for i in 0..N {
+    let mut i = 0;
+    while i < N {
         out[i] = ct_select_u64(choice, if_true[i], if_false[i]);
+        i += 1;
     }
     out
 }
@@ -85,7 +100,7 @@ pub(crate) fn is_zero<const N: usize>(a: [u64; N]) -> bool {
 ///
 /// The result is fully reduced whenever that integer is below `2 m`.
 #[inline]
-pub(crate) fn reduce_once<const N: usize>(
+pub(crate) const fn reduce_once<const N: usize>(
     value: [u64; N],
     overflow: bool,
     m: [u64; N],
@@ -96,7 +111,7 @@ pub(crate) fn reduce_once<const N: usize>(
 
 /// `a + b mod m` for `a, b < m`.
 #[inline]
-pub(crate) fn add_mod<const N: usize>(a: [u64; N], b: [u64; N], m: [u64; N]) -> [u64; N] {
+pub(crate) const fn add_mod<const N: usize>(a: [u64; N], b: [u64; N], m: [u64; N]) -> [u64; N] {
     let (sum, carry) = adc(a, b);
     reduce_once(sum, carry, m)
 }
@@ -135,11 +150,13 @@ pub(crate) fn from_le_bytes<const N: usize, const B: usize>(bytes: &[u8; B]) -> 
 
 /// Encode as `B = 8 N` little-endian bytes.
 #[inline]
-pub(crate) fn to_le_bytes<const N: usize, const B: usize>(limbs: [u64; N]) -> [u8; B] {
+pub(crate) const fn to_le_bytes<const N: usize, const B: usize>(limbs: [u64; N]) -> [u8; B] {
     const { assert!(B == 8 * N) };
     let mut out = [0u8; B];
-    for (chunk, limb) in out.chunks_exact_mut(8).zip(limbs) {
-        chunk.copy_from_slice(&limb.to_le_bytes());
+    let mut i = 0;
+    while i < B {
+        out[i] = (limbs[i / 8] >> ((i % 8) * 8)) as u8;
+        i += 1;
     }
     out
 }
@@ -168,9 +185,9 @@ pub(crate) fn to_be_bytes<const N: usize, const B: usize>(limbs: [u64; N]) -> [u
 
 /// CIOS Montgomery product `a * b * 2^(-64 N) mod m`.
 ///
-/// Requires `a, b < m`, `m` odd with its top bit clear, and `inv = -m^{-1} mod 2^64`.
+/// Requires `b < m` (the scanned operand `a` may use all N limbs), `m` odd with its top bit clear, and `inv = -m^{-1} mod 2^64`.
 #[inline]
-pub(crate) fn mont_mul<const N: usize>(
+pub(crate) const fn mont_mul<const N: usize>(
     a: [u64; N],
     b: [u64; N],
     m: [u64; N],
@@ -179,12 +196,16 @@ pub(crate) fn mont_mul<const N: usize>(
     let mut t = [0u64; N];
     // Limb `N` of the running sum, which stays below `2 m` after every outer round.
     let mut t_top = 0u64;
-    for &ai in &a {
+    let mut i = 0;
+    while i < N {
+        let ai = a[i];
         let mut carry = 0u128;
-        for j in 0..N {
+        let mut j = 0;
+        while j < N {
             let cur = (t[j] as u128) + (ai as u128) * (b[j] as u128) + carry;
             t[j] = cur as u64;
             carry = cur >> 64;
+            j += 1;
         }
         let cur = (t_top as u128) + carry;
         let hi = cur as u64;
@@ -194,42 +215,185 @@ pub(crate) fn mont_mul<const N: usize>(
         let u = t[0].wrapping_mul(inv);
         let cur0 = (t[0] as u128) + (u as u128) * (m[0] as u128);
         let mut carry2 = cur0 >> 64;
-        for j in 1..N {
+        let mut j = 1;
+        while j < N {
             let cur = (t[j] as u128) + (u as u128) * (m[j] as u128) + carry2;
             t[j - 1] = cur as u64;
             carry2 = cur >> 64;
+            j += 1;
         }
         let cur = (hi as u128) + carry2;
         t[N - 1] = cur as u64;
         t_top = hi_carry.wrapping_add((cur >> 64) as u64);
+        i += 1;
     }
     reduce_once(t, t_top != 0, m)
 }
 
-/// `base^exp mod m` with a fixed square-and-multiply schedule of `64 N` rounds.
-///
-/// `base < m` is in plain (non-Montgomery) form, as is the result; `r2 = 2^(128 N) mod m`.
-/// The schedule reads every bit of `exp` but the round count does not depend on its value.
-#[inline]
+/// Fixed-work exponentiation. Inputs and output are Montgomery residues.
 pub(crate) fn mont_pow<const N: usize>(
     base: [u64; N],
     exp: [u64; N],
     m: [u64; N],
     inv: u64,
-    r2: [u64; N],
+    one_mont: [u64; N],
 ) -> [u64; N] {
-    let mut b_m = mont_mul(base, r2, m, inv);
-    let mut acc_m = mont_mul(one(), r2, m, inv);
+    use qsag_asm::wipe::SecretBuffer;
+    let mut base = SecretBuffer(base);
+    let mut acc = SecretBuffer(one_mont);
+    let mut product = SecretBuffer([0; N]);
     for limb in exp {
         for bit in 0..64 {
-            let take = ((limb >> bit) & 1) == 1;
-            let prod = mont_mul(acc_m, b_m, m, inv);
-            acc_m = ct_select(take, prod, acc_m);
-            b_m = mont_mul(b_m, b_m, m, inv);
+            *product = mont_mul(*acc, *base, m, inv);
+            *acc = ct_select((limb >> bit) & 1 != 0, *product, *acc);
+            *base = mont_mul(*base, *base, m, inv);
         }
     }
-    mont_mul(acc_m, one(), m, inv)
+    *acc
 }
+
+/// Field methods shared by the Pasta fields and both BLS12-381 fields. The
+/// private words are always xR mod p; bytes and scalar bits are canonical.
+macro_rules! montgomery_field {
+    ($name:ident, $n:literal, $bytes:literal, $p:ident, $inv:ident, $r2:ident, $exp:ident) => {
+        impl $name {
+            pub const ZERO: Self = Self([0; $n]);
+            pub const ONE: Self = Self::from_u64(1);
+
+            pub const fn from_u64(v: u64) -> Self {
+                let mut words = [0; $n];
+                words[0] = v;
+                Self::from_raw(words)
+            }
+
+            /// Reduce a little-endian integer and enter Montgomery form.
+            pub(crate) const fn from_raw(words: [u64; $n]) -> Self {
+                Self(limbs::mont_mul(words, $r2, $p, $inv))
+            }
+
+            fn canonical_words(&self) -> [u64; $n] {
+                limbs::mont_mul(self.0, limbs::one(), $p, $inv)
+            }
+
+            fn from_limbs(mut words: [u64; $n]) -> Option<Self> {
+                let result = limbs::lt(words, $p).then(|| Self::from_raw(words));
+                qsag_asm::volatile_fill(&mut words, 0);
+                result
+            }
+
+            pub fn from_le_bytes(bytes: &[u8; $bytes]) -> Option<Self> {
+                Self::from_limbs(limbs::from_le_bytes(bytes))
+            }
+
+            pub fn from_be_bytes(bytes: &[u8; $bytes]) -> Option<Self> {
+                Self::from_limbs(limbs::from_be_bytes(bytes))
+            }
+
+            pub fn to_le_bytes(&self) -> [u8; $bytes] {
+                let words = qsag_asm::wipe::SecretBuffer(self.canonical_words());
+                limbs::to_le_bytes(*words)
+            }
+
+            pub fn to_be_bytes(&self) -> [u8; $bytes] {
+                let words = qsag_asm::wipe::SecretBuffer(self.canonical_words());
+                limbs::to_be_bytes(*words)
+            }
+
+            #[inline]
+            pub fn is_zero(&self) -> bool {
+                limbs::is_zero(self.0)
+            }
+
+            #[inline]
+            pub fn is_odd(&self) -> bool {
+                qsag_asm::wipe::SecretBuffer(self.canonical_words())[0] & 1 != 0
+            }
+
+            #[inline]
+            fn sum(&self, rhs: &Self) -> Self {
+                Self(limbs::add_mod(self.0, rhs.0, $p))
+            }
+            #[inline]
+            fn difference(&self, rhs: &Self) -> Self {
+                Self(limbs::sub_mod(self.0, rhs.0, $p))
+            }
+            #[inline]
+            fn product(&self, rhs: &Self) -> Self {
+                Self(limbs::mont_mul(self.0, rhs.0, $p, $inv))
+            }
+            #[inline]
+            pub fn neg_mod(&self) -> Self {
+                Self(limbs::neg_mod(self.0, $p))
+            }
+
+            #[inline]
+            pub fn square(&self) -> Self {
+                self.product(self)
+            }
+            #[inline]
+            pub fn double(&self) -> Self {
+                self.sum(self)
+            }
+
+            pub fn pow(&self, exp: &[u64; $n]) -> Self {
+                Self(limbs::mont_pow(self.0, *exp, $p, $inv, Self::ONE.0))
+            }
+
+            pub fn inv_or_zero(&self) -> Self {
+                self.pow(&$exp)
+            }
+
+            #[inline]
+            pub fn select(choice: bool, a: Self, b: Self) -> Self {
+                Self(limbs::ct_select(choice, a.0, b.0))
+            }
+        }
+
+        impl PartialEq for $name {
+            fn eq(&self, rhs: &Self) -> bool {
+                limbs::ct_eq(self.0, rhs.0)
+            }
+        }
+
+        impl qsag_asm::wipe::SecretWipe for $name {
+            fn secret_wipe(&mut self) {
+                qsag_asm::volatile_fill(&mut self.0, 0);
+            }
+        }
+
+        impl core::ops::Add for $name {
+            type Output = Self;
+            fn add(self, rhs: Self) -> Self {
+                self.sum(&rhs)
+            }
+        }
+        impl core::ops::Sub for $name {
+            type Output = Self;
+            fn sub(self, rhs: Self) -> Self {
+                self.difference(&rhs)
+            }
+        }
+        impl core::ops::Mul for $name {
+            type Output = Self;
+            fn mul(self, rhs: Self) -> Self {
+                self.product(&rhs)
+            }
+        }
+        impl core::ops::Neg for $name {
+            type Output = Self;
+            fn neg(self) -> Self {
+                self.neg_mod()
+            }
+        }
+
+        impl core::fmt::Debug for $name {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str(concat!(stringify!($name), "(<REDACTED>)"))
+            }
+        }
+    };
+}
+pub(crate) use montgomery_field;
 
 #[cfg(test)]
 mod tests {
@@ -493,6 +657,13 @@ mod tests {
         assert_eq!(mul(last, last), one());
         assert_eq!(mul(last, [0; N]), [0; N]);
         let mut rng = Rng(seed);
+        for input in core::iter::once([u64::MAX; N]).chain((0..64).map(|_| rng.limbs())) {
+            let residue = mont_mul(input, r2, m, inv);
+            assert_eq!(
+                mont_mul(residue, one(), m, inv),
+                ref_trim(&ref_rem(&input, &m))
+            );
+        }
         for _ in 0..200 {
             let (a, b) = (rng.below(m), rng.below(m));
             assert_eq!(mul(a, b), ref_mul_mod(a, b, m));
@@ -502,16 +673,21 @@ mod tests {
             assert_eq!(mont_mul(a_m, one(), m, inv), a);
         }
 
+        let pow = |a, exp| {
+            let base = mont_mul(a, r2, m, inv);
+            let one_m = mont_mul(one(), r2, m, inv);
+            mont_mul(mont_pow(base, exp, m, inv, one_m), one(), m, inv)
+        };
         let p_minus_2 = ref_trim(&ref_sub(&m, &[2]));
-        assert_eq!(mont_pow([0; N], p_minus_2, m, inv, r2), [0; N]);
-        assert_eq!(mont_pow(last, [0; N], m, inv, r2), one());
+        assert_eq!(pow([0; N], p_minus_2), [0; N]);
+        assert_eq!(pow(last, [0; N]), one());
         for _ in 0..4 {
             let a = rng.below(m);
-            let a_inv = mont_pow(a, p_minus_2, m, inv, r2);
+            let a_inv = pow(a, p_minus_2);
             assert_eq!(mul(a, a_inv), if a == [0; N] { [0; N] } else { one() });
             let mut cube = [0u64; N];
             cube[0] = 3;
-            assert_eq!(mont_pow(a, cube, m, inv, r2), mul(mul(a, a), a));
+            assert_eq!(pow(a, cube), mul(mul(a, a), a));
         }
     }
 

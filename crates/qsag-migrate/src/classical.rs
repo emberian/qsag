@@ -238,7 +238,9 @@ impl ClassicalOwnershipWitness {
         ct_zeroize_bytes(&mut tweaked_sk);
         let (qx, _) = out_pt.to_affine()?;
         out_pt.wipe();
-        Some(ClassicalCommitmentKind::BitcoinTaprootXOnly(qx.to_be_bytes()))
+        Some(ClassicalCommitmentKind::BitcoinTaprootXOnly(
+            qx.to_be_bytes(),
+        ))
     }
 
     /// Compute the Ethereum 20-byte `Keccak256(uncompressed_pk_64)[12..32]` address commitment!
@@ -392,7 +394,8 @@ impl ClassicalOwnershipWitness {
                 }
             }
             ClassicalCommitmentKind::Slip0010Ed25519(ref expected) => {
-                if let ClassicalCommitmentKind::Slip0010Ed25519(a) = self.compute_slip0010_commitment()
+                if let ClassicalCommitmentKind::Slip0010Ed25519(a) =
+                    self.compute_slip0010_commitment()
                 {
                     qsag_accel::ct::ct_eq_bytes(&a, expected)
                 } else {
