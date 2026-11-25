@@ -551,7 +551,11 @@ impl<W: DurableWal> PersonalBeltLatch<W> {
     pub fn key_epoch_context(&self) -> &[u8; 32] {
         &self.context
     }
-    pub(crate) fn derive_wire_link_key(&self, session_id: &[u8; 32], peer: u16) -> Option<[u8; 32]> {
+    pub(crate) fn derive_wire_link_key(
+        &self,
+        session_id: &[u8; 32],
+        peer: u16,
+    ) -> Option<[u8; 32]> {
         let key = self.keys.get(&peer)?;
         let low = self.party.min(peer).to_be_bytes();
         let high = self.party.max(peer).to_be_bytes();

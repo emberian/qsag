@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Framed point-to-point transport between isolated parties.
 //!
 //! Every protocol message travels in one frame:
@@ -21,9 +22,15 @@
 //! [`WireTransport`] and the frame codec are `no_std`. The channel mesh and the loopback
 //! socket mesh need `std` and are compiled with the `std` feature (and in tests).
 
+mod pq_handshake;
+
+pub const ROUND_PQ_HS_INIT: u32 = 0x50514801;
+pub const ROUND_PQ_HS_RESP: u32 = 0x50514802;
+pub const ROUND_PQ_HS_CONFIRM: u32 = 0x50514803;
+
 use alloc::vec;
 use alloc::vec::Vec;
-use core::fmt;
+pub use qsag_core::wire_transport::{TransportError, WireTransport};
 
 /// First bytes of every frame.
 pub const FRAME_MAGIC: [u8; 4] = *b"QSWF";
@@ -35,73 +42,6 @@ pub const SEALED_FRAME_OVERHEAD: usize = FRAME_HEADER_BYTES + 1 + 32 + 32;
 pub const MAX_FRAME_PAYLOAD: usize = 1 << 23;
 /// Maximum complete wire frame, including its fixed header.
 pub const MAX_WIRE_FRAME_BYTES: usize = FRAME_HEADER_BYTES + MAX_FRAME_PAYLOAD;
-
-/// Transport and framing failures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TransportError {
-    /// The peer index is not a party of the mesh, or is the local party.
-    UnknownPeer {
-        peer: usize,
-    },
-    PayloadTooLarge,
-    /// The link to `peer` is closed: the peer is gone.
-    Closed {
-        peer: usize,
-    },
-    /// Nothing arrived from `peer` in time.
-    Timeout {
-        peer: usize,
-    },
-    /// Not a frame: bad magic, truncated header, or length field unequal to the payload.
-    Malformed,
-    SessionMismatch,
-    AuthenticationFailed,
-    SequenceExhausted,
-    /// The frame names another sender or destination than the link it arrived on.
-    RouteMismatch,
-    RoundTagMismatch {
-        expected: u32,
-        got: u32,
-    },
-    SequenceMismatch {
-        expected: u64,
-        got: u64,
-    },
-}
-
-impl fmt::Display for TransportError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownPeer { peer } => write!(f, "unknown peer {peer}"),
-            Self::PayloadTooLarge => f.write_str("payload too large for one frame"),
-            Self::Closed { peer } => write!(f, "link to party {peer} is closed"),
-            Self::Timeout { peer } => write!(f, "timed out waiting for party {peer}"),
-            Self::Malformed => f.write_str("malformed frame"),
-            Self::AuthenticationFailed => f.write_str("wire authentication failed"),
-            Self::SequenceExhausted => f.write_str("wire sequence exhausted"),
-            Self::SessionMismatch => f.write_str("frame belongs to another session"),
-            Self::RouteMismatch => f.write_str("frame arrived on the wrong link"),
-            Self::RoundTagMismatch { expected, got } => {
-                write!(f, "frame for round {got:#x}, expected round {expected:#x}")
-            }
-            Self::SequenceMismatch { expected, got } => {
-                write!(f, "frame sequence {got}, expected {expected}")
-            }
-        }
-    }
-}
-
-impl TransportError {
-    /// Returns `true` only when the directed link or sequence space is permanently unusable
-    /// (`Closed` or `SequenceExhausted`). Transient timeouts and unauthenticated/malformed/out-of-round
-    /// frames must not permanently brick the link (`CRITICAL-11`).
-    #[inline]
-    pub const fn is_fatal_link_error(&self) -> bool {
-        matches!(self, Self::Closed { .. } | Self::SequenceExhausted)
-    }
-}
-
-impl core::error::Error for TransportError {}
 
 /// Header of one frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,43 +108,6 @@ pub fn decode_frame(raw: &[u8]) -> Result<(FrameHeader, &[u8]), TransportError> 
         return Err(TransportError::Malformed);
     }
     Ok((header, &raw[FRAME_HEADER_BYTES..]))
-}
-
-/// One party's end of a mesh: frames to and from each peer, in rounds.
-pub trait WireTransport {
-    /// Index of the local party.
-    fn party(&self) -> usize;
-
-    /// Number of parties in the mesh.
-    fn parties(&self) -> usize;
-
-    /// Send `payload` to `to_party` as the next frame of round `round_tag`.
-    fn send_frame(
-        &mut self,
-        to_party: usize,
-        round_tag: u32,
-        payload: &[u8],
-    ) -> Result<(), TransportError>;
-
-    /// Receive the next frame from `from_party`. It must belong to this session, to this
-    /// link, to round `expected_round_tag` and carry the next sequence number; otherwise
-    /// the frame is consumed and an error returned.
-    fn recv_frame(
-        &mut self,
-        from_party: usize,
-        expected_round_tag: u32,
-    ) -> Result<Vec<u8>, TransportError>;
-
-    /// Receive a transport envelope whose payload has its own authenticated routing,
-    /// round and sequence header. Unauthenticated outer sequence counters must not
-    /// advance before that payload is authenticated. Built-in meshes bypass their
-    /// outer sequencer here; transports with already-authenticated sequencing may
-    /// delegate to `recv_frame`. This is not a replacement for `recv_frame` on plain links.
-    fn recv_authenticated_envelope(
-        &mut self,
-        from_party: usize,
-        expected_round_tag: u32,
-    ) -> Result<Vec<u8>, TransportError>;
 }
 
 /// Per-link sequence state of one party. Turns payloads into frames and checks received
@@ -414,6 +317,28 @@ pub struct MacSealedWireChannel<T: WireTransport> {
 }
 
 impl<T: WireTransport> MacSealedWireChannel<T> {
+    /// Authenticate ephemeral X25519 and ML-KEM-768 keys with the pairwise roster secrets.
+    /// Each endpoint must supply fresh private entropy for this invocation.
+    pub fn establish_pq_hybrid(
+        transport: T,
+        deployment_id: [u8; 32],
+        session_id: [u8; 32],
+        static_psks: Vec<[u8; 32]>,
+        mut ephemeral_seed: [u8; 32],
+        encrypted: bool,
+    ) -> Result<Self, TransportError> {
+        let out = pq_handshake::establish(
+            transport,
+            deployment_id,
+            session_id,
+            static_psks,
+            &ephemeral_seed,
+            encrypted,
+        );
+        qsag_asm::ct_memzero(&mut ephemeral_seed);
+        out
+    }
+
     /// `keys[peer]` is the provisioned pairwise link key; the local entry is wiped and unused.
     pub fn new(
         transport: T,
@@ -657,7 +582,61 @@ pub struct ConfidentialWireChannel<T: WireTransport> {
     failed_links: Vec<bool>,
 }
 
+/// Framed, confidential loopback endpoints for ceremonies that hold all parties
+/// on one host. Each pair gets an independent operating-system key.
+#[cfg(feature = "std")]
+pub fn confidential_loopback(
+    count: usize,
+    session: [u8; 32],
+) -> std::io::Result<Vec<ConfidentialWireChannel<TcpEndpoint>>> {
+    let (endpoints, _) = TcpWireMesh::loopback(count, session)?;
+    let mut keys = qsag_core::wipe::SecretBuffer(alloc::vec![alloc::vec![[0;32]; count]; count]);
+    for a in 0..count {
+        for b in a + 1..count {
+            qsag_asm::fill_os_random(&mut keys[a][b])?;
+            keys[b][a] = keys[a][b];
+        }
+    }
+    endpoints
+        .into_iter()
+        .zip(keys.iter_mut())
+        .map(|(endpoint, row)| {
+            ConfidentialWireChannel::new(endpoint, session, session, core::mem::take(row))
+                .map_err(std::io::Error::other)
+        })
+        .collect()
+}
+
 impl<T: WireTransport> ConfidentialWireChannel<T> {
+    /// Authenticate ephemeral X25519 and ML-KEM-768 keys with the pairwise roster secrets.
+    /// Each endpoint must supply fresh private entropy for this invocation.
+    pub fn establish_pq_hybrid(
+        transport: T,
+        deployment_id: [u8; 32],
+        session_id: [u8; 32],
+        static_psks: Vec<[u8; 32]>,
+        mut ephemeral_seed: [u8; 32],
+    ) -> Result<Self, TransportError> {
+        let out = pq_handshake::establish(
+            transport,
+            deployment_id,
+            session_id,
+            static_psks,
+            &ephemeral_seed,
+            true,
+        );
+        qsag_asm::ct_memzero(&mut ephemeral_seed);
+        let inner = out?;
+        Ok(Self {
+            failed_links: vec![false; inner.parties()],
+            inner,
+        })
+    }
+
+    pub(crate) fn into_sealed(self) -> MacSealedWireChannel<T> {
+        self.inner
+    }
+
     /// Provision an encrypted, direction-bound channel from per-peer 32-byte secrets.
     pub fn new(
         transport: T,
@@ -999,6 +978,52 @@ mod mesh {
     }
 
     impl TcpWireMeshBuilder {
+        /// Attach the already connected peer streams of one independently hosted party.
+        /// Supply one slot per enrolled party and leave only the local slot empty.
+        /// Wrap the endpoint in a confidential authenticated channel before moving shares.
+        pub fn endpoint(
+            &self,
+            session_id: [u8; 32],
+            party: usize,
+            streams: Vec<Option<TcpStream>>,
+        ) -> std::io::Result<TcpEndpoint> {
+            self.endpoint_with_stats(session_id, party, streams, Arc::new(MeshStats::default()))
+        }
+
+        fn endpoint_with_stats(
+            &self,
+            session_id: [u8; 32],
+            party: usize,
+            streams: Vec<Option<TcpStream>>,
+            stats: Arc<MeshStats>,
+        ) -> std::io::Result<TcpEndpoint> {
+            let n = streams.len();
+            if self.timeout.is_zero()
+                || party >= n
+                || n > usize::from(u16::MAX) + 1
+                || streams
+                    .iter()
+                    .enumerate()
+                    .any(|(id, s)| s.is_none() != (id == party))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid TCP roster or timeout",
+                ));
+            }
+            for stream in streams.iter().flatten() {
+                stream.set_nodelay(true)?;
+                stream.set_read_timeout(Some(self.timeout))?;
+                stream.set_write_timeout(Some(self.timeout))?;
+            }
+            Ok(TcpEndpoint {
+                seq: FrameSequencer::new(session_id, party, n),
+                streams,
+                receiving: (0..n).map(|_| PartialFrame::default()).collect(),
+                stats,
+            })
+        }
+
         pub fn loopback(
             self,
             parties: usize,
@@ -1019,25 +1044,16 @@ mod mesh {
                 let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
                 let dialer = TcpStream::connect(listener.local_addr()?)?;
                 let (accepted, _) = listener.accept()?;
-                dialer.set_nodelay(true)?;
-                accepted.set_nodelay(true)?;
-                for stream in [&dialer, &accepted] {
-                    stream.set_read_timeout(Some(self.timeout))?;
-                    stream.set_write_timeout(Some(self.timeout))?;
-                }
                 streams[lo][hi] = Some(dialer);
                 streams[hi][lo] = Some(accepted);
             }
             let endpoints = streams
                 .into_iter()
                 .enumerate()
-                .map(|(party, streams)| TcpEndpoint {
-                    seq: FrameSequencer::new(session_id, party, parties),
-                    streams,
-                    receiving: (0..parties).map(|_| PartialFrame::default()).collect(),
-                    stats: stats.clone(),
+                .map(|(party, streams)| {
+                    self.endpoint_with_stats(session_id, party, streams, stats.clone())
                 })
-                .collect();
+                .collect::<std::io::Result<Vec<_>>>()?;
             Ok((endpoints, stats))
         }
     }
@@ -1266,8 +1282,13 @@ mod tests {
                 let mut channels: Vec<_> = endpoints
                     .into_iter()
                     .map(|endpoint| {
-                        let mut channel =
-                            MacSealedWireChannel::new(endpoint, [0xDA; 32], SESSION, vec![[3; 32]; 3]).unwrap();
+                        let mut channel = MacSealedWireChannel::new(
+                            endpoint,
+                            [0xDA; 32],
+                            SESSION,
+                            vec![[3; 32]; 3],
+                        )
+                        .unwrap();
                         channel.encrypted = encrypted;
                         channel
                     })
@@ -1793,7 +1814,8 @@ mod authenticated_tests {
             let keys = vec![[3; 32]; 2];
             let (mut alice, mut bob) = if encrypted {
                 (
-                    MacSealedWireChannel::new_encrypted(alice, [0xDA; 32], [2; 32], keys.clone()).unwrap(),
+                    MacSealedWireChannel::new_encrypted(alice, [0xDA; 32], [2; 32], keys.clone())
+                        .unwrap(),
                     MacSealedWireChannel::new_encrypted(bob, [0xDA; 32], [2; 32], keys).unwrap(),
                 )
             } else {
