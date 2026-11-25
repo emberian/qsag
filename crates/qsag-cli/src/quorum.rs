@@ -46,11 +46,12 @@ const QUORUM_HELP: &str = "\
 qsag quorum <keygen|sign|reanchor-tpm|refresh|reshare|verify|coupon> [options]
 
 Threshold Jorts custody ceremonies:
-  - `--scheme jorts-2of3-sha3` (default): dealerless 2-of-3 RSS Jorts gated by FsBeltWal & FsCeremonyJournal.
+  - `--scheme jorts-2of3-sha3` (default): single-host 2-of-3 RSS Jorts gated by FsBeltWal & FsCeremonyJournal.
   - `--scheme hem-jorts-poseidon2`: dynamic (t, n) Shamir quorum producing canonical 65B/4328B
     JortsPoseidon2 keys & signatures directly aggregatable by untrusted `qsag aggregate`!
 
 subcommands:
+  daemon   serve authenticated CNF custody ceremonies (qsag quorum daemon --help)
   wire     run one isolated CNF custodian over TCP (qsag quorum wire --help)
   keygen   enroll a quorum custody vault (--vault-dir) and write --public-out
   sign     threshold-sign one monotone leaf epoch across the active quorum
@@ -66,7 +67,7 @@ subcommands:
 const QUORUM_KEYGEN_HELP: &str = "\
 qsag quorum keygen --vault-dir <dir> --public-out <path> [options]
 
-Run a dealerless 2-of-3 RSS key generation ceremony with zero central secret reconstruction.
+Run a single-host 2-of-3 RSS ceremony. All shares live in this process. Use quorum wire or daemon for multi-host custody.
 
   --vault-dir <dir>             private 0700 directory for party-{0,1,2}.{sk,belt,ceremony}
   --public-out <path>           destination for the quorum public key JSON
@@ -662,6 +663,7 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
             print!("{QUORUM_HELP}");
             Ok(())
         }
+        "daemon" => crate::quorum_wire::run(raw),
         "wire" => crate::quorum_wire::run(rest),
         "keygen" => keygen(rest),
         "sign" => sign(rest),
@@ -793,7 +795,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         PartyPrivateRng::from_seed(party_seeds[p].0, b"QSAG.CLI.QUORUM.DKG.RNG.V1")
     });
     let (shares, pk_seed) = run_dealerless_rss_dkg_2of3(dkg_session_id, 32, &mut dkg_rngs)
-        .map_err(|e| CliError::state(format!("dealerless 2-of-3 DKG failed: {e}")))?;
+        .map_err(|e| CliError::state(format!("local 2-of-3 DKG failed: {e}")))?;
 
     let keygen_engine_sid = os_random_32()?;
     let keygen_rngs: [PartyPrivateRng; 3] = [
@@ -918,7 +920,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let public = Json::object(vec![
         ("format", Json::str(PUBLIC_FORMAT)),
         ("scheme", Json::str(SCHEME_NAME)),
-        ("custody_model", Json::str("dealerless-2of3-rss-jorts")),
+        ("custody_model", Json::str(crate::cli::SINGLE_HOST_CUSTODY)),
         ("tree_height", Json::num(height)),
         ("capacity", Json::num(params.capacity())),
         ("pk_seed", Json::hex(&key_material.pk.pk_seed)),
@@ -1034,7 +1036,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         .get_u64("epoch")?
         .ok_or_else(|| CliError::usage("missing required option --epoch"))?;
     let out_path = args.require("out")?;
-    ensure_absent(out_path)?;
+    let reserved_output = crate::cli::reserve_output(out_path, false)?;
     let msg_arg = args
         .get("message")
         .or_else(|| args.get("in"))
@@ -1396,7 +1398,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
     sig_fields.extend(policy_fields);
     sig_fields.push(("signature", Json::hex(&sig_bytes.0)));
     let sig_json = Json::object(sig_fields);
-    write_new(out_path, sig_json.to_pretty().as_bytes(), false)?;
+    crate::cli::finish_output(reserved_output, sig_json.to_pretty().as_bytes())?;
 
     if args.flag("json") {
         let report = Json::object(vec![

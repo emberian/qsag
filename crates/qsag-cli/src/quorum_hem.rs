@@ -69,7 +69,8 @@ const HEM_META_FORMAT: &str = "qsag-hem-quorum-meta-v2";
 const SIG_FORMAT: &str = "qsag-quorum-signature-v1";
 const MAX_VAULT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
-const HEM_ENVELOPE_FORMAT: &str = "cshake256-iterated-v1";
+const HEM_ENVELOPE_FORMAT: &str = "cshake256-balloon-v2";
+const HEM_LEGACY_ENVELOPE: &str = "cshake256-iterated-v1";
 const HEM_SHARE_SEAL_MAGIC: &[u8; 24] = b"QSAG.HEM.SHARE.SEAL.V1\0\0";
 const HEM_SHARE_SEAL_HEADER_BYTES: usize = 24 + 8 + 8 + 32 + 32;
 
@@ -180,10 +181,7 @@ fn write_public_json(
     Json::object(vec![
         ("format", Json::str(PUBLIC_FORMAT)),
         ("scheme", Json::str(HEM_SCHEME_NAME)),
-        (
-            "custody_model",
-            Json::str("dynamic-shamir-hem-jorts-poseidon2"),
-        ),
+        ("custody_model", Json::str(crate::cli::SINGLE_HOST_CUSTODY)),
         ("threshold", Json::num(t)),
         ("parties", Json::num(n)),
         ("quorum_epoch", Json::num(quorum_epoch)),
@@ -326,6 +324,10 @@ enum Step {
     TargetPrepared,
     /// Reshare only: the old vault records where it is being reshared to.
     IntentRecorded,
+    /// The encrypted successor exists, before the source releases its activation key.
+    SuccessorStaged,
+    /// The source anchor committed to one fully staged successor.
+    SourceRetired,
     /// Reshare only: an interrupted reshare was undone and the old vault is live again.
     IntentCleared,
 }
@@ -350,25 +352,24 @@ fn lock_identity(lock: &Vault) -> Result<(u64, u64), CliError> {
     ))
 }
 
-/// Take the exclusive lock of an existing vault. The second value says the lock file was
-/// created by this call.
+/// Take the exclusive lock of an existing vault.
 ///
 /// Only a vault written before lock files existed (meta format v1) may lack one; it gets a
 /// lock here, created exclusively, so two commands racing on such a vault end up holding
 /// the same file one after the other. A v2 vault records its lock's inode in the meta and
 /// is refused when the lock is missing or is a different file.
-fn lock_existing_vault(vault_dir: &str) -> Result<(Vault, bool), CliError> {
+fn lock_existing_vault(vault_dir: &str) -> Result<Vault, CliError> {
     private_dir(vault_dir, false)?;
     let mp = meta_path(vault_dir);
     if exists(&lock_path(vault_dir))? {
-        return Ok((Vault::acquire(&mp, false)?, false));
+        return Vault::acquire(&mp, false);
     }
     let meta = Json::parse(&read_text(&mp)?)?;
     if meta.field_str("format")? != HEM_META_FORMAT_V1 {
         // Unless another command converted the vault since the check above, a current
         // vault without its lock is refused.
         if exists(&lock_path(vault_dir))? {
-            return Ok((Vault::acquire(&mp, false)?, false));
+            return Vault::acquire(&mp, false);
         }
         return Err(crate::vault::corrupt());
     }
@@ -380,9 +381,9 @@ fn lock_existing_vault(vault_dir: &str) -> Result<(Vault, bool), CliError> {
         return Err(retired());
     }
     match Vault::acquire(&mp, true) {
-        Ok(lock) => Ok((lock, true)),
+        Ok(lock) => Ok(lock),
         // Another command created it first: wait for that one.
-        Err(_) => Ok((Vault::acquire(&mp, false)?, false)),
+        Err(_) => Vault::acquire(&mp, false),
     }
 }
 
@@ -401,11 +402,12 @@ fn retired() -> CliError {
 }
 
 // ---------------------------------------------------------------------------------------
-// Passphrase Envelope (cshake256-iterated-v1)
+// Passphrase envelope
 // ---------------------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct HemEnvelopeMeta {
+    format: &'static str,
     salt: [u8; 32],
     nonce: [u8; 32],
     tag: [u8; 32],
@@ -424,48 +426,22 @@ impl HemEnvelopeKeys {
             return Err(CliError::input("empty passphrase"));
         }
         let salt = os_random_32()?;
-        let (enc, mac) = derive_hem_envelope_keys(pass, &salt);
+        let (enc, mac) = crate::envelope::derive_v2(pass, &salt, HEM_SCHEME_NAME);
         Ok(Self { salt, enc, mac })
     }
 
-    fn from_salt(pass: &[u8], salt: [u8; 32]) -> Result<Self, CliError> {
+    fn from_salt(pass: &[u8], salt: [u8; 32], format: &str) -> Result<Self, CliError> {
         if pass.is_empty() {
             return Err(CliError::input("empty passphrase"));
         }
-        let (enc, mac) = derive_hem_envelope_keys(pass, &salt);
+        let derive = if format == HEM_LEGACY_ENVELOPE {
+            crate::envelope::derive_v1
+        } else {
+            crate::envelope::derive_v2
+        };
+        let (enc, mac) = derive(pass, &salt, HEM_SCHEME_NAME);
         Ok(Self { salt, enc, mac })
     }
-}
-
-fn derive_hem_envelope_keys(pass: &[u8], salt: &[u8; 32]) -> (Secret32, Secret32) {
-    let mut state = Secret32::new([0u8; 32]);
-    cshake256_framed_xof(
-        b"QSAG.ENVELOPE.KDF.V1",
-        &[pass, salt, HEM_SCHEME_NAME.as_bytes()],
-        &mut state.0,
-    );
-    for i in 0..crate::envelope::KDF_ROUNDS {
-        let mut next = Secret32::new([0u8; 32]);
-        cshake256_framed_xof(
-            b"QSAG.ENVELOPE.ITER.V1",
-            &[&state.0, salt, &i.to_le_bytes()],
-            &mut next.0,
-        );
-        state = next;
-    }
-    let mut enc = Secret32::new([0u8; 32]);
-    cshake256_framed_xof(
-        b"QSAG.ENVELOPE.ENC.V1",
-        &[&state.0, salt, HEM_SCHEME_NAME.as_bytes()],
-        &mut enc.0,
-    );
-    let mut mac = Secret32::new([0u8; 32]);
-    cshake256_framed_xof(
-        b"QSAG.ENVELOPE.MAC.V1",
-        &[&state.0, salt, HEM_SCHEME_NAME.as_bytes()],
-        &mut mac.0,
-    );
-    (enc, mac)
 }
 
 fn crypt_latch_seed(
@@ -621,6 +597,7 @@ fn open_sealed_share_bytes(
 // ---------------------------------------------------------------------------------------
 
 struct PendingReshare {
+    activation_commitment: Option<[u8; 32]>,
     /// Absolute path of the vault being created.
     target: String,
     /// The quorum epoch the new vault starts at.
@@ -709,8 +686,33 @@ impl Meta {
         }
     }
 
+    fn retirement_marker(&self) -> [u8; 32] {
+        cshake256_framed_32(
+            b"QSAG.HEM.RETIRED.V2",
+            &[
+                &self.pk,
+                &self.lock_id.0.to_le_bytes(),
+                &self.lock_id.1.to_le_bytes(),
+            ],
+        )
+    }
+
+    fn authenticate_intent(&mut self, keys: Option<&HemEnvelopeKeys>) {
+        if let (Some(keys), Some(env)) = (keys, self.envelope.as_ref()) {
+            let tag = self.compute_envelope_tag(
+                env.format,
+                &env.salt,
+                &env.nonce,
+                &env.encrypted_latch_seed,
+                &keys.mac,
+            );
+            self.envelope.as_mut().unwrap().tag = tag;
+        }
+    }
+
     fn compute_envelope_tag(
         &self,
+        format: &str,
         salt: &[u8; 32],
         nonce: &[u8; 32],
         encrypted_latch_seed: &[u8; 32],
@@ -720,11 +722,11 @@ impl Meta {
         for d in &self.share_digests {
             flat_shares.extend_from_slice(d);
         }
-        cshake256_framed_32(
+        let content = cshake256_framed_32(
             b"QSAG.HEM.META.TAG.V1",
             &[
                 &mac.0,
-                HEM_ENVELOPE_FORMAT.as_bytes(),
+                format.as_bytes(),
                 HEM_SCHEME_NAME.as_bytes(),
                 &(self.t as u64).to_le_bytes(),
                 &(self.n as u64).to_le_bytes(),
@@ -738,6 +740,42 @@ impl Meta {
                 nonce,
                 encrypted_latch_seed,
                 &flat_shares,
+            ],
+        );
+        if format == HEM_LEGACY_ENVELOPE {
+            return content;
+        }
+        let anchor = self.anchor_info.unwrap_or(([0; 24], [0; 32]));
+        let intent = self.pending.as_ref().map(|p| {
+            cshake256_framed_32(
+                b"QSAG.HEM.INTENT.V2",
+                &[
+                    p.activation_commitment
+                        .as_ref()
+                        .map_or(&[][..], |d| d.as_slice()),
+                    p.target.as_bytes(),
+                    &p.quorum_epoch.to_le_bytes(),
+                    p.anchor_key_id.as_ref().map_or(&[][..], |id| id.as_slice()),
+                    p.anchor_dir.as_deref().unwrap_or("").as_bytes(),
+                ],
+            )
+        });
+        cshake256_framed_32(
+            b"QSAG.HEM.META.TAG.V2",
+            &[
+                &mac.0,
+                &content,
+                intent.as_ref().map_or(&[][..], |hash| hash.as_slice()),
+                &[
+                    u8::from(self.anchor_info.is_some()),
+                    u8::from(self.invalidated),
+                ],
+                &self.lock_id.0.to_le_bytes(),
+                &self.lock_id.1.to_le_bytes(),
+                &anchor.0,
+                &anchor.1,
+                &[u8::from(self.anchor_key_id.is_some())],
+                &self.anchor_key_id.unwrap_or([0; 32]),
             ],
         )
     }
@@ -766,6 +804,10 @@ impl Meta {
             None => frames.push(vec![0]),
             Some(pending) => {
                 frames.push(vec![1]);
+                if let Some(d) = &pending.activation_commitment {
+                    frames.push(b"QSAG.HEM.PREPARED.V1".to_vec());
+                    frames.push(d.to_vec());
+                }
                 frames.push(pending.target.as_bytes().to_vec());
                 frames.push(pending.quorum_epoch.to_le_bytes().to_vec());
                 if let Some(key_id) = pending.anchor_key_id {
@@ -779,7 +821,7 @@ impl Meta {
             }
         }
         if let Some(env) = &self.envelope {
-            frames.push(HEM_ENVELOPE_FORMAT.as_bytes().to_vec());
+            frames.push(env.format.as_bytes().to_vec());
             frames.push(env.salt.to_vec());
             frames.push(env.nonce.to_vec());
             frames.push(env.tag.to_vec());
@@ -799,6 +841,40 @@ impl Meta {
             qsag_accel::ct::ct_zeroize_bytes(frame);
         }
         digest
+    }
+
+    fn activation_commitment(&self, pending: &PendingReshare, key: &Secret32) -> [u8; 32] {
+        cshake256_framed_32(
+            b"QSAG.HEM.HANDOFF.KEY.V1",
+            &[
+                &key.0,
+                &self.checkpoint().tag,
+                pending.target.as_bytes(),
+                &pending.quorum_epoch.to_le_bytes(),
+            ],
+        )
+    }
+
+    // A TPM seal can contain a pending checkpoint before its irreversible NV
+    // increment. Even a copy of that record must not decrypt a sealed successor.
+    fn wrap_activation(&self, bytes: &[u8; 32], commitment: &[u8; 32]) -> Secret32 {
+        let mut out = Secret32::new(cshake256_framed_32(
+            b"QSAG.HEM.HANDOFF.WRAP.V1",
+            &[&self.latch_seed.0, &self.checkpoint().tag, commitment],
+        ));
+        for (byte, input) in out.0.iter_mut().zip(bytes) {
+            *byte ^= input;
+        }
+        out
+    }
+
+    fn committed_activation(&self, external: LedgerCheckpoint) -> Option<Secret32> {
+        let pending = self.pending.as_ref()?;
+        let expected = pending.activation_commitment.as_ref()?;
+        let key = self.wrap_activation(&external.tag, expected);
+        (self.generation.checked_add(1)? == external.generation
+            && qsag_accel::ct::ct_eq_bytes(expected, &self.activation_commitment(pending, &key)))
+        .then_some(key)
     }
 
     fn checkpoint(&self) -> LedgerCheckpoint {
@@ -865,12 +941,15 @@ impl Meta {
             members.push(("anchor_key_id", Json::hex(&key_id)));
         }
         if let Some(env) = &self.envelope {
-            members.push(("envelope", Json::str(HEM_ENVELOPE_FORMAT)));
+            members.push(("envelope", Json::str(env.format)));
             members.push(("envelope_salt", Json::hex(&env.salt)));
             members.push(("envelope_nonce", Json::hex(&env.nonce)));
             members.push(("envelope_tag", Json::hex(&env.tag)));
         }
         if let Some(pending) = &self.pending {
+            if let Some(d) = &pending.activation_commitment {
+                members.push(("activation_commitment", Json::hex(d)));
+            }
             members.push(("pending_reshare_target", Json::str(pending.target.clone())));
             members.push(("pending_reshare_epoch", Json::num(pending.quorum_epoch)));
             if let Some(key_id) = pending.anchor_key_id {
@@ -901,6 +980,12 @@ impl Meta {
         let pending = match json.get("pending_reshare_target") {
             None => None,
             Some(target) => Some(PendingReshare {
+                activation_commitment: json
+                    .get("activation_commitment")
+                    .map(|v| {
+                        from_hex_exact(v.as_str().ok_or_else(corrupt)?, "activation_commitment")
+                    })
+                    .transpose()?,
                 target: target.as_str().ok_or_else(corrupt)?.to_owned(),
                 quorum_epoch: json.field_u64("pending_reshare_epoch")?,
                 anchor_key_id: json
@@ -927,10 +1012,13 @@ impl Meta {
             if json.get("envelope").is_none() {
                 return Err(CliError::input("damaged sealed Hem quorum envelope header"));
             }
-            if json.field_str("envelope")? != HEM_ENVELOPE_FORMAT {
-                return Err(CliError::input("unsupported sealed Hem quorum envelope"));
-            }
+            let format = match json.field_str("envelope")? {
+                HEM_ENVELOPE_FORMAT => HEM_ENVELOPE_FORMAT,
+                HEM_LEGACY_ENVELOPE => HEM_LEGACY_ENVELOPE,
+                _ => return Err(CliError::input("unsupported sealed Hem quorum envelope")),
+            };
             Some(HemEnvelopeMeta {
+                format,
                 salt: from_hex_exact(json.field_str("envelope_salt")?, "envelope_salt")?,
                 nonce: from_hex_exact(json.field_str("envelope_nonce")?, "envelope_nonce")?,
                 tag: from_hex_exact(json.field_str("envelope_tag")?, "envelope_tag")?,
@@ -1020,8 +1108,9 @@ impl Meta {
                 "sealed Hem quorum vault requires --passphrase-env or --passphrase-file",
             )),
             (Some(env), Some(pass_bytes)) => {
-                let keys = HemEnvelopeKeys::from_salt(pass_bytes, env.salt)?;
+                let keys = HemEnvelopeKeys::from_salt(pass_bytes, env.salt, env.format)?;
                 let expected_tag = self.compute_envelope_tag(
+                    env.format,
                     &env.salt,
                     &env.nonce,
                     &env.encrypted_latch_seed,
@@ -1150,6 +1239,26 @@ fn commit_anchored(
     fresh: bool,
     hook: Hook<'_>,
 ) -> Result<(), CliError> {
+    stage_generation(vault_dir, quorum, meta, keys, hook)?;
+    meta.write(vault_dir, fresh)?;
+    if let Some(ext_anchor) = anchor {
+        ext_anchor
+            .advance(meta.checkpoint())
+            .map_err(|e| CliError::state(format!("ExternalAnchorAdvanceFailed: {e}")))?;
+    }
+    hook(Step::MetaCommitted)?;
+    remove_stale(vault_dir, Keep::Generation(meta.generation))?;
+    hook(Step::StaleRemoved)
+}
+
+/// Sync the next generation's shares without publishing its metadata.
+fn stage_generation(
+    vault_dir: &str,
+    quorum: &HemDynamicShamirQuorum,
+    meta: &mut Meta,
+    keys: Option<&HemEnvelopeKeys>,
+    hook: Hook<'_>,
+) -> Result<(), CliError> {
     let generation = meta
         .generation
         .checked_add(1)
@@ -1183,8 +1292,10 @@ fn commit_anchored(
         (Some(k), Some(nonce)) => {
             let mut enc_latch = meta.latch_seed.0;
             crypt_latch_seed(&mut enc_latch, &k.enc, &k.salt, &nonce, generation);
-            let tag = meta.compute_envelope_tag(&k.salt, &nonce, &enc_latch, &k.mac);
+            let tag =
+                meta.compute_envelope_tag(HEM_ENVELOPE_FORMAT, &k.salt, &nonce, &enc_latch, &k.mac);
             Some(HemEnvelopeMeta {
+                format: HEM_ENVELOPE_FORMAT,
                 salt: k.salt,
                 nonce,
                 tag,
@@ -1193,24 +1304,27 @@ fn commit_anchored(
         }
         _ => None,
     };
-    meta.write(vault_dir, fresh)?;
-    if let Some(ext_anchor) = anchor {
-        ext_anchor
-            .advance(meta.checkpoint())
-            .map_err(|e| CliError::state(format!("ExternalAnchorAdvanceFailed: {e}")))?;
-    }
-    hook(Step::MetaCommitted)?;
-    remove_stale(vault_dir, Keep::Generation(generation))?;
-    hook(Step::StaleRemoved)
+    Ok(())
 }
 
 /// Retire the vault: the meta and external anchor say so first, then every share file is wiped.
 fn retire_anchored(
     vault_dir: &str,
     meta: &mut Meta,
+    lock: &mut Vault,
+    keys: Option<&HemEnvelopeKeys>,
     anchor: Option<&FsExternalMountAnchor>,
     hook: Hook<'_>,
 ) -> Result<(), CliError> {
+    let increment = if meta
+        .pending
+        .as_ref()
+        .is_some_and(|p| p.activation_commitment.is_some())
+    {
+        2
+    } else {
+        1
+    };
     meta.invalidated = true;
     meta.pending = None;
     meta.envelope = None;
@@ -1218,9 +1332,24 @@ fn retire_anchored(
     meta.share_digests = Vec::new();
     meta.generation = meta
         .generation
-        .checked_add(1)
+        .checked_add(increment)
         .ok_or_else(|| CliError::state("HemQuorumGenerationExhausted"))?;
+    if let Some(k) = keys {
+        let nonce = os_random_32()?;
+        let mut ciphertext = [0; 32];
+        crypt_latch_seed(&mut ciphertext, &k.enc, &k.salt, &nonce, meta.generation);
+        let tag =
+            meta.compute_envelope_tag(HEM_ENVELOPE_FORMAT, &k.salt, &nonce, &ciphertext, &k.mac);
+        meta.envelope = Some(HemEnvelopeMeta {
+            format: HEM_ENVELOPE_FORMAT,
+            salt: k.salt,
+            nonce,
+            tag,
+            encrypted_latch_seed: ciphertext,
+        });
+    }
     meta.write(vault_dir, false)?;
+    lock.write_marker(&meta.retirement_marker())?;
     if let Some(ext_anchor) = anchor {
         ext_anchor
             .advance(meta.checkpoint())
@@ -1361,10 +1490,61 @@ fn load_generation(
     Ok(quorum)
 }
 
+fn prepared_path(target: &str) -> String {
+    join(target, "quorum-reshare.prepared")
+}
+
+// A fresh key is generated for exactly one staged successor. Only the committed
+// predecessor, unlocked against its committed anchor, can recover it after a crash.
+fn crypt_prepared(bytes: &mut [u8], key: &Secret32) {
+    let mut pad = ZeroizingBuf::new(vec![0; bytes.len()]);
+    cshake256_framed_xof(b"QSAG.HEM.HANDOFF.STREAM.V1", &[&key.0], &mut pad.0);
+    for (byte, mask) in bytes.iter_mut().zip(&pad.0) {
+        *byte ^= mask;
+    }
+}
+
+fn stage_prepared(target: &str, mut bytes: ZeroizingBuf, key: &Secret32) -> Result<(), CliError> {
+    if bytes.0.len() as u64 > MAX_VAULT_FILE_BYTES {
+        return Err(crate::vault::corrupt());
+    }
+    crypt_prepared(&mut bytes.0, key);
+    let tag = cshake256_framed_32(b"QSAG.HEM.HANDOFF.MAC.V1", &[&key.0, &bytes.0]);
+    bytes.0.extend_from_slice(&tag);
+    write_new(&prepared_path(target), &bytes.0, true)
+}
+
+/// The caller holds the successor lock and the predecessor's durable decision.
+fn publish_prepared(target: &str, key: &Secret32) -> Result<(), CliError> {
+    let path = prepared_path(target);
+    let mut raw = read_bounded_file(&path, MAX_VAULT_FILE_BYTES + 32)?;
+    let len = raw
+        .0
+        .len()
+        .checked_sub(32)
+        .ok_or_else(crate::vault::corrupt)?;
+    let (bytes, tag) = raw.0.split_at_mut(len);
+    let expected = cshake256_framed_32(b"QSAG.HEM.HANDOFF.MAC.V1", &[&key.0, bytes]);
+    if !qsag_accel::ct::ct_eq_bytes(tag, &expected) {
+        return Err(crate::vault::corrupt());
+    }
+    if !exists(&meta_path(target))? {
+        crypt_prepared(bytes, key);
+        replace_secret(&meta_path(target), bytes)?;
+    }
+    // Recovery may find both the published metadata and its authenticated staging file.
+    wipe_and_remove(&path)?;
+    sync_parent(&path)
+}
+
 /// Settle a reshare that stopped after the old vault recorded its intent.
+#[allow(clippy::too_many_arguments)]
 fn settle_interrupted_reshare(
     vault_dir: &str,
     meta: &mut Meta,
+    lock: &mut Vault,
+    keys: Option<&HemEnvelopeKeys>,
+    retirement_keys: Option<&HemEnvelopeKeys>,
     anchor: Option<&FsExternalMountAnchor>,
     hook: Hook<'_>,
 ) -> Result<(), CliError> {
@@ -1386,7 +1566,14 @@ fn settle_interrupted_reshare(
         if successor.pk != meta.pk || successor.quorum_epoch < pending.quorum_epoch {
             return Err(unknown("it holds a different vault"));
         }
-        retire_anchored(vault_dir, meta, anchor, hook)?;
+        retire_anchored(
+            vault_dir,
+            meta,
+            lock,
+            retirement_keys.or(keys),
+            anchor,
+            hook,
+        )?;
         return Err(retired());
     }
     // Never committed. The staged shares are shares of this vault's key: wipe them.
@@ -1413,6 +1600,10 @@ fn settle_interrupted_reshare(
         {
             crate::anchor::remove_uncommitted_guarded_target(&target, HEM_ANCHOR_DOMAIN, &key_id)?;
         }
+        let prepared = prepared_path(&target);
+        if exists(&prepared)? {
+            wipe_and_remove(&prepared)?;
+        }
         for leftover in [directory_path(&target), lock_path(&target)] {
             if exists(&leftover)? {
                 std::fs::remove_file(&leftover)
@@ -1422,6 +1613,7 @@ fn settle_interrupted_reshare(
         sync_parent(&meta_path(&target))?;
     }
     meta.pending = None;
+    meta.authenticate_intent(keys);
     meta.write(vault_dir, false)?;
     hook(Step::IntentCleared)
 }
@@ -1440,11 +1632,14 @@ fn open_vault_anchored(
     anchor_cfg: Option<&AnchorConfig>,
     hook: Hook<'_>,
 ) -> Result<OpenVault, CliError> {
-    let (lock, lock_created) = lock_existing_vault(vault_dir)?;
+    let mut lock = lock_existing_vault(vault_dir)?;
     let lock_id = lock_identity(&lock)?;
     let json = Json::parse(&read_text(&meta_path(vault_dir))?)?;
 
     if json.field_str("format")? == HEM_META_FORMAT_V1 {
+        if lock.marker()?.is_some() {
+            return Err(retired());
+        }
         if anchor_cfg.is_some() {
             return Err(CliError::state(
                 "legacy Hem quorum vault was not enrolled with an external monotone anchor",
@@ -1469,9 +1664,24 @@ fn open_vault_anchored(
     }
 
     let mut meta = Meta::from_json(&json)?;
-    if lock_created || meta.lock_id != lock_id {
+    // A peer can acquire the new inode and finish a v1 conversion before its
+    // creator acquires it. The converted metadata must name the held inode.
+    if meta.lock_id != lock_id {
         return Err(crate::vault::corrupt());
     }
+    if let Some(marker) = lock.marker()? {
+        if marker != meta.retirement_marker() {
+            return Err(crate::vault::corrupt());
+        }
+        if meta.invalidated {
+            if meta.envelope.is_some() {
+                meta.unlock_with_passphrase(pass)?;
+            }
+            remove_stale(vault_dir, Keep::Nothing)?;
+        }
+        return Err(retired());
+    }
+    let mut handoff_floor = None;
     let anchor = match (meta.anchor_info, anchor_cfg) {
         (Some(_), None) => {
             return Err(CliError::state(
@@ -1505,7 +1715,14 @@ fn open_vault_anchored(
                 .map_err(|e| CliError::state(format!("ExternalAnchorRollbackOrCorrupt: {e}")))?
                 .ok_or_else(|| CliError::state("ExternalAnchorMissingFloorState"))?;
             let local_ckpt = meta.checkpoint();
-            if local_ckpt.generation < ext_ckpt.generation
+            if meta.generation.checked_add(1) == Some(ext_ckpt.generation)
+                && meta
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| p.activation_commitment.is_some())
+            {
+                handoff_floor = Some(ext_ckpt);
+            } else if local_ckpt.generation < ext_ckpt.generation
                 || (local_ckpt.generation == ext_ckpt.generation
                     && !qsag_accel::ct::ct_eq_bytes(&local_ckpt.tag, &ext_ckpt.tag))
             {
@@ -1517,14 +1734,84 @@ fn open_vault_anchored(
         }
     };
 
+    let envelope_keys = if meta.envelope.is_some() {
+        meta.unlock_with_passphrase(pass)?
+    } else if meta.invalidated {
+        // Retirement already erased the envelope; there is no authenticated live
+        // generation that authorizes cleanup from this tombstone alone.
+        return Err(retired());
+    } else {
+        meta.unlock_with_passphrase(pass)?
+    };
     if meta.invalidated {
-        remove_stale(vault_dir, Keep::Nothing)?;
         return Err(retired());
     }
-    let envelope_keys = meta.unlock_with_passphrase(pass)?;
-    settle_interrupted_reshare(vault_dir, &mut meta, anchor.as_ref(), &mut *hook)?;
+    let mut retirement_keys = None;
+    if meta.pending.is_some()
+        && meta
+            .envelope
+            .as_ref()
+            .is_some_and(|e| e.format == HEM_LEGACY_ENVELOPE)
+    {
+        retirement_keys = Some(HemEnvelopeKeys::derive_fresh(
+            pass.ok_or_else(crate::vault::corrupt)?,
+        )?);
+    }
+    if let Some(floor) = handoff_floor {
+        let key = meta.committed_activation(floor).ok_or_else(|| {
+            CliError::state("ExternalAnchorDetectedRollback: invalid Hem handoff")
+        })?;
+        // A composite load returns the highest component. Complete the same
+        // checkpoint on every component before any recoverable publication.
+        anchor
+            .as_ref()
+            .ok_or_else(crate::vault::corrupt)?
+            .advance(floor)
+            .map_err(|e| CliError::state(format!("ExternalAnchorAdvanceFailed: {e}")))?;
+        let pending = meta.pending.as_ref().ok_or_else(crate::vault::corrupt)?;
+        let _target_lock = Vault::acquire(&meta_path(&pending.target), false)?;
+        if !exists(&meta_path(&pending.target))? || exists(&prepared_path(&pending.target))? {
+            publish_prepared(&pending.target, &key)?;
+        }
+        // The external floor irrevocably identifies this successor. Its
+        // custodian files may already have advanced beyond the initial epoch.
+        retire_anchored(
+            vault_dir,
+            &mut meta,
+            &mut lock,
+            envelope_keys.as_ref(),
+            anchor.as_ref(),
+            hook,
+        )?;
+        return Err(retired());
+    }
+    settle_interrupted_reshare(
+        vault_dir,
+        &mut meta,
+        &mut lock,
+        envelope_keys.as_ref(),
+        retirement_keys.as_ref(),
+        anchor.as_ref(),
+        &mut *hook,
+    )?;
     let quorum = load_generation(vault_dir, &meta, envelope_keys.as_ref())?;
     remove_stale(vault_dir, Keep::Generation(meta.generation))?;
+    let envelope_keys = match (&meta.envelope, pass) {
+        (Some(env), Some(pass)) if env.format == HEM_LEGACY_ENVELOPE => {
+            let fresh = HemEnvelopeKeys::derive_fresh(pass)?;
+            commit_anchored(
+                vault_dir,
+                &quorum,
+                &mut meta,
+                Some(&fresh),
+                anchor.as_ref(),
+                false,
+                &mut *hook,
+            )?;
+            Some(fresh)
+        }
+        _ => envelope_keys,
+    };
     Ok(OpenVault {
         _lock: lock,
         quorum,
@@ -1680,10 +1967,41 @@ fn sign_tx_anchored(
     )?;
     hook(Step::LeafBurned)?;
 
-    let (leaf_epoch, sig) = vault
-        .quorum
-        .sign_reserved(reserved, message)
+    let leaf_epoch = reserved.leaf_epoch();
+    let parties = reserved
+        .into_wire_signers(
+            vault.quorum.public_directory(),
+            vault.quorum.latch_authority(),
+            message,
+        )
         .map_err(map_quorum_err)?;
+    let channels =
+        crate::quorum_wire::ceremony_channels(parties.len(), crate::cli::os_random_32()?)?;
+    let dir = vault.quorum.public_directory();
+    let quorum_epoch = vault.quorum.quorum_epoch();
+    let signatures = std::thread::scope(|scope| {
+        let jobs: Vec<_> = parties
+            .into_iter()
+            .zip(channels)
+            .map(|(party, mut wire)| {
+                scope.spawn(move || party.sign(&mut wire, dir, quorum_epoch, message))
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|j| {
+                j.join()
+                    .map_err(|_| CliError::state("signer stopped"))?
+                    .map_err(map_quorum_err)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    let mut results = signatures.into_iter();
+    let sig = results
+        .next()
+        .ok_or_else(|| CliError::state("empty signing committee"))?;
+    if results.any(|s| s != sig) {
+        return Err(CliError::verify("signers disagree on the signature"));
+    }
     Ok(Signed {
         leaf_epoch,
         sig,
@@ -1699,6 +2017,23 @@ fn refresh_tx(
     hook: Hook<'_>,
 ) -> Result<OpenVault, CliError> {
     refresh_tx_anchored(vault_dir, deterministic, pass, None, hook)
+}
+
+fn wire_reshare(
+    quorum: &mut HemDynamicShamirQuorum,
+    session: [u8; 32],
+    old: &[usize],
+    t: usize,
+    n: usize,
+    old_rngs: &mut [PartyPrivateRng],
+    new_rngs: &mut [PartyPrivateRng],
+) -> Result<(), CliError> {
+    let plan = quorum
+        .wire_reshare_plan(session, old, t, n)
+        .map_err(map_quorum_err)?;
+    quorum
+        .reshare_local(&plan, old_rngs, new_rngs)
+        .map_err(map_quorum_err)
 }
 
 fn refresh_tx_anchored(
@@ -1722,11 +2057,16 @@ fn refresh_tx_anchored(
     } else {
         os_random_32()?
     };
-    let mut party_rngs = fresh_party_rngs(vault.quorum.threshold_and_size().1)?;
-    vault
-        .quorum
-        .proactive_refresh(sid, &mut party_rngs)
-        .map_err(map_quorum_err)?;
+    let (t, n) = vault.quorum.threshold_and_size();
+    wire_reshare(
+        &mut vault.quorum,
+        sid,
+        &(0..n).collect::<Vec<_>>(),
+        t,
+        n,
+        &mut fresh_party_rngs(n)?,
+        &mut fresh_party_rngs(n)?,
+    )?;
     if vault.quorum.public_key() != pk_before {
         return Err(CliError::verify(
             "proactive refresh mutated validator pubkey",
@@ -1831,22 +2171,21 @@ fn reshare_tx_anchored(
     let mut old_party_rngs = fresh_party_rngs(old_n)?;
     let mut new_party_rngs = fresh_party_rngs(new_n)?;
     let OpenVault {
-        _lock: old_lock,
+        _lock: mut old_lock,
         mut quorum,
         meta: mut old_meta,
-        envelope_keys: _,
+        envelope_keys: old_keys,
         anchor: old_anchor,
     } = old;
-    quorum
-        .reshare_quorum(
-            sid,
-            &old_signers,
-            new_t,
-            new_n,
-            &mut old_party_rngs,
-            &mut new_party_rngs,
-        )
-        .map_err(map_quorum_err)?;
+    wire_reshare(
+        &mut quorum,
+        sid,
+        &old_signers,
+        new_t,
+        new_n,
+        &mut old_party_rngs,
+        &mut new_party_rngs,
+    )?;
     if quorum.public_key() != pk_before {
         return Err(CliError::verify(
             "dynamic reshare mutated validator public key",
@@ -1870,11 +2209,13 @@ fn reshare_tx_anchored(
     );
     // Record recovery information before provisioning any external state.
     old_meta.pending = Some(PendingReshare {
+        activation_commitment: None,
         target: target.clone(),
         quorum_epoch: quorum.quorum_epoch(),
         anchor_key_id: new_anchor_cfg.map(|_| key_id),
         anchor_dir: new_anchor_cfg.and_then(|cfg| cfg.anchor_dir.clone()),
     });
+    old_meta.authenticate_intent(old_keys.as_ref());
     old_meta.write(old_vault_dir, false)?;
     hook(Step::IntentRecorded)?;
     let new_anchor = match new_anchor_cfg {
@@ -1901,17 +2242,57 @@ fn reshare_tx_anchored(
         &quorum.public_directory().to_bytes(),
         false,
     )?;
-    commit_anchored(
-        &target,
-        &quorum,
-        &mut new_meta,
-        new_keys.as_ref(),
-        new_anchor.as_ref(),
-        true,
-        &mut *hook,
-    )?;
+    if let Some(source_anchor) = &old_anchor {
+        stage_generation(&target, &quorum, &mut new_meta, new_keys.as_ref(), hook)?;
+        let encoded = ZeroizingBuf::new(new_meta.to_json().to_pretty().into_bytes());
+        let activation = Secret32::new(os_random_32()?);
+        stage_prepared(&target, encoded, &activation)?;
+        hook(Step::SuccessorStaged)?;
+        if let Some(anchor) = &new_anchor {
+            anchor
+                .advance(new_meta.checkpoint())
+                .map_err(|e| CliError::state(format!("ExternalAnchorAdvanceFailed: {e}")))?;
+        }
+        let pending = old_meta
+            .pending
+            .as_ref()
+            .ok_or_else(crate::vault::corrupt)?;
+        let commitment = old_meta.activation_commitment(pending, &activation);
+        old_meta.pending.as_mut().unwrap().activation_commitment = Some(commitment);
+        old_meta.authenticate_intent(old_keys.as_ref());
+        old_meta.write(old_vault_dir, false)?;
+        source_anchor
+            .advance(LedgerCheckpoint {
+                generation: old_meta
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(crate::vault::corrupt)?,
+                tag: old_meta.wrap_activation(&activation.0, &commitment).0,
+            })
+            .map_err(|e| CliError::state(format!("ExternalAnchorAdvanceFailed: {e}")))?;
+        hook(Step::SourceRetired)?;
+        publish_prepared(&target, &activation)?;
+        hook(Step::MetaCommitted)?;
+    } else {
+        commit_anchored(
+            &target,
+            &quorum,
+            &mut new_meta,
+            new_keys.as_ref(),
+            new_anchor.as_ref(),
+            true,
+            &mut *hook,
+        )?;
+    }
 
-    retire_anchored(old_vault_dir, &mut old_meta, old_anchor.as_ref(), hook)?;
+    retire_anchored(
+        old_vault_dir,
+        &mut old_meta,
+        &mut old_lock,
+        old_keys.as_ref(),
+        old_anchor.as_ref(),
+        hook,
+    )?;
     drop(old_lock);
     Ok(Reshared {
         old_t,
@@ -2006,7 +2387,7 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
         args.flag("ephemeral-unanchored"),
         "anchor-dir",
     )?;
-    ensure_absent(out_path)?;
+    let reserved_output = crate::cli::reserve_output(out_path, false)?;
     if args.get("in").is_some() && args.get("message").is_some() {
         return Err(CliError::usage("pass either --message or --in, not both"));
     }
@@ -2060,7 +2441,7 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
         ("signature_bytes", Json::num(HEM_JORTS_SIG_BYTES)),
         ("signature", Json::hex(&sig_bytes)),
     ]);
-    write_new(out_path, sig_json.to_pretty().as_bytes(), false)?;
+    crate::cli::finish_output(reserved_output, sig_json.to_pretty().as_bytes())?;
 
     if args.flag("json") {
         let report = Json::object(vec![
@@ -2340,6 +2721,130 @@ mod tests {
     }
 
     #[test]
+    fn anchored_retirement_precedes_publication_and_recovers_the_committed_successor() {
+        let scratch = Scratch::new("anchored-handoff");
+        let old = scratch.path("old");
+        let target = scratch.path("new");
+        let external = scratch.path("anchor");
+        private_dir(&external, true).unwrap();
+        let cfg = AnchorConfig::dir_only(&external, Some(old.clone()), true);
+        let quorum = stage(2);
+        create_vault_anchored(
+            &old,
+            &quorum,
+            Secret32::new([32; 32]),
+            None,
+            Some(&cfg),
+            &mut no_crash,
+        )
+        .unwrap();
+        let snapshot = std::fs::read(meta_path(&old)).unwrap();
+        let interrupted = reshare_tx_anchored(
+            &old,
+            &target,
+            None,
+            2,
+            3,
+            false,
+            None,
+            None,
+            Some(&cfg),
+            None,
+            &mut |step| {
+                if step == Step::SuccessorStaged {
+                    let bytes = std::fs::read(prepared_path(&target)).unwrap();
+                    assert!(
+                        std::str::from_utf8(&bytes)
+                            .ok()
+                            .and_then(|s| Json::parse(s).ok())
+                            .is_none()
+                    );
+                    assert!(publish_prepared(&target, &Secret32::new([0; 32])).is_err());
+                    assert!(!exists(&meta_path(&target)).unwrap());
+                }
+                if step == Step::SourceRetired {
+                    Err(CliError::state("power loss"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(matches!(interrupted,Err(e) if e.message == "power loss"));
+        assert!(!exists(&meta_path(&target)).unwrap());
+        let intent = std::fs::read(meta_path(&old)).unwrap();
+        replace_secret(&meta_path(&old), &snapshot).unwrap();
+        let stale = open_vault_anchored(&old, None, Some(&cfg), &mut no_crash)
+            .err()
+            .unwrap();
+        assert!(
+            stale.message.contains("ExternalAnchorDetectedRollback"),
+            "{}",
+            stale.message
+        );
+        replace_secret(&meta_path(&old), &intent).unwrap();
+        let recovered = open_vault_anchored(&old, None, Some(&cfg), &mut no_crash)
+            .err()
+            .unwrap();
+        assert!(
+            recovered.message.contains("ShareInvalidated"),
+            "{}",
+            recovered.message
+        );
+        assert!(!exists(&prepared_path(&target)).unwrap());
+        assert_eq!(sign_ok(&target, &quorum.public_key(), b"successor"), 0);
+    }
+
+    #[test]
+    fn pending_anchor_record_requires_the_predecessor_secret() {
+        let scratch = Scratch::new("handoff-wrap");
+        let target = scratch.path("new");
+        private_dir(&target, true).unwrap();
+        let mut meta = Meta::new(&stage(1), Secret32::new([13; 32]), (11, 17));
+        let key = Secret32::new([31; 32]);
+        meta.pending = Some(PendingReshare {
+            activation_commitment: None,
+            target: target.clone(),
+            quorum_epoch: 1,
+            anchor_key_id: None,
+            anchor_dir: None,
+        });
+        let commitment = meta.activation_commitment(meta.pending.as_ref().unwrap(), &key);
+        meta.pending.as_mut().unwrap().activation_commitment = Some(commitment);
+        stage_prepared(&target, ZeroizingBuf::new(b"successor".to_vec()), &key).unwrap();
+        let floor = LedgerCheckpoint {
+            generation: meta.generation + 1,
+            tag: meta.wrap_activation(&key.0, &commitment).0,
+        };
+        assert!(publish_prepared(&target, &Secret32::new(floor.tag)).is_err());
+        assert!(!exists(&meta_path(&target)).unwrap());
+        let recovered = meta.committed_activation(floor).unwrap();
+        assert_eq!(recovered.0, key.0);
+        meta.latch_seed = Secret32::new([14; 32]);
+        assert!(meta.committed_activation(floor).is_none());
+        publish_prepared(&target, &recovered).unwrap();
+        assert_eq!(std::fs::read(meta_path(&target)).unwrap(), b"successor");
+    }
+
+    #[test]
+    fn sealed_metadata_authenticates_custody_policy() {
+        let quorum = stage(1);
+        let mut meta = Meta::new(&quorum, Secret32::new([13; 32]), (11, 17));
+        let mac = Secret32::new([19; 32]);
+        let tag = |m: &Meta| {
+            m.compute_envelope_tag(HEM_ENVELOPE_FORMAT, &[2; 32], &[3; 32], &[5; 32], &mac)
+        };
+        let original = tag(&meta);
+        meta.invalidated = true;
+        assert_ne!(tag(&meta), original);
+        meta.invalidated = false;
+        meta.lock_id.1 += 1;
+        assert_ne!(tag(&meta), original);
+        meta.lock_id.1 -= 1;
+        meta.anchor_info = Some(([0; 24], [0; 32]));
+        assert_ne!(tag(&meta), original);
+    }
+
+    #[test]
     fn interrupted_anchored_reshares_use_fresh_identities_and_remove_targets() {
         let scratch = Scratch::new("anchored-reshare-retry");
         let old = scratch.path("old");
@@ -2443,6 +2948,7 @@ mod tests {
             let decoy_target = scratch.path("forged-decoy-target");
             private_dir(&decoy_target, true).unwrap();
             forged.pending = Some(PendingReshare {
+                activation_commitment: None,
                 target: decoy_target,
                 quorum_epoch: forged.quorum_epoch + 1,
                 anchor_key_id: Some(live_key_id),

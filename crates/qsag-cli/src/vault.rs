@@ -51,6 +51,32 @@ impl Vault {
             .map_err(|_| corrupt())
     }
 
+    /// Read an optional durable marker from a dedicated custody lock.
+    pub fn marker(&mut self) -> Result<Option<[u8; 32]>, CliError> {
+        self.check_path()?;
+        match self.file.metadata().map_err(|_| corrupt())?.len() {
+            0 => Ok(None),
+            32 => {
+                let mut record = [0; 32];
+                self.file
+                    .seek(SeekFrom::Start(0))
+                    .and_then(|_| self.file.read_exact(&mut record))
+                    .map_err(|_| corrupt())?;
+                Ok(Some(record))
+            }
+            _ => Err(corrupt()),
+        }
+    }
+    pub fn write_marker(&mut self, record: &[u8; 32]) -> Result<(), CliError> {
+        self.check_path()?;
+        self.file
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| self.file.write_all(record))
+            .and_then(|_| self.file.sync_all())
+            .map_err(|e| CliError::io("persisting retirement", e))?;
+        self.check_path()
+    }
+
     /// Key the state MAC with the opened secret, so a sealed file's MAC needs its passphrase.
     pub fn set_key_material(&mut self, opened: &crate::envelope::OpenedSecret) {
         self.key_material = Some(opened.vault_key_material());
