@@ -5,7 +5,8 @@
 //!
 //! ```text
 //! <ledger-dir>/                 owner-only
-//!   ledger.json                 policy, committee, sealed provisioning seed (vault-locked)
+//!   ledger.json                 policy, committee, ledger authentication key (vault-locked)
+//!   guards/<party>.json         independent guard provisioning vault
 //!   guards/committee.ckpt       every party's durable guard checkpoint: window, spend,
 //!                               burned intent nonces and sessions, retired barrier slots
 //!   guards/committee.fence      FsPolicyGenerationFence: monotone checkpoint generation
@@ -16,12 +17,6 @@
 //! leaves either every approving guard burned or none of them. The guards are the authority
 //! on what was released: an intent whose nonce they have burned is spent whatever its record
 //! says.
-//!
-//! Custody model: every guard share is derived from the one provisioning seed in `ledger.json`,
-//! so the committee lives on a single host. The ledger gives durable, replay-proof,
-//! velocity-capped authorization across invocations; it does not give separation between the
-//! approving parties. With `--anchor-dir` the fence generation is also ratcheted in an
-//! external monotone anchor, so restoring an old copy of the whole ledger directory is refused.
 //!
 //! The enrollment policy selects `preprocessing_slots`; every slot remains single use.
 
@@ -48,11 +43,11 @@ use crate::codec::{Json, from_hex_exact, to_hex};
 use crate::dealerless_ceremony::provision_distributed_policy_guards_with_capacity;
 use crate::vault::{Vault, set};
 
-const ROOT_FORMAT: &str = "qsag-policy-ledger-v2";
+const ROOT_FORMAT: &str = "qsag-policy-ledger-v3";
 const ROOT_SCHEME: &str = "policy-guard-ledger";
 const POLICY_FORMAT: &str = "qsag-policy-v1";
 const INTENT_FORMAT: &str = "qsag-policy-intent-v1";
-const CUSTODY_MODEL: &str = "single-host guard committee derived from one provisioning seed";
+const CUSTODY_MODEL: &str = "single-host guard committee with separate per-guard vault files";
 const ANCHOR_DOMAIN: &str = "policy_fence";
 const ANCHOR_SEAL_FIELD: &str = "anchor_fence_seal";
 const BUNDLE_MAGIC: &[u8; 8] = b"QSAGPLB2";
@@ -599,17 +594,62 @@ fn decode_bundle<'a>(
     })
 }
 
-/// Provision the committee's guard shares from the ledger seed. The same seed always yields
-/// the same shares, which is what lets a later invocation restore their durable checkpoints.
+fn guard_seeds(
+    dir: &str,
+    ledger: &[u8; 32],
+    parties: &[u16],
+    pass: Option<&[u8]>,
+    create: bool,
+) -> Result<qsag_core::wipe::SecretBuffer<Vec<[u8; 32]>>, CliError> {
+    let mut seeds = qsag_core::wipe::SecretBuffer(Vec::with_capacity(parties.len()));
+    for &party in parties {
+        let path = join(dir, &["guards", &format!("{party}.json")])?;
+        let secret = if create {
+            let secret = Secret32::new(os_random_32()?);
+            let mut file = Json::object(vec![
+                ("format", Json::str("qsag-policy-guard-v1")),
+                ("scheme", Json::str("policy-guard")),
+                ("ledger_id", Json::hex(ledger)),
+                ("party", Json::num(party)),
+                ("seed", Json::hex(&secret.0)),
+            ]);
+            if let Some(pass) = pass {
+                crate::envelope::seal(&mut file, pass)?;
+            }
+            let encoded = ZeroizingBuf::new(file.to_pretty().into_bytes());
+            write_new(&path, &encoded, true)?;
+            secret
+        } else {
+            let file = Json::parse(&read_text(&path)?)?;
+            if file.field_str("format")? != "qsag-policy-guard-v1"
+                || file.field_str("scheme")? != "policy-guard"
+                || file.field_str("ledger_id")? != to_hex(ledger)
+                || file.field_u64("party")? != u64::from(party)
+            {
+                return Err(rolled_back("guard vault does not match its enrolled party"));
+            }
+            crate::envelope::open(&file, pass)?.seed()?
+        };
+        if seeds
+            .iter()
+            .any(|prior: &[u8; 32]| ct_eq_bytes(prior, &secret.0))
+        {
+            return Err(rolled_back("duplicate guard seed"));
+        }
+        seeds.push(secret.0);
+    }
+    Ok(seeds)
+}
+
 fn provision_guards(
+    entropies: &[[u8; 32]],
     seed: &Secret32,
     ledger: &[u8; 32],
     parties: &[u16],
     slots: usize,
 ) -> Result<Vec<PolicySignerGuardShare>, CliError> {
-    let entropy = party_secret(seed, b"guard dealer entropy", 0);
     let authority = party_secret(seed, b"window authority", 0);
-    provision_distributed_policy_guards_with_capacity(entropy.0, parties, slots)
+    provision_distributed_policy_guards_with_capacity(*ledger, entropies, parties, slots)
         .map_err(|e| CliError::state(format!("provisioning policy guard failed: {e:?}")))?
         .into_iter()
         .map(|guard| {
@@ -630,10 +670,9 @@ fn write_bundle<'a>(
     let mut checkpoints: Vec<(u16, Vec<u8>)> = guards
         .into_iter()
         .map(|guard| {
-            let key = party_secret(seed, b"guard checkpoint key", guard.party_id);
             (
                 guard.party_id,
-                guard.export_durable_checkpoint(&key.0, generation),
+                guard.export_enrolled_checkpoint(ledger, generation),
             )
         })
         .collect();
@@ -745,6 +784,7 @@ impl OpenLedger {
             ));
         }
         let mut guards = provision_guards(
+            &guard_seeds(dir, &id, &committee.parties, passphrase, false)?,
             &seed,
             &id,
             &committee.parties,
@@ -757,13 +797,7 @@ impl OpenLedger {
         }
         for (guard, (party, checkpoint)) in guards.iter_mut().zip(&checkpoints) {
             let restored = (*party == guard.party_id)
-                .then(|| {
-                    guard.restore_from_durable_checkpoint(
-                        checkpoint,
-                        &party_secret(&seed, b"guard checkpoint key", *party).0,
-                        generation,
-                    )
-                })
+                .then(|| guard.restore_enrolled_checkpoint(&id, checkpoint, generation))
                 .and_then(Result::ok);
             if restored != Some(generation) || guard.is_poisoned() {
                 return Err(rolled_back(format_args!(
@@ -1443,10 +1477,7 @@ interval, the quorum tiers, the committee `parties`, and optionally `window_secs
 one velocity window; 0 or absent keeps one window for the ledger's life) and
 `intent_ttl_secs` (how long a proposed intent stays signable; default 86400).
 
-Every guard share is derived from one provisioning seed stored in <dir>/ledger.json, so the
-committee lives on this host: the ledger makes authorization durable, replay-proof and
-velocity-capped across invocations, and does not separate the approving parties from each
-other. Set `preprocessing_slots` in the enrollment policy to budget single-use barrier slots.
+Each guard requires its own vault under <dir>/guards. The CLI loads these files locally.
 
   --anchor-dir <dir>            ratchet every guard generation in an external monotone anchor,
                                 so restoring an old copy of the ledger directory is refused
@@ -1454,7 +1485,7 @@ other. Set `preprocessing_slots` in the enrollment policy to budget single-use b
                                 stops a restore of the ledger directory only, not of the volume)
   --ephemeral-unanchored        enroll a disposable ledger without rollback protection
                                 (required when --anchor-dir is absent)
-  --passphrase-env <VAR> / --passphrase-file <PATH>  seal the provisioning seed
+  --passphrase-env <VAR> / --passphrase-file <PATH>  seal the ledger and guard vaults
   --json                        print the ledger identifier and policy digest as JSON
 ";
 
@@ -1489,7 +1520,7 @@ fn init(raw: &[String]) -> Result<(), CliError> {
     let dir = args.require("ledger-dir")?;
     if !args.flag("accept-single-host-custody") {
         return Err(CliError::usage(
-            "policy init requires --accept-single-host-custody: one provisioning seed on this host derives every guard share",
+            "policy init requires --accept-single-host-custody: this command opens all guard vaults locally",
         ));
     }
     let anchor_cfg = AnchorConfig::for_vault(&args, dir, "anchor-dir", "allow-single-disk-anchor")?;
@@ -1527,6 +1558,13 @@ fn init(raw: &[String]) -> Result<(), CliError> {
     let id = ledger_id(&seed, &policy, &committee, nonce);
 
     let guards = provision_guards(
+        &guard_seeds(
+            dir,
+            &id,
+            &committee.parties,
+            passphrase.as_deref().map(Vec::as_slice),
+            true,
+        )?,
         &seed,
         &id,
         &committee.parties,
@@ -2243,6 +2281,30 @@ mod tests {
                 NOW + DEFAULT_INTENT_TTL_SECS,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn missing_or_substituted_guard_vault_refuses_both_access_modes() {
+        let scratch = Scratch::new();
+        let dir = scratch.create(0);
+        let first = join(&dir, &["guards", "1.json"]).unwrap();
+        let second = join(&dir, &["guards", "2.json"]).unwrap();
+        let saved = std::fs::read(&first).unwrap();
+        let refused = || {
+            for access in [Access::Inspect, Access::Update] {
+                assert!(OpenLedger::open(&dir, None, None, access).is_err());
+            }
+        };
+        std::fs::remove_file(&first).unwrap();
+        refused();
+        std::fs::copy(&second, &first).unwrap();
+        refused();
+        let mut replaced = Json::parse(std::str::from_utf8(&saved).unwrap()).unwrap();
+        set(&mut replaced, "seed", Json::hex(&[0x65; 32]));
+        std::fs::write(&first, replaced.to_pretty()).unwrap();
+        refused();
+        std::fs::write(&first, saved).unwrap();
+        assert!(OpenLedger::open(&dir, None, None, Access::Inspect).is_ok());
     }
 
     #[test]

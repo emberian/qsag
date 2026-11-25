@@ -161,9 +161,16 @@ fn main() {
     );
     let quorum = [20u16, 30, 50];
     let (mut intent, _) = request(&quorum).expect("the policy approves this transfer");
-    let all_guards =
-        dealerless_ceremony::provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])
-            .expect("distributed policy guard ceremony");
+    let parties = [10, 20, 30, 40, 50];
+    let seeds = dealerless_ceremony::fresh_guard_seeds::<5>().expect("OS entropy");
+    let all_guards = dealerless_ceremony::provision_distributed_policy_guards_with_capacity(
+        [0x99; 32],
+        &seeds[..],
+        &parties,
+        1,
+    )
+    .expect("distributed policy guard ceremony");
+    drop(seeds);
     let signing_bytes = all_guards
         .iter()
         .find(|g| g.party_id == 10)

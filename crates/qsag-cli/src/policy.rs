@@ -2,15 +2,18 @@
 //! and, when no ledger is named, a stateless evaluation of a fixed custody policy against
 //! named transaction scenarios that runs the committed MAC barrier for the approved one.
 
-use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
+use qsag_core::wipe::SecretBuffer;
 use qsag_policy::{
-    PolicyViolation, QuorumTierRule, SigningPayloadBinding, TransactionIntent, TransactionPolicy,
+    PolicySignerGuardShare, PolicyViolation, QuorumTierRule, SigningPayloadBinding,
+    TransactionIntent, TransactionPolicy,
 };
 
 use crate::cli::{Args, CliError, exit};
 use crate::codec::Json;
-use crate::dealerless_ceremony::provision_distributed_policy_guards;
+use crate::dealerless_ceremony::{
+    fresh_guard_seeds, provision_distributed_policy_guards_with_capacity,
+};
 
 const POLICY_HELP: &str = "\
 qsag policy <init|propose|approve|status> --ledger-dir <dir> [options]
@@ -114,13 +117,27 @@ const APPROVED: Request = Request {
     approvers: &[20, 30, 50],
 };
 
+const DEMO_PARTIES: [u16; 5] = [10, 20, 30, 40, 50];
+
+struct ApprovedRequest {
+    intent: TransactionIntent,
+    signing_bytes: Vec<u8>,
+    guards: Vec<PolicySignerGuardShare>,
+    seeds: SecretBuffer<[[u8; 32]; DEMO_PARTIES.len()]>,
+}
+
+fn demo_guards(seeds: &[[u8; 32]]) -> Result<Vec<PolicySignerGuardShare>, PolicyViolation> {
+    // The demo releases one intent. Its checkpoint is reopened under the same enrollment.
+    provision_distributed_policy_guards_with_capacity([0x99; 32], seeds, &DEMO_PARTIES, 1)
+}
+
 impl Request {
     /// Build the canonical intent; the policy is evaluated as part of binding the payload.
     /// Returns the intent and the exact bytes its approvers authorize for signing.
     fn bind(
         &self,
         policy: &TransactionPolicy,
-    ) -> Result<Result<(TransactionIntent, Vec<u8>), PolicyViolation>, CliError> {
+    ) -> Result<Result<ApprovedRequest, PolicyViolation>, CliError> {
         let bound = TransactionIntent::builder(
             1,
             WitnessSuiteTag::SlhDsa128s,
@@ -142,14 +159,24 @@ impl Request {
             },
             policy,
         );
-        Ok(bound.and_then(|(mut intent, _)| {
-            let guards = provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])?;
+        let (mut intent, _) = match bound {
+            Ok(binding) => binding,
+            Err(violation) => return Ok(Err(violation)),
+        };
+        let seeds =
+            fresh_guard_seeds().map_err(|e| CliError::io("sampling policy guard entropy", e))?;
+        Ok(demo_guards(&seeds[..]).and_then(|guards| {
             let initiator = guards
                 .iter()
                 .find(|g| g.party_id == intent.initiator_party)
                 .ok_or(PolicyViolation::UnauthenticatedInitiator)?;
-            let bytes = initiator.authenticate_initiated_intent(policy, &mut intent)?;
-            Ok((intent, bytes))
+            let signing_bytes = initiator.authenticate_initiated_intent(policy, &mut intent)?;
+            Ok(ApprovedRequest {
+                intent,
+                signing_bytes,
+                guards,
+                seeds,
+            })
         }))
     }
 }
@@ -214,17 +241,21 @@ fn scenarios() -> [Scenario; 7] {
 /// tokens minted, each checked to bind exactly this key, message, context, and quorum.
 fn mint_release_tokens(
     policy: &TransactionPolicy,
-    intent: &TransactionIntent,
-    signing_bytes: &[u8],
+    approved: ApprovedRequest,
 ) -> Result<usize, CliError> {
+    let ApprovedRequest {
+        intent,
+        signing_bytes,
+        guards,
+        seeds,
+    } = approved;
     let barrier = |e: PolicyViolation| {
         CliError::new(
             exit::POLICY_DENIED,
             format!("policy barrier refused: {e:?}"),
         )
     };
-    let mut guards: Vec<_> = provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])
-        .map_err(barrier)?
+    let mut guards: Vec<_> = guards
         .into_iter()
         .filter(|g| intent.quorum_ids.contains(&g.party_id))
         .collect();
@@ -232,7 +263,7 @@ fn mint_release_tokens(
     let mut commits = Vec::new();
     for guard in &mut guards {
         let (state, commit) = guard
-            .round1_commit_intent(policy, intent, SESSION, NOW, intent.rolling_window_spent)
+            .round1_commit_intent(policy, &intent, SESSION, NOW, intent.rolling_window_spent)
             .map_err(barrier)?;
         states.push(state);
         commits.push(commit);
@@ -263,7 +294,7 @@ fn mint_release_tokens(
     let mut minted = 0;
     for (state, guard) in states4.into_iter().zip(&mut guards) {
         let token = state.finalize(guard, &sigma_opens).map_err(barrier)?;
-        let bound = token.matches_signing(&key_id(), signing_bytes, CONTEXT, &intent.quorum_ids)
+        let bound = token.matches_signing(&key_id(), &signing_bytes, CONTEXT, &intent.quorum_ids)
             && !token.matches_signing(&key_id(), b"another message", CONTEXT, &intent.quorum_ids);
         if !bound {
             return Err(CliError::verify(
@@ -276,20 +307,15 @@ fn mint_release_tokens(
     // This evaluation is stateless: nothing is written. What a persistent ledger would store
     // is still exercised, by exporting each guard's checkpoint and restoring it into a freshly
     // provisioned share, which must come back with the intent nonce and the session burned.
-    let fresh =
-        provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50]).map_err(barrier)?;
+    let fresh = demo_guards(&seeds[..]).map_err(barrier)?;
     for (guard, mut restored) in guards.iter().zip(
         fresh
             .into_iter()
             .filter(|g| intent.quorum_ids.contains(&g.party_id)),
     ) {
-        let key = cshake256_framed_32(
-            b"QSAG.CLI.POLICY.EPHEMERAL.KEY.V1",
-            &[&key_id(), &guard.party_id.to_be_bytes()],
-        );
-        let checkpoint = guard.export_durable_checkpoint(&key, 1);
+        let checkpoint = guard.export_enrolled_checkpoint(&key_id(), 1);
         let kept = restored
-            .restore_from_durable_checkpoint(&checkpoint, &key, 1)
+            .restore_enrolled_checkpoint(&key_id(), &checkpoint, 1)
             .is_ok()
             && restored.is_nonce_burned(&intent.nonce)
             && restored.is_session_burned(&SESSION)
@@ -327,10 +353,10 @@ pub fn evaluate_all() -> Result<([u8; 32], Vec<Json>, bool), CliError> {
             ("expected", Json::str(outcome(&expected))),
             ("matches_expected", Json::Bool(matches)),
         ];
-        if let Ok((intent, signing_bytes)) = &bound {
+        if let Ok(approved) = bound {
             row.push((
                 "release_tokens_minted",
-                Json::num(mint_release_tokens(&policy, intent, signing_bytes)?),
+                Json::num(mint_release_tokens(&policy, approved)?),
             ));
         }
         rows.push(Json::object(row));
