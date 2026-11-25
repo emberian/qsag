@@ -9,11 +9,12 @@ description = "Hem post-quantum K-to-1 hash signature aggregation over Quintic G
 [features]
 default = ["std"]
 alloc = []
+# Cross-crate privacy regression tests in qsag-cred.
+relation-test-utils = []
 std = ["alloc", "qsag-asm/std", "qsag-core/std"]
 vulkan = ["std", "dep:qsag-accel", "qsag-accel/vulkan"]
 
 [dependencies]
-qsag-cred = { path = "../qsag-cred", default-features = false }
 qsag-core = { path = "../qsag-core", default-features = false }
 qsag-accel = { path = "../qsag-accel", optional = true, default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }

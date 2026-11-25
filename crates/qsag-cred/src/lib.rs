@@ -3,13 +3,7 @@
 #![allow(clippy::chunks_exact_to_as_chunks)]
 //! Threshold cryptographic building blocks and accumulator-based credentials.
 //!
-//! [`voprf`] evaluates a custom symmetric Poseidon2/cSHAKE PRF using actively
-//! checked replicated sharing (five online servers, privacy against one corrupt
-//! server). [`voprf_spdz`] evaluates the same function with Shamir/SPDZ shares.
-//! Neither is a lattice OPRF or a publicly transferable proof of PRF evaluation:
-//! verifiability relies on authenticated server responses and the enrolled key
-//! record. The SPDZ API handles all online states together; its authenticated
-//! network deployment is not implemented here.
+//! [`voprf`] evaluates a Poseidon2/cSHAKE PRF using threshold Shamir-SPDZ custody.
 //!
 //! [`blind_vc`] enrolls issuer-approved attribute commitments in an issuer-managed
 //! Merkle accumulator. Issuance discloses the attributes and commitment to the
@@ -27,13 +21,13 @@ extern crate alloc;
 #[cfg(any(test, feature = "std"))]
 extern crate std;
 pub mod blind_vc;
+pub mod capability;
 pub mod fips204_ntt;
+pub mod presentation;
 pub mod presentation_challenge;
 pub mod rss_mpc;
 pub mod threshold_mldsa;
 pub mod threshold_mldsa_shamir;
-mod toprf_engine;
-pub mod voprf;
 pub mod voprf_spdz;
 pub use fips204_ntt::{
     MLDSA_D, MLDSA_N, MLDSA_Q, MlDsaLevel, MlDsaParams, MlDsaSigningKey, Poly256,
@@ -52,3 +46,4 @@ pub use threshold_mldsa::{
     threshold_mldsa_dkg_party, threshold_sign_mldsa_party, threshold_sign_mldsa_party_policy_gated,
 };
 pub use threshold_mldsa_shamir::threshold_mldsa_shamir_expand_party;
+pub use voprf_spdz as voprf;

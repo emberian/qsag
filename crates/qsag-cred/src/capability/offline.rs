@@ -350,7 +350,7 @@ impl DelegatedPresentationInput {
 
 /// Committed-mask presentation of offline delegation, including terminal-key possession
 /// and all the registered mode's request, revocation and distinct-token checks.
-/// It inherits the privacy and knowledge-soundness bounds of [`protocol::prove`].
+/// It inherits the privacy and knowledge-soundness bounds of `protocol::prove`.
 pub struct DelegatedCapabilityRelation {
     inner: CapabilityRelation,
 }

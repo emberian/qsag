@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "Threshold symmetric Poseidon2 OPRF, issuer-accumulator selective-disclosure credentials, and dealerless FIPS 204 threshold ML-DSA"
 
 [dependencies]
+qsag-agg = { path = "../qsag-agg", default-features = false }
 qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
 qsag-core = { path = "../qsag-core", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }
@@ -14,5 +15,8 @@ qsag-accel = { path = "../qsag-accel", default-features = false, features = ["al
 qsag-addr = { path = "../qsag-addr" }
 qsag-policy = { path = "../qsag-policy" }
 
+[dev-dependencies]
+qsag-agg = { path = "../qsag-agg", default-features = false, features = ["relation-test-utils"] }
+
 [features]
-std = ["qsag-asm/std", "qsag-core/std", "qsag-policy/std"]
+std = ["qsag-agg/std", "qsag-asm/std", "qsag-core/std", "qsag-policy/std"]

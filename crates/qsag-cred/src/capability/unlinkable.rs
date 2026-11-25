@@ -1,7 +1,7 @@
 //! Challenge-bound registered bearer capabilities. Each proof uses fresh, secret holder coins.
 use super::*;
-pub use qsag_cred::presentation_challenge::VerifierChallengeLedger;
-use qsag_cred::presentation_challenge::{ChallengeError, PresentationChallenges};
+pub use crate::presentation_challenge::VerifierChallengeLedger;
+use crate::presentation_challenge::{ChallengeError, PresentationChallenges};
 
 /// Verifier-selected facts shared by every candidate in the anonymity set.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,7 +34,7 @@ pub struct CapabilityChallenge<'a> {
 
 impl<'a> CapabilityChallenge<'a> {
     fn domain(verifier_id: &[u8], scope: &[u8]) -> Vec<u8> {
-        let mut out = b"QSAG.CAPABILITY.UNLINKABLE/v1".to_vec();
+        let mut out = qsag_agg::zk_hem::capability::UNLINKABLE_DOMAIN.to_vec();
         for field in [verifier_id, scope] {
             out.extend_from_slice(&(field.len() as u64).to_le_bytes());
             out.extend_from_slice(field);
@@ -70,7 +70,7 @@ impl<'a> CapabilityChallenge<'a> {
 pub struct UnlinkableCapabilityPresentation(ZkHemV2Proof);
 
 impl UnlinkableCapabilityPresentation {
-    const MAGIC: &[u8; 8] = b"QSAGCAU1";
+    const MAGIC: &[u8; 8] = qsag_agg::zk_hem::capability::UNLINKABLE_WIRE_MAGIC;
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Self::MAGIC.to_vec();
