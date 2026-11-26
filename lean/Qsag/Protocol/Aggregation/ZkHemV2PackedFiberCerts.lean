@@ -2,9 +2,8 @@ module
 /-
 # Qsag.Protocol.Aggregation.ZkHemV2PackedFiberCerts — Packed-Fiber WHIR Schedule Certificates, Single-OOD `< 2^{-277}` Sampler & Recursive Margin Schedule (`< 2^{-128}`)
 
-Closes the schedule-certificate obligations for `zkHemV2ProdSched` (`16 ≤ logCells ≤ 28`) and establishes
-both single-proof packed-fiber `< 2^{-128}` QROM soundness and `[DKT26]` recursive-tree `< 2^{-128}` QROM
-soundness up to depth `d ≤ 16` (`65,536` leaf shards, `131,071` tree nodes) at `Q ≤ 2^{64}`:
+Counts first-stage OOD collisions and checks numerical QROM budgets. The reduction
+for the deployed scalar verifier takes a Boolean round invariant for its transitions.
 1. **Packed-Fiber Merkle Depth (`packedStageDepth`):** Certifies that deployed fiber trees have depth
    `st.logDomain` (not scalar `st.logDomain + st.foldK`), accepting honest `st.logDomain`-length Canopy
    openings across all 45 stage entries while `scalarStageDepth` rejects them (`#tooth_pair`).
@@ -13,7 +12,7 @@ soundness up to depth `d ≤ 16` (`65,536` leaf shards, `131,071` tree nodes) at
    `deployed_single_ood_gs_bad_lt_277`, bounding Guruswami–Sudan decode-list pair collisions on a single
    400-bit OOD squeeze strictly below `< 2^{-277}` across all 45 stage entries of `16 ≤ logCells ≤ 28`
    with positive integer seed budgets (`≥ 1` seed) at every round.
-3. **All 13 Deployed Packed-Fiber Schedules Clear `< 2^{-128}` (`zkHemV2_packed_all13_qrom_lt_128_at_2pow64`):**
+3. **All 13 Deployed Packed-Fiber Schedules Clear `< 2^{-128}` (`zkHemV2_packed_all13_budget_lt_128`):**
    Proves `< 2^{-128}` at `Q ≤ 2^{64}` across `16 ≤ logCells ≤ 28` under both 400-bit `TurboSHAKE256`
    (`.turboShake400`) and 448-bit `Poseidon2-GL-w24` (`.poseidon2Gl24`, `p^7 > 2^447`) commitments.
 4. **Recursive `[DKT26]` Margin Schedule (`zkHemV2RecursiveMarginSched`):** Proves `< 2^{-128}` across
@@ -512,6 +511,21 @@ def gsListHasOodCollision : List (GsUniPoly QuinticGoldilocks) → QuinticGoldil
     rest.any (fun Q => decide (RoundPoly.evalCoeffs P.coeffs z = RoundPoly.evalCoeffs Q.coeffs z)) ||
       gsListHasOodCollision rest z
 
+theorem gsListHasOodCollision_of_pair (ps : List (GsUniPoly QuinticGoldilocks))
+    (P Q : GsUniPoly QuinticGoldilocks) (p : P ∈ ps) (q : Q ∈ ps) (ne : P ≠ Q)
+    (z : QuinticGoldilocks) (eq : RoundPoly.evalCoeffs P.coeffs z = RoundPoly.evalCoeffs Q.coeffs z) :
+    gsListHasOodCollision ps z = true := by
+  induction ps with
+  | nil => cases p
+  | cons h t ih =>
+    apply Bool.or_eq_true_iff.mpr
+    rcases List.mem_cons.mp p with rfl | hp
+    · left
+      exact List.any_eq_true.mpr ⟨Q,(List.mem_cons.mp q).resolve_left (Ne.symm ne),decide_eq_true eq⟩
+    · rcases List.mem_cons.mp q with rfl | hq
+      · left; exact List.any_eq_true.mpr ⟨P,hp,decide_eq_true eq.symm⟩
+      · right; exact ih hp hq
+
 private theorem ite_or_le_add (u v : Bool) :
     (if (u || v) = true then 1 else 0) ≤
       (if u = true then 1 else 0) + (if v = true then 1 else 0) := by
@@ -742,10 +756,10 @@ theorem tooth_scalar_stage_rejects_logDomain_path {D : Type} [DecidableEq D]
    2 ^ 400, Nat.two_pow_pos 400⟩
 
 /-- Packed-fiber per-stage round bounds replacing `< 2^{-400}` OOD with `singleOodSeedBound` (`< 2^{-277}`). -/
-def packedStageRoundBounds (q : Nat) (hq : 0 < q) (s : WhirStage) : List RatBound :=
+@[expose] def packedStageRoundBounds (q : Nat) (hq : 0 < q) (s : WhirStage) : List RatBound :=
   List.replicate s.foldK (s.foldBound q hq) ++ [singleOodSeedBound s, s.shiftBound q hq]
 
-def packedStagesRoundBounds (q : Nat) (hq : 0 < q) : List WhirStage → List RatBound
+@[expose] def packedStagesRoundBounds (q : Nat) (hq : 0 < q) : List WhirStage → List RatBound
   | [] => []
   | s :: rest => packedStageRoundBounds q hq s ++ packedStagesRoundBounds q hq rest
 
@@ -835,7 +849,7 @@ private theorem dfmRoundScale_mono {Q Q' : Nat} (h : Q ≤ Q') (b : RatBound) :
   show (2 * Q + 1) ^ 2 * b.num * b.den ≤ (2 * Q' + 1) ^ 2 * b.num * b.den
   exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _ (Nat.pow_le_pow_left (by omega) 2))
 
-private theorem sumList_map_dfm_mono {Q Q' : Nat} (h : Q ≤ Q') :
+theorem sumList_map_dfm_mono {Q Q' : Nat} (h : Q ≤ Q') :
     ∀ bs : List RatBound,
       RatBound.le (RatBound.sumList (bs.map (dfmRoundScale Q)))
         (RatBound.sumList (bs.map (dfmRoundScale Q')))
@@ -949,7 +963,7 @@ theorem packedProdQromError_16_covers_two_guesses :
 /-- **All 13 Deployed Packed-Fiber Schedules (`16 ≤ logCells ≤ 28`) Clear `< 2^{-128}` at `Q ≤ 2^{64}`:**
     Replaces the `< 2^{-400}` OOD bound with the realizable `< 2^{-277}` `singleOodSeedBound` and supports
     both `.turboShake400` and `.poseidon2Gl24` commitment profiles. -/
-theorem zkHemV2_packed_all13_qrom_lt_128_at_2pow64
+theorem zkHemV2_packed_all13_budget_lt_128
     (prof : WhirCommitmentProfile) (logCells Q : Nat)
     (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (hQ : Q ≤ 2 ^ 64) :
     RatBound.lt
@@ -1200,7 +1214,7 @@ theorem inhabited_recursiveMargin_tree :
   Qsag.ZkHemV2Packed.packed_stage_accepts_logDomain_path
   Qsag.ZkHemV2Packed.tooth_scalar_stage_rejects_logDomain_path
   Qsag.ZkHemV2Packed.deployed_single_ood_gs_bad_lt_277
-  Qsag.ZkHemV2Packed.zkHemV2_packed_all13_qrom_lt_128_at_2pow64
+  Qsag.ZkHemV2Packed.zkHemV2_packed_all13_budget_lt_128
   Qsag.ZkHemV2Packed.zkHemV2RecursiveMarginSched_johnson_and_dkt26
   Qsag.ZkHemV2Packed.zkHemV2RecursiveMargin_tree_lt_128
   Qsag.ZkHemV2Packed.tooth_unadjusted_single_sched_fails_d16
@@ -1208,7 +1222,7 @@ theorem inhabited_recursiveMargin_tree :
   Qsag.ZkHemV2Packed.inhabited_recursiveMargin_tree
 
 #verify_inhabited
-  Qsag.ZkHemV2Packed.zkHemV2_packed_all13_qrom_lt_128_at_2pow64
+  Qsag.ZkHemV2Packed.zkHemV2_packed_all13_budget_lt_128
   Qsag.ZkHemV2Packed.inhabited_packedFiberCerts
 #verify_inhabited
   Qsag.ZkHemV2Packed.zkHemV2RecursiveMargin_tree_lt_128
@@ -1218,6 +1232,87 @@ theorem inhabited_recursiveMargin_tree :
   Qsag.ZkHemV2Packed.tooth_scalar_stage_rejects_logDomain_path
 #tooth_pair Qsag.ZkHemV2Packed.zkHemV2RecursiveMargin_tree_lt_128 vs
   Qsag.ZkHemV2Packed.tooth_unadjusted_single_sched_fails_d16
+
+/-- The seeded bound is computed on the same deployment table as the verifier. -/
+theorem packedProdStages_eq (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28) :
+    packedProdStages n = zkHemV2ProdStages n := by
+  have casesN : n=16 ∨ n=17 ∨ n=18 ∨ n=19 ∨ n=20 ∨ n=21 ∨ n=22 ∨ n=23 ∨
+      n=24 ∨ n=25 ∨ n=26 ∨ n=27 ∨ n=28 := by omega
+  rcases casesN with rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl <;>
+    simp only [zkHemV2ProdStages.public_eqs, packedProdStages]
+
+/-- Commit-round charges count individual 400-bit seeds. The Boolean invariant
+    and its transition bounds still refer to the verifier's own IOP. -/
+abbrev SeededScheduleCert (env : WhirEnv QuinticGoldilocks) (n : Nat) :=
+  WhirScheduleCert env (zkHemV2ProdSched n) 400
+    (packedStagesRoundBounds quinticGoldilocksCard quinticGoldilocksCard_pos (packedProdStages n))
+
+/-- Composed succinct-transcript QROM + 400-bit Merkle soundness `< 2^{-128}` (`logCells ∈ [16, 28]`, `Q ≤ 2^64`). -/
+theorem zkHemV2_deployed_succinct_qrom_soundness_128 {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat} (logCells : Nat)
+    (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (hQ : Q ≤ 2 ^ 64)
+    (env : WhirEnv QuinticGoldilocks) (M : MerkleSetup D QuinticGoldilocks) (dfltRoot : D)
+    (sc : SeededScheduleCert env logCells)
+    (codec : FsCodec (SuccinctRoundMsg D (WhirPub QuinticGoldilocks))
+      (zkHemV2ProdSched logCells).numRounds cardX)
+    (aux : Fin cardX → List (QuinticGoldilocks × List D))
+    (claim : QuinticGoldilocks) (initRoots : Nat → D)
+    (tblOf : Nat → D → Nat → QuinticGoldilocks)
+    (hx : ¬ whirInLang env (zkHemV2ProdSched logCells)
+      ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).liftStmt
+        claim initRoots tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec 400) (o : Fin cardX),
+      succinctFsAccept (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+        (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+        M codec aux claim initRoots H o = true →
+      let str := fsTranscript codec H (codec.dec o)
+      ∀ q ∈ (whirOracleIop env (zkHemV2ProdSched logCells) 400).queries claim
+          (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 ((whirOracleIop env (zkHemV2ProdSched logCells) 400).depth q.1)
+          (tblOf q.1 ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)) =
+          (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)
+    (A : QuantumAdv cardX 400 cardAnc Q)
+    (hMerkle : RatBound.le
+      ⟨uniformOracleSum 400 cardX (fun H =>
+          QVec.queryMassOn
+            (succinctFsCollisionEvent (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+              (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+              M codec aux claim initRoots tblOf H)
+            (runQuantumAdv A H)),
+        (2 ^ 400) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (merkle400QromBound Q)) :
+    RatBound.lt
+      ⟨uniformOracleSum 400 cardX (fun H =>
+          QVec.queryMassOn
+            (succinctFsAccept (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+              (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+              M codec aux claim initRoots H)
+            (runQuantumAdv A H)),
+        (2 ^ 400) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (RatBound.invPow2 128) := by
+  let sched := zkHemV2ProdSched logCells
+  have hRbr : RatBound.le
+      ⟨(2 * Q + 1) ^ 2 * qsum sched.numRounds sc.cert.bad, 2 ^ 400, Nat.two_pow_pos 400⟩
+      (packedProdQromError logCells Q) := by
+    rw [packedProdQromError_eq]
+    apply dfm_sum_le
+    · rw [packedStagesRoundBounds_length, packedProdStages_eq logCells hLo hHi]
+      simp only [sched, WhirVerifierSchedule.numRounds, zkHemV2ProdSched.public_eqs]
+    · exact sc.covers
+  have hBudget := succinct_fs_qrom_total_error_budget
+    (whirOracleIop env sched 400) (whirSuccinctBridge env sched 400 dfltRoot)
+    M sc.cert codec aux claim initRoots tblOf hx hRoots A
+    (packedProdQromError logCells Q) (merkle400QromBound Q) hRbr hMerkle
+  exact ratBound_lt_of_le_of_lt_packed hBudget
+    (zkHemV2_packed_all13_budget_lt_128 .turboShake400 logCells Q hLo hHi hQ)
+
+#verify_constructive zkHemV2_deployed_succinct_qrom_soundness_128
 
 end Qsag.ZkHemV2Packed
 end

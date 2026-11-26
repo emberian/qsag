@@ -4,7 +4,7 @@ public import Qsag.Protocol.Aggregation.ClosedWhirSchedule
 public import Qsag.Protocol.Aggregation.ClosedFsQromCompile
 public import Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness
 public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
-public import Qsag.Protocol.Aggregation.ZkHem
+public import Qsag.Protocol.Aggregation.HemInterpolation
 import Qsag.Protocol.Aggregation.HemRbrSoundness
 import Qsag.Tactic.AssuranceKit
 
@@ -271,7 +271,7 @@ def publicHemError (p : PublicHemQuintic128) (n t : Nat) : RatBound :=
 
 /-- Strict bound on the public profile's total QROM knowledge-error budget under the
     CDHZ25 reduction and the ideal hash model. Includes a separate transcript hash term. -/
-theorem publicHemQuintic_qrom_soundness_128 (profile : PublicHemQuintic128)
+theorem publicHemQuintic_budget_lt_128 (profile : PublicHemQuintic128)
     (logCells qOracle : Nat) (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28)
     (hQ : qOracle ≤ 2^64) :
     RatBound.lt (publicHemError profile logCells qOracle) ⟨1, 2^128, by decide⟩ := by
@@ -300,25 +300,6 @@ theorem publicHemQuintic_qrom_soundness_128 (profile : PublicHemQuintic128)
        (Nat.mul_le_mul_right _ (Nat.add_le_add (Nat.mul_le_mul_right _ hm) (Nat.mul_le_mul_right _ hm)))))
      decide +kernel)
 
-/-- Even the digest term of the legacy Ext4 schedule's published upper bound
-    exceeds the target. This is a statement about the guarantee in the reduction. -/
-theorem tooth_legacy_publicHem_qrom_budget :
-    RatBound.lt ⟨1, 2^128, by decide⟩
-      (RatBound.add (scheduleQromError deployedSched (2^64))
-        ⟨6380*(2^64)^3, 2^256, by decide⟩) := by
-  let s := scheduleQromError deployedSched (2^64)
-  have hs : 0 < s.den := s.h_pos
-  have hd : 2^256 < (6380*(2^64)^3)*2^128 := by decide +kernel
-  show 1*(s.den*2^256) < (s.num*2^256 + 6380*(2^64)^3*s.den)*2^128
-  rw [Nat.one_mul, Nat.add_mul]
-  apply Nat.lt_of_lt_of_le _ (Nat.le_add_left _ _)
-  rw [Nat.mul_comm (6380*(2^64)^3) s.den, Nat.mul_assoc]
-  exact Nat.mul_lt_mul_of_pos_left hd hs
-
-theorem tooth_legacy_publicHem_refutes_128 :
-    ¬ RatBound.le (RatBound.add (scheduleQromError deployedSched (2^64))
-        ⟨6380*(2^64)^3, 2^256, by decide⟩) ⟨1, 2^128, by decide⟩ :=
-  Nat.not_le_of_lt tooth_legacy_publicHem_qrom_budget
 
 /-- A checked false row polynomial can recover the honest running claim at
     most eight quintic challenges. This includes the degree-seven S-boxes and
@@ -536,9 +517,9 @@ theorem publicHemQuintic_succinct_false_acceptance {Stmt Msg Pub : Type} {cardX 
 #verify_constructive publicHemQuintic_stage0_recover publicHemQuintic_stepOp_gamma_roots
 #print axioms publicHemQuintic_extract_slot
 #print axioms publicHemQuintic_row_collision_count
-#print axioms publicHemQuintic_qrom_soundness_128
-#print axioms tooth_legacy_publicHem_qrom_budget
-#verify_constructive publicHemQuintic_qrom_soundness_128 tooth_legacy_publicHem_qrom_budget
-#tooth_pair publicHemQuintic_qrom_soundness_128 vs tooth_legacy_publicHem_refutes_128
+#print axioms publicHemQuintic_budget_lt_128
+
+#verify_constructive publicHemQuintic_budget_lt_128
+
 end Qsag.Aggregation
 end

@@ -1,18 +1,11 @@
 module
 /-
-# Qsag.Protocol.Aggregation.ZkHemV2ScheduleCert — Production `zk-Hem v2` + DKT26 Schedule Certificate & `< 2^{-128}` QROM Soundness
+# Quintic WHIR schedule certificates and production error budgets
 
-This module models the E9 Rust overlay at `crates/qsag-agg/src/zk_hem/v2/`.
-The live checkout uses an earlier query table.
-1. Re-exports the 9-triple Toom-3 `𝔽_{p^5} mod (u^5 - 3)` identity (`toom3MulFp5_eq_quinticMul`).
-2. Proves the DKT26 (`ePrint 2026/2056` Thm 5.12) mask-line bad-challenge bound (`≤ 1` per false
-   pair on `ZkHemV2.maskLine` / `maskLineVec`), `dkt26_threshold_inside_johnson` via
-   `gsDecodeList_length_le_johnson`, and `tooth_bcgm25_deg7_mask_line_fails_at_28`.
-3. Constructs unconditional `zkHemV2QuinticCert : WhirScheduleCert zkHemV2QuinticEnv zkHemV2QuinticSched 400`
-   over `QuinticGoldilocks` (`p^5`) with 5 OOD points and 400-bit digests.
-4. Formalizes `zkHemV2ProdSched` (`log_cells ∈ [16, 28]`, `267/266` Stage-0 queries, 400-bit digests,
-   32B `tree_nonce`), proving `johnsonOk = true` and `< 2^{-128}` composed succinct QROM + Merkle
-   soundness given the schedule certificate, consistent roots and collision-event bound across `logCells ∈ [16, 28]` and `Q ≤ 2^{64}` (`#tooth_pair` vs `v1` & `𝔽_p`).
+The constructed certificate uses a 64-point domain, 66 positional samples, five
+out-of-domain values and a projection fold. For production sizes 16 through 28
+the module checks the DKT26 thresholds and evaluates the round budgets.
+The game-level production reduction requires a certificate for its verifier.
 -/
 
 public import Qsag.Math.QuinticToom3
@@ -1009,69 +1002,6 @@ theorem zkHemV2_cdhz25_qrom_lt_128_at_2pow64 {Q k : Nat} {epsRbr : RatBound}
       (RatBound.invPow2 128) := by decide +kernel
   exact ratBound_lt_of_le_of_lt hMono hTop
 
-/-- Composed succinct-transcript QROM + 400-bit Merkle soundness `< 2^{-128}` (`logCells ∈ [16, 28]`, `Q ≤ 2^64`). -/
-theorem zkHemV2_deployed_succinct_qrom_soundness_128 {D : Type} [DecidableEq D]
-    {cardX cardAnc Q : Nat} (logCells : Nat)
-    (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (hQ : Q ≤ 2 ^ 64)
-    (env : WhirEnv QuinticGoldilocks) (M : MerkleSetup D QuinticGoldilocks) (dfltRoot : D)
-    (sc : WhirScheduleCert env (zkHemV2ProdSched logCells) 400)
-    (codec : FsCodec (SuccinctRoundMsg D (WhirPub QuinticGoldilocks))
-      (zkHemV2ProdSched logCells).numRounds cardX)
-    (aux : Fin cardX → List (QuinticGoldilocks × List D))
-    (claim : QuinticGoldilocks) (initRoots : Nat → D)
-    (tblOf : Nat → D → Nat → QuinticGoldilocks)
-    (hx : ¬ whirInLang env (zkHemV2ProdSched logCells)
-      ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).liftStmt
-        claim initRoots tblOf))
-    (hRoots : ∀ (H : Fin cardX → BitVec 400) (o : Fin cardX),
-      succinctFsAccept (whirOracleIop env (zkHemV2ProdSched logCells) 400)
-        (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
-        M codec aux claim initRoots H o = true →
-      let str := fsTranscript codec H (codec.dec o)
-      ∀ q ∈ (whirOracleIop env (zkHemV2ProdSched logCells) 400).queries claim
-          (str.map (fun sc' => (sc'.1.pub, sc'.2))),
-        M.root q.1 ((whirOracleIop env (zkHemV2ProdSched logCells) 400).depth q.1)
-          (tblOf q.1 ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
-            initRoots (str.map Prod.fst) q.1)) =
-          (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
-            initRoots (str.map Prod.fst) q.1)
-    (A : QuantumAdv cardX 400 cardAnc Q)
-    (hMerkle : RatBound.le
-      ⟨uniformOracleSum 400 cardX (fun H =>
-          QVec.queryMassOn
-            (succinctFsCollisionEvent (whirOracleIop env (zkHemV2ProdSched logCells) 400)
-              (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
-              M codec aux claim initRoots tblOf H)
-            (runQuantumAdv A H)),
-        (2 ^ 400) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
-        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
-          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
-      (merkle400QromBound Q)) :
-    RatBound.lt
-      ⟨uniformOracleSum 400 cardX (fun H =>
-          QVec.queryMassOn
-            (succinctFsAccept (whirOracleIop env (zkHemV2ProdSched logCells) 400)
-              (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
-              M codec aux claim initRoots H)
-            (runQuantumAdv A H)),
-        (2 ^ 400) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
-        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
-          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
-      (RatBound.invPow2 128) := by
-  let sched := zkHemV2ProdSched logCells
-  have hRbr : RatBound.le
-      ⟨(2 * Q + 1) ^ 2 * qsum sched.numRounds sc.cert.bad, 2 ^ 400, Nat.two_pow_pos 400⟩
-      (scheduleQromError sched Q) := by
-    rw [scheduleQromError_eq]
-    exact dfm_sum_le Q 400 sched.numRounds sc.cert.bad sched.roundBounds
-      sched.roundBounds_length sc.covers
-  have hBudget := succinct_fs_qrom_total_error_budget
-    (whirOracleIop env sched 400) (whirSuccinctBridge env sched 400 dfltRoot)
-    M sc.cert codec aux claim initRoots tblOf hx hRoots A
-    (scheduleQromError sched Q) (merkle400QromBound Q) hRbr hMerkle
-  exact ratBound_lt_of_le_of_lt hBudget
-    (zkHemV2_prod_qrom_error_lt_128_at_2pow64 logCells Q hLo hHi hQ)
-
 /-- 32B `tree_nonce` Stage-0 Canopy disjointness and `< 2^{-128}` multi-proof bound (`P ≤ 2^64`). -/
 theorem zkHemV2_treeNonce_disjoint_and_multiproof_128 {cardX w P : Nat}
     (L : SaltedCanopyLayout (2 ^ 256) cardX w) {s₁ s₂ : Fin (2 ^ 256)} (hNe : s₁ ≠ s₂)
@@ -1168,7 +1098,6 @@ theorem inhabited_zkHemV2_prod_qrom_128 :
   Qsag.ZkHemV2Cert.zkHemV2ProdSched_johnsonOk
   Qsag.ZkHemV2Cert.zkHemV2_prod_qrom_error_lt_128_at_2pow64
   Qsag.ZkHemV2Cert.zkHemV2_cdhz25_qrom_lt_128_at_2pow64
-  Qsag.ZkHemV2Cert.zkHemV2_deployed_succinct_qrom_soundness_128
   Qsag.ZkHemV2Cert.zkHemV2_treeNonce_disjoint_and_multiproof_128
   Qsag.ZkHemV2Cert.tooth_v1_256bit_digest_violates_qrom_128_at_2pow64
   Qsag.ZkHemV2Cert.tooth_base_field_challenges_violate_qrom_128
@@ -1194,6 +1123,6 @@ end
 
 public section
 namespace Qsag.ZkHemV2Cert
-#export_eqns zkHemV2ProdStages zkHemV2ProdSched dkt26Covers
+#export_eqns zkHemV2ProdStages zkHemV2ProdSched dkt26Covers dkt26MaskLineTotalBad dkt26Bcf
 end Qsag.ZkHemV2Cert
 end

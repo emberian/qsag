@@ -12,7 +12,7 @@ public import Qsag.Protocol.Aggregation.ClosedWhirSchedule
 public import Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness
 public import Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
 public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
-public import Qsag.Protocol.Aggregation.ZkHemV2ScheduleCert
+public import Qsag.Protocol.Aggregation.ZkHemV2ComposedZkAndCerts
 public import Qsag.Protocol.Aggregation.QuinticMultiStageWhir
 import Qsag.Tactic.AssuranceKit
 
@@ -192,8 +192,108 @@ def unpackInitial (stages : List WhirStage) (x : PackedStmt) : WhirStmt QuinticG
   | st :: _ => ⟨(List.range (2 ^ st.foldK * st.domainSize)).map
       (fun p => (x.2 (p % st.domainSize)).getD (p / st.domainSize) QuinticGoldilocks.zero), x.1⟩
 
-/-- Enough bits for five field elements and all positions of the largest deployed round. -/
-def packedChallengeBits : Nat := 2000 + 32 * 267
+/-- Detect a single pair of distinct candidate polynomials that agrees at
+    every OOD point extracted from the packed round challenge. -/
+def packedOodCollision (ps : List (GsUniPoly QuinticGoldilocks)) (c : Nat) : Bool :=
+  ps.any fun p => ps.any fun q => decide (p.coeffs ≠ q.coeffs) &&
+    (List.range 5).all fun j => decide (RoundPoly.evalCoeffs p.coeffs (whirField c j) =
+      RoundPoly.evalCoeffs q.coeffs (whirField c j))
+
+private theorem packedOod_first {ps : List (GsUniPoly QuinticGoldilocks)} {c : Nat}
+    (hit : packedOodCollision ps c = true) : gsListHasOodCollision ps (whirField c 0) = true := by
+  obtain ⟨p,hp,h⟩ := List.any_eq_true.mp hit
+  obtain ⟨q,hq,b⟩ := List.any_eq_true.mp h
+  obtain ⟨ne,all⟩ := Bool.and_eq_true_iff.mp b
+  exact gsListHasOodCollision_of_pair _ p q hp hq (fun eq => of_decide_eq_true ne (congrArg _ eq))
+    _ (of_decide_eq_true (List.all_eq_true.mp all 0 (by decide)))
+
+private theorem packedOod_upper (hi N : Nat) (width : N = 2^hi * 2^400) (ps : List (GsUniPoly QuinticGoldilocks)) (B : Nat)
+    (bound : qsum (2^400) (fun c => if gsListHasOodCollision ps (decodeQuintic400 c.val) then 1 else 0) ≤ B) :
+    qsum N (fun c => if packedOodCollision ps c.val then 1 else 0) ≤ 2^hi * B := by
+  let score := fun z => if gsListHasOodCollision ps z then 1 else 0
+  calc
+    _ ≤ qsum N (fun c => score (whirField c.val 0)) := by
+      apply qsum_le_qsum
+      intro c
+      by_cases h : packedOodCollision ps c.val = true
+      · simp [score,h,packedOod_first h]
+      · simp [h]
+    _ = _ := qsum_mul_mod_eq width (Nat.two_pow_pos 400) _ (fun t => score (decodeQuintic400 t))
+      (fun c => congrArg score (whirField_first c.val))
+    _ ≤ _ := Nat.mul_le_mul_left _ bound
+
+private theorem scaled400 {hi bad B : Nat} (h : bad ≤ 2^hi * B) (hB : B * 2^277 < 2^400) :
+    bad * 2^277 < 2^hi * 2^400 := by
+  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right _ h)
+    (by rw [Nat.mul_assoc]; exact Nat.mul_lt_mul_of_pos_left hB (Nat.two_pow_pos _))
+
+private theorem seedMassPos {N : Nat} (event : Fin N → Bool) (a : Fin N) (yes : event a = true) :
+    0 < qsum N (fun i => if event i then 1 else 0) := by
+  calc
+    1 = qsum N (fun i => if i = a then 1 else 0) := (qsum_eq_indicator _ _).symm
+    _ ≤ _ := by
+      apply qsum_le_qsum
+      intro i
+      by_cases eq : i = a
+      · subst i; simp [yes]
+      · simp [eq]
+
+private theorem packedOod_word (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28) (st : WhirStage)
+    (first : (zkHemV2ProdSched n).stages.head? = some st) (shift : QuinticGoldilocks)
+    (nz : shift ≠ CommRingOps.zero) (seed : Nat) :
+    ∃ word : QuinticGoldilocks → QuinticGoldilocks, packedOodCollision
+      (gsDecodeList st.degBound st.agree (ZkHemV2.fiberRoots st.logDomain shift) word) seed = true := by
+  let env := {zkHemV2QuinticEnv with chalField := fun _ j => whirField seed j}
+  obtain ⟨word,p,hp,q,hq,ne,hit⟩ := deployed_first_ood_list_collision n lo hi st first shift nz env ⟨0,Nat.two_pow_pos _⟩
+  refine ⟨word,?_⟩
+  apply List.any_eq_true.mpr
+  refine ⟨p,hp,List.any_eq_true.mpr ⟨q,hq,Bool.and_eq_true_iff.mpr ⟨decide_eq_true ?_,?_⟩⟩⟩
+  · intro eq; exact ne (UPoly.ext eq)
+  · exact List.all_eq_true.mpr fun j mem => decide_eq_true (hit ⟨j,List.mem_range.mp mem⟩)
+
+private theorem packedOod_bound (n extra N : Nat) (hN : 0 < N)
+    (width : N = 2^extra * 2^400) (lo : 16 ≤ n) (hi : n ≤ 28)
+    (st : WhirStage) (first : (zkHemV2ProdSched n).stages.head? = some st)
+    (shift : QuinticGoldilocks) (nz : shift ≠ CommRingOps.zero)
+    (word : QuinticGoldilocks → QuinticGoldilocks) :
+    let ps := gsDecodeList st.degBound st.agree (ZkHemV2.fiberRoots st.logDomain shift) word
+    RatBound.lt ⟨qsum N (fun c => if packedOodCollision ps c.val then 1 else 0),N,hN⟩ (RatBound.invPow2 277) := by
+  intro ps
+  have mem : st ∈ (packedProdSched n).stages := by
+    change st ∈ packedProdStages n
+    rw [packedProdStages_eq n lo hi]
+    rw [zkHemV2ProdSched.public_eqs] at first
+    exact List.mem_of_mem_head? first
+  obtain ⟨_,_,bound,lt⟩ := deployed_single_ood_gs_bad_lt_277 n lo hi st mem shift nz word
+  change _ * 2^277 < 1 * N
+  change (singleOodSeedBound st).num * 2^277 < 1 * 2^400 at lt
+  rw [Nat.one_mul] at lt ⊢
+  exact Nat.lt_of_lt_of_eq (scaled400 (hi := extra) (packedOod_upper extra N width ps _ bound) lt) width.symm
+
+/-- Any received word fixed before the full packed squeeze has probability
+    below 2^-277 of a decode-list pair agreeing at all five first-stage OOD points. -/
+theorem packed_first_ood_collision_lt_277 (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28)
+    (st : WhirStage) (first : (zkHemV2ProdSched n).stages.head? = some st)
+    (shift : QuinticGoldilocks) (nz : shift ≠ CommRingOps.zero) (word : QuinticGoldilocks → QuinticGoldilocks) :
+    let ps := gsDecodeList st.degBound st.agree (ZkHemV2.fiberRoots st.logDomain shift) word
+    let bad := qsum (2^packedChallengeBits) fun c => if packedOodCollision ps c.val then 1 else 0
+    RatBound.lt ⟨bad,2^packedChallengeBits,Nat.two_pow_pos _⟩ (RatBound.invPow2 277) :=
+  packedOod_bound n (packedChallengeBits - 400) _ (Nat.two_pow_pos _)
+    (Nat.pow_add 2 (packedChallengeBits - 400) 400) lo hi st first shift nz word
+
+/-- For the verifier's full squeeze, the same two decoded polynomials agree on
+    all five OOD coordinates with a positive probability below 2^-277. -/
+theorem packed_first_ood_positive_mass (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28)
+    (st : WhirStage) (first : (zkHemV2ProdSched n).stages.head? = some st)
+    (shift : QuinticGoldilocks) (nz : shift ≠ CommRingOps.zero) (seed : Fin (2^packedChallengeBits)) :
+    ∃ word : QuinticGoldilocks → QuinticGoldilocks,
+      let ps := gsDecodeList st.degBound st.agree (ZkHemV2.fiberRoots st.logDomain shift) word
+      let bad := qsum (2^packedChallengeBits) fun c => if packedOodCollision ps c.val then 1 else 0
+      0 < bad ∧ RatBound.lt ⟨bad,2^packedChallengeBits,Nat.two_pow_pos _⟩ (RatBound.invPow2 277) := by
+  obtain ⟨word,hit⟩ := packedOod_word n lo hi st first shift nz seed.val
+  exact ⟨word,seedMassPos _ seed hit,packed_first_ood_collision_lt_277 n lo hi st first shift nz word⟩
+
+#verify_constructive packed_first_ood_collision_lt_277 packed_first_ood_positive_mass
 
 @[expose] def packedWhirIop (logCells : Nat) :
     OracleIop PackedStmt QuinticGoldilocks PackedMsg (WhirPub QuinticGoldilocks)
@@ -625,7 +725,7 @@ theorem packedWhir_qrom_soundness_128
     (packedStagesRoundBounds_length _ _ (packedProdStages logCells)) covers
   rw [← packedProdQromError_eq] at hSum
   exact ratBound_lt_of_le_of_lt_packed (RatBound.le_trans hClosed (RatBound.add_le_add hSum hMerkle))
-    (zkHemV2_packed_all13_qrom_lt_128_at_2pow64 prof logCells Q hLo hHi hQ)
+    (zkHemV2_packed_all13_budget_lt_128 prof logCells Q hLo hHi hQ)
 
 /-- QROM acceptance bound for the byte verifier evaluated on the fixed context's
     finite random-oracle experiment. Its commitments and claimed opening are
@@ -831,7 +931,7 @@ theorem succinctWhirAggregate_extractorSound {nVal nC : Nat}
     ε.num * 2 ^ 128 < 1 * ε.den := by
   intro ε
   refine ⟨⟨extractSuccinctWhirAggregate_straightLine profile fr nodeDecode slotC, ?_⟩,
-    zkHemV2_packed_all13_qrom_lt_128_at_2pow64 prof logCells Q hLo hHi hQ⟩
+    zkHemV2_packed_all13_budget_lt_128 prof logCells Q hLo hHi hQ⟩
   intro n nA hPos π prover
   obtain ⟨rows, ht, he⟩ := hSlots n nA hPos π prover
   apply Spec.GameBound.trans (Spec.event_le_two_reductions _ _ _ ?_) (Spec.RatBound.add_le_add ht he)
@@ -848,26 +948,8 @@ theorem succinctWhirAggregate_extractorSound {nVal nC : Nat}
     | false => exact .inr rfl
     | true => exact absurd (validExtractedSlots ha (rows ω) sigs ht' he') hn
 
-/-- The machine that validates the extracted witness before certifying a statement simulates the ideal aggregate machine. -/
-def succinctWhirAggregate_dataRefines_ideal {nVal : Nat}
-    (logCells : Nat) (profile : AggSigProfile) (fr : SuccinctWhirByteFraming)
-    (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
-    (slotC : SlotLeafTableCodec) (H : Spec.Bytes → Spec.Bytes) :
-    Spec.DataRefines
-      (Spec.verifiedAggregateMachine
-        (verifyAggNativeSig (profileGeom profile))
-        (verifySuccinctWhirAggregate (nVal := nVal) logCells profile fr)
-        (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) H)
-      (Spec.idealAggregateMachine (verifyAggNativeSig (profileGeom profile)))
-      (Spec.verifiedAggregateVisIn
-        (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC))
-      id :=
-  Spec.verifiedAggregate_dataRefines_ideal
-    (verifyAggNativeSig (profileGeom profile))
-    (verifySuccinctWhirAggregate (nVal := nVal) logCells profile fr)
-    (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) H
-
-/-- Trace inclusion for the witness-checking machine together with the measured game bound. -/
+/-- The measured probability that the public machine accepts and the ideal
+    machine rejects the extracted signatures. -/
 theorem measuredSuccinctWhirAggregate_refines_idealAggregate {nVal n : Nat}
     (logCells : Nat) (profile : AggSigProfile) (fr : SuccinctWhirByteFraming)
     (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes)) (slotC : SlotLeafTableCodec)
@@ -878,15 +960,29 @@ theorem measuredSuccinctWhirAggregate_refines_idealAggregate {nVal n : Nat}
     let single := verifyAggNativeSig (profileGeom profile)
     let verify := verifySuccinctWhirAggregate (nVal := nVal) logCells profile fr
     let games := measuredSlotGames logCells profile fr nodeDecode slotC hPos H Q prover
-    (∀ oracle trace, (Spec.verifiedAggregateMachine single verify extract oracle).AdmitsTrace trace →
-      (Spec.idealAggregateMachine single).AdmitsTrace
-        (Spec.projectTrace (Spec.verifiedAggregateVisIn extract) id trace)) ∧
-    Spec.GameBound (Spec.aggregateSoundnessGame hPos single verify extract Q H prover).winProb
-      (Spec.RatBound.add games.1.winProb games.2.winProb) :=
-  ⟨fun oracle _ ht => (succinctWhirAggregate_dataRefines_ideal logCells profile fr nodeDecode slotC oracle).preserve_admitsTrace ht,
-    measuredSuccinctWhirAggregate_extractorSound logCells profile fr nodeDecode slotC hPos H Q prover⟩
+    Spec.GameBound (Spec.aggregateRefinementGame hPos single verify extract Q H prover).winProb
+      (Spec.RatBound.add games.1.winProb games.2.winProb) := by
+  intro extract single verify games
+  apply Spec.event_le_two_reductions
+  intro ω hw
+  obtain ⟨ha, hn⟩ := (Spec.aggregateRefinementGame_win ..).mp hw
+  dsimp only [verify] at ha
+  let r := Spec.aggregateRun (H ω) Q (prover ω)
+  let rows := reconstructedSlotRows (nVal := nVal) profile fr nodeDecode slotC r.2 r.1.2
+  let openings := recordedSlotRows (nVal := nVal) profile fr nodeDecode slotC r.2 r.1.2
+  change (_ && !slotTablesValid profile r.1.1 rows) = true ∨ (_ && !slotOpeningsRecorded r.1.1 openings) = true
+  dsimp only
+  rw [ha, Bool.true_and, Bool.true_and]
+  cases ht : slotTablesValid profile r.1.1 rows with
+  | false => exact .inl rfl
+  | true =>
+    cases ho : slotOpeningsRecorded r.1.1 openings with
+    | false => exact .inr rfl
+    | true =>
+      rw [← slotSignaturesRecovered_reconstructed profile fr nodeDecode slotC r.2 r.1.1 r.1.2] at ho
+      exact absurd (validExtractedSlots ha rows _ ht ho) hn
 
-/-- Trace inclusion for the witness-checking machine, together with the extraction-failure bound conditional on the two packed slot game estimates. -/
+/-- The same public-to-ideal discrepancy under the packed slot bounds. -/
 theorem succinctWhirAggregate_refines_idealAggregate_128 {nVal nC n nA : Nat}
     (logCells : Nat) (profile : AggSigProfile) (prof : WhirCommitmentProfile) (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28)
     (fr : SuccinctWhirByteFraming)
@@ -896,36 +992,29 @@ theorem succinctWhirAggregate_refines_idealAggregate_128 {nVal nC n nA : Nat}
     (hPos : 0 < n) (π : Spec.CoinSplit n nC nA)
     (prover : Fin nA → Spec.Code Spec.byteOracleIface
       (Spec.AggregateStatement AggValidatorPk nVal × SuccinctWhirAggregateProof))
-    (hSlots : PackedSlotGameBounds (nVal := nVal) logCells profile prof fr nodeDecode slotC oracle Q)
-    (fail : Fin n → Bool)
-    (hFail : ∀ ω : Fin n, fail ω = true →
-      let H := oracle (π.chal ω)
-      let r := Spec.aggregateRun H Q (prover (π.advc ω))
-      verifySuccinctWhirAggregate logCells profile fr H r.1.1 r.1.2 = true ∧
-      ¬ Spec.AggregateSoundnessOutcome (verifyAggNativeSig (profileGeom profile)) H r.2 r.1.1
-          (extractSuccinctWhirAggregate profile fr nodeDecode slotC r.2 r.1.1 r.1.2)) :
+    (hSlots : PackedSlotGameBounds (nVal := nVal) logCells profile prof fr nodeDecode slotC oracle Q) :
     let ε := toSpecRatBound
       (RatBound.add (packedProdQromError logCells Q) (merkleProfileQromBound prof Q))
-    (∀ (H : Spec.Bytes → Spec.Bytes)
-       (trace : List (Spec.AggregateSubmission AggValidatorPk SuccinctWhirAggregateProof nVal × Unit)),
-      (Spec.verifiedAggregateMachine
-        (verifyAggNativeSig (profileGeom profile))
-        (verifySuccinctWhirAggregate (nVal := nVal) logCells profile fr)
-        (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) H).AdmitsTrace trace →
-      (Spec.idealAggregateMachine (verifyAggNativeSig (profileGeom profile))).AdmitsTrace
-        (Spec.projectTrace
-          (Spec.verifiedAggregateVisIn
-            (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC))
-          id trace)) ∧
-    Spec.GameBound (Spec.FinGame.mk hPos fail).winProb ε ∧
-    ε.num * 2 ^ 128 < 1 * ε.den := by
+    Spec.GameBound (Spec.aggregateRefinementGame hPos (verifyAggNativeSig (profileGeom profile))
+      (verifySuccinctWhirAggregate logCells profile fr) (extractSuccinctWhirAggregate profile fr nodeDecode slotC)
+      Q (fun ω => oracle (π.chal ω)) (fun ω => prover (π.advc ω))).winProb ε ∧
+      ε.num * 2^128 < 1 * ε.den := by
   intro ε
-  obtain ⟨hSound, hLt128⟩ :=
-    succinctWhirAggregate_extractorSound logCells profile prof hLo hHi fr nodeDecode slotC oracle Q hQ hSlots
-  exact ⟨fun H _ hAdmits =>
-      (succinctWhirAggregate_dataRefines_ideal logCells profile fr nodeDecode slotC H).preserve_admitsTrace hAdmits,
-    hSound.failure_bound hPos π prover fail hFail,
-    hLt128⟩
+  obtain ⟨rows, ht, he⟩ := hSlots n nA hPos π prover
+  refine ⟨Spec.GameBound.trans (Spec.event_le_two_reductions _ _ _ ?_) (Spec.RatBound.add_le_add ht he), ?_⟩
+  · intro ω hw
+    obtain ⟨ha, hn⟩ := (Spec.aggregateRefinementGame_win ..).mp hw
+    let r := Spec.aggregateRun (oracle (π.chal ω)) Q (prover (π.advc ω))
+    let sigs := extractSuccinctWhirAggregate profile fr nodeDecode slotC r.2 r.1.1 r.1.2
+    dsimp only
+    rw [ha, Bool.true_and, Bool.true_and]
+    cases ht' : slotTablesValid profile r.1.1 (rows ω) with
+    | false => exact .inl rfl
+    | true =>
+      cases he' : slotSignaturesRecovered profile r.1.1 (rows ω) sigs with
+      | false => exact .inr rfl
+      | true => exact absurd (validExtractedSlots ha (rows ω) sigs ht' he') hn
+  · exact zkHemV2_packed_all13_budget_lt_128 prof logCells Q hLo hHi hQ
 
 /-- Under the packed slot game estimates, an accepted active signer gives participation, a transcript break or a quorum forgery outside the bounded failure event. -/
 theorem succinctWhirAggregate_quorum_euf_cma_reduction {nVal nC n nA : Nat}
@@ -1050,91 +1139,7 @@ private def auditSlotCodec : SlotLeafTableCodec :=
       rw [List.append_nil] at h
       rw [h]; rfl⟩
 
-/-- A finite audit family with one enabled message class per challenger coin.
-    Ordinary hashes have full width. A round squeeze for a different class is empty. -/
-private abbrev AuditCoin := Fin (2 ^ 512)
-private def messageClass (bs : Spec.Bytes) : AuditCoin :=
-  ⟨decodeNatLeBytes bs % (2^512), Nat.mod_lt _ (Nat.two_pow_pos _)⟩
 private def auditSqueeze : Spec.Bytes := List.replicate (packedChallengeBits / 8) 0
-private def auditSlotOracle (fr : SuccinctWhirByteFraming) (c : AuditCoin) : Spec.Bytes → Spec.Bytes
-  | 1 :: bs => if (fr.contextC.decodePrefix bs).any (fun p => decide (messageClass p.1.message = c))
-      then auditSqueeze else []
-  | _ => auditSqueeze
-
-private theorem auditOracle_range (fr : SuccinctWhirByteFraming) (c : AuditCoin) (bs : Spec.Bytes) :
-    auditSlotOracle fr c bs = [] ∨ auditSlotOracle fr c bs = auditSqueeze := by
-  unfold auditSlotOracle
-  split
-  · split <;> simp
-  · exact .inr rfl
-
-private theorem auditAcceptedClass (fr : SuccinctWhirByteFraming) (c : AuditCoin)
-    (stmt : Spec.AggregateStatement AggValidatorPk 1) (p : SuccinctWhirAggregateProof)
-    (ha : verifySuccinctWhirAggregate 16 .xmssPoseidon2 fr (auditSlotOracle fr c) stmt p = true) :
-    c = messageClass stmt.message := by
-  by_cases he : c = messageClass stmt.message
-  · exact he
-  simp only [verifySuccinctWhirAggregate, packedEnvelopeOk, Bool.and_eq_true, decide_eq_true_eq] at ha
-  have hv := ha.2
-  have len := ha.1.1.2
-  cases hr : p.rounds with
-  | nil =>
-    have h : (0 : Nat) = (packedProdSched 16).numRounds := by simpa [hr] using len
-    exact absurd h (by decide)
-  | cons m ms =>
-    let ctx := whirContext 16 .xmssPoseidon2 stmt p
-    have hmiss : whirPrefixChallenge fr (auditSlotOracle fr c) ctx [m] = none := by
-      simp [whirPrefixChallenge, whirRoundPreimage, auditSlotOracle, fr.contextC.decodePrefix_append,
-        ctx, whirContext, Ne.symm he, packedChallengeBits]
-    simp [deriveSuccinctFsTranscript, hr, deriveFsAux, hmiss, ctx] at hv
-
-/-- Two possible message classes on each adversary coin cost at most two winning challenger coins. -/
-private theorem twoClassBound {n nA : Nat} (π : Spec.CoinSplit n (2^512) nA) (G : Spec.FinGame n)
-    (a b : Fin nA → AuditCoin)
-    (cover : ∀ ω, G.win ω = true → π.chal ω = a (π.advc ω) ∨ π.chal ω = b (π.advc ω)) :
-    Spec.GameBound G.winProb ⟨2, 2^512, Nat.two_pow_pos _⟩ := by
-  have hCount : G.winCount ≤ nA * 2 := by
-    rw [Spec.FinGame.winCount_eq, π.sampleSum_eq, Spec.sampleSum_comm]
-    refine Nat.le_trans (Spec.sampleSum_le nA _ (fun _ => 2) (fun i => ?_)) (Nat.le_of_eq (Spec.sampleSum_const _ _))
-    let weight := fun (c : AuditCoin) (k : AuditCoin) => if c = k then 1 else 0
-    have le := Spec.sampleSum_le (2^512) (fun c => if G.win (π.pair c i) then 1 else 0)
-      (fun c => weight c (a i) + weight c (b i)) (fun c => by
-        cases hw : G.win (π.pair c i) with
-        | false => exact Nat.zero_le _
-        | true =>
-          have hc := cover (π.pair c i) hw
-          rw [π.chal_pair, π.advc_pair] at hc
-          rcases hc with h | h <;> simp [weight, h])
-    have one (k : AuditCoin) : Spec.sampleSum (2^512) (fun c => weight c k) = 1 := by
-      rw [Spec.sampleSum_eq_qsum]; exact qsum_eq_indicator _ k
-    rw [Spec.sampleSum_add_fn, one, one] at le
-    exact le
-  change G.winCount * (2^512) ≤ 2 * n
-  calc
-    _ ≤ (nA * 2) * 2^512 := Nat.mul_le_mul_right _ hCount
-    _ = 2 * (2^512 * nA) := by ac_rfl
-    _ = 2 * n := congrArg (2 * ·) π.card_eq.symm
-
-private theorem auditPackedSlotBounds (fr : SuccinctWhirByteFraming) (slotC : SlotLeafTableCodec) :
-    PackedSlotGameBounds (nVal := 1) 16 .xmssPoseidon2 .turboShake400 fr (fun _ => none) slotC
-      (auditSlotOracle fr) 1 := by
-  apply packedSlotGameBounds_of_reconstructed
-  intro n nA hp π prover
-  let run := fun ω => Spec.aggregateRun (auditSlotOracle fr (π.chal ω)) 1 (prover (π.advc ω))
-  let accepted : Spec.FinGame n := ⟨hp, fun ω => verifySuccinctWhirAggregate 16 .xmssPoseidon2 fr
-    (auditSlotOracle fr (π.chal ω)) (run ω).1.1 (run ω).1.2⟩
-  let guess := fun (v : Spec.Bytes) i => messageClass (Spec.aggregateRun (fun _ => v) 1 (prover i)).1.1.message
-  have bound := twoClassBound π accepted (guess []) (guess auditSqueeze) (fun ω ha => by
-    have hc := auditAcceptedClass fr (π.chal ω) _ _ ha
-    rcases Spec.aggregateRun_one_two_answers _ [] auditSqueeze (auditOracle_range fr (π.chal ω))
-        (prover (π.advc ω)) with h | h
-    · exact .inl (hc.trans (congrArg (fun r => messageClass r.1.1.message) h))
-    · exact .inr (hc.trans (congrArg (fun r => messageClass r.1.1.message) h)))
-  constructor
-  · apply Spec.GameBound.trans (Spec.event_le_reduction_win _ accepted (fun _ hw => (Bool.and_eq_true_iff.mp hw).1))
-    exact Spec.GameBound.trans bound packedProdQromError_16_covers_two_guesses
-  · apply Spec.GameBound.trans (Spec.event_le_reduction_win _ accepted (fun _ hw => (Bool.and_eq_true_iff.mp hw).1))
-    exact Spec.GameBound.trans bound (by decide +kernel)
 
 /-- In a one-validator tree the recorded leaf digest is the root. -/
 theorem extractRecordedSingleton (profile : AggSigProfile) (fr : SuccinctWhirByteFraming)
@@ -1147,41 +1152,6 @@ theorem extractRecordedSingleton (profile : AggSigProfile) (fr : SuccinctWhirByt
       some (extractSlotNativeSig profile rows 0) := by
   simp [extractSuccinctWhirAggregate, recordedSlotRows, depth, extractOnlineMerkleOpening,
     Nat.lt_one_iff.mp i.isLt, slotC.decode_encode, List.findSome?]
-
-/-- Joint numerical soundness instance. On the enabled message class, one funded query
-    opens any supplied table for the active validator, including an honest signing table. -/
-theorem inhabited_succinctWhirAggregate_extractorSound :
-    ∃ (fr : SuccinctWhirByteFraming) (slotC : SlotLeafTableCodec) (oracle : Fin (2^512) → Spec.Bytes → Spec.Bytes)
-      (c : Fin (2^512)) (submit : List StepOpRow → Spec.Code Spec.byteOracleIface
-        (Spec.AggregateStatement AggValidatorPk 1 × SuccinctWhirAggregateProof)),
-      (∀ rows, let r := Spec.aggregateRun (oracle c) 1 (submit rows)
-        r.1.1.bitmap = 1#1 ∧ r.2.length = 1 ∧
-        extractSuccinctWhirAggregate .xmssPoseidon2 fr (fun _ => none) slotC r.2 r.1.1 r.1.2 0 =
-          some (extractSlotNativeSig .xmssPoseidon2 rows 0) ∧
-        ∀ pre, (whirPrefixChallenge fr (oracle c) (whirContext 16 .xmssPoseidon2 r.1.1 r.1.2) pre).isSome = true) ∧
-      PackedSlotGameBounds (nVal := 1) 16 .xmssPoseidon2 .turboShake400 fr (fun _ => none) slotC oracle 1 ∧
-      Spec.AggregateExtractorSound (Spec.StraightLineExtractor (decodeSlotLeafSig slotC) succinctWhirProofSigs)
-        (verifyAggNativeSig (profileGeom .xmssPoseidon2)) (verifySuccinctWhirAggregate (nVal := 1) 16 .xmssPoseidon2 fr)
-        (extractSuccinctWhirAggregate .xmssPoseidon2 fr (fun _ => none) slotC) oracle 1
-        (toSpecRatBound (RatBound.add (packedProdQromError 16 1) (merkleProfileQromBound .turboShake400 1))) := by
-  let fr := auditWhirFraming
-  let slotC := auditSlotCodec
-  let oracle := auditSlotOracle fr
-  let c := messageClass auditMsg
-  let stmt : Spec.AggregateStatement AggValidatorPk 1 := ⟨fun _ =>
-    deriveAggPublicKey xmssPoseidon2Geom auditSkSeed auditPkSeed, 1#1, auditMsg⟩
-  let leaf := fun rows => slotC.encode 0 .xmssPoseidon2 0 rows
-  let finish := fun d => (stmt, (⟨0, d, [], QuinticGoldilocks.one, [], [], []⟩ : SuccinctWhirAggregateProof))
-  have bounds := auditPackedSlotBounds fr slotC
-  refine ⟨fr, slotC, oracle, c, fun rows => .call (leaf rows) (fun d => .ret (finish d)), ?_, bounds,
-    (succinctWhirAggregate_extractorSound 16 .xmssPoseidon2 .turboShake400 (by decide) (by decide)
-      fr _ slotC oracle 1 (by decide) bounds).1⟩
-  intro rows
-  rw [Spec.aggregateRun_one_call (Nat.le_refl 1) (oracle c) (leaf rows) finish]
-  refine ⟨rfl, rfl, extractRecordedSingleton _ fr rfl slotC _ stmt (finish (oracle c (leaf rows))).2 rows 0, ?_⟩
-  intro pre
-  simp [whirPrefixChallenge, whirRoundPreimage, oracle, auditSlotOracle, fr.contextC.decodePrefix_append,
-    whirContext, finish, stmt, c, auditSqueeze]
 
 /-- Honest single-validator recording and extraction. At depth zero the salted leaf digest
     is itself the root. The signer supplies the valid counters required by XMSS signing. -/
@@ -1335,10 +1305,10 @@ theorem inhabited_tooth_omitted_stage0_queries_or_ood :
     (fun _ => rfl) _ (fun _ _ => auditSqueeze) (fun _ _ => List.length_replicate)
     (fun _ _ => rfl) 1 (Nat.le_refl 1) (by decide)
 
-#verify_kernel packedBridge succinctWhirAggregate_dataRefines_ideal
+#verify_kernel packedBridge
 
-#verify_constructive extractRecordedSingleton auditOracle_range auditAcceptedClass twoClassBound auditPackedSlotBounds
-  inhabited_succinctWhirAggregate_extractorSound inhabited_tooth_omitted_stage0_queries_or_ood
+#verify_constructive extractRecordedSingleton
+  inhabited_tooth_omitted_stage0_queries_or_ood
   deriveFsAux_total contextOnly_extract_none readFrameList_encode inhabited_active_slot_extraction
   slotSignaturesRecovered_reconstructed packedSlotGameBounds_of_reconstructed
   measuredSuccinctWhirAggregate_extractorSound measuredSuccinctWhirAggregate_refines_idealAggregate
@@ -1352,7 +1322,6 @@ theorem inhabited_tooth_omitted_stage0_queries_or_ood :
   succinctWhirAggregate_refines_idealAggregate_128
   succinctWhirAggregate_quorum_euf_cma_reduction tooth_omitted_stage0_queries_or_ood_accepts_bogus_table
 
-#verify_inhabited succinctWhirAggregate_extractorSound inhabited_succinctWhirAggregate_extractorSound
 
 #tooth_pair verifySuccinctWhirAggregate_context vs tooth_changed_message_rejected
 #tooth_pair succinctWhirAggregate_extractorSound vs tooth_omitted_stage0_queries_or_ood_accepts_bogus_table
