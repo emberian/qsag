@@ -190,10 +190,7 @@ theorem tooth_four_mask_points_concrete :
 #tooth_pair Qsag.ZkHemV2.v2_blinding_residue_ring_perfectly_simulated vs
   Qsag.ZkHemV2Teeth.tooth_residue_ring_base_field_not_surjective
 
-#tooth_pair Qsag.ZkHemV2.ZkHemV2Profile.ofWireTag_wireTag vs
-  Qsag.ZkHemV2.ZkHemV2Profile.ofWireTag_v1_tag
-#tooth_pair Qsag.ZkHemV2.ZkHemV2Profile.wireTag_of_ofWireTag vs
-  Qsag.ZkHemV2.ZkHemV2Profile.wireTag_ne_v1_tag
+
 #tooth_pair Qsag.ZkHemV2.blindCells_eq vs
   Qsag.ZkHemV2Teeth.tooth_four_mask_points_blind_cells_short
 

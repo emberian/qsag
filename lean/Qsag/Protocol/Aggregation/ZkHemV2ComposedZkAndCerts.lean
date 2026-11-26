@@ -1,7 +1,7 @@
 module
 public import Qsag.Protocol.Aggregation.ZkHemV2ScheduleCert
 public import Qsag.Protocol.Aggregation.ZkHemV2
-public import Qsag.Protocol.Aggregation.ZkHem
+public import Qsag.Protocol.Aggregation.HemInterpolation
 public import Qsag.Protocol.Aggregation.ClosedWhirSchedule
 public import Qsag.Protocol.Aggregation.ClosedFsQromCompile
 public import Qsag.Math.PolyRing
@@ -106,11 +106,12 @@ private theorem recoverPads_left (u : Nat → E) (hu : lookupPadDet u ≠ zero) 
   exact QuinticGoldilocks.ext (h (i := 0) (by decide)) (h (i := 1) (by decide))
     (h (i := 2) (by decide)) (h (i := 3) (by decide)) (h (i := 4) (by decide))
 
-private def baseElements := List.ofFn (n := goldilocksPrime) (fun i => (⟨i.val,i.isLt⟩ : Goldilocks))
+-- These enumerations occur only in the finite right-inverse proof.
+private noncomputable def baseElements := List.ofFn (n := goldilocksPrime) (fun i => (⟨i.val,i.isLt⟩ : Goldilocks))
 private theorem baseMember (x : Goldilocks) : x ∈ baseElements :=
   List.mem_ofFn.mpr ⟨⟨x.val,x.isLt⟩,rfl⟩
 
-private def quinticElements : List E :=
+private noncomputable def quinticElements : List E :=
   baseElements.flatMap fun a => baseElements.flatMap fun b => baseElements.flatMap fun c =>
     baseElements.flatMap fun d => baseElements.map fun e => ⟨a,b,c,d,e⟩
 

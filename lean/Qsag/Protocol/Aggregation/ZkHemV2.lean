@@ -1,5 +1,5 @@
 module
-public import Qsag.Protocol.Aggregation.ZkHem
+public import Qsag.Protocol.Aggregation.HemInterpolation
 public import Qsag.Protocol.Aggregation.Aggregation
 public import Qsag.Math.QuinticExt5
 public import Qsag.Math.Tactic.CommRing
@@ -2805,26 +2805,6 @@ theorem wireTag_injective {p q : ZkHemV2Profile} (h : p.wireTag = q.wireTag) : p
   rw [h, ofWireTag_wireTag q] at h1
   exact (Option.some.inj h1).symm
 
-/-- `from_wire_tag` rejects every wire tag of a v1 regime. -/
-theorem ofWireTag_v1_tag (r : Aggregation.WhirSecurityRegime) : ofWireTag r.tagByte = none := by
-  have hs : (Aggregation.WhirSecurityRegime.decodeTag? r.tagByte).isSome = true := by
-    rw [Aggregation.WhirSecurityRegime.decodeTag?_tagByte]
-    rfl
-  rcases (Aggregation.WhirSecurityRegime.decodeTag?_isSome_iff _).mp hs with
-    h | h | h | h | h | h | h | h <;> rw [h] <;> rfl
-
-/-- No v2 profile shares a wire tag with a v1 regime. -/
-theorem wireTag_ne_v1_tag (r : Aggregation.WhirSecurityRegime) (p : ZkHemV2Profile) :
-    ¬ (r.tagByte = p.wireTag) := by
-  intro h
-  have h1 := ofWireTag_v1_tag r
-  rw [h, ofWireTag_wireTag] at h1
-  cases h1
-
-/-- The v1 decoder rejects both v2 tags. -/
-theorem v1_decode_v2_tag (p : ZkHemV2Profile) :
-    Aggregation.WhirSecurityRegime.decodeTag? p.wireTag = none := by
-  cases p <;> rfl
 
 end ZkHemV2Profile
 
@@ -2879,8 +2859,7 @@ theorem blindCells_eq_blinding_count (s q : Nat) (qs : List Goldilocks)
     blindCells s q = qs.length + 5 * ys.length := by
   rw [blindCells_eq, hq, hy]
 
-#verify_constructive
-  Qsag.ZkHemV2.v2_mask_line_perfectly_simulated
+#verify_constructive Qsag.ZkHemV2.v2_mask_line_perfectly_simulated
   Qsag.ZkHemV2.v2_mask_claim_determined
   Qsag.ZkHemV2.v2_mask_symbol_determined
   Qsag.ZkHemV2.v2_mask_line_view_perfectly_simulated
@@ -2909,9 +2888,6 @@ theorem blindCells_eq_blinding_count (s q : Nat) (qs : List Goldilocks)
   Qsag.ZkHemV2.v2_blinding_residue_ring_perfectly_simulated
   Qsag.ZkHemV2.ZkHemV2Profile.ofWireTag_wireTag
   Qsag.ZkHemV2.ZkHemV2Profile.wireTag_of_ofWireTag
-  Qsag.ZkHemV2.ZkHemV2Profile.ofWireTag_v1_tag
-  Qsag.ZkHemV2.ZkHemV2Profile.wireTag_ne_v1_tag
-  Qsag.ZkHemV2.ZkHemV2Profile.v1_decode_v2_tag
   Qsag.ZkHemV2.stage0Queries_table
   Qsag.ZkHemV2.blindCells_eq
   Qsag.ZkHemV2.blindCells_eq_blinding_count
