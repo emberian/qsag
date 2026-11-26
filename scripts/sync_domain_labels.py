@@ -52,8 +52,6 @@ SHARED: dict[str, str] = {
                           "recomputes it for its ledger",
     "QSAG.SEED_BURN.V1": "durable seed-burn ledger tag: qsag-core (pcg_dense) and the "
                          "qsag-quorum durable custody open the same ledger format",
-    "QSAG.ZKHEM2.TREE/v1": "zk-Hem v2 Canopy tree customization: qsag-agg and the "
-                           "qsag-ass2 enclave firmware",
     "QSAGFNOD": "Poseidon2 FORS node domain: one constant in qsag-agg and qsag-accel",
     "QSAGHMS1": "stateful H_msg domain: qsag-agg signature, qsag-core Poseidon2 MPC",
     "QSAGMRKL": "Poseidon2 Merkle node domain: qsag-agg, qsag-accel and qsag-core",

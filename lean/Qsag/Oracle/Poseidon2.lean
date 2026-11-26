@@ -843,25 +843,45 @@ theorem applyME_zero : applyME state12Zero = state12Zero := by
   rw [applyMEStd_zero]
   rfl
 
+private theorem transpose4x3_add (a b : Poseidon2State12) :
+    poseidon2Transpose4x3 (state12Add a b) =
+    state12Add (poseidon2Transpose4x3 a) (poseidon2Transpose4x3 b) := rfl
+
+private theorem transpose3x4_add (a b : Poseidon2State12) :
+    poseidon2Transpose3x4 (state12Add a b) =
+    state12Add (poseidon2Transpose3x4 a) (poseidon2Transpose3x4 b) := rfl
+
+private theorem compose_preserves_add {α : Type} (add : α → α → α) (f g : α → α)
+    (hf : ∀ x y, f (add x y) = add (f x) (f y))
+    (hg : ∀ x y, g (add x y) = add (g x) (g y)) (x y : α) :
+    f (g (add x y)) = add (f (g x)) (f (g y)) :=
+  (congrArg f (hg x y)).trans (hf _ _)
+
 theorem applyME_add (a b : Poseidon2State12) :
-    applyME (state12Add a b) = state12Add (applyME a) (applyME b) := by
-  have ht : poseidon2Transpose4x3 (state12Add a b) =
-      state12Add (poseidon2Transpose4x3 a) (poseidon2Transpose4x3 b) := rfl
-  have hu (x y : Poseidon2State12) : poseidon2Transpose3x4 (state12Add x y) =
-      state12Add (poseidon2Transpose3x4 x) (poseidon2Transpose3x4 y) := rfl
-  exact (congrArg (fun x => poseidon2Transpose3x4 (applyMEStd x)) ht).trans
-    ((congrArg poseidon2Transpose3x4
-      (applyMEStd_add (poseidon2Transpose4x3 a) (poseidon2Transpose4x3 b))).trans (hu _ _))
+    applyME (state12Add a b) = state12Add (applyME a) (applyME b) :=
+  compose_preserves_add state12Add poseidon2Transpose3x4 (fun x => applyMEStd (poseidon2Transpose4x3 x))
+    transpose3x4_add (compose_preserves_add state12Add applyMEStd poseidon2Transpose4x3 applyMEStd_add transpose4x3_add) a b
+
+private theorem transpose4x3_scale (c : Goldilocks) (a : Poseidon2State12) :
+    poseidon2Transpose4x3 (state12Scale c a) =
+    state12Scale c (poseidon2Transpose4x3 a) := rfl
+
+private theorem transpose3x4_scale (c : Goldilocks) (a : Poseidon2State12) :
+    poseidon2Transpose3x4 (state12Scale c a) =
+    state12Scale c (poseidon2Transpose3x4 a) := rfl
+
+private theorem compose_commutes {α : Type} (scale f g : α → α)
+    (hf : ∀ x, f (scale x) = scale (f x))
+    (hg : ∀ x, g (scale x) = scale (g x)) (x : α) :
+    f (g (scale x)) = scale (f (g x)) :=
+  (congrArg f (hg x)).trans (hf _)
 
 theorem applyME_scale (c : Goldilocks) (a : Poseidon2State12) :
-    applyME (state12Scale c a) = state12Scale c (applyME a) := by
-  have ht : poseidon2Transpose4x3 (state12Scale c a) =
-      state12Scale c (poseidon2Transpose4x3 a) := rfl
-  have hu (x : Poseidon2State12) : poseidon2Transpose3x4 (state12Scale c x) =
-      state12Scale c (poseidon2Transpose3x4 x) := rfl
-  exact (congrArg (fun x => poseidon2Transpose3x4 (applyMEStd x)) ht).trans
-    ((congrArg poseidon2Transpose3x4
-      (applyMEStd_scale c (poseidon2Transpose4x3 a))).trans (hu _))
+    applyME (state12Scale c a) = state12Scale c (applyME a) :=
+  compose_commutes (state12Scale c) poseidon2Transpose3x4
+    (fun x => applyMEStd (poseidon2Transpose4x3 x)) (transpose3x4_scale c)
+    (compose_commutes (state12Scale c) applyMEStd poseidon2Transpose4x3
+      (applyMEStd_scale c) (transpose4x3_scale c)) a
 
 theorem applyMI_zero : applyMI state12Zero = state12Zero := by
   unfold applyMI state12Zero state12Sum lane4Zero lane4Sum
