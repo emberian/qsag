@@ -1309,3 +1309,952 @@ theorem stepOpConstraints_iff_guard_and_next (kind : StepConstraintKind) (c0 : G
 
 /-- Selector-explicit 256-column `Hem` AIR row: pairs a `StepOpRow` (`256` witness columns)
     with explicit field-valued `StepOp` selectors `sels` (`52` selectors over `allStepConstraintKinds`). -/
+structure HemStepOpSelectorRow where
+  row  : StepOpRow
+  sels : List Goldilocks
+  deriving DecidableEq, Repr
+
+/-- Index of a `StepConstraintKind` inside `allStepConstraintKinds`. -/
+def stepConstraintKindIdx (kind : StepConstraintKind) : Nat :=
+  allStepConstraintKinds.idxOf kind
+
+/-- Canonical one-hot selector vector for `kind` over `allStepConstraintKinds`. -/
+def oneHotStepSelectors (kind : StepConstraintKind) : List Goldilocks :=
+  allStepConstraintKinds.map fun k => if k == kind then Goldilocks.one else Goldilocks.zero
+
+/-- Selector booleanity residuals `s_k * (1 - s_k)` for all `k < allStepConstraintKinds.length`. -/
+def hemStepSelectorBoolResiduals (sels : List Goldilocks) : List Goldilocks :=
+  (List.range allStepConstraintKinds.length).map fun k =>
+    stepBoolCheck (sels.getD k Goldilocks.zero)
+
+/-- Selector pairwise-orthogonality residuals `s_i * s_j` for all `0 ≤ i < j < allStepConstraintKinds.length`. -/
+def hemStepSelectorOrthResiduals (sels : List Goldilocks) : List Goldilocks :=
+  (List.range allStepConstraintKinds.length).flatMap fun i =>
+    (List.range i).map fun j =>
+      sels.getD j Goldilocks.zero *ₚ sels.getD i Goldilocks.zero
+
+/-- Scheduled opcode pin residuals:
+    - On an inactive slot (`none`), every selector is pinned to `0`.
+    - On an active slot (`some _`), the scheduled selector `s_{uid_t}` is pinned to `1`. -/
+def hemStepSchedulePinResiduals (profile : AggSigProfile) (slot : StepOpSlot) (t : Nat)
+    (sels : List Goldilocks) : List Goldilocks :=
+  match slot with
+  | none =>
+    (List.range allStepConstraintKinds.length).map fun k => sels.getD k Goldilocks.zero
+  | some _ =>
+    let kind := (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1
+    [Goldilocks.one -ₚ sels.getD (stepConstraintKindIdx kind) Goldilocks.zero]
+
+/-- Selector-muxed opcode guard & next-state transition residuals on row `t`:
+    - Each `kind_k`'s pure pre-state guard list is gated by `s_k * g = 0`.
+    - On an active slot, each `next` limb satisfies `x.next j = Σ_k s_k * stepOpExpectedNext kind_k c0 x j`. -/
+def hemStepMuxedInputResiduals (c0 : Goldilocks) (x : StepOpRowInputs)
+    (sels : List Goldilocks) : List Goldilocks :=
+  let guardRes :=
+    (List.range allStepConstraintKinds.length).flatMap fun k =>
+      let sk := sels.getD k Goldilocks.zero
+      let kind := allStepConstraintKinds.getD k .idle
+      (stepOpGuardResiduals kind c0 x).map (fun g => sk *ₚ g)
+  let nextRes :=
+    (List.range 44).map fun j =>
+      x.next j -ₚ
+        (List.range allStepConstraintKinds.length).foldl
+          (fun acc k =>
+            acc +ₚ (sels.getD k Goldilocks.zero *ₚ
+              stepOpExpectedNext (allStepConstraintKinds.getD k .idle) c0 x j))
+          Goldilocks.zero
+  guardRes ++ nextRes
+
+/-- Read the shared mux evaluator's inputs from the committed row. -/
+def hemStepMuxedOpResiduals (slot : StepOpSlot) (c0 : Goldilocks) (row : StepOpRow)
+    (sels : List Goldilocks) : List Goldilocks :=
+  match slot with
+  | none => []
+  | some pub => hemStepMuxedInputResiduals c0 (stepOpRowInputs pub row) sels
+
+/-- Full intra-row residuals of a selector-explicit `HemStepOpSelectorRow` (including `s_i * s_j = 0`). -/
+def hemStepSelectorRowResiduals (profile : AggSigProfile) (slot : StepOpSlot) (t : Nat)
+    (sr : HemStepOpSelectorRow) : List Goldilocks :=
+  let c0 := Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).2
+  (stepOpPermTrace sr.row).2 ++
+  stepOpBoundaryResiduals (stepOpRowsPerSigner profile) t sr.row ++
+  hemStepSelectorBoolResiduals sr.sels ++
+  hemStepSelectorOrthResiduals sr.sels ++
+  hemStepSchedulePinResiduals profile slot t sr.sels ++
+  hemStepMuxedOpResiduals slot c0 sr.row sr.sels
+
+/-- Mutated intra-row residuals omitting ONLY pairwise selector orthogonality `s_i * s_j = 0` (for `#tooth`). -/
+def hemStepSelectorRowResidualsOmitOrthogonality (profile : AggSigProfile) (slot : StepOpSlot)
+    (t : Nat) (sr : HemStepOpSelectorRow) : List Goldilocks :=
+  let c0 := Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).2
+  (stepOpPermTrace sr.row).2 ++
+  stepOpBoundaryResiduals (stepOpRowsPerSigner profile) t sr.row ++
+  hemStepSelectorBoolResiduals sr.sels ++
+  hemStepSchedulePinResiduals profile slot t sr.sels ++
+  hemStepMuxedOpResiduals slot c0 sr.row sr.sels
+
+def hemStepSelectorIntraFrom (profile : AggSigProfile) (slots : List StepOpSlot) :
+    Nat → List HemStepOpSelectorRow → List Goldilocks
+  | _, [] => []
+  | g, sr :: rest =>
+    hemStepSelectorRowResiduals profile (slots.getD (g / stepOpRowsPerSigner profile) none)
+      (g % stepOpRowsPerSigner profile) sr ++
+    hemStepSelectorIntraFrom profile slots (g + 1) rest
+
+def hemStepSelectorIntraOmitOrthFrom (profile : AggSigProfile) (slots : List StepOpSlot) :
+    Nat → List HemStepOpSelectorRow → List Goldilocks
+  | _, [] => []
+  | g, sr :: rest =>
+    hemStepSelectorRowResidualsOmitOrthogonality profile
+      (slots.getD (g / stepOpRowsPerSigner profile) none)
+      (g % stepOpRowsPerSigner profile) sr ++
+    hemStepSelectorIntraOmitOrthFrom profile slots (g + 1) rest
+
+/-- Full selector-explicit 256-column `Hem` AIR validity predicate. -/
+def hemStepTraceValid (profile : AggSigProfile) (slots : List StepOpSlot)
+    (srows : List HemStepOpSelectorRow) : Bool :=
+  decide (0 < slots.length) &&
+  decide (srows.length = slots.length * stepOpRowsPerSigner profile) &&
+  srows.all (fun sr => sr.row.wellShaped && decide (sr.sels.length = allStepConstraintKinds.length)) &&
+  allZeroGoldilocks (hemStepSelectorIntraFrom profile slots 0 srows) &&
+  allZeroGoldilocks (stepOp256ShiftResiduals (srows.map HemStepOpSelectorRow.row))
+
+/-- Mutated selector-explicit 256-column `Hem` AIR validity predicate omitting ONLY `s_i * s_j = 0`. -/
+def hemStepTraceValidOmitOrthogonality (profile : AggSigProfile) (slots : List StepOpSlot)
+    (srows : List HemStepOpSelectorRow) : Bool :=
+  decide (0 < slots.length) &&
+  decide (srows.length = slots.length * stepOpRowsPerSigner profile) &&
+  srows.all (fun sr => sr.row.wellShaped && decide (sr.sels.length = allStepConstraintKinds.length)) &&
+  allZeroGoldilocks (hemStepSelectorIntraOmitOrthFrom profile slots 0 srows) &&
+  allZeroGoldilocks (stepOp256ShiftResiduals (srows.map HemStepOpSelectorRow.row))
+
+/-- Attach canonical scheduled selectors to a `StepOpRow` table. -/
+def attachHonestStepSelectorsFrom (profile : AggSigProfile) (slots : List StepOpSlot) :
+    Nat → List StepOpRow → List HemStepOpSelectorRow
+  | _, [] => []
+  | g, row :: rest =>
+    let slot := slots.getD (g / stepOpRowsPerSigner profile) none
+    let t := g % stepOpRowsPerSigner profile
+    let sels := match slot with
+      | none => List.replicate allStepConstraintKinds.length Goldilocks.zero
+      | some _ =>
+        oneHotStepSelectors (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1
+    { row := row, sels := sels } :: attachHonestStepSelectorsFrom profile slots (g + 1) rest
+
+def attachHonestStepSelectors (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) : List HemStepOpSelectorRow :=
+  attachHonestStepSelectorsFrom profile slots 0 rows
+
+private theorem allZero_orth_iff (sels : List Goldilocks) :
+    allZeroGoldilocks (hemStepSelectorOrthResiduals sels) = true ↔
+      ∀ i j, j < i → i < allStepConstraintKinds.length →
+        sels.getD j Goldilocks.zero *ₚ sels.getD i Goldilocks.zero = Goldilocks.zero := by
+  simp only [hemStepSelectorOrthResiduals, allZeroGoldilocks_eq]
+  simp only [List.all_flatMap, List.all_map, List.all_eq_true, List.mem_range,
+    Function.comp_apply, beq_iff_eq]
+  exact ⟨fun h i j hji hi => h i hi j hji, fun h i hi j hji => h i j hji hi⟩
+
+private theorem nodup_getElem_inj {α : Type} :
+    ∀ {xs : List α}, xs.Nodup → ∀ {i j : Nat} (hi : i < xs.length) (hj : j < xs.length),
+      xs[i]'hi = xs[j]'hj → i = j
+  | [], _, i, _, hi, _, _ => False.elim (Nat.not_lt_zero i hi)
+  | x :: xs, hNd, 0, 0, _, _, _ => rfl
+  | x :: xs, hNd, 0, j + 1, _, hj, hEq => by
+    obtain ⟨hNotMem, _⟩ := List.nodup_cons.mp hNd
+    simp only [List.getElem_cons_zero, List.getElem_cons_succ] at hEq
+    exact False.elim (hNotMem (hEq ▸ List.getElem_mem (Nat.lt_of_succ_lt_succ hj)))
+  | x :: xs, hNd, i + 1, 0, hi, _, hEq => by
+    obtain ⟨hNotMem, _⟩ := List.nodup_cons.mp hNd
+    simp only [List.getElem_cons_zero, List.getElem_cons_succ] at hEq
+    exact False.elim (hNotMem (hEq.symm ▸ List.getElem_mem (Nat.lt_of_succ_lt_succ hi)))
+  | x :: xs, hNd, i + 1, j + 1, hi, hj, hEq => by
+    obtain ⟨_, hNdTail⟩ := List.nodup_cons.mp hNd
+    simp only [List.getElem_cons_succ] at hEq
+    exact congrArg Nat.succ
+      (nodup_getElem_inj hNdTail (Nat.lt_of_succ_lt_succ hi) (Nat.lt_of_succ_lt_succ hj) hEq)
+
+section SelectorEquiv
+
+attribute [local irreducible] stepOpGuardResiduals stepOpExpectedNext
+
+private theorem oneHot_getD_eq (kind : StepConstraintKind) (hMem : kind ∈ allStepConstraintKinds)
+    (k : Nat) (hk : k < allStepConstraintKinds.length) :
+    (oneHotStepSelectors kind).getD k Goldilocks.zero =
+      if k = stepConstraintKindIdx kind then Goldilocks.one else Goldilocks.zero := by
+  unfold oneHotStepSelectors stepConstraintKindIdx
+  have hkMap : k < (allStepConstraintKinds.map fun x =>
+      if x == kind then Goldilocks.one else Goldilocks.zero).length := by simp [hk]
+  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hkMap, Option.getD_some, List.getElem_map]
+  have hIdxLt : allStepConstraintKinds.idxOf kind < allStepConstraintKinds.length :=
+    List.idxOf_lt_length_of_mem hMem
+  by_cases hEqIdx : k = allStepConstraintKinds.idxOf kind
+  · subst hEqIdx
+    have hAt : allStepConstraintKinds[allStepConstraintKinds.idxOf kind]'hIdxLt = kind :=
+      List.getElem_idxOf hIdxLt
+    simp [hAt]
+  · have hNeElem : allStepConstraintKinds[k]'hk ≠ kind := by
+      intro hSame
+      apply hEqIdx
+      have hAt : allStepConstraintKinds[allStepConstraintKinds.idxOf kind]'hIdxLt = kind :=
+        List.getElem_idxOf hIdxLt
+      exact nodup_getElem_inj allStepConstraintKinds_nodup hk hIdxLt (hSame.trans hAt.symm)
+    simp [beq_false_of_ne hNeElem, hEqIdx]
+
+/-- **One-Hot Selector Collapse (`hemStepSelector_oneHot_collapse`)**:
+    Under pairwise orthogonality `s_i * s_j = 0` and scheduled pin `1 - s_{uid} = 0`,
+    `sels` is forced to equal `oneHotStepSelectors kind`. -/
+theorem hemStepSelector_oneHot_collapse (kind : StepConstraintKind) (sels : List Goldilocks)
+    (hMem : kind ∈ allStepConstraintKinds)
+    (hLen : sels.length = allStepConstraintKinds.length)
+    (hOrth : allZeroGoldilocks (hemStepSelectorOrthResiduals sels) = true)
+    (hPin : Goldilocks.one -ₚ sels.getD (stepConstraintKindIdx kind) Goldilocks.zero = Goldilocks.zero) :
+    sels = oneHotStepSelectors kind := by
+  have hOrthFn := (allZero_orth_iff sels).mp hOrth
+  have hUidOne : sels.getD (stepConstraintKindIdx kind) Goldilocks.zero = Goldilocks.one :=
+    (g_sub_eq_zero_iff.mp hPin).symm
+  have hUidLt : stepConstraintKindIdx kind < allStepConstraintKinds.length :=
+    List.idxOf_lt_length_of_mem hMem
+  apply List.ext_getElem
+  · rw [hLen, oneHotStepSelectors, List.length_map]
+  · intro k hk1 hk2
+    have hkLt : k < allStepConstraintKinds.length := hLen ▸ hk1
+    have hLhs : sels[k]'hk1 = sels.getD k Goldilocks.zero := by
+      rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hk1, Option.getD_some]
+    have hRhs : (oneHotStepSelectors kind)[k]'hk2 =
+        (oneHotStepSelectors kind).getD k Goldilocks.zero := by
+      rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hk2, Option.getD_some]
+    rw [hLhs, hRhs, oneHot_getD_eq kind hMem k hkLt]
+    by_cases hEq : k = stepConstraintKindIdx kind
+    · subst hEq; simpa [List.getD_eq_getElem?_getD] using hUidOne
+    · simp only [hEq, ↓reduceIte]
+      by_cases hLt : k < stepConstraintKindIdx kind
+      · have hProd := hOrthFn (stepConstraintKindIdx kind) k hLt hUidLt
+        rw [hUidOne, g_mul_one] at hProd
+        exact hProd
+      · have hGt : stepConstraintKindIdx kind < k := by omega
+        have hProd := hOrthFn k (stepConstraintKindIdx kind) hGt hkLt
+        rw [hUidOne, g_one_mul] at hProd
+        exact hProd
+
+private theorem foldl_oneHot_sum (n uid : Nat) (hUid : uid < n) (f : Nat → Goldilocks) :
+    (List.range n).foldl
+      (fun acc k => acc +ₚ ((if k = uid then Goldilocks.one else Goldilocks.zero) *ₚ f k))
+      Goldilocks.zero = f uid := by
+  induction n with
+  | zero => omega
+  | succ m ih =>
+    rw [List.range_succ, List.foldl_append, List.foldl_cons, List.foldl_nil]
+    by_cases hEq : m = uid
+    · subst hEq
+      have hZeroPre : ∀ (ls : List Nat), (∀ k ∈ ls, k ≠ m) →
+          ls.foldl (fun acc k => acc +ₚ ((if k = m then Goldilocks.one else Goldilocks.zero) *ₚ f k))
+            Goldilocks.zero = Goldilocks.zero := by
+        intro ls hNe
+        induction ls with
+        | nil => rfl
+        | cons a as ihL =>
+          have haNe : a ≠ m := hNe a (List.mem_cons_self ..)
+          simp only [List.foldl_cons, haNe, ↓reduceIte, g_zero_mul, g_add_zero]
+          exact ihL (fun x hx => hNe x (List.mem_cons_of_mem _ hx))
+      rw [hZeroPre (List.range m) (fun k hk => Nat.ne_of_lt (List.mem_range.mp hk))]
+      simp only [↓reduceIte, g_one_mul, g_zero_add]
+    · have hLtM : uid < m := by omega
+      rw [ih hLtM]
+      simp only [hEq, ↓reduceIte, g_zero_mul, g_add_zero]
+
+private theorem getD_rep_zero :
+    ∀ (n j : Nat), (List.replicate n Goldilocks.zero).getD j Goldilocks.zero = Goldilocks.zero
+  | 0, _ => rfl
+  | _ + 1, 0 => rfl
+  | n + 1, j + 1 => getD_rep_zero n j
+
+private theorem foldl_congr_on {A B : Type} (f g : B → A → B) :
+    ∀ (xs : List A) (init : B), (∀ a ∈ xs, ∀ acc, f acc a = g acc a) →
+      xs.foldl f init = xs.foldl g init
+  | [], _, _ => rfl
+  | a :: rest, init, h =>
+    (congrArg (fun acc => rest.foldl f acc) (h a (List.mem_cons_self ..) init)).trans
+      (foldl_congr_on f g rest (g init a) (fun b hb acc => h b (List.mem_cons_of_mem a hb) acc))
+
+private theorem foldl_selector_sum (n uid : Nat) (hUid : uid < n)
+    (sel f : Nat → Goldilocks)
+    (hSel : ∀ k < n, sel k = if k = uid then Goldilocks.one else Goldilocks.zero) :
+    (List.range n).foldl (fun acc k => acc +ₚ (sel k *ₚ f k)) Goldilocks.zero = f uid := by
+  have h := foldl_congr_on
+    (fun acc k => acc +ₚ (sel k *ₚ f k))
+    (fun acc k => acc +ₚ ((if k = uid then Goldilocks.one else Goldilocks.zero) *ₚ f k))
+    (List.range n) Goldilocks.zero
+    (fun k hk acc => congrArg (fun v => acc +ₚ (v *ₚ f k)) (hSel k (List.mem_range.mp hk)))
+  exact h.trans (foldl_oneHot_sum n uid hUid f)
+
+private theorem hemStep_oneHot_fold (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (hMem : kind ∈ allStepConstraintKinds) (j : Nat) :
+    (List.range allStepConstraintKinds.length).foldl
+      (fun acc k => acc +ₚ ((oneHotStepSelectors kind).getD k Goldilocks.zero *ₚ
+        stepOpExpectedNext (allStepConstraintKinds.getD k .idle) c0 x j))
+      Goldilocks.zero = stepOpExpectedNext kind c0 x j := by
+  have hUidLt : stepConstraintKindIdx kind < allStepConstraintKinds.length := by
+    unfold stepConstraintKindIdx
+    exact List.idxOf_lt_length_of_mem hMem
+  have hKindAtUid : allStepConstraintKinds.getD (stepConstraintKindIdx kind) .idle = kind := by
+    have hIdxLt : allStepConstraintKinds.idxOf kind < allStepConstraintKinds.length :=
+      List.idxOf_lt_length_of_mem hMem
+    unfold stepConstraintKindIdx
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hIdxLt, Option.getD_some]
+    exact List.getElem_idxOf hIdxLt
+  have h := foldl_selector_sum allStepConstraintKinds.length (stepConstraintKindIdx kind)
+    hUidLt (fun k => (oneHotStepSelectors kind).getD k Goldilocks.zero)
+    (fun k => stepOpExpectedNext (allStepConstraintKinds.getD k .idle) c0 x j)
+    (oneHot_getD_eq kind hMem)
+  exact h.trans (congrArg (fun k => stepOpExpectedNext k c0 x j) hKindAtUid)
+
+private theorem hemStep_oneHot_guards (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (hMem : kind ∈ allStepConstraintKinds) :
+    allZeroGoldilocks ((List.range allStepConstraintKinds.length).flatMap fun k =>
+      (stepOpGuardResiduals (allStepConstraintKinds.getD k .idle) c0 x).map
+        (fun g => (oneHotStepSelectors kind).getD k Goldilocks.zero *ₚ g)) = true ↔
+    allZeroGoldilocks (stepOpGuardResiduals kind c0 x) = true := by
+  have hUidLt : stepConstraintKindIdx kind < allStepConstraintKinds.length := by
+    unfold stepConstraintKindIdx
+    exact List.idxOf_lt_length_of_mem hMem
+  have hKindAtUid : allStepConstraintKinds.getD (stepConstraintKindIdx kind) .idle = kind := by
+    have hIdxLt : allStepConstraintKinds.idxOf kind < allStepConstraintKinds.length :=
+      List.idxOf_lt_length_of_mem hMem
+    unfold stepConstraintKindIdx
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hIdxLt, Option.getD_some]
+    exact List.getElem_idxOf hIdxLt
+  constructor
+  · intro hGuards
+    simp only [allZeroGoldilocks_eq] at hGuards ⊢
+    rw [List.all_flatMap, List.all_eq_true] at hGuards
+    have hAt := hGuards (stepConstraintKindIdx kind) (List.mem_range.mpr hUidLt)
+    rw [oneHot_getD_eq kind hMem _ hUidLt] at hAt
+    simp only [↓reduceIte, hKindAtUid, List.all_map] at hAt
+    have hComp : ((fun x => x == Goldilocks.zero) ∘ fun g => Goldilocks.one *ₚ g) =
+        (fun x => x == Goldilocks.zero) := by
+      funext g; simp only [Function.comp, g_one_mul]
+    rwa [hComp] at hAt
+  · intro hGuardOk
+    simp only [allZeroGoldilocks_eq] at hGuardOk ⊢
+    rw [List.all_flatMap, List.all_eq_true]
+    intro k hkRange
+    have hk := List.mem_range.mp hkRange
+    rw [oneHot_getD_eq kind hMem k hk, List.all_map]
+    by_cases hEq : k = stepConstraintKindIdx kind
+    · simp only [hEq, ↓reduceIte, hKindAtUid]
+      have hComp : ((fun x => x == Goldilocks.zero) ∘ fun g => Goldilocks.one *ₚ g) =
+          (fun x => x == Goldilocks.zero) := by
+        funext g; simp only [Function.comp, g_one_mul]
+      rwa [hComp]
+    · simp only [hEq, ↓reduceIte]
+      have hComp0 : ((fun x => x == Goldilocks.zero) ∘ fun g => Goldilocks.zero *ₚ g) =
+          (fun _ => true) := by
+        funext g; simp only [Function.comp, g_zero_mul, beq_self_eq_true]
+      rw [hComp0]
+      exact List.all_eq_true.mpr (fun _ _ => rfl)
+
+private theorem hemStep_oneHot_mux (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (hMem : kind ∈ allStepConstraintKinds)
+    (hValid : kind.validSlot = true) :
+    allZeroGoldilocks (hemStepMuxedInputResiduals c0 x (oneHotStepSelectors kind)) = true ↔
+    allZeroGoldilocks (stepOpConstraints kind c0 x) = true := by
+  unfold hemStepMuxedInputResiduals
+  rw [allZeroGoldilocks_append, Bool.and_eq_true, hemStep_oneHot_guards kind c0 x hMem,
+    stepOpConstraints_iff_guard_and_next kind c0 x hValid]
+  apply and_congr_right'
+  rw [allZero_map_iff]
+  constructor
+  · intro h j hj
+    exact (g_sub_eq_zero_iff.mp (h j hj)).trans (hemStep_oneHot_fold kind c0 x hMem j)
+  · intro h j hj
+    exact g_sub_eq_zero_iff.mpr ((h j hj).trans (hemStep_oneHot_fold kind c0 x hMem j).symm)
+
+private theorem hemStep_oneHot_selectors (kind : StepConstraintKind)
+    (hMem : kind ∈ allStepConstraintKinds) :
+    allZeroGoldilocks (hemStepSelectorBoolResiduals (oneHotStepSelectors kind)) = true ∧
+    allZeroGoldilocks (hemStepSelectorOrthResiduals (oneHotStepSelectors kind)) = true ∧
+    Goldilocks.one -ₚ (oneHotStepSelectors kind).getD (stepConstraintKindIdx kind) Goldilocks.zero =
+      Goldilocks.zero := by
+  have hUidLt : stepConstraintKindIdx kind < allStepConstraintKinds.length := by
+    unfold stepConstraintKindIdx
+    exact List.idxOf_lt_length_of_mem hMem
+  refine ⟨?_, ?_, ?_⟩
+  · unfold hemStepSelectorBoolResiduals
+    rw [allZero_map_iff]; intro k hk
+    rw [oneHot_getD_eq kind hMem k hk]
+    by_cases hEq : k = stepConstraintKindIdx kind
+    · simp only [hEq, ↓reduceIte]
+      exact (stepBoolCheck_eq_zero_iff _).mpr (.inr rfl)
+    · simp only [hEq, ↓reduceIte]
+      exact (stepBoolCheck_eq_zero_iff _).mpr (.inl rfl)
+  · rw [allZero_orth_iff]; intro i j hji hi
+    rw [oneHot_getD_eq kind hMem j (Nat.lt_trans hji hi), oneHot_getD_eq kind hMem i hi]
+    by_cases hjU : j = stepConstraintKindIdx kind
+    · have hiNe : i ≠ stepConstraintKindIdx kind := by omega
+      simp only [hjU, hiNe, ↓reduceIte]
+      exact g_mul_zero _
+    · simp only [hjU, ↓reduceIte]
+      exact g_zero_mul _
+  · rw [oneHot_getD_eq kind hMem _ hUidLt]
+    simp only [↓reduceIte]
+    exact g_sub_self _
+
+private theorem hemStepSelectorInputs_iff (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (sels : List Goldilocks) (permRes boundaryRes : List Goldilocks)
+    (hMem : kind ∈ allStepConstraintKinds) (hValid : kind.validSlot = true)
+    (hLen : sels.length = allStepConstraintKinds.length) :
+    allZeroGoldilocks
+        (permRes ++
+         boundaryRes ++
+         hemStepSelectorBoolResiduals sels ++
+         hemStepSelectorOrthResiduals sels ++
+         [Goldilocks.one -ₚ sels.getD (stepConstraintKindIdx kind) Goldilocks.zero] ++
+         hemStepMuxedInputResiduals c0 x sels) = true ↔
+      allZeroGoldilocks
+        (permRes ++
+         boundaryRes ++
+         stepOpConstraints kind c0 x) = true ∧
+      sels = oneHotStepSelectors kind := by
+  have hSingle : ∀ r : Goldilocks, allZeroGoldilocks [r] = (r == Goldilocks.zero) := by
+    intro r; simp [allZeroGoldilocks_eq]
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, hSingle, beq_iff_eq]
+  constructor
+  · rintro ⟨⟨⟨⟨⟨hGA, hBnd⟩, _⟩, hOrth⟩, hPin⟩, hMux⟩
+    have hEq := hemStepSelector_oneHot_collapse kind sels hMem hLen hOrth hPin
+    rw [hEq] at hMux
+    exact ⟨⟨⟨hGA, hBnd⟩, (hemStep_oneHot_mux kind c0 x hMem hValid).mp hMux⟩, hEq⟩
+  · rintro ⟨⟨⟨hGA, hBnd⟩, hOp⟩, hEq⟩
+    rw [hEq]
+    obtain ⟨hBool, hOrth, hPin⟩ := hemStep_oneHot_selectors kind hMem
+    exact ⟨⟨⟨⟨⟨hGA, hBnd⟩, hBool⟩, hOrth⟩, hPin⟩,
+      (hemStep_oneHot_mux kind c0 x hMem hValid).mpr hOp⟩
+
+
+private theorem hemStepSelectorRowActive_iff (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (rowsPerSigner t : Nat) (sr : HemStepOpSelectorRow)
+    (hMem : kind ∈ allStepConstraintKinds) (hValid : kind.validSlot = true)
+    (hLen : sr.sels.length = allStepConstraintKinds.length) :
+    allZeroGoldilocks
+        ((stepOpPermTrace sr.row).2 ++
+         stepOpBoundaryResiduals rowsPerSigner t sr.row ++
+         hemStepSelectorBoolResiduals sr.sels ++
+         hemStepSelectorOrthResiduals sr.sels ++
+         [Goldilocks.one -ₚ sr.sels.getD (stepConstraintKindIdx kind) Goldilocks.zero] ++
+         hemStepMuxedOpResiduals (some pub) c0 sr.row sr.sels) = true ↔
+      allZeroGoldilocks
+        ((stepOpPermTrace sr.row).2 ++
+         stepOpBoundaryResiduals rowsPerSigner t sr.row ++
+         stepOpConstraints kind c0 (stepOpRowInputs pub sr.row)) = true ∧
+      sr.sels = oneHotStepSelectors kind :=
+  hemStepSelectorInputs_iff kind c0 (stepOpRowInputs pub sr.row) sr.sels
+    (stepOpPermTrace sr.row).2 (stepOpBoundaryResiduals rowsPerSigner t sr.row)
+    hMem hValid hLen
+
+private theorem hemStepSelectorRowResiduals_iff (profile : AggSigProfile) (slot : StepOpSlot)
+    (t : Nat) (sr : HemStepOpSelectorRow)
+    (hLen : sr.sels.length = allStepConstraintKinds.length) :
+    allZeroGoldilocks (hemStepSelectorRowResiduals profile slot t sr) = true ↔
+      allZeroGoldilocks (stepOp256RowResiduals profile slot t sr.row) = true ∧
+      sr.sels = (match slot with
+        | none => List.replicate allStepConstraintKinds.length Goldilocks.zero
+        | some _ =>
+          oneHotStepSelectors (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1) := by
+  simp only [hemStepSelectorRowResiduals]
+  cases slot with
+  | none =>
+    simp only [stepOp256RowResiduals.public_eqs]
+    unfold hemStepSchedulePinResiduals hemStepMuxedOpResiduals
+    simp only [List.append_nil, allZeroGoldilocks_append, Bool.and_eq_true]
+    constructor
+    · rintro ⟨⟨⟨⟨hGA, hBnd⟩, _⟩, _⟩, hPin⟩
+      have hZeroAll := (allZero_map_iff allStepConstraintKinds.length
+        (fun k => sr.sels.getD k Goldilocks.zero)).mp hPin
+      refine ⟨⟨hGA, hBnd⟩, ?_⟩
+      apply List.ext_getElem
+      · rw [hLen, List.length_replicate]
+      · intro k hk1 _
+        have hGet : sr.sels[k]'hk1 = sr.sels.getD k Goldilocks.zero := by
+          rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hk1, Option.getD_some]
+        rw [hGet, List.getElem_replicate]
+        exact hZeroAll k (hLen ▸ hk1)
+    · rintro ⟨⟨hGA, hBnd⟩, hSelsEq⟩
+      refine ⟨⟨⟨⟨hGA, hBnd⟩, ?_⟩, ?_⟩, ?_⟩
+      · rw [hSelsEq]; unfold hemStepSelectorBoolResiduals
+        rw [allZero_map_iff]; intro k _
+        rw [getD_rep_zero]; exact (stepBoolCheck_eq_zero_iff _).mpr (.inl rfl)
+      · rw [hSelsEq, allZero_orth_iff]; intro i j _ _
+        rw [getD_rep_zero, g_zero_mul]
+      · rw [hSelsEq, allZero_map_iff]; intro k _; exact getD_rep_zero _ _
+  | some pub =>
+    simp only [stepOp256RowResiduals.public_eqs]
+    obtain ⟨hMem, hValid⟩ := buildSignerProgram_kind_mem_and_valid profile t
+    unfold hemStepSchedulePinResiduals
+    exact hemStepSelectorRowActive_iff
+      (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1
+      (Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).2)
+      pub (stepOpRowsPerSigner profile) t sr hMem hValid hLen
+
+private theorem hemStepSelectorIntraFrom_iff (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (srows : List HemStepOpSelectorRow) (g : Nat),
+      (∀ sr ∈ srows, sr.sels.length = allStepConstraintKinds.length) →
+      (allZeroGoldilocks (hemStepSelectorIntraFrom profile slots g srows) = true ↔
+        allZeroGoldilocks (stepOp256IntraResidualsFrom profile slots g (srows.map HemStepOpSelectorRow.row)) = true ∧
+        srows = attachHonestStepSelectorsFrom profile slots g (srows.map HemStepOpSelectorRow.row))
+  | [], _, _ => by simp [hemStepSelectorIntraFrom, stepOp256IntraResidualsFrom.public_eqs, attachHonestStepSelectorsFrom]
+  | sr :: rest, g, hLens => by
+    simp only [List.map_cons, hemStepSelectorIntraFrom, stepOp256IntraResidualsFrom.public_eqs,
+      attachHonestStepSelectorsFrom]
+    rw [allZeroGoldilocks_append, allZeroGoldilocks_append, Bool.and_eq_true, Bool.and_eq_true,
+        hemStepSelectorRowResiduals_iff profile _ _ sr (hLens sr (List.mem_cons_self ..)),
+        hemStepSelectorIntraFrom_iff profile slots rest (g + 1)
+          (fun x hx => hLens x (List.mem_cons_of_mem _ hx))]
+    constructor
+    · rintro ⟨⟨hRowOk, hSelEq⟩, hRestOk, hRestEq⟩
+      refine ⟨⟨hRowOk, hRestOk⟩, ?_⟩
+      rw [← hRestEq]
+      cases sr; dsimp only at hSelEq ⊢; subst hSelEq; rfl
+    · rintro ⟨⟨hRowOk, hRestOk⟩, hConsEq⟩
+      injection hConsEq with hHeadEq hTailEq
+      have hSelEq : sr.sels = _ := (congrArg HemStepOpSelectorRow.sels hHeadEq)
+      exact ⟨⟨hRowOk, hSelEq⟩, hRestOk, hTailEq⟩
+
+private theorem attachHonestStepSelectorsFrom_map_row (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (rows : List StepOpRow) (g : Nat),
+      (attachHonestStepSelectorsFrom profile slots g rows).map HemStepOpSelectorRow.row = rows
+  | [], _ => rfl
+  | r :: rs, g => congrArg (r :: ·) (attachHonestStepSelectorsFrom_map_row profile slots rs (g + 1))
+
+private theorem attachHonestStepSelectorsFrom_sels_len (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (rows : List StepOpRow) (g : Nat) (sr : HemStepOpSelectorRow),
+      sr ∈ attachHonestStepSelectorsFrom profile slots g rows →
+      sr.sels.length = allStepConstraintKinds.length
+  | [], _, _, h => False.elim (List.not_mem_nil h)
+  | r :: rs, g, sr, h => by
+    rcases List.mem_cons.mp h with rfl | hTail
+    · dsimp only
+      cases slots.getD (g / stepOpRowsPerSigner profile) none with
+      | none => exact List.length_replicate
+      | some _ => unfold oneHotStepSelectors; exact List.length_map ..
+    · exact attachHonestStepSelectorsFrom_sels_len profile slots rs (g + 1) sr hTail
+
+/-- **Selector-Muxed 256-Column Equivalence (`hemStepTraceValid_iff_stepOp256TableOk`)**:
+    1. Attaching canonical scheduled selectors to any `rows` satisfies `hemStepTraceValid` iff
+       `stepOp256TableOk profile slots rows = true`.
+    2. Conversely, ANY selector-explicit trace `srows` satisfying `hemStepTraceValid` has
+       `srows = attachHonestStepSelectors profile slots (srows.map (·.row))` and
+       `stepOp256TableOk profile slots (srows.map (·.row)) = true`. -/
+theorem hemStepTraceValid_iff_stepOp256TableOk (profile : AggSigProfile) (slots : List StepOpSlot)
+    (srows : List HemStepOpSelectorRow) :
+    hemStepTraceValid profile slots srows = true ↔
+      stepOp256TableOk profile slots (srows.map HemStepOpSelectorRow.row) = true ∧
+      srows = attachHonestStepSelectors profile slots (srows.map HemStepOpSelectorRow.row) := by
+  simp only [hemStepTraceValid, stepOp256TableOk.public_eqs, attachHonestStepSelectors]
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.length_map, List.all_map, List.all_eq_true]
+  constructor
+  · rintro ⟨⟨⟨⟨hPos, hLen⟩, hShapedAndSels⟩, hIntra⟩, hShift⟩
+    have hShaped : ∀ x ∈ srows, x.row.wellShaped = true := fun x hx => (hShapedAndSels x hx).1
+    have hSelsLen : ∀ x ∈ srows, x.sels.length = allStepConstraintKinds.length :=
+      fun x hx => (hShapedAndSels x hx).2
+    obtain ⟨hIntraRow, hSrowsEq⟩ := (hemStepSelectorIntraFrom_iff profile slots srows 0 hSelsLen).mp hIntra
+    exact ⟨⟨⟨⟨⟨hPos, hLen⟩, hShaped⟩, hIntraRow⟩, hShift⟩, hSrowsEq⟩
+  · rintro ⟨⟨⟨⟨⟨hPos, hLen⟩, hShaped⟩, hIntraRow⟩, hShift⟩, hSrowsEq⟩
+    have hSelsLen : ∀ x ∈ srows, x.sels.length = allStepConstraintKinds.length := by
+      intro x hx
+      rw [hSrowsEq] at hx
+      exact attachHonestStepSelectorsFrom_sels_len profile slots _ 0 x hx
+    have hIntra := (hemStepSelectorIntraFrom_iff profile slots srows 0 hSelsLen).mpr ⟨hIntraRow, hSrowsEq⟩
+    exact ⟨⟨⟨⟨hPos, hLen⟩, fun x hx => ⟨hShaped x hx, hSelsLen x hx⟩⟩, hIntra⟩, hShift⟩
+
+theorem hemStepTraceValid_attachHonest_iff (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) :
+    hemStepTraceValid profile slots (attachHonestStepSelectors profile slots rows) = true ↔
+      stepOp256TableOk profile slots rows = true := by
+  rw [hemStepTraceValid_iff_stepOp256TableOk]
+  unfold attachHonestStepSelectors
+  rw [attachHonestStepSelectorsFrom_map_row]
+  simp
+
+end SelectorEquiv
+
+/-- A valid active table row executes the scheduled functional transition and satisfies
+    its guards; its permutation output is the actual Poseidon2 permutation. This theorem
+    projects facts from the original table, without adding a verifier-validity premise. -/
+theorem stepOp256TableOk_active_execution (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) (i : Nat) (row : StepOpRow) (pub : AggValidatorPk × Digest5)
+    (hTable : stepOp256TableOk profile slots rows = true)
+    (hRow : rows[i]? = some row)
+    (hSlot : slots.getD (i / stepOpRowsPerSigner profile) none = some pub) :
+    let op := (buildSignerProgram profile).getD (i % stepOpRowsPerSigner profile) StepOp.idle
+    let kind := (stepOpKindAndC0 op).1
+    let c0 := Goldilocks.ofNat (stepOpKindAndC0 op).2
+    (stepOpPermTrace row).1 = poseidon2Perm12 row.stIn ∧
+    allZeroGoldilocks (stepOpGuardResiduals kind c0 (stepOpRowInputs pub row)) = true ∧
+    ∀ j < 44, row.nextState.getD j Goldilocks.zero =
+      stepOpExpectedNext kind c0 (stepOpRowInputs pub row) j := by
+  have hr := stepOp256TableOk_row_at profile slots rows i row hTable hRow
+  rw [hSlot] at hr
+  simp only [stepOp256RowResiduals.public_eqs] at hr
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true] at hr
+  obtain ⟨_, hValid⟩ := buildSignerProgram_kind_mem_and_valid profile
+    (i % stepOpRowsPerSigner profile)
+  exact ⟨stepOp256_groupA_exact row hr.1.1,
+    (stepOpConstraints_iff_guard_and_next _ _ _ hValid).mp hr.2⟩
+
+/-- Populate the 44 next-state cells by executing an opcode. The remaining 212 cells
+    are retained. This is an execution constructor, not a native-signature trace builder. -/
+@[expose] def populateStepOpNext (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow) : StepOpRow :=
+  { row with nextState := (List.range 44).map (stepOpExpectedNext kind c0 (stepOpRowInputs pub row)) }
+
+theorem populateStepOpNext_inputs (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow) :
+    stepOpRowInputs pub (populateStepOpNext kind c0 pub row) =
+      { stepOpRowInputs pub row with next := fun j =>
+          ((List.range 44).map (stepOpExpectedNext kind c0 (stepOpRowInputs pub row))).getD j Goldilocks.zero } := by
+  simp only [populateStepOpNext, stepOpRowInputs.public_eqs, stepOpPermTrace_nextState]
+
+/-- Every scheduled opcode admits exactly its functional next state once its guards
+    hold. This covers all active opcode classes, rather than just padding `Idle`. -/
+theorem populateStepOpNext_constraints_iff (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow)
+    (hValid : kind.validSlot = true) :
+    allZeroGoldilocks (stepOpConstraints kind c0
+      (stepOpRowInputs pub (populateStepOpNext kind c0 pub row))) = true ↔
+    allZeroGoldilocks (stepOpGuardResiduals kind c0 (stepOpRowInputs pub row)) = true := by
+  rw [stepOpConstraints_iff_guard_and_next kind c0 _ hValid,
+    populateStepOpNext_inputs, stepOpGuardResiduals_congr_next]
+  have hNext : ∀ j < 44,
+      (stepOpRowInputs pub (populateStepOpNext kind c0 pub row)).next j =
+        stepOpExpectedNext kind c0 (stepOpRowInputs pub row) j := by
+    intro j hj
+    simp [stepOpRowInputs.public_eqs, populateStepOpNext, List.getD_eq_getElem?_getD, hj]
+  constructor
+  · exact And.left
+  · intro hGuard
+    refine ⟨hGuard, ?_⟩
+    intro j hj
+    rw [stepOpExpectedNext_congr_next]
+    exact hNext j hj
+
+/-- An accepted row is unchanged by recomputing its next-state block. In particular,
+    the AIR cannot accept two different 44-cell next states for the same guarded inputs. -/
+theorem populateStepOpNext_eq_of_constraints (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow)
+    (hValid : kind.validSlot = true) (hLen : row.nextState.length = 44)
+    (hOk : allZeroGoldilocks (stepOpConstraints kind c0 (stepOpRowInputs pub row)) = true) :
+    populateStepOpNext kind c0 pub row = row := by
+  have hNext := ((stepOpConstraints_iff_guard_and_next kind c0 _ hValid).mp hOk).2
+  have hEq : (List.range 44).map (stepOpExpectedNext kind c0 (stepOpRowInputs pub row)) =
+      row.nextState := by
+    apply List.ext_getElem
+    · simp [hLen]
+    · intro i hi hi'
+      have hi44 : i < 44 := by simpa using hi
+      have he := hNext i hi44
+      simpa [stepOpRowInputs.public_eqs, List.getD_eq_getElem?_getD, hi'] using he.symm
+  simp [populateStepOpNext, hEq]
+
+/-- Guard/transition completeness for a scheduled active row, with both boundary gates
+    retained. Native-verifier completeness still requires constructing inputs satisfying
+    these guards along the complete signer program. -/
+theorem stepOp256RowResiduals_active_iff (profile : AggSigProfile)
+    (pub : AggValidatorPk × Digest5) (t : Nat) (row : StepOpRow) :
+    let op := (buildSignerProgram profile).getD t StepOp.idle
+    let kind := (stepOpKindAndC0 op).1
+    let c0 := Goldilocks.ofNat (stepOpKindAndC0 op).2
+    allZeroGoldilocks (stepOp256RowResiduals profile (some pub) t row) = true ↔
+      allZeroGoldilocks (stepOpPermTrace row).2 = true ∧
+      (∀ j < 44, t = 0 → row.prevState.getD j Goldilocks.zero = Goldilocks.zero) ∧
+      (∀ j < 44, t + 1 = stepOpRowsPerSigner profile →
+        row.nextState.getD j Goldilocks.zero = Goldilocks.zero) ∧
+      allZeroGoldilocks (stepOpGuardResiduals kind c0 (stepOpRowInputs pub row)) = true ∧
+      (∀ j < 44, row.nextState.getD j Goldilocks.zero =
+        stepOpExpectedNext kind c0 (stepOpRowInputs pub row) j) := by
+  dsimp only
+  simp only [stepOp256RowResiduals.public_eqs]
+  rw [allZeroGoldilocks_append, allZeroGoldilocks_append, Bool.and_eq_true, Bool.and_eq_true,
+    stepOpBoundaryResiduals_iff, stepOpConstraints_iff_guard_and_next _ _ _
+      (buildSignerProgram_kind_mem_and_valid profile t).2]
+  simp only [and_assoc, stepOpRowInputs.public_eqs]
+
+/-- A corrupted next-state limb is rejected even when the other row cells are arbitrary.
+    This pairs with the constructor above: the transition gate enforces its computed output. -/
+theorem tooth_stepOp_wrong_next_rejected (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow) (j : Nat)
+    (hValid : kind.validSlot = true) (hj : j < 44)
+    (hWrong : row.nextState.getD j Goldilocks.zero ≠
+      stepOpExpectedNext kind c0 (stepOpRowInputs pub row) j) :
+    allZeroGoldilocks (stepOpConstraints kind c0 (stepOpRowInputs pub row)) = false := by
+  apply Bool.eq_false_iff.mpr
+  intro h
+  exact hWrong (((stepOpConstraints_iff_guard_and_next kind c0 _ hValid).mp h).2 j hj)
+
+/-- Populate all permutation columns without assuming any opcode guards. -/
+@[expose] def stepOpHonestPermutationRow (input : Poseidon2State12)
+    (prev next aux : List Goldilocks) : StepOpRow :=
+  let w := honestPoseidon2PermWitness input
+  ⟨input, w.initExtSbox, w.intSbox, w.termExtSbox, prev, next, aux⟩
+
+theorem stepOpHonestPermutationRow_groupA (input : Poseidon2State12)
+    (prev next aux : List Goldilocks) :
+    allZeroGoldilocks (stepOpPermTrace (stepOpHonestPermutationRow input prev next aux)).2 = true := by
+  let w := honestPoseidon2PermWitness input
+  have h := (poseidon2PermResiduals_allZero_iff w).mpr (by simp only [w, honestPoseidon2PermWitness.public_eqs])
+  have he : poseidon2PermResiduals w =
+      (stepOpPermTrace (stepOpHonestPermutationRow input prev next aux)).2 ++
+      (state12Sub (stepOpPermTrace (stepOpHonestPermutationRow input prev next aux)).1
+        w.output).toList := by
+    simp only [poseidon2PermResiduals.public_eqs, stepOpPermTrace.public_eqs,
+      stepOpHonestPermutationRow, w, honestPoseidon2PermWitness.public_eqs]
+  rw [he, allZeroGoldilocks_append, Bool.and_eq_true] at h
+  exact h.1
+
+theorem stepOpHonestPermutationRow_wellShaped (input : Poseidon2State12)
+    (prev next aux : List Goldilocks)
+    (hp : prev.length = 44) (hn : next.length = 44) (ha : aux.length = 38) :
+    (stepOpHonestPermutationRow input prev next aux).wellShaped = true := by
+  obtain ⟨h1, h2, h3⟩ := honestPoseidon2PermWitness_lengths input
+  simp only [stepOpHonestPermutationRow, StepOpRow.wellShaped.public_eqs, h1, h2, h3, hp, hn, ha,
+    beq_self_eq_true, Bool.and_self]
+
+/-- A non-padding active opcode has satisfiable guards and a full honest permutation
+    witness. This certificate concerns one row; it does not assert a valid whole signer slot. -/
+theorem inhabited_populateStepOpNext :
+    ∃ (kind : StepConstraintKind) (c0 : Goldilocks)
+      (pub : AggValidatorPk × Digest5) (row : StepOpRow),
+      kind.validSlot = true ∧ kind ≠ .idle ∧
+      allZeroGoldilocks (stepOpGuardResiduals kind c0 (stepOpRowInputs pub row)) = true ∧
+      row.wellShaped = true ∧
+      allZeroGoldilocks (stepOpPermTrace row).2 = true := by
+  let pub : AggValidatorPk × Digest5 :=
+    (⟨.corduroyPoseidon2, ⟨‹1›, ‹2›, ‹3›, ‹4›⟩, ⟨‹5›, ‹6›, ‹7›, ‹8›⟩⟩,
+      ⟨‹9›, ‹10›, ‹11›, ‹12›, ‹13›⟩)
+  let input : Poseidon2State12 :=
+    ⟨pub.1.pkSeed, pub.1.pkRoot, ⟨domainHMsgStateless, pub.2.limb4, Goldilocks.zero, poseidon2IvTag⟩⟩
+  let row := stepOpHonestPermutationRow input (List.replicate 44 Goldilocks.zero)
+    (List.replicate 44 Goldilocks.zero) (List.replicate 38 Goldilocks.zero)
+  have hValid : StepConstraintKind.statelessDeriveBlock0.validSlot = true := by
+    simp only [StepConstraintKind.validSlot.public_eqs]
+  have hNotIdle : StepConstraintKind.statelessDeriveBlock0 ≠ .idle := by intro h; cases h
+  refine ⟨.statelessDeriveBlock0, Goldilocks.zero, pub, row, hValid, hNotIdle, ?_, ?_, ?_⟩
+  · change allZeroGoldilocks (stepOpGuardResiduals .statelessDeriveBlock0 Goldilocks.zero
+      (stepOpRowInputs pub row)) = true
+    simp [row, input, pub, stepOpGuardResiduals, stepOpRowInputs.public_eqs,
+      stepOpHonestPermutationRow, allZeroGoldilocks_eq, Poseidon2State12.toList_eq,
+      Lane4.toList_eq, g_sub_self]
+    intro i hi
+    have hCases : i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 := by omega
+    rcases hCases with rfl | rfl | rfl | rfl <;> simp [g_sub_self]
+  · exact stepOpHonestPermutationRow_wellShaped input _ _ _
+      (List.length_replicate ..) (List.length_replicate ..) (List.length_replicate ..)
+  · exact stepOpHonestPermutationRow_groupA input _ _ _
+
+#tooth_pair populateStepOpNext_constraints_iff vs tooth_stepOp_wrong_next_rejected
+#verify_inhabited populateStepOpNext_constraints_iff inhabited_populateStepOpNext
+
+/-! ### §3.4. Active-slot execution: per-signer row semantics
+
+`stepOp256TableOk` speaks about one flat list of rows. The lemmas below restrict it to one
+active signer slot, re-index its rows by the step `t` of `buildSignerProgram`, and expose every
+scheduled row as a guarded functional transition of the 44 carried limbs. -/
+
+/-- Row `t` of signer slot `k` of a table (`stepOpZeroRow` outside the table). -/
+def stepOpSlotRow (profile : AggSigProfile) (rows : List StepOpRow) (k t : Nat) : StepOpRow :=
+  rows.getD (k * stepOpRowsPerSigner profile + t) stepOpZeroRow
+#export_eqns stepOpSlotRow
+
+/-- State limb `j` entering row `t`. -/
+@[expose] def stepPrev (R : Nat → StepOpRow) (t j : Nat) : Goldilocks :=
+  (R t).prevState.getD j Goldilocks.zero
+
+/-- Auxiliary cell `i` of row `t`. -/
+@[expose] def stepAux (R : Nat → StepOpRow) (t i : Nat) : Goldilocks :=
+  (R t).aux.getD i Goldilocks.zero
+
+theorem stepAux_fun (R : Nat → StepOpRow) (t : Nat) :
+    stepAux R t = fun i => (R t).aux.getD i Goldilocks.zero := rfl
+
+/-- Row `t` executes `op`: its permutation columns hold `poseidon2Perm12` of its `COL_ST_IN`
+    block, the guards of `op` vanish, and the state entering row `t + 1` is the functional
+    next state of `op`. -/
+@[expose] def StepRowSem (pub : AggValidatorPk × Digest5) (R : Nat → StepOpRow) (op : StepOp)
+    (t : Nat) : Prop :=
+  (stepOpPermTrace (R t)).1 = poseidon2Perm12 (R t).stIn ∧
+  allZeroGoldilocks (stepOpGuardResiduals (stepOpKindAndC0 op).1
+    (Goldilocks.ofNat (stepOpKindAndC0 op).2) (stepOpRowInputs pub (R t))) = true ∧
+  ∀ j < 44, stepPrev R (t + 1) j =
+    stepOpExpectedNext (stepOpKindAndC0 op).1 (Goldilocks.ofNat (stepOpKindAndC0 op).2)
+      (stepOpRowInputs pub (R t)) j
+
+private theorem stepOpRowsPerSigner_pos (profile : AggSigProfile) :
+    0 < stepOpRowsPerSigner profile := by
+  cases profile <;> simp only [stepOpRowsPerSigner.public_eqs] <;> decide
+
+private theorem stepOp256TableOk_slot_row_core (profile : AggSigProfile)
+    (slots : List StepOpSlot) (rows : List StepOpRow) (k : Nat) (pub : AggValidatorPk × Digest5)
+    (hTable : stepOp256TableOk profile slots rows = true)
+    (hSlot : slots[k]? = some (some pub)) (t : Nat)
+    (ht : t < stepOpRowsPerSigner profile) :
+    rows[k * stepOpRowsPerSigner profile + t]? = some (stepOpSlotRow profile rows k t) ∧
+    allZeroGoldilocks (stepOp256RowResiduals profile (some pub) t
+      (stepOpSlotRow profile rows k t)) = true := by
+  obtain ⟨_, hLen, _, hIntra, _⟩ := (stepOp256TableOk_iff_rows profile slots rows).mp hTable
+  have hRpos := stepOpRowsPerSigner_pos profile
+  have hk : k < slots.length := (List.getElem?_eq_some_iff.mp hSlot).1
+  have h1 : (k + 1) * stepOpRowsPerSigner profile ≤ slots.length * stepOpRowsPerSigner profile :=
+    Nat.mul_le_mul_right _ hk
+  rw [Nat.succ_mul] at h1
+  have hi0 : k * stepOpRowsPerSigner profile + t < rows.length := by omega
+  have hRow0 : rows[k * stepOpRowsPerSigner profile + t]? =
+      some (stepOpSlotRow profile rows k t) := by
+    unfold stepOpSlotRow
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hi0]
+    rfl
+  have hDiv : (k * stepOpRowsPerSigner profile + t) / stepOpRowsPerSigner profile = k := by
+    rw [Nat.add_comm, Nat.add_mul_div_right _ _ hRpos, Nat.div_eq_of_lt ht, Nat.zero_add]
+  have hMod : (k * stepOpRowsPerSigner profile + t) % stepOpRowsPerSigner profile = t := by
+    rw [Nat.add_comm, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt ht]
+  have hSlotD : slots.getD k none = some pub := by
+    rw [List.getD_eq_getElem?_getD, hSlot]
+    rfl
+  have hRes := hIntra _ _ hRow0
+  rw [hDiv, hMod, hSlotD] at hRes
+  exact ⟨hRow0, hRes⟩
+
+/-- Every non-final row of an active slot of a valid table executes its scheduled opcode. -/
+theorem stepOp256TableOk_slot_rowSem (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) (k : Nat) (pub : AggValidatorPk × Digest5)
+    (hTable : stepOp256TableOk profile slots rows = true)
+    (hSlot : slots[k]? = some (some pub)) (t : Nat)
+    (ht : t + 1 < stepOpRowsPerSigner profile) :
+    StepRowSem pub (stepOpSlotRow profile rows k)
+      ((buildSignerProgram profile).getD t StepOp.idle) t := by
+  obtain ⟨hRow0, hRes⟩ := stepOp256TableOk_slot_row_core profile slots rows k pub hTable hSlot t
+    (by omega)
+  obtain ⟨hRow1, _⟩ := stepOp256TableOk_slot_row_core profile slots rows k pub hTable hSlot
+    (t + 1) ht
+  obtain ⟨_, _, _, _, hShift⟩ := (stepOp256TableOk_iff_rows profile slots rows).mp hTable
+  have hA := stepOp256RowResiduals_active_iff profile pub t (stepOpSlotRow profile rows k t)
+  dsimp only at hA
+  obtain ⟨hGA, _, _, hGuard, hNext⟩ := hA.mp hRes
+  refine ⟨stepOp256_groupA_exact _ hGA, hGuard, fun j hj => ?_⟩
+  unfold stepPrev
+  rw [← hShift _ _ _ hRow0 hRow1 j hj]
+  exact hNext j hj
+
+/-- The first row of an active slot of a valid table starts from the zero state. -/
+theorem stepOp256TableOk_slot_init (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) (k : Nat) (pub : AggValidatorPk × Digest5)
+    (hTable : stepOp256TableOk profile slots rows = true)
+    (hSlot : slots[k]? = some (some pub)) :
+    ∀ j < 44, stepPrev (stepOpSlotRow profile rows k) 0 j = Goldilocks.zero := by
+  obtain ⟨_, hRes⟩ := stepOp256TableOk_slot_row_core profile slots rows k pub hTable hSlot 0
+    (stepOpRowsPerSigner_pos profile)
+  have hA := stepOp256RowResiduals_active_iff profile pub 0 (stepOpSlotRow profile rows k 0)
+  dsimp only at hA
+  obtain ⟨_, hInit, _⟩ := hA.mp hRes
+  exact fun j hj => hInit j hj rfl
+
+/-- The rows from `t0` on execute the opcodes `ops` in order. -/
+@[expose] def StepRunAt (pub : AggValidatorPk × Digest5) (R : Nat → StepOpRow) (ops : List StepOp)
+    (t0 : Nat) : Prop :=
+  ∀ (i : Nat) (hi : i < ops.length), StepRowSem pub R ops[i] (t0 + i)
+
+theorem StepRunAt.get {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {ops : List StepOp} {t0 : Nat} (h : StepRunAt pub R ops t0) (i : Nat) (op : StepOp)
+    (hop : ops[i]? = some op) : StepRowSem pub R op (t0 + i) := by
+  obtain ⟨hi, he⟩ := List.getElem?_eq_some_iff.mp hop
+  have h' := h i hi
+  rw [he] at h'
+  exact h'
+
+theorem StepRunAt.head {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {op : StepOp} {ops : List StepOp} {t0 : Nat} (h : StepRunAt pub R (op :: ops) t0) :
+    StepRowSem pub R op t0 :=
+  h 0 (Nat.zero_lt_succ _)
+
+theorem StepRunAt.tail {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {op : StepOp} {ops : List StepOp} {t0 : Nat} (h : StepRunAt pub R (op :: ops) t0) :
+    StepRunAt pub R ops (t0 + 1) := by
+  intro i hi
+  have h' := h (i + 1) (Nat.succ_lt_succ hi)
+  simp only [List.getElem_cons_succ] at h'
+  have e : t0 + (i + 1) = t0 + 1 + i := by omega
+  rw [e] at h'
+  exact h'
+
+theorem StepRunAt.append_left {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {a b : List StepOp} {t0 : Nat} (h : StepRunAt pub R (a ++ b) t0) :
+    StepRunAt pub R a t0 := by
+  intro i hi
+  have h' := h i (by rw [List.length_append]; omega)
+  rw [List.getElem_append_left hi] at h'
+  exact h'
+
+theorem StepRunAt.append_right {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {a b : List StepOp} {t0 : Nat} (h : StepRunAt pub R (a ++ b) t0) :
+    StepRunAt pub R b (t0 + a.length) := by
+  intro i hi
+  have h' := h (a.length + i) (by rw [List.length_append]; omega)
+  rw [List.getElem_append_right (by omega)] at h'
+  simp only [Nat.add_sub_cancel_left] at h'
+  rw [← Nat.add_assoc] at h'
+  exact h'
+
+theorem flatMap_range_uniform_length (f : Nat → List StepOp) (L : Nat)
+    (hL : ∀ i, (f i).length = L) :
+    ∀ n : Nat, ((List.range n).flatMap f).length = n * L
+  | 0 => by simp
+  | n + 1 => by
+    rw [List.range_succ, List.flatMap_append, List.length_append,
+      flatMap_range_uniform_length f L hL n, List.flatMap_cons, List.flatMap_nil,
+      List.append_nil, hL n, Nat.succ_mul]
+
+theorem StepRunAt.flatMap_range {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {f : Nat → List StepOp} {L : Nat} (hL : ∀ i, (f i).length = L) :
+    ∀ (n : Nat) {t0 : Nat}, StepRunAt pub R ((List.range n).flatMap f) t0 →
+      ∀ i < n, StepRunAt pub R (f i) (t0 + i * L)
+  | 0, _, _, i, hi => absurd hi (Nat.not_lt_zero i)
+  | n + 1, t0, h, i, hi => by
+    rw [List.range_succ, List.flatMap_append, List.flatMap_cons, List.flatMap_nil,
+      List.append_nil] at h
+    by_cases hin : i < n
+    · exact StepRunAt.flatMap_range hL n h.append_left i hin
+    · have hEq : i = n := by omega
+      subst hEq
+      have h' := h.append_right
+      rw [flatMap_range_uniform_length f L hL i] at h'
+      exact h'
+
+theorem StepRunAt.map_range {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
+    {g : Nat → StepOp} {n t0 : Nat} (h : StepRunAt pub R ((List.range n).map g) t0) :
+    ∀ i < n, StepRowSem pub R (g i) (t0 + i) := by
+  intro i hi
+  have h' := h i (by rw [List.length_map, List.length_range]; exact hi)
+  rw [List.getElem_map, List.getElem_range] at h'
+  exact h'
+
+/-- The rows of an active slot of a valid table execute the signer program body. -/
+theorem stepOp256TableOk_slot_run (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) (k : Nat) (pub : AggValidatorPk × Digest5)
+    (hTable : stepOp256TableOk profile slots rows = true)
+    (hSlot : slots[k]? = some (some pub)) :
+    StepRunAt pub (stepOpSlotRow profile rows k) (signerProgramBody profile) 0 := by
+  intro i hi
+  have hLt : (signerProgramBody profile).length + 1 < stepOpRowsPerSigner profile := by
+    cases profile with
+    | xmssPoseidon2 => rw [buildSignerProgram_length.1]; simp only [stepOpRowsPerSigner.public_eqs]; decide
+    | corduroyPoseidon2 => rw [buildSignerProgram_length.2.1]; simp only [stepOpRowsPerSigner.public_eqs]; decide
+  have h := stepOp256TableOk_slot_rowSem profile slots rows k pub hTable hSlot i (by omega)
+  have hGet : (buildSignerProgram profile).getD i StepOp.idle = (signerProgramBody profile)[i] := by
+    simp only [buildSignerProgram.public_eqs]
+    rw [List.getD_eq_getElem?_getD, List.getElem?_append_left hi, List.getElem?_eq_getElem hi]
+    rfl
+  rw [hGet] at h
+  rw [Nat.zero_add]
+  exact h
+
+
+end HemStepOp256Machine
+end Qsag
+end
