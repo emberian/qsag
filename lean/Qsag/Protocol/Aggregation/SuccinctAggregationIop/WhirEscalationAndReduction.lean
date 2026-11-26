@@ -634,3 +634,637 @@ def decodeRowWitness (row : List Goldilocks) : Option AggSignerTraceWitness :=
   | _ => none
 
 /-- A row decodes to `w` exactly when its cells from column `14` on are the encoding of `w`. -/
+theorem decodeRowWitness_eq_some_iff (row : List Goldilocks) (w : AggSignerTraceWitness) :
+    decodeRowWitness row = some w ↔ row.drop 14 = aggSignerWitnessCodec.enc w := by
+  constructor
+  · intro h
+    unfold decodeRowWitness at h
+    cases hd : aggSignerWitnessCodec.dec (row.drop 14) with
+    | none => rw [hd] at h; cases h
+    | some p =>
+      obtain ⟨w', r⟩ := p
+      rw [hd] at h
+      cases r with
+      | cons _ _ => cases h
+      | nil =>
+        have hw : w' = w := Option.some.inj h
+        have e := aggSignerWitnessCodec.enc_dec _ _ _ hd
+        rw [List.append_nil, hw] at e
+        exact e
+  · intro h
+    have hd := aggSignerWitnessCodec.dec_enc w []
+    rw [List.append_nil, ← h] at hd
+    simp only [decodeRowWitness, hd]
+
+/-- **Deterministic row projection.** Decodes the witness block of each of the first `K` rows;
+    fails if a row is missing or does not carry a canonical witness encoding. -/
+def extractSignerWitnessesFromRows :
+    Nat → List (List Goldilocks) → Option (List AggSignerTraceWitness)
+  | 0, _ => some []
+  | _ + 1, [] => none
+  | k + 1, row :: rows =>
+    match decodeRowWitness row with
+    | none => none
+    | some w =>
+      match extractSignerWitnessesFromRows k rows with
+      | none => none
+      | some ws => some (w :: ws)
+
+/-- Row gate of one active row, a function of the committed row alone: the boundary columns
+    `0..13` equal `expectedBoundaryCols`, the remaining cells decode to a witness block, and
+    every transition residual of that block vanishes. -/
+def committedRowOk (geom : AggSigGeometry) (msg : List UInt8) (pk : AggValidatorPk)
+    (row : List Goldilocks) : Bool :=
+  decide (row.take 14 = expectedBoundaryCols pk msg) &&
+  match decodeRowWitness row with
+  | none => false
+  | some w => allZeroGoldilocks (signerTraceResiduals geom pk msg w)
+
+def committedActiveRowsOk (geom : AggSigGeometry) (msg : List UInt8) :
+    List AggValidatorPk → List (List Goldilocks) → Bool
+  | [], padRows => allZeroGoldilocks (padRows.flatMap id)
+  | _ :: _, [] => false
+  | pk :: pks, row :: rows =>
+    committedRowOk geom msg pk row && committedActiveRowsOk geom msg pks rows
+
+/-- All row-gate and boundary constraints as a predicate on the committed `rows` only: no
+    witness is supplied beside the rows. -/
+def committedRowsSatisfyAllConstraints (stmt : AggArithPublicStmt)
+    (rows : List (List Goldilocks)) : Bool :=
+  stmt.wellFormed && decide (rows.length = 2 ^ stmt.logRows) &&
+  committedActiveRowsOk stmt.geom stmt.msg stmt.committeePks rows
+
+private theorem committedRowOk_unpack {geom : AggSigGeometry} {msg : List UInt8}
+    {pk : AggValidatorPk} {row : List Goldilocks}
+    (h : committedRowOk geom msg pk row = true) :
+    row.take 14 = expectedBoundaryCols pk msg ∧
+    ∃ w, decodeRowWitness row = some w ∧
+      allZeroGoldilocks (signerTraceResiduals geom pk msg w) = true := by
+  unfold committedRowOk at h
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+  obtain ⟨hT, hM⟩ := h
+  refine ⟨hT, ?_⟩
+  cases hd : decodeRowWitness row with
+  | none => rw [hd] at hM; cases hM
+  | some w => rw [hd] at hM; exact ⟨w, rfl, hM⟩
+
+private theorem committedRowOk_intro {geom : AggSigGeometry} {msg : List UInt8}
+    {pk : AggValidatorPk} {row : List Goldilocks} {w : AggSignerTraceWitness}
+    (hT : row.take 14 = expectedBoundaryCols pk msg)
+    (hd : decodeRowWitness row = some w)
+    (hZ : allZeroGoldilocks (signerTraceResiduals geom pk msg w) = true) :
+    committedRowOk geom msg pk row = true := by
+  unfold committedRowOk
+  rw [hd, decide_eq_true hT]
+  exact hZ
+
+private theorem committedRow_boundary_gates_vanish {pk : AggValidatorPk} {msg : List UInt8}
+    {row : List Goldilocks} (hT : row.take 14 = expectedBoundaryCols pk msg) :
+    allZeroGoldilocks (evalRowGateList (boundaryRowGates pk msg) row) = true := by
+  have h := boundaryGatesFrom_exact 0 (expectedBoundaryCols pk msg) [] (row.drop 14) rfl
+  have hRow : [] ++ expectedBoundaryCols pk msg ++ row.drop 14 = row := by
+    rw [List.nil_append, ← hT]
+    exact List.take_append_drop 14 row
+  rw [hRow] at h
+  exact h
+
+private theorem extractSignerWitnesses_succ_cons {k : Nat} {row : List Goldilocks}
+    {rows : List (List Goldilocks)} {ws : List AggSignerTraceWitness}
+    (h : extractSignerWitnessesFromRows (k + 1) (row :: rows) = some ws) :
+    ∃ w wt, decodeRowWitness row = some w ∧
+      extractSignerWitnessesFromRows k rows = some wt ∧ ws = w :: wt := by
+  rw [extractSignerWitnessesFromRows] at h
+  cases hd : decodeRowWitness row with
+  | none => rw [hd] at h; cases h
+  | some w =>
+    rw [hd] at h
+    dsimp only at h
+    cases hE : extractSignerWitnessesFromRows k rows with
+    | none => rw [hE] at h; cases h
+    | some wt =>
+      rw [hE] at h
+      exact ⟨w, wt, rfl, rfl, (Option.some.inj h).symm⟩
+
+private theorem committedActiveRowsOk_extract (geom : AggSigGeometry) (msg : List UInt8) :
+    ∀ (pks : List AggValidatorPk) (rows : List (List Goldilocks)),
+      committedActiveRowsOk geom msg pks rows = true →
+      ∃ ws, extractSignerWitnessesFromRows pks.length rows = some ws ∧
+        ws.length = pks.length ∧
+        ∀ (k : Nat) (hk : k < pks.length) (hkW : k < ws.length),
+          (rows.getD k []).take 14 = expectedBoundaryCols (pks[k]'hk) msg ∧
+          decodeRowWitness (rows.getD k []) = some (ws[k]'hkW) ∧
+          allZeroGoldilocks (signerTraceResiduals geom (pks[k]'hk) msg (ws[k]'hkW)) = true
+  | [], _, _ => ⟨[], rfl, rfl, fun _ hk _ => absurd hk (Nat.not_lt_zero _)⟩
+  | _ :: _, [], h => by rw [committedActiveRowsOk] at h; cases h
+  | pk :: pks, row :: rows, h => by
+    rw [committedActiveRowsOk, Bool.and_eq_true] at h
+    obtain ⟨hRow, hRest⟩ := h
+    obtain ⟨hT, w, hd, hZ⟩ := committedRowOk_unpack hRow
+    obtain ⟨ws, hE, hLen, hA⟩ := committedActiveRowsOk_extract geom msg pks rows hRest
+    refine ⟨w :: ws, ?_, congrArg Nat.succ hLen, ?_⟩
+    · show extractSignerWitnessesFromRows (pks.length + 1) (row :: rows) = some (w :: ws)
+      simp only [extractSignerWitnessesFromRows, hd, hE]
+    · intro k hk hkW
+      cases k with
+      | zero => exact ⟨hT, hd, hZ⟩
+      | succ k' => exact hA k' (Nat.lt_of_succ_lt_succ hk) (Nat.lt_of_succ_lt_succ hkW)
+
+private theorem committedActiveRowsOk_at (geom : AggSigGeometry) (msg : List UInt8) :
+    ∀ (pks : List AggValidatorPk) (rows : List (List Goldilocks)) (k : Nat)
+      (hk : k < pks.length),
+      committedActiveRowsOk geom msg pks rows = true →
+      committedRowOk geom msg (pks[k]'hk) (rows.getD k []) = true
+  | [], _, _, hk, _ => absurd hk (Nat.not_lt_zero _)
+  | _ :: _, [], _, _, h => by rw [committedActiveRowsOk] at h; cases h
+  | _ :: _, _ :: _, 0, _, h => by
+    rw [committedActiveRowsOk, Bool.and_eq_true] at h
+    exact h.1
+  | _ :: pks, _ :: rows, k + 1, hk, h => by
+    rw [committedActiveRowsOk, Bool.and_eq_true] at h
+    exact committedActiveRowsOk_at geom msg pks rows k (Nat.lt_of_succ_lt_succ hk) h.2
+
+private theorem extractSignerWitnesses_unique :
+    ∀ (K : Nat) (rows : List (List Goldilocks)) (ws ws' : List AggSignerTraceWitness),
+      extractSignerWitnessesFromRows K rows = some ws →
+      ws'.length = K →
+      (∀ (k : Nat) (hk : k < ws'.length),
+        (rows.getD k []).drop 14 = aggSignerWitnessCodec.enc (ws'[k]'hk)) →
+      ws' = ws
+  | 0, _, _, _, hE, hLen, _ => by
+    rw [extractSignerWitnessesFromRows] at hE
+    rw [List.eq_nil_of_length_eq_zero hLen]
+    exact Option.some.inj hE
+  | _ + 1, [], _, _, hE, _, _ => by rw [extractSignerWitnessesFromRows] at hE; cases hE
+  | _ + 1, _ :: _, _, [], _, hLen, _ => by cases hLen
+  | K + 1, row :: rows, ws, w' :: ws', hE, hLen, hCells => by
+    obtain ⟨w, wt, hd, hEt, hws⟩ := extractSignerWitnesses_succ_cons hE
+    have hd' : decodeRowWitness row = some w' :=
+      (decodeRowWitness_eq_some_iff row w').mpr (hCells 0 (Nat.zero_lt_succ _))
+    have hw : w' = w := Option.some.inj (hd'.symm.trans hd)
+    have ih := extractSignerWitnesses_unique K rows wt ws' hEt (Nat.succ.inj hLen)
+      (fun k hk => hCells (k + 1) (Nat.succ_lt_succ hk))
+    rw [hws, hw, ih]
+
+/-- **Committed rows determine valid witnesses (`committed_rows_extract_valid_witnesses`).**
+    If the committed `rows` alone satisfy every row-gate and boundary constraint, then the row
+    projection `extractSignerWitnessesFromRows` returns `K` witness blocks; on row `k` the
+    boundary gates vanish, the transition residuals of the extracted block vanish, and the block
+    yields a signature accepted by `verifyAggNativeSig` for committee key `k`; and any other
+    list of `K` witness blocks whose encodings occupy the witness cells of the same rows is
+    equal to the extracted one. -/
+theorem committed_rows_extract_valid_witnesses (stmt : AggArithPublicStmt)
+    (rows : List (List Goldilocks))
+    (hSat : committedRowsSatisfyAllConstraints stmt rows = true) :
+    ∃ ws : List AggSignerTraceWitness,
+      extractSignerWitnessesFromRows stmt.committeePks.length rows = some ws ∧
+      ws.length = stmt.committeePks.length ∧
+      (∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkW : k < ws.length),
+        allZeroGoldilocks (evalRowGateList (boundaryRowGates (stmt.committeePks[k]'hkP) stmt.msg)
+          (rows.getD k [])) = true ∧
+        allZeroGoldilocks
+          (signerTraceResiduals stmt.geom (stmt.committeePks[k]'hkP) stmt.msg (ws[k]'hkW)) = true ∧
+        verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg
+          (extractSignerWitnessSig (ws[k]'hkW)) = true) ∧
+      (∀ ws' : List AggSignerTraceWitness,
+        ws'.length = stmt.committeePks.length →
+        (∀ (k : Nat) (hk : k < ws'.length),
+          (rows.getD k []).drop 14 = aggSignerWitnessCodec.enc (ws'[k]'hk)) →
+        ws' = ws) := by
+  unfold committedRowsSatisfyAllConstraints at hSat
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hSat
+  obtain ⟨⟨_, _⟩, hAct⟩ := hSat
+  obtain ⟨ws, hE, hWsLen, hBody⟩ :=
+    committedActiveRowsOk_extract stmt.geom stmt.msg stmt.committeePks rows hAct
+  refine ⟨ws, hE, hWsLen, ?_, ?_⟩
+  · intro k hkP hkW
+    obtain ⟨hT, _, hZ⟩ := hBody k hkP hkW
+    exact ⟨committedRow_boundary_gates_vanish hT, hZ,
+      signerTraceResiduals_sound stmt.geom (stmt.committeePks[k]'hkP) stmt.msg _ hZ⟩
+  · intro ws' hLen' hCells
+    exact extractSignerWitnesses_unique _ rows ws ws' hE hLen' hCells
+
+private theorem committedRowsSatisfy_row_at (stmt : AggArithPublicStmt)
+    (rows : List (List Goldilocks)) (k : Nat) (hk : k < stmt.committeePks.length)
+    (hSat : committedRowsSatisfyAllConstraints stmt rows = true) :
+    committedRowOk stmt.geom stmt.msg (stmt.committeePks[k]'hk) (rows.getD k []) = true := by
+  unfold committedRowsSatisfyAllConstraints at hSat
+  simp only [Bool.and_eq_true] at hSat
+  exact committedActiveRowsOk_at stmt.geom stmt.msg stmt.committeePks rows k hk hSat.2
+
+/-- **`#tooth`: a tampered committed row breaks a gate or the binding.** Start from committed
+    rows that satisfy every constraint and change any cell of an active row `k`. Then either the
+    tampered rows are rejected, or row `k` now decodes to a different witness block (which the
+    row gates then check in place of the original one). No change to an active row leaves both
+    acceptance and the bound witness intact. -/
+theorem tooth_tampered_committed_row_breaks_gate_or_binding (stmt : AggArithPublicStmt)
+    (rows rows' : List (List Goldilocks)) (k : Nat) (hk : k < stmt.committeePks.length)
+    (hSat : committedRowsSatisfyAllConstraints stmt rows = true)
+    (hTamper : rows'.getD k [] ≠ rows.getD k []) :
+    committedRowsSatisfyAllConstraints stmt rows' = false ∨
+    decodeRowWitness (rows'.getD k []) ≠ decodeRowWitness (rows.getD k []) := by
+  cases hV : committedRowsSatisfyAllConstraints stmt rows' with
+  | false => exact Or.inl rfl
+  | true =>
+    refine Or.inr (fun hEq => hTamper ?_)
+    obtain ⟨hT, w, hd, _⟩ := committedRowOk_unpack (committedRowsSatisfy_row_at stmt rows k hk hSat)
+    obtain ⟨hT', w', hd', _⟩ :=
+      committedRowOk_unpack (committedRowsSatisfy_row_at stmt rows' k hk hV)
+    have hw : w' = w := Option.some.inj ((hd'.symm.trans hEq).trans hd)
+    have hD := (decodeRowWitness_eq_some_iff _ w).mp hd
+    have hD' := (decodeRowWitness_eq_some_iff _ w').mp hd'
+    rw [hw] at hD'
+    rw [← List.take_append_drop 14 (rows'.getD k []), ← List.take_append_drop 14 (rows.getD k []),
+      hT, hT', hD, hD']
+
+private theorem expectedBoundaryCols_length (pk : AggValidatorPk) (msg : List UInt8) :
+    (expectedBoundaryCols pk msg).length = 14 := by
+  simp only [expectedBoundaryCols.public_eqs]
+  rfl
+
+private theorem committedRowOk_honest (geom : AggSigGeometry) (msg : List UInt8)
+    (pk : AggValidatorPk) (w : AggSignerTraceWitness)
+    (hZ : allZeroGoldilocks (signerTraceResiduals geom pk msg w) = true) :
+    committedRowOk geom msg pk (expectedBoundaryCols pk msg ++ aggSignerWitnessCodec.enc w) =
+      true := by
+  have hLen := expectedBoundaryCols_length pk msg
+  exact committedRowOk_intro (List.take_left' hLen)
+    ((decodeRowWitness_eq_some_iff _ w).mpr (List.drop_left' hLen)) hZ
+
+/-- Honest committed rows: row `k` is the 14 boundary columns of validator `k` followed by the
+    canonical cell stream of its honest witness block; padding rows are zero. -/
+def buildCommittedRows (stmt : AggArithPublicStmt) (sigs : List AggNativeSignature) :
+    List (List Goldilocks) :=
+  (stmt.committeePks.zip sigs).map (fun (pk, sig) =>
+    expectedBoundaryCols pk stmt.msg ++
+      aggSignerWitnessCodec.enc (buildHonestSignerTraceWitness stmt.geom pk stmt.msg sig)) ++
+  List.replicate (2 ^ stmt.logRows - stmt.committeePks.length)
+    (List.replicate 14 Goldilocks.zero)
+
+private theorem committedActiveRowsOk_honest (geom : AggSigGeometry) (msg : List UInt8) :
+    ∀ (pks : List AggValidatorPk) (sigs : List AggNativeSignature)
+      (padRows : List (List Goldilocks)),
+      pks.length = sigs.length →
+      allZeroGoldilocks (padRows.flatMap id) = true →
+      (∀ (k : Nat) (hkP : k < pks.length) (hkS : k < sigs.length),
+        verifyAggNativeSig geom (pks[k]'hkP) msg (sigs[k]'hkS) = true) →
+      committedActiveRowsOk geom msg pks
+        ((pks.zip sigs).map (fun (pk, sig) =>
+          expectedBoundaryCols pk msg ++
+            aggSignerWitnessCodec.enc (buildHonestSignerTraceWitness geom pk msg sig)) ++
+          padRows) = true
+  | [], [], _, _, hPad, _ => hPad
+  | _ :: _, [], _, hLen, _, _ => by cases hLen
+  | [], _ :: _, _, hLen, _, _ => by cases hLen
+  | pk :: pks, sig :: sigs, padRows, hLen, hPad, hAll => by
+    have hVer0 : verifyAggNativeSig geom pk msg sig = true :=
+      hAll 0 (Nat.zero_lt_succ _) (Nat.zero_lt_succ _)
+    have hSigZ := (signerTraceResiduals_complete geom pk msg sig hVer0).2
+    have ih := committedActiveRowsOk_honest geom msg pks sigs padRows (Nat.succ.inj hLen) hPad
+      (fun k hkP hkS => hAll (k + 1) (Nat.succ_lt_succ hkP) (Nat.succ_lt_succ hkS))
+    have hRow := committedRowOk_honest geom msg pk
+      (buildHonestSignerTraceWitness geom pk msg sig) hSigZ
+    simp only [List.zip_cons_cons, List.map_cons, List.cons_append, committedActiveRowsOk,
+      Bool.and_eq_true]
+    exact ⟨hRow, ih⟩
+
+/-- **Completeness of the row-committed layout.** For valid signatures of all `K` committee
+    keys, the honest committed rows satisfy every row-only constraint. -/
+theorem buildCommittedRows_satisfy_constraints
+    (stmt : AggArithPublicStmt) (sigs : List AggNativeSignature)
+    (hWf : stmt.wellFormed = true)
+    (hLen : sigs.length = stmt.committeePks.length)
+    (hAll : ∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkS : k < sigs.length),
+      verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg (sigs[k]'hkS) = true) :
+    committedRowsSatisfyAllConstraints stmt (buildCommittedRows stmt sigs) = true := by
+  have hKLePow : stmt.committeePks.length ≤ 2 ^ stmt.logRows := by
+    unfold AggArithPublicStmt.wellFormed at hWf
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+    exact hWf.1.2
+  have hRowsLen : (buildCommittedRows stmt sigs).length = 2 ^ stmt.logRows := by
+    unfold buildCommittedRows
+    rw [List.length_append, List.length_map, List.length_zip, List.length_replicate, hLen,
+      Nat.min_self]
+    exact Nat.add_sub_of_le hKLePow
+  have hAct := committedActiveRowsOk_honest stmt.geom stmt.msg stmt.committeePks sigs
+    (List.replicate (2 ^ stmt.logRows - stmt.committeePks.length)
+      (List.replicate 14 Goldilocks.zero))
+    hLen.symm (allZero_flatMap_replicate_zeros _ 14) hAll
+  unfold committedRowsSatisfyAllConstraints
+  rw [hWf, decide_eq_true hRowsLen]
+  exact hAct
+
+/-- Inhabitedness witness for the row-committed layout: for the audit key and any valid signing
+    counters, the honest committed rows satisfy the row-only constraints, so the hypotheses of
+    `committed_rows_extract_valid_witnesses` and of the `#tooth` are jointly satisfiable. -/
+theorem inhabited_committed_row_extraction :
+    let pk0 := deriveAggPublicKey xmssPoseidon2Geom auditSkSeed auditPkSeed
+    let stmt : AggArithPublicStmt :=
+      { geom := xmssPoseidon2Geom, msg := auditMsg, committeePks := [pk0], logRows := 1 }
+    stmt.wellFormed = true ∧
+    (∀ (ctrs : ValidSigningCtrs xmssPoseidon2Geom auditSkSeed pk0 auditMsg auditRRand 0),
+      let sig0 := signAggNative xmssPoseidon2Geom auditSkSeed pk0 auditMsg auditRRand 0
+                    ctrs.layer0Ctr ctrs.upperCtrs
+      committedRowsSatisfyAllConstraints stmt (buildCommittedRows stmt [sig0]) = true) := by
+  intro pk0 stmt
+  have hGeomWf : xmssPoseidon2Geom.wellFormed = true := deployedAggGeometries_wellFormed.1
+  have hPkProf : (pk0.profile == xmssPoseidon2Geom.profile) = true := rfl
+  have hStmtWf : stmt.wellFormed = true := by
+    unfold AggArithPublicStmt.wellFormed
+    dsimp only [stmt]
+    simp [hGeomWf, hPkProf]
+  refine ⟨hStmtWf, fun ctrs => ?_⟩
+  intro sig0
+  have hVer0 := aggNativeSig_completeness xmssPoseidon2Geom auditSkSeed auditPkSeed
+    auditMsg auditRRand 0 hGeomWf ctrs
+  refine buildCommittedRows_satisfy_constraints stmt [sig0] hStmtWf rfl ?_
+  intro k hkP _
+  have hk0 : k = 0 := by simp [stmt] at hkP; omega
+  subst hk0
+  exact hVer0
+
+/-! ### Execution trace: committed rows only -/
+
+/-- Execution trace on `{0, 1}^logRows`: the committed rows and nothing else. Every witness
+    block the constraints speak about is read out of `rows`. -/
+structure AggExecutionTrace where
+  rows : List (List Goldilocks)
+  deriving DecidableEq, Repr
+
+/-- The per-validator witness blocks of a trace, as a function of its committed rows. -/
+def AggExecutionTrace.signerWitnesses (stmt : AggArithPublicStmt) (tr : AggExecutionTrace) :
+    Option (List AggSignerTraceWitness) :=
+  extractSignerWitnessesFromRows stmt.committeePks.length tr.rows
+
+/-- Every row-gate and boundary constraint of the trace: `stmt.wellFormed`, exactly
+    `2^stmt.logRows` rows, on each active row `k < K` the 14 boundary columns pinned to
+    `(profileFieldTag, pkSeed, pkRoot, mu)` and the transition residuals of the witness block
+    decoded from that row, and all-zero padding rows. -/
+def traceSatisfiesAllConstraints (stmt : AggArithPublicStmt) (tr : AggExecutionTrace) : Bool :=
+  committedRowsSatisfyAllConstraints stmt tr.rows
+
+/-- The canonical honest execution trace of `K` valid `AggNativeSignature`s. -/
+def buildHonestAggExecutionTrace (stmt : AggArithPublicStmt)
+    (sigs : List AggNativeSignature) : AggExecutionTrace :=
+  { rows := buildCommittedRows stmt sigs }
+
+/-- All-zero execution trace (`2^logRows` zero rows of `numCols` cells). -/
+def zeroAggExecutionTrace (logRows numCols : Nat) : AggExecutionTrace :=
+  { rows := List.replicate (2 ^ logRows) (List.replicate numCols Goldilocks.zero) }
+
+/-- **Per-validator signature extractor.** From a trace satisfying every constraint, reads the
+    witness block out of row `k` and returns the signature it encodes, accepted by
+    `verifyAggNativeSig` for committee key `k`. -/
+def extractValidCommitteeSigsFromTrace (stmt : AggArithPublicStmt) (tr : AggExecutionTrace)
+    (hSat : traceSatisfiesAllConstraints stmt tr = true) :
+    ∀ (k : Nat) (hk : k < stmt.committeePks.length),
+      { sig : AggNativeSignature //
+        verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hk) stmt.msg sig = true } :=
+  fun k hk =>
+    match hd : decodeRowWitness (tr.rows.getD k []) with
+    | some w => ⟨extractSignerWitnessSig w, by
+        obtain ⟨_, w', hd', hZ⟩ :=
+          committedRowOk_unpack (committedRowsSatisfy_row_at stmt tr.rows k hk hSat)
+        have hw : w' = w := Option.some.inj (hd'.symm.trans hd)
+        rw [← hw]
+        exact signerTraceResiduals_sound stmt.geom (stmt.committeePks[k]'hk) stmt.msg w' hZ⟩
+    | none => False.elim (by
+        obtain ⟨_, w', hd', _⟩ :=
+          committedRowOk_unpack (committedRowsSatisfy_row_at stmt tr.rows k hk hSat)
+        rw [hd] at hd'
+        cases hd')
+
+/-- **Honest execution trace completeness.** Whenever all `K` committee validators have valid
+    `AggNativeSignature`s on `stmt.msg`, the honest trace satisfies every constraint. -/
+theorem buildHonestAggExecutionTrace_satisfies_constraints
+    (stmt : AggArithPublicStmt) (sigs : List AggNativeSignature)
+    (hWf : stmt.wellFormed = true)
+    (hLen : sigs.length = stmt.committeePks.length)
+    (hAll : ∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkS : k < sigs.length),
+      verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg (sigs[k]'hkS) = true) :
+    traceSatisfiesAllConstraints stmt (buildHonestAggExecutionTrace stmt sigs) = true :=
+  buildCommittedRows_satisfy_constraints stmt sigs hWf hLen hAll
+
+/-- **Row-constraint exactness (`trace_satisfies_constraints_iff_all_k_sigs_valid`).**
+    1. Every trace whose constraints vanish has `2^logRows` rows, and its rows decode to `K`
+       witness blocks whose boundary gates vanish and which encode signatures accepted by
+       `verifyAggNativeSig` for `(stmt.msg, stmt.committeePks[k])`.
+    2. A constraint-satisfying trace exists if and only if all `K` committee keys have valid
+       `AggNativeSignature`s on `stmt.msg`. -/
+theorem trace_satisfies_constraints_iff_all_k_sigs_valid
+    (stmt : AggArithPublicStmt) (hWf : stmt.wellFormed = true) :
+    (∀ (tr : AggExecutionTrace),
+      traceSatisfiesAllConstraints stmt tr = true →
+      tr.rows.length = 2 ^ stmt.logRows ∧
+      ∃ ws : List AggSignerTraceWitness,
+        tr.signerWitnesses stmt = some ws ∧
+        ws.length = stmt.committeePks.length ∧
+        (∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkW : k < ws.length),
+          allZeroGoldilocks (evalRowGateList (boundaryRowGates (stmt.committeePks[k]'hkP) stmt.msg)
+            (tr.rows.getD k [])) = true ∧
+          verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg
+            (extractSignerWitnessSig (ws[k]'hkW)) = true)) ∧
+    (Nonempty { tr : AggExecutionTrace // traceSatisfiesAllConstraints stmt tr = true } ↔
+     Nonempty { sigs : List AggNativeSignature //
+       sigs.length = stmt.committeePks.length ∧
+       ∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkS : k < sigs.length),
+         verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg (sigs[k]'hkS) = true }) := by
+  have hSound : ∀ (tr : AggExecutionTrace),
+      traceSatisfiesAllConstraints stmt tr = true →
+      tr.rows.length = 2 ^ stmt.logRows ∧
+      ∃ ws : List AggSignerTraceWitness,
+        tr.signerWitnesses stmt = some ws ∧
+        ws.length = stmt.committeePks.length ∧
+        (∀ (k : Nat) (hkP : k < stmt.committeePks.length) (hkW : k < ws.length),
+          allZeroGoldilocks (evalRowGateList (boundaryRowGates (stmt.committeePks[k]'hkP) stmt.msg)
+            (tr.rows.getD k [])) = true ∧
+          verifyAggNativeSig stmt.geom (stmt.committeePks[k]'hkP) stmt.msg
+            (extractSignerWitnessSig (ws[k]'hkW)) = true) := by
+    intro tr hSat
+    have hLen : tr.rows.length = 2 ^ stmt.logRows := by
+      have h := hSat
+      unfold traceSatisfiesAllConstraints committedRowsSatisfyAllConstraints at h
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+      exact h.1.2
+    obtain ⟨ws, hE, hWsLen, hPer, _⟩ := committed_rows_extract_valid_witnesses stmt tr.rows hSat
+    exact ⟨hLen, ws, hE, hWsLen, fun k hkP hkW => ⟨(hPer k hkP hkW).1, (hPer k hkP hkW).2.2⟩⟩
+  refine ⟨hSound, ?_⟩
+  constructor
+  · rintro ⟨⟨tr, hSat⟩⟩
+    obtain ⟨_, ws, _, hWLen, hPerK⟩ := hSound tr hSat
+    let sigs := ws.map extractSignerWitnessSig
+    refine ⟨⟨sigs, by simp [sigs, hWLen], fun k hkP hkS => ?_⟩⟩
+    have hkW : k < ws.length := by simp [sigs] at hkS; exact hkS
+    have hEqSig : sigs[k]'hkS = extractSignerWitnessSig (ws[k]'hkW) := by
+      simp [sigs]
+    rw [hEqSig]
+    exact (hPerK k hkP hkW).2
+  · rintro ⟨⟨sigs, hLen, hAll⟩⟩
+    exact ⟨⟨buildHonestAggExecutionTrace stmt sigs,
+      buildHonestAggExecutionTrace_satisfies_constraints stmt sigs hWf hLen hAll⟩⟩
+
+/-- **`#tooth`: the all-zero trace is rejected (`tooth_zero_trace_rejected_for_any_pk`).** For
+    every well-formed statement, with no assumption on `pkSeed`, `pkRoot`, `msg` or `numCols`,
+    the all-zero rows fail: boundary gate `(row = 0, col = 0)` pins
+    `profileFieldTag pk0.profile ∈ {1, 2} ≠ 0`. -/
+theorem tooth_zero_trace_rejected_for_any_pk
+    (stmt : AggArithPublicStmt) (numCols : Nat)
+    (hWf : stmt.wellFormed = true) :
+    traceSatisfiesAllConstraints stmt (zeroAggExecutionTrace stmt.logRows numCols) = false := by
+  apply Bool.eq_false_iff.mpr
+  intro hSat
+  have hNonEmpty : stmt.committeePks ≠ [] := by
+    unfold AggArithPublicStmt.wellFormed at hWf
+    simp only [Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff] at hWf
+    exact hWf.1.1.1.2
+  have hk : 0 < stmt.committeePks.length := by
+    cases hPks : stmt.committeePks with
+    | nil => exact absurd hPks hNonEmpty
+    | cons _ _ => exact Nat.zero_lt_succ _
+  obtain ⟨hT, _⟩ := committedRowOk_unpack
+    (committedRowsSatisfy_row_at stmt (zeroAggExecutionTrace stmt.logRows numCols).rows 0 hk hSat)
+  have hB := committedRow_boundary_gates_vanish hT
+  have hRowEq : (zeroAggExecutionTrace stmt.logRows numCols).rows.getD 0 [] =
+      List.replicate numCols Goldilocks.zero := by
+    dsimp only [zeroAggExecutionTrace]
+    cases hPow : 2 ^ stmt.logRows with
+    | zero => exact absurd hPow (Nat.ne_of_gt (Nat.two_pow_pos _))
+    | succ m => rfl
+  rw [hRowEq] at hB
+  unfold boundaryRowGates at hB
+  simp only [expectedBoundaryCols.public_eqs] at hB
+  simp only [List.singleton_append] at hB
+  have hCol0 := boundaryGatesFrom_zero_at_col0 (profileFieldTag _) _ _ hB
+  rw [getD_zero_replicate_zero] at hCol0
+  exact profileFieldTag_ne_zero _ hCol0.symm
+
+/-- Inhabitedness witness for the row constraints: the audit statement is well formed, its
+    all-zero trace is rejected, and the honest trace of any valid signing counters is accepted. -/
+theorem inhabited_agg_arithmetization_pipeline :
+    let pk0 := deriveAggPublicKey xmssPoseidon2Geom auditSkSeed auditPkSeed
+    let stmt : AggArithPublicStmt :=
+      { geom := xmssPoseidon2Geom, msg := auditMsg, committeePks := [pk0], logRows := 1 }
+    stmt.wellFormed = true ∧
+    traceSatisfiesAllConstraints stmt (zeroAggExecutionTrace 1 14) = false ∧
+    (∀ (ctrs : ValidSigningCtrs xmssPoseidon2Geom auditSkSeed pk0 auditMsg auditRRand 0),
+      let sig0 := signAggNative xmssPoseidon2Geom auditSkSeed pk0 auditMsg auditRRand 0
+                    ctrs.layer0Ctr ctrs.upperCtrs
+      traceSatisfiesAllConstraints stmt (buildHonestAggExecutionTrace stmt [sig0]) = true) := by
+  intro pk0 stmt
+  obtain ⟨hStmtWf, hHon⟩ := inhabited_committed_row_extraction
+  exact ⟨hStmtWf, tooth_zero_trace_rejected_for_any_pk stmt 14 hStmtWf, hHon⟩
+
+/-- A 32-byte digest. -/
+abbrev CanopyDigest32 : Type := { b : ByteArray // b.data.toList.length = 32 }
+
+/-- An explicit collision of a byte-string hash `H`: two distinct inputs with equal outputs,
+    as data (a subtype of pairs), not as an existence statement. -/
+@[expose] def ExtractedHashCollision (H : ByteArray → ByteArray) : Type :=
+  { p : ByteArray × ByteArray // p.1 ≠ p.2 ∧ H p.1 = H p.2 }
+
+/-- `pcs.rs:hash_merkle_internal` input frame: `0x00 || node_idx (4 bytes LE) || left || right`. -/
+def canopyNodeFrame (nodeIdx : Nat) (l r : CanopyDigest32) : ByteArray :=
+  ⟨⟨(0 : UInt8) ::
+    ([leByte nodeIdx 1, leByte nodeIdx 256, leByte nodeIdx 65536, leByte nodeIdx 16777216] ++
+      (l.1.data.toList ++ r.1.data.toList))⟩⟩
+
+/-- `pcs.rs:hash_tree_root` input frame: `0x01 || log_leaves || top`. -/
+def canopyRootFrame (logLeaves : Nat) (top : CanopyDigest32) : ByteArray :=
+  ⟨⟨(1 : UInt8) :: leByte logLeaves 1 :: top.1.data.toList⟩⟩
+
+/-- Node hash induced by `H` on `canopyNodeFrame`, for `H` with 32-byte output. -/
+def canopyNodeHashOf (H : ByteArray → ByteArray) (hOut : ∀ x, (H x).data.toList.length = 32)
+    (nodeIdx : Nat) (l r : CanopyDigest32) : CanopyDigest32 :=
+  ⟨H (canopyNodeFrame nodeIdx l r), hOut _⟩
+
+/-- Root hash induced by `H` on `canopyRootFrame`. -/
+def canopyRootHashOf (H : ByteArray → ByteArray) (hOut : ∀ x, (H x).data.toList.length = 32)
+    (logLeaves : Nat) (top : CanopyDigest32) : CanopyDigest32 :=
+  ⟨H (canopyRootFrame logLeaves top), hOut _⟩
+
+private theorem byteArray_eq_of_toList_eq {a b : ByteArray}
+    (h : a.data.toList = b.data.toList) : a = b := by
+  obtain ⟨⟨la⟩⟩ := a
+  obtain ⟨⟨lb⟩⟩ := b
+  have h' : la = lb := h
+  rw [h']
+
+private theorem canopyNodeFrame_inj {i : Nat} {l r l' r' : CanopyDigest32}
+    (h : canopyNodeFrame i l r = canopyNodeFrame i l' r') : l = l' ∧ r = r' := by
+  have h1 : (0 : UInt8) ::
+      ([leByte i 1, leByte i 256, leByte i 65536, leByte i 16777216] ++
+        (l.1.data.toList ++ r.1.data.toList)) =
+      (0 : UInt8) ::
+      ([leByte i 1, leByte i 256, leByte i 65536, leByte i 16777216] ++
+        (l'.1.data.toList ++ r'.1.data.toList)) :=
+    congrArg (fun b : ByteArray => b.data.toList) h
+  have h2 := List.append_cancel_left (List.cons.inj h1).2
+  obtain ⟨e1, e2⟩ := List.append_inj h2 (l.2.trans l'.2.symm)
+  exact ⟨Subtype.ext (byteArray_eq_of_toList_eq e1), Subtype.ext (byteArray_eq_of_toList_eq e2)⟩
+
+private theorem canopyRootFrame_inj {k : Nat} {top top' : CanopyDigest32}
+    (h : canopyRootFrame k top = canopyRootFrame k top') : top = top' := by
+  have h1 : (1 : UInt8) :: leByte k 1 :: top.1.data.toList =
+      (1 : UInt8) :: leByte k 1 :: top'.1.data.toList :=
+    congrArg (fun b : ByteArray => b.data.toList) h
+  exact Subtype.ext (byteArray_eq_of_toList_eq (List.cons.inj (List.cons.inj h1).2).2)
+
+/-- **Transcript-extracted hash collision.** For a byte-string hash `H` with 32-byte output, two
+    accepted `CanopyMultiProof` openings of one index set against one commitment that differ in
+    a leaf digest or a sibling yield an explicit pair of distinct frames with equal `H` digests,
+    computed from the two transcripts by `extractCanopyCollision`. -/
+def extractHashCollisionFromCanopyTranscripts (H : ByteArray → ByteArray)
+    (hOut : ∀ x, (H x).data.toList.length = 32)
+    (logLeaves : Nat) (commitment : CanopyDigest32)
+    (leaves₁ leaves₂ : List (Nat × CanopyDigest32)) (proof₁ proof₂ : List CanopyDigest32)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (hAcc₁ : verifyCanopyMultiproof (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut)
+      logLeaves commitment leaves₁ proof₁ = true)
+    (hAcc₂ : verifyCanopyMultiproof (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut)
+      logLeaves commitment leaves₂ proof₂ = true)
+    (hNe : (leaves₁, proof₁) ≠ (leaves₂, proof₂)) : ExtractedHashCollision H :=
+  match extractCanopyCollision (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut) logLeaves
+      commitment leaves₁ leaves₂ proof₁ proof₂ hIdx hAcc₁ hAcc₂ hNe with
+  | .inl c =>
+    ⟨(canopyRootFrame logLeaves c.top₁, canopyRootFrame logLeaves c.top₂),
+      fun h => c.ne (canopyRootFrame_inj h), congrArg Subtype.val c.eq⟩
+  | .inr c =>
+    ⟨(canopyNodeFrame c.idx c.l c.r, canopyNodeFrame c.idx c.l' c.r'),
+      fun h => c.ne (by
+        obtain ⟨e1, e2⟩ := canopyNodeFrame_inj h
+        rw [e1, e2]),
+      congrArg Subtype.val c.eq⟩
+
+/-- Two distinct leaf assignments accepted against one `CanopyMultiProof` commitment yield an
+    explicit `H` collision. -/
+def extractHashCollisionFromDistinctLeaves (H : ByteArray → ByteArray)
+    (hOut : ∀ x, (H x).data.toList.length = 32)
+    (logLeaves : Nat) (commitment : CanopyDigest32)
+    (leaves₁ leaves₂ : List (Nat × CanopyDigest32)) (proof₁ proof₂ : List CanopyDigest32)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (hAcc₁ : verifyCanopyMultiproof (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut)
+      logLeaves commitment leaves₁ proof₁ = true)
+    (hAcc₂ : verifyCanopyMultiproof (canopyNodeHashOf H hOut) (canopyRootHashOf H hOut)
+      logLeaves commitment leaves₂ proof₂ = true)
+    (hNe : leaves₁ ≠ leaves₂) : ExtractedHashCollision H :=
+  extractHashCollisionFromCanopyTranscripts H hOut logLeaves commitment leaves₁ leaves₂
+    proof₁ proof₂ hIdx hAcc₁ hAcc₂ (fun h => hNe (Prod.mk.inj h).1)
+
+end Qsag
+
+end
+
+public section
+
+namespace Qsag
+
+/-- Computational projection without exposing the subtype's private proof helper. -/
+theorem canopyNodeHashOf_val (H : ByteArray → ByteArray)
+    (hOut : ∀ x, (H x).data.toList.length = 32) (i : Nat) (l r : CanopyDigest32) :
+    (canopyNodeHashOf H hOut i l r).val = H (canopyNodeFrame i l r) := by rfl
+theorem canopyRootHashOf_val (H : ByteArray → ByteArray)
+    (hOut : ∀ x, (H x).data.toList.length = 32) (i : Nat) (top : CanopyDigest32) :
+    (canopyRootHashOf H hOut i top).val = H (canopyRootFrame i top) := by rfl
+#export_eqns canopyNodeFrame canopyRootFrame
+
+end Qsag
+end
