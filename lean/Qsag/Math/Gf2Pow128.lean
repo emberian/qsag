@@ -17,10 +17,8 @@ set_option autoImplicit false
 
 abbrev Tower8 := TowerElem 3
 abbrev Tower128 := TowerElem 7
-abbrev Tower256 := TowerElem 8
 abbrev TowerBitVec (k : Nat) := BitVec (2 ^ k)
 abbrev Tower128Exec := BitVec 128
-abbrev Tower256Exec := BitVec 256
 
 @[expose] def towerZero : (k : Nat) → TowerElem k
   | 0 => false
@@ -1659,18 +1657,6 @@ theorem gf2Pow128_inv_zero :
 end Qsag.Math
 
 namespace Qsag
-/-- Certified basis images and nondegenerate product for the deployed two-lane
-linear map. The arithmetic is checked in the field module; users consume these
-three equations without opening the basis conversion implementation. -/
-theorem gf128_linear_layer_basis_certificate :
-    psiTower128ToPoly (unpackTower 7 0x6938822d2669c41b597c42deeb84a0bb#128) =
-      0x9E3779B97F4A7C15F39CC0605CEDC835#128 ∧
-    psiTower128ToPoly (unpackTower 7 0x2df5aeeede6d3f143c5406b243efb482#128) =
-      0xBF58476D1CE4E5B994D049BB133111EB#128 ∧
-    gf2_128_mul_bv 0x9E3779B97F4A7C15F39CC0605CEDC835#128
-      0xBF58476D1CE4E5B994D049BB133111EB#128 ≠ 1#128 := by
-  decide
-
 /-! ### Exports for lane cred-mig -/
 
 /-- `X · X^j = X^(j+1)` below the reduction degree. -/
@@ -1684,28 +1670,6 @@ namespace Qsag
 theorem joinBits_eq_append (k : Nat) (lo hi : TowerBitVec k) :
     joinBits k lo hi = (hi ++ lo).cast (Nat.two_pow_succ k).symm := by
   unfold joinBits; rfl
-/-- Executed values of the Rust multiplication behind `rust_spn_poly_basis_kats` (`Oracle/Spn`): the
-`pow7_plain` product tree `(x·x²)·(x²·x²)` at `2` and `3`, and both lanes of one round body at state
-`(3, 5)`, round constant `(7, 11)`, with the two deployed linear-layer constants. Checked here because
-the multiplication loop is not exported. -/
-theorem rustGf128Mul_pow7_round_kats :
-    MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul 2#128 (MigrationExecution.rustGf128Mul 2#128 2#128)) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul 2#128 2#128) (MigrationExecution.rustGf128Mul 2#128 2#128)) = 0x80#128 ∧
-    MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul 3#128 (MigrationExecution.rustGf128Mul 3#128 3#128)) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul 3#128 3#128) (MigrationExecution.rustGf128Mul 3#128 3#128)) = 0xff#128 ∧
-    (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128))) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128)) (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128)))) ^^^
-        MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128))) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128)) (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128)))) 0x9E3779B97F4A7C15F39CC0605CEDC835#128 =
-      0x7e449a0c3042bf1c84c9783f54d336e9#128 ∧
-    (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128))) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128)) (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128)))) ^^^
-        MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128))) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128)) (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128)))) 0xBF58476D1CE4E5B994D049BB133111EB#128 =
-      0x11db4739396e6534126ec4cc445b09a2#128 := by
-  decide +kernel
-/-- Reading the tower word of `GF128_MDS_A` through `towerToRust` (the wrong basis map) does not give
-its polynomial-basis image; the executed half of `towerToRust_differs_from_psi_on_mds_constant`
-(`Oracle/Spn`). -/
-theorem gf128_towerToRust_mds_a_ne_poly_bits :
-    MigrationExecution.towerToRust 7 (unpackTower 7 0x6938822d2669c41b597c42deeb84a0bb#128) ≠
-      0x9E3779B97F4A7C15F39CC0605CEDC835#128 := by
-  decide +kernel
-#verify_constructive Qsag.rustGf128Mul_pow7_round_kats Qsag.gf128_towerToRust_mds_a_ne_poly_bits
 #export_eqns lowBits highBits Simulates rustGf128MulXIter
 #export_eqns MigrationExecution.rustGf128MulX MigrationExecution.rustGf128MulLoop MigrationExecution.rustGf128Mul MigrationExecution.rustPolyAct
 end Qsag

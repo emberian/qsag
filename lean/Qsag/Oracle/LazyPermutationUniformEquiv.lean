@@ -1,5 +1,5 @@
 module
-public import Qsag.Oracle.Spn
+public import Qsag.Oracle.PublicPermutation
 public import Qsag.Math.Counting
 public import Qsag.Spec.Assumptions
 public import Qsag.Oracle.SpongeTwoWayIndifferentiability

@@ -3,7 +3,7 @@ public import Qsag.Math.Algebra
 public import Qsag.Math.Primality
 public import Qsag.Spec.Bounds
 public import Qsag.Oracle.FiatShamir
-public import Qsag.Oracle.Spn
+public import Qsag.Oracle.PublicPermutation
 public import Qsag.Tactic.Prelude
 public section
 -- Avoid the choice-based LawfulBEq derived from the Fin order package.
@@ -3004,8 +3004,7 @@ theorem rbr_multiRound_qrom_induction
     exact RatBound.le_trans hRestBound
       (RatBound.add_le_add hFirstSimp (RatBound.le_refl _))
 
-/-! ### Executed non-vacuity fixtures (evaluated here, where the bodies are visible; assembled in
-`Tests/ConcreteSecurityBudgetTeeth`) -/
+/-! ### Executable witnesses for the coherent query bounds -/
 
 /-- Concrete 2-query Hadamard superposition circuit (`QuantumAdv 2 2 1 2`) preparing
     `|0, 0, 0⟩ + |1, 0, 0⟩` via `hadamardQuery2 2 1` after query 0 so query 1 probes `oracleXor`
@@ -6976,144 +6975,6 @@ namespace Qsag
 set_option autoImplicit false
 set_option exponentiation.threshold 512
 
-def publicSpnPack (x : PublicSpnState) : BitVec 256 := x.2 ++ x.1
-
-def publicSpnUnpack (x : BitVec 256) : PublicSpnState :=
-  (x.extractLsb' 0 128, x.extractLsb' 128 128)
-
-theorem publicSpnUnpack_pack (x : PublicSpnState) :
-    publicSpnUnpack (publicSpnPack x) = x := by
-  simp only [publicSpnUnpack, publicSpnPack, BitVec.extractLsb'_append_eq_right,
-    BitVec.extractLsb'_append_eq_left]
-
-theorem publicSpnPack_unpack (x : BitVec 256) :
-    publicSpnPack (publicSpnUnpack x) = x := by
-  exact BitVec.extractLsb'_append_extractLsb'
-
-def publicSpnQueryCode (direction : PublicPermutationDirection) (x : PublicSpnState) :
-    Fin (2 ^ 257) :=
-  ((match direction with | .forward => 0#1 | .inverse => 1#1) ++ publicSpnPack x).toFin
-
-def publicSpnQueryDecode (code : Fin (2 ^ 257)) : PublicPermutationDirection × PublicSpnState :=
-  let word := BitVec.ofFin code
-  (if word.extractLsb' 256 1 = 0#1 then .forward else .inverse,
-    publicSpnUnpack (word.extractLsb' 0 256))
-
-theorem publicSpnQueryDecode_code (direction : PublicPermutationDirection) (x : PublicSpnState) :
-    publicSpnQueryDecode (publicSpnQueryCode direction x) = (direction, x) := by
-  have h : (1#1 : BitVec 1) ≠ 0#1 := by decide
-  cases direction <;>
-    simp only [publicSpnQueryDecode, publicSpnQueryCode, BitVec.ofFin_toFin,
-      BitVec.extractLsb'_append_eq_left, BitVec.extractLsb'_append_eq_right,
-      publicSpnUnpack_pack, h, ↓reduceIte]
-
-/-- Both operations exposed as one bitstring oracle table. -/
-def publicSpnOracleTable (p : PublicPermutation PublicSpnState)
-    (code : Fin (2 ^ 257)) : BitVec 256 :=
-  let query := publicSpnQueryDecode code
-  publicSpnPack (publicPermutationQuery p query.1 query.2)
-
-theorem publicSpnOracleTable_code (p : PublicPermutation PublicSpnState)
-    (direction : PublicPermutationDirection) (x : PublicSpnState) :
-    publicSpnOracleTable p (publicSpnQueryCode direction x) =
-      publicSpnPack (publicPermutationQuery p direction x) := by
-  unfold publicSpnOracleTable
-  rw [publicSpnQueryDecode_code]
-
-/-- Coherent XOR query, including a coherent direction register. -/
-def publicSpnCoherentQuery {anc : Nat} (p : PublicPermutation PublicSpnState)
-    (state : QVec (2 ^ 257) 256 anc) : QVec (2 ^ 257) 256 anc :=
-  oracleXor (publicSpnOracleTable p) state
-
-theorem publicSpnCoherentQuery_involutive {anc : Nat} (p : PublicPermutation PublicSpnState)
-    (state : QVec (2 ^ 257) 256 anc) :
-    publicSpnCoherentQuery p (publicSpnCoherentQuery p state) = state :=
-  oracleXor_involutive (publicSpnOracleTable p) state
-
-theorem publicSpnCoherentQuery_isometry {anc : Nat} (p : PublicPermutation PublicSpnState)
-    (state : QVec (2 ^ 257) 256 anc) :
-    QVec.stateNormSq (publicSpnCoherentQuery p state) = QVec.stateNormSq state :=
-  oracleXor_isometry (publicSpnOracleTable p) state
-
-/-- The target is given before the online run. This family is fixed before sampling p;
-there is no extra oracle-correlated advice parameter. `q` counts forward/inverse
-primitive calls together; a superposition of directions costs one call. -/
-abbrev PublicSpnPreimageAdversary (anc q : Nat) :=
-  PublicSpnState → QuantumAdv (2 ^ 257) 256 anc q
-
-/-- Fresh-image challenge: sample x, compute target=P(x) XOR x, then run the adversary
-on target with BOTH primitive directions. One sampler forward call is additional to q.
-The final target register is measured as the proposed preimage; the input and ancilla
-registers are ignored. The verifier makes one further forward call. -/
-def publicSpnPreimageFinalState {anc q : Nat} (p : PublicPermutation PublicSpnState)
-    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
-    QVec (2 ^ 257) 256 anc :=
-  runQuantumAdv (adversary (publicSpnFeedForward p challenge)) (publicSpnOracleTable p)
-
-/-- Unnormalized Born mass of the actual feed-forward preimage relation. -/
-def publicSpnPreimageMass {anc q : Nat} (p : PublicPermutation PublicSpnState)
-    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) : Nat :=
-  let state := publicSpnPreimageFinalState p adversary challenge
-  qsum (2 ^ 257) (fun input => qsum (2 ^ 256) (fun output => qsum anc (fun auxiliary =>
-    if publicSpnFeedForward p (publicSpnUnpack (BitVec.ofFin output)) =
-        publicSpnFeedForward p challenge
-    then GaussInt.normSq (state input output auxiliary) else 0)))
-
-def publicSpnPreimageProbability {anc q : Nat} (p : PublicPermutation PublicSpnState)
-    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) : RatBound where
-  num := publicSpnPreimageMass p adversary challenge
-  den := QVec.stateNormSq (publicSpnPreimageFinalState p adversary challenge)
-  h_pos := runQuantumAdv_normSq_pos _ _
-
-/-- Uniform fresh 256-bit input challenge, sampled after the public primitive.
-Normalization is performed per challenge before averaging, since target-dependent
-scaled circuits may have different squared norms. -/
-def publicSpnFreshPreimageProbability {anc q : Nat} (p : PublicPermutation PublicSpnState)
-    (adversary : PublicSpnPreimageAdversary anc q) : RatBound :=
-  RatBound.mul (RatBound.invPow2 256) (RatBound.sumList (List.ofFn
-    (fun challenge : Fin (2 ^ 256) => publicSpnPreimageProbability p adversary
-      (publicSpnUnpack (BitVec.ofFin challenge)))))
-
-/-- Exact experiment for a finite primitive ensemble: select an entry uniformly,
-then a fresh uniform input, then run the fixed adversary family. The same adversary
-is used for every primitive. Repeated entries carry repeated probability weight.
-This does NOT assert the supplied ensemble is uniform over all permutations; such
-an ideal sampler and its uniformity certificate remain separate work. -/
-def publicSpnEnsemblePreimageProbability {anc q : Nat}
-    (primitives : List (PublicPermutation PublicSpnState)) (nonempty : 0 < primitives.length)
-    (adversary : PublicSpnPreimageAdversary anc q) : RatBound :=
-  RatBound.mul ⟨1, primitives.length, nonempty⟩
-    (RatBound.sumList (primitives.map (fun p => publicSpnFreshPreimageProbability p adversary)))
-
-/-- The game probability is normalized even when the adversary uses scaled unitaries. -/
-theorem publicSpnPreimageMass_le_norm {anc q : Nat} (p : PublicPermutation PublicSpnState)
-    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
-    publicSpnPreimageMass p adversary challenge ≤
-      QVec.stateNormSq (publicSpnPreimageFinalState p adversary challenge) := by
-  unfold publicSpnPreimageMass QVec.stateNormSq QVec.queryWeight
-  apply qsum_le_qsum
-  intro input
-  apply qsum_le_qsum
-  intro output
-  apply qsum_le_qsum
-  intro auxiliary
-  split
-  · exact Nat.le_refl _
-  · exact Nat.zero_le _
-
-theorem publicSpnPreimageProbability_le_one {anc q : Nat} (p : PublicPermutation PublicSpnState)
-    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
-    RatBound.le (publicSpnPreimageProbability p adversary challenge) RatBound.one := by
-  simpa only [RatBound.le, publicSpnPreimageProbability, RatBound.one_num, RatBound.one_den,
-    Nat.mul_one, Nat.one_mul] using publicSpnPreimageMass_le_norm p adversary challenge
-
-/-- Concrete single-address experiment. Public address parameters are given to the
-adversary before its online run; the function family and code may depend on them.
-This does not model extra queries to OTHER chain addresses or a full signature game. -/
-def publicChainPreimageProbability {anc q : Nat}
-    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8) (address : PublicChainAddress)
-    (adversary : PublicChainAddress → PublicSpnPreimageAdversary anc q) : RatBound :=
-  publicSpnFreshPreimageProbability (publicChainPermutation framedXof address) (adversary address)
 
 /-! ### Equation lemmas for the Gaussian-integer state vectors, the query gate, the adversary
 run and the one-bit Walsh transform
@@ -7666,8 +7527,6 @@ theorem tooth_onlineMerkle_empty_queries_unqueried_root :
   cases h
 
 
-
-
 private def witnessInitVec : QVec 2 2 1 :=
   fun x y _ => if x.1 = 0 ∧ y.1 = 0 then ⟨1, 0⟩ else GaussInt.zero
 
@@ -7735,8 +7594,6 @@ theorem inhabited_qrom_unitary_merkle_extract :
     (fun _ _ _ _ => rfl),
     (fun _ _ _ => by unfold witnessTargetSet; simp),
     witnessCoverProof⟩
-
-
 
 
 /-- A singleton adaptive target can contain the answer being tested. -/
@@ -7810,16 +7667,6 @@ theorem measured_parity_execution :
       (measuredStateAt qromParityAdv qromParityOracle 1 (Nat.le_refl 1) xs)) = 8 := by
   decide
 
-set_option maxRecDepth 10000 in
-/-- Nonvacuity control in the QUANTUM game: the identity primitive makes the mode
-constant, so every online adversary wins for every challenge. This does not describe
-the actual SPN; it rules out deriving mode hardness from permutation laws alone. -/
-theorem identityPublicPermutation_quantum_preimage_mass {anc q : Nat}
-    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
-    publicSpnPreimageMass identityPublicPermutation adversary challenge =
-      QVec.stateNormSq (publicSpnPreimageFinalState identityPublicPermutation adversary challenge) := by
-  unfold publicSpnPreimageMass QVec.stateNormSq QVec.queryWeight
-  simp only [publicSpnFeedForward_identity, ↓reduceIte]
 
 def paritySuccess (H : Fin 2 → BitVec 1) (x : Fin 2) : Bool :=
   decide (x.val = (H 0 ^^^ H 1).toNat)
@@ -7939,14 +7786,12 @@ theorem toy_classical_run_execution :
       ((2 ^ 1) ^ 4 * (prefixScale guesser 1 (Nat.le_refl 1) * QVec.stateNormSq guesser.init)) := by
   decide +kernel
 
-#verify_constructive
-  Qsag.lazyRo_query_regime_characterization
+#verify_constructive Qsag.lazyRo_query_regime_characterization
   Qsag.toy_measured_merkle_execution
   Qsag.toyQueryAdv_classical
   Qsag.toy_classical_run_execution
   Qsag.coherent_parity_runtime_execution
   Qsag.tooth_fourier_database_measurement_disturbs
-  Qsag.identityPublicPermutation_quantum_preimage_mass
   Qsag.tooth_bht_256bit_unrestricted_collision_ceiling_85bits
   Qsag.tooth_merkle_right_blind_compression_collides
   Qsag.canopyToy_honest_accepted

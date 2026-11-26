@@ -7,7 +7,7 @@ public import Qsag.Oracle.Keccak
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Oracle.Sponge
 public import Qsag.Tactic.Prelude
-public import Qsag.Oracle.Spn
+public import Qsag.Oracle.PublicPermutation
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Spec.Bounds
 public import Qsag.Spec.Encoding
@@ -91,61 +91,6 @@ theorem tooth_oversized_tag_midstate_single_block_fails :
 #tooth_pair Qsag.cshakePrefix_single_block_length vs Qsag.tooth_oversized_tag_midstate_single_block_fails
 
 
-
-open MigrationExecution
-set_option exponentiation.threshold 2048
-theorem tooth_degenerate_mds_ab_eq_one_collapses_branch_number :
-    ∃ st : Tower128 × Tower128,
-      st ≠ (towerZero 7, towerZero 7) ∧
-      spnLinearMix 7 (towerOne 7) (towerOne 7) st = (towerZero 7, towerZero 7) ∧
-      laneActiveWeight 7 st + laneActiveWeight 7 (spnLinearMix 7 (towerOne 7) (towerOne 7) st) = 2 := by
-  refine ⟨(towerOne 7, towerOne 7), fun h => towerOne128_ne_zero (congrArg Prod.fst h), ?_, ?_⟩
-  · unfold spnLinearMix
-    simp only [towerOne_mul, towerAdd_self_zero]
-  · unfold spnLinearMix laneActiveWeight
-    simp only [towerOne_mul, towerAdd_self_zero, towerOne128_ne_zero, ↓reduceIte]
-
-#tooth_pair Qsag.spnLinearMix_branch_number_three vs Qsag.tooth_degenerate_mds_ab_eq_one_collapses_branch_number
-#tooth_pair Qsag.sbox7MaxDiffProb128_eq_three_div_two_pow_127 vs Qsag.tooth_frobenius_sbox_x2_differential_probability_one
-#tooth_pair Qsag.spnRound128_nonzero_rc_breaks_zero_fixpoint vs Qsag.tooth_zero_round_constants_preserve_zero_subspace
-
-theorem inhabited_parallel_seeded_spn_security :
-    ∃ (mds : ValidSpnMdsPair 7) (rc : Tower128 × Tower128) (s s' : Tower128 × Tower128),
-      rc ≠ (towerZero 7, towerZero 7) ∧ s ≠ s' ∧
-      72 ≤ spnTrailActiveSboxes mds.mdsA mds.mdsB (fun _ => rc) spnRounds s s' := by
-  have hRcNe : ((towerOne 7, towerZero 7) : Tower128 × Tower128) ≠ (towerZero 7, towerZero 7) :=
-    fun h => towerOne128_ne_zero (congrArg Prod.fst h)
-  have hSNe : ((towerZero 7, towerZero 7) : Tower128 × Tower128) ≠ (towerOne 7, towerZero 7) :=
-    fun h => towerOne128_ne_zero (congrArg Prod.fst h).symm
-  exact ⟨parallelSeededMdsPair, (towerOne 7, towerZero 7), (towerZero 7, towerZero 7),
-    (towerOne 7, towerZero 7), hRcNe, hSNe,
-    (spn48_active_sboxes_ge_72 parallelSeededMdsPair (fun _ => (towerOne 7, towerZero 7))
-      (towerZero 7, towerZero 7) (towerOne 7, towerZero 7) hSNe).1⟩
-
-#verify_inhabited Qsag.spn48_active_sboxes_ge_72 Qsag.inhabited_parallel_seeded_spn_security
-
-
-/-! ## 7. Controls
-
-The executed controls of the Rust-model SPN (`rust_spn_poly_basis_kats`, `rust_le_lane_framing_kats`,
-`tooth_big_endian_lane_framing_differs`, `tooth_swapped_mds_constants_change_round`,
-`tooth_untranslated_tower_constant_breaks_round`, `tooth_xor_constant_permutation_davies_meyer_collapses`,
-`tooth_walsh_single_trail_is_not_the_hull`, the `chainStepKat_*` chain and
-`rust_parallel_chain_step_executed_kat`, `towerToRust_differs_from_psi_on_mds_constant`) and the teeth
-`tooth_frobenius_sbox_x2_differential_probability_one` /
-`tooth_zero_round_constants_preserve_zero_subspace` are proved in `Oracle/Spn`, with the sealed
-multiplication and cSHAKE256 values certified in `Math/Gf2Pow128` and `Oracle/Keccak`. -/
-
-
-
-/-! ## §5. One trail is not the hull -/
-
-#verify_constructive tooth_big_endian_lane_framing_differs
-#verify_constructive tooth_swapped_mds_constants_change_round
-#verify_constructive tooth_untranslated_tower_constant_breaks_round
-#verify_constructive tooth_xor_constant_permutation_davies_meyer_collapses
-#verify_constructive tooth_walsh_single_trail_is_not_the_hull
-
 end Qsag
 
 section
@@ -171,8 +116,6 @@ namespace Qsag
 #verify_constructive tooth_canopy_sibling_mutation inhabited_canopy_nonempty_opening
 
 
-
-
 #verify_constructive inhabited_canopy_multiproof_binding
 #verify_constructive tooth_onlineMerkle_empty_queries_unqueried_root
 #tooth_pair Qsag.onlineMerkle_preChallenge_unique vs Qsag.tooth_onlineMerkle_empty_queries_unqueried_root
@@ -183,9 +126,6 @@ namespace Qsag
 #verify_constructive tooth_qrom_query_record_changes_born_probability
 
 end Qsag
-
--- `identityPublicPermutation_quantum_preimage_mass` is proved and audited in `Oracle/Qrom` (it unfolds
--- `publicSpnPreimageMass`).
 
 public section
 set_option exponentiation.threshold 8192
@@ -205,10 +145,6 @@ theorem tooth_poseidon2_margin_fails_at_rp17 : ¬ Poseidon2InterpolationMargin 1
   fun h => by
     have := poseidon2_interpolation_margin_needs_26 16 8 17 (by decide) h
     omega
-
-
-
-
 
 
 /-- `#tooth` **Reduced-Round `(R_F = 4, R_P = 10)` & Single-Initial-Round GSR Failure (`tooth_reduced_poseidon2_fails_cico_and_gsr`)**:
@@ -315,9 +251,7 @@ end
 public section
 namespace Qsag
 open MigrationExecution
-#verify_constructive rust_spn_poly_basis_kats rust_le_lane_framing_kats
-  rust_parallel_chain_step_executed_kat towerToRust_differs_from_psi_on_mds_constant
-  lazyRo_query_regime_characterization identityPublicPermutation_quantum_preimage_mass
+#verify_constructive lazyRo_query_regime_characterization
   measured_parity_execution coherent_parity_runtime_execution
 end Qsag
 end

@@ -69,7 +69,7 @@ Keccak round functions and sampling a whole permutation up front are separate mo
 -/
 
 public import Qsag.Oracle.SpongeDomainSeparation
-public import Qsag.Oracle.Spn
+public import Qsag.Oracle.PublicPermutation
 public import Qsag.Spec.GameBound
 import Qsag.Tactic.AssuranceKit
 

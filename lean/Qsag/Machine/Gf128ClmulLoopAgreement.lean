@@ -1,25 +1,5 @@
 module
-/-
-# Qsag.Gf128ClmulLoopAgreement — Symbolic Field-Loop Agreement and SIMD Carry-Less Multiply Bridge
 
-Three representations of multiplication in `GF(2^128)` appear across specifications,
-Rust share/SPN arithmetic, and SIMD assembly kernels:
-
-* `towerMul 7` (`ParallelSeededSpn`): Wiedemann tower `GF(2)[x₀,…,x₆]/(xₖ² + xₖ·xₖ₋₁ + 1)`.
-* `MigrationExecution.rustGf128Mul`: the 128-step shift-and-reduce loop of
-  `qsag_accel::gf2_128::gf2_128_mul` over `GF(2)[z]/(z^128 + z^7 + z^2 + z + 1)`.
-* `gf128FieldMul` (`McRefine`) and `SimdBinaryEquiv.fastRemainder ∘ SimdBinaryEquiv.clmul128`:
-  four-limb carry-less multiplication (`PCLMULQDQ` / `VPCLMULQDQ` / `PMULL` + `PMULL2`)
-  followed by two-fold `0x87` polynomial reduction (`gf2_128_reduce_x128_7_2_1_0`).
-
-`gf128Reduce_shiftLeft_one` and `gf128Reduce_setWidth` are proved structurally from the
-single-step shift commutation `gf128ReduceStep (k + 1) (p <<< 1) = (gf128ReduceStep k p) <<< 1`
-without enumerating 256-bit or 128-bit monomial tables in the kernel. Combining this with
-`Tower128PolyBasisIso` and `SimdBinaryEquiv` links `towerMul 7`, `rustGf128Mul`,
-`gf128FieldMul`, single-lane `PCLMULQDQ` / `PMULL` reduction, and dual-lane `VPCLMULQDQ`
-carry-less dot-product accumulation under the explicit basis isomorphism `psiTower128ToPoly` /
-`polyToTower128`.
--/
 
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Math.GoldilocksBase
@@ -457,13 +437,7 @@ end
 
 public section
 namespace Qsag.Math
-/-- **Five-Way `𝔽_{2^{128}}` Multiplication Agreement (`gf2Pow128_five_way_mul_agreement`)**:
-    Certifies that canonical `Gf2Pow128.mul` agrees identically on all 128-bit inputs with:
-    1. Wiedemann `towerMul 7` transported via `psiTower128ToPoly` / `polyToTower128`,
-    2. `MigrationExecution.rustGf128Mul` (128-step Rust shift-and-reduce),
-    3. `gf2_128_mul_bv` (`ParallelSeededSpnSecurity` bit-vector multiplication),
-    4. `SimdBinaryEquiv.fastRemainder ∘ pclmulqdqFourProduct256` (x86-64 `PCLMULQDQ`), and
-    5. `SimdBinaryEquiv.fastRemainder ∘ pmullFourProduct256` (AArch64 `PMULL` / `PMULL2`). -/
+
 theorem gf2Pow128_five_way_mul_agreement (a b : BitVec 128) :
     let prod := (Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits
     prod = Qsag.psiTower128ToPoly (Qsag.towerMul 7 (Qsag.polyToTower128 a) (Qsag.polyToTower128 b)) ∧
