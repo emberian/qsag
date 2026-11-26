@@ -294,38 +294,6 @@ private theorem embedding_event_bound {N : Nat} {hN : 0 < N}
         E.nCp E.nAp E.πp E.sample E.hSample E.advTag E.hAdvTag A hA)
       (hTcr N E.nCt E.nAt hN E.πt E.seed E.hSeed E.advT E.hAdvT))
 
-/-- **The two violation probabilities of `authenticatedCustody_unsafe_release_le_violations`,
-    bounded.** Given a reduction embedding, `Spec.PrfHard` for its PRF with `qTag + 1` queries and
-    `Spec.SmDtTcrHard` for its tweakable hash: the acknowledgement-violation event has probability
-    at most `custodians * (εPrf + 256 ^ (-outLen)) + εTcr` and the WAL-violation event at most
-    `εTcr`. These are the hypotheses `hAck`, `hWal` of
-    `authenticatedCustody_unsafe_release_bound`. -/
-theorem AuthCustodyReductionEmbedding.violation_probabilities_prf_tcr_bound
-    {N : Nat} {hN : 0 < N}
-    {dep : Fin N → Qsag.DistCustody.AuthDeployment F C PK D Sig}
-    {adv : (ω : Fin N) → List (Qsag.DistCustody.AuthTurn F (dep ω).core.quorum.numParties)}
-    (E : AuthCustodyReductionEmbedding hN dep adv)
-    {εPrf εTcr : Spec.RatBound}
-    (hPrf : PrfHard E.𝒜P E.prf E.keyLen E.inLen E.outLen (E.qTag + 1) εPrf)
-    (hTcr : SmDtTcrHard E.𝒜T E.th E.seedLen E.qTcr εTcr) :
-    GameBound
-      (FinGame.mk hN (fun ω =>
-        (Qsag.DistCustody.authRun (dep ω) (Qsag.DistCustody.authAckViolation (dep ω))
-          (Qsag.DistCustody.AuthState.init (dep ω)) (adv ω)).2)).winProb
-      (((εPrf.add (tagGuessBound E.outLen)).scale E.custodians).add εTcr) ∧
-    GameBound
-      (FinGame.mk hN (fun ω =>
-        (Qsag.DistCustody.authRun (dep ω) (Qsag.DistCustody.authWalViolation (dep ω))
-          (Qsag.DistCustody.AuthState.init (dep ω)) (adv ω)).2)).winProb
-      εTcr :=
-  ⟨embedding_event_bound E hPrf hTcr _ (fun ω h => E.extract_ack ω h),
-    GameBound.trans
-      (event_le_reduction_win _
-        (smDtTcrGame hN E.th E.qTcr (fun ω => E.seed (E.πt.chal ω))
-          (fun ω => E.advT (E.πt.advc ω)))
-        (fun ω h => E.extract_wal ω h))
-      (hTcr N E.nCt E.nAt hN E.πt E.seed E.hSeed E.advT E.hAdvT)⟩
-
 /-- **`Pr[unsafe release] ≤ custodians * (εPrf + 256 ^ (-outLen)) + εTcr`, given a reduction
     embedding.** Over a finite coin space that determines the deployment and the schedule against
     the unguarded `DistCustody.authMachine`, and given a reduction embedding of the two violation
@@ -362,8 +330,7 @@ theorem AuthCustodyReductionEmbedding.unsafe_release_prf_tcr_bound
 
 end AuthBound
 
-#verify_constructive
-  Qsag.Top.rssSharedRelease_refines_reference_rel
+#verify_constructive Qsag.Top.rssSharedRelease_refines_reference_rel
   Qsag.Top.rssSharedRelease_admits_reference_traces
   Qsag.Top.rssSharedRelease_runStep_eq_reference
   Qsag.Top.thresholdServiceShared_prefixEquivalent_ideal
@@ -372,7 +339,6 @@ end AuthBound
   Qsag.Top.prfCertLayer_issue
   Qsag.Top.prfCertCustody_forgery_carries_prf_tag
   Qsag.Top.tooth_prfCertLayer_wrong_tag_rejected
-  Qsag.Top.AuthCustodyReductionEmbedding.violation_probabilities_prf_tcr_bound
   Qsag.Top.AuthCustodyReductionEmbedding.unsafe_release_prf_tcr_bound
 
 #tooth_pair Qsag.Top.prfCertCustody_forgery_carries_prf_tag vs

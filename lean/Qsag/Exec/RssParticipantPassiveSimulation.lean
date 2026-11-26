@@ -132,4 +132,34 @@ theorem passive_prefix_simulation (nodes : Nodes) (binding : List UInt8) (state 
 
 #verify_constructive inverse_forwardTape forward_inverseTape
   routed_corrupt_round_of_represents passive_prefix_simulation
+
+/-- A finite passive simulation preserves the length of the sampled tape. -/
+theorem forwardTape_length (state : RssKState) (rounds : List PassiveRound) (tape : List KState) :
+    (forwardTape state rounds tape).length = tape.length := by
+  induction rounds generalizing state tape with
+  | nil => rfl
+  | cons round rounds ih =>
+    cases tape with
+    | nil => rfl
+    | cons hidden tape => simp only [forwardTape, List.length_cons, ih]
+
+theorem inverseTape_length (state : RssKState) (rounds : List PassiveRound) (tape : List KState) :
+    (inverseTape state rounds tape).length = tape.length := by
+  induction rounds generalizing state tape with
+  | nil => rfl
+  | cons round rounds ih =>
+    cases tape with
+    | nil => rfl
+    | cons sample tape => simp only [inverseTape, List.length_cons, ih]
+
+@[expose] def fixedTapeEquiv (state : RssKState) (rounds : List PassiveRound) (length : Nat) :
+    SimpleEquiv { tape : List KState // tape.length = length }
+      { tape : List KState // tape.length = length } where
+  toFun tape := ⟨forwardTape state rounds tape.val, (forwardTape_length _ _ _).trans tape.property⟩
+  invFun tape := ⟨inverseTape state rounds tape.val, (inverseTape_length _ _ _).trans tape.property⟩
+  left_inv tape := by apply Subtype.ext; exact inverse_forwardTape _ _ _
+  right_inv tape := by apply Subtype.ext; exact forward_inverseTape _ _ _
+
+#verify_constructive forwardTape_length inverseTape_length
+#verify_kernel fixedTapeEquiv
 end Qsag.RssParticipant
