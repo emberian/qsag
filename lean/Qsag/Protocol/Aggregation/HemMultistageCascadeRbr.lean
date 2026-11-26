@@ -372,7 +372,7 @@ theorem hemShiftRound_bad_triples_bound {F : Type} [LawfulField F] [DecidableEq 
 
 /-! ## §2. Messages, states and round steps of the multi-stage IOP -/
 
-instance hemWhirStageSpecDecEq : DecidableEq (HemWhirStageSpec QuarticGoldilocks)
+instance hemWhirStageSpecDecEq : DecidableEq (HemWhirStageSpec QuinticGoldilocks)
   | ⟨d₁, g₁, a₁, l₁, q₁⟩, ⟨d₂, g₂, a₂, l₂, q₂⟩ =>
     if h : d₁ = d₂ ∧ g₁ = g₂ ∧ a₁ = a₂ ∧ l₁ = l₂ ∧ q₁ = q₂ then
       isTrue (by
@@ -385,11 +385,11 @@ instance hemWhirStageSpecDecEq : DecidableEq (HemWhirStageSpec QuarticGoldilocks
 
 /-- Prover messages of the multi-stage IOP. -/
 inductive HemFoldIopMsg where
-  | cascade (absorbedShifts : List QuarticGoldilocks)
-  | cross (w₀ w₁ w₂ : QuarticGoldilocks)
-  | shift (c_F c_G : QuarticGoldilocks)
-  | commit (stageTable : List QuarticGoldilocks)
-  | final (finalCoeffs : List QuarticGoldilocks)
+  | cascade (absorbedShifts : List QuinticGoldilocks)
+  | cross (w₀ w₁ w₂ : QuinticGoldilocks)
+  | shift (c_F c_G : QuinticGoldilocks)
+  | commit (stageTable : List QuinticGoldilocks)
+  | final (finalCoeffs : List QuinticGoldilocks)
   deriving DecidableEq, Repr
 
 /-- Verifier state between rounds. `cur` holds the oracle, kernel and claim of the stage
@@ -397,10 +397,10 @@ inductive HemFoldIopMsg where
     `mid` is the state between the `cross` and `shift` rounds of one fold. -/
 inductive HemFoldIopState where
   | init
-  | cur (dom : List QuarticGoldilocks) (deg agree : Nat) (oracle : Nat → QuarticGoldilocks)
-      (kernel : List QuarticGoldilocks) (claim : QuarticGoldilocks)
-  | mid (dIn dOut : List QuarticGoldilocks) (d A : Nat) (oracle : Nat → QuarticGoldilocks)
-      (kernel : List QuarticGoldilocks) (e_f e_g : QuarticGoldilocks)
+  | cur (dom : List QuinticGoldilocks) (deg agree : Nat) (oracle : Nat → QuinticGoldilocks)
+      (kernel : List QuinticGoldilocks) (claim : QuinticGoldilocks)
+  | mid (dIn dOut : List QuinticGoldilocks) (d A : Nat) (oracle : Nat → QuinticGoldilocks)
+      (kernel : List QuinticGoldilocks) (e_f e_g : QuinticGoldilocks)
   | accepted
   | invalid
 
@@ -410,16 +410,16 @@ inductive HemFoldIopState where
       `dom` and meets the claim against the kernel;
     * `mid`: both halves of the oracle have such a witness on the fold domain, for the two
       half-claims fixed by the cross wires and `φ`. -/
-def hemFoldIopLive (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (inst : HemWhirInstance QuarticGoldilocks) : HemFoldIopState → Prop
+def hemFoldIopLive (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks) : HemFoldIopState → Prop
   | .init =>
     WellFormedHemCascadeInstance 1 domPts d₀ A₀ inst ∧ inst.stages = stages ∧
       HemStatementValid inst
   | .cur dom deg agree oracle kernel claim =>
-    ∃ P : List QuarticGoldilocks, polyWitnessValid dom agree deg oracle kernel claim P = true
+    ∃ P : List QuinticGoldilocks, polyWitnessValid dom agree deg oracle kernel claim P = true
   | .mid dIn dOut d A oracle kernel e_f e_g =>
-    ∃ Fp Gp : List QuarticGoldilocks,
+    ∃ Fp Gp : List QuinticGoldilocks,
       polyWitnessValid dOut A d (cosetEvenOracle oracle) kernel e_f Fp = true ∧
       polyWitnessValid dOut A d (cosetOddOracle dIn oracle) kernel e_g Gp = true
   | .accepted => True
@@ -437,9 +437,9 @@ theorem hemFoldGuard_false (s : HemFoldIopState) : hemFoldGuard false s = .inval
 
 /-- Round 0: the single-batch cascade. The verifier checks the instance shape against the
     static parameters, including `inst.stages = stages`. -/
-def hemFoldCascadeStep (S domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (inst : HemWhirInstance QuarticGoldilocks) (s : HemFoldIopState)
+def hemFoldCascadeStep (S domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks) (s : HemFoldIopState)
     (m : HemFoldIopMsg) (ch : Nat) : HemFoldIopState :=
   match s, m with
   | .init, .cascade [s₀] =>
@@ -457,8 +457,8 @@ def hemFoldCascadeStep (S domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
 
 /-- `cross` round of the fold onto `st`: cross wires in, `φ` out. The verifier folds the kernel
     and fixes the two half-claims `w₀ + φ w₁` and `w₂ + φ (claim - w₀)`. -/
-def hemFoldCrossStep (S curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
-    (st : HemWhirStageSpec QuarticGoldilocks) (s : HemFoldIopState)
+def hemFoldCrossStep (S curDom : List QuinticGoldilocks) (curDeg curAgree : Nat)
+    (st : HemWhirStageSpec QuinticGoldilocks) (s : HemFoldIopState)
     (m : HemFoldIopMsg) (ch : Nat) : HemFoldIopState :=
   match s, m with
   | .cur dom deg agree oracle kernel claim, .cross w₀ w₁ w₂ =>
@@ -474,8 +474,8 @@ def hemFoldCrossStep (S curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
 /-- `shift` round of the fold onto `st`: shift wires in, `(θ, α, β)` out. The next oracle is the
     virtual fold of the current one and the next claim is `hemFoldClaimUpdate`, which is
     `hemBridgeFoldClaim` on the half-claims (`hemFoldClaimUpdate_eq_bridge`). -/
-def hemFoldShiftStep (S curDom : List QuarticGoldilocks)
-    (st : HemWhirStageSpec QuarticGoldilocks) (s : HemFoldIopState)
+def hemFoldShiftStep (S curDom : List QuinticGoldilocks)
+    (st : HemWhirStageSpec QuinticGoldilocks) (s : HemFoldIopState)
     (m : HemFoldIopMsg) (ch : Nat) : HemFoldIopState :=
   match s, m with
   | .mid dIn dOut d A oracle kernel e_f e_g, .shift c_F c_G =>
@@ -497,8 +497,8 @@ def hemFoldShiftStep (S curDom : List QuarticGoldilocks)
 
 /-- The cross-stage fold-consistency check: the committed table equals `oracle` at every index
     of a domain of size `n`. -/
-@[expose] def hemTableMatchesOracle (n : Nat) (table : List QuarticGoldilocks)
-    (oracle : Nat → QuarticGoldilocks) : Bool :=
+@[expose] def hemTableMatchesOracle (n : Nat) (table : List QuinticGoldilocks)
+    (oracle : Nat → QuinticGoldilocks) : Bool :=
   (List.range n).all (fun i => decide (tableToOracle table i = oracle i))
 
 /-- `commit` round: the prover sends the table of the stage oracle; the verifier checks it
@@ -519,7 +519,7 @@ def hemFoldFinalStep (s : HemFoldIopState) (m : HemFoldIopMsg) : HemFoldIopState
   | _, _ => .invalid
 
 /-- The claim update of the `shift` round is `affine.rs::bridge_finish` on the running claim. -/
-theorem hemFoldClaimUpdate_eq_bridge (claim w₀ w₁ w₂ c_F c_G φ θ α β : QuarticGoldilocks) :
+theorem hemFoldClaimUpdate_eq_bridge (claim w₀ w₁ w₂ c_F c_G φ θ α β : QuinticGoldilocks) :
     hemFoldClaimUpdate (CommRingOps.add w₀ (CommRingOps.mul φ w₁))
       (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀))) c_F c_G θ α β =
     hemBridgeFoldClaim claim w₀ w₁ w₂ c_F c_G φ θ α β := by
@@ -542,25 +542,25 @@ structure HemFoldBudget where
 
 /-- Analytic certificate of one fold stage `st`: an affine fold decomposition bound at the
     stage degree and agreement, and decoding-list bounds one agreement step below. -/
-structure HemStageFoldCert (S : List QuarticGoldilocks)
-    (st : HemWhirStageSpec QuarticGoldilocks) (b : HemFoldBudget) : Prop where
+structure HemStageFoldCert (S : List QuinticGoldilocks)
+    (st : HemWhirStageSpec QuinticGoldilocks) (b : HemFoldBudget) : Prop where
   decomp_bound : AffineFoldDecompBound st.domainPts S st.degBound st.minAgree b.badMca
-  list_lo_bound : ∀ word : QuarticGoldilocks → QuarticGoldilocks,
+  list_lo_bound : ∀ word : QuinticGoldilocks → QuinticGoldilocks,
     (gsDecodeList (st.degBound - 1) (st.minAgree - 1) st.domainPts word).length ≤ b.listLo
-  list_hi_bound : ∀ word : QuarticGoldilocks → QuarticGoldilocks,
+  list_hi_bound : ∀ word : QuinticGoldilocks → QuinticGoldilocks,
     (gsDecodeList st.degBound (st.minAgree - 1) st.domainPts word).length ≤ b.listHi
 
 /-- Certificate of the whole cascade: the Round-0 certificate, the stage geometry chain, and one
     `HemStageFoldCert` per stage with budget `bud st`. -/
-structure HemMultistageRbrCert (S domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget) : Prop where
+structure HemMultistageRbrCert (S domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget) : Prop where
   cascade_cert : HemCascadeRbrCert S domPts d₀ A₀ badMca listG
   chain : HemStageChainWellFormed domPts (d₀ + 1) (A₀ + 1) stages
   stage_certs : ∀ st ∈ stages, HemStageFoldCert S st (bud st)
 
-theorem hemFoldStageGeom_antipodal {curDom : List QuarticGoldilocks} {curDeg curAgree : Nat}
-    {st : HemWhirStageSpec QuarticGoldilocks}
+theorem hemFoldStageGeom_antipodal {curDom : List QuinticGoldilocks} {curDeg curAgree : Nat}
+    {st : HemWhirStageSpec QuinticGoldilocks}
     (h : HemFoldStageGeom curDom curDeg curAgree st) :
     IsAntipodalDomainPair curDom st.domainPts where
   nodup_in := h.1
@@ -572,11 +572,11 @@ theorem hemFoldStageGeom_antipodal {curDom : List QuarticGoldilocks} {curDeg cur
   sq_eq := fun idx hIdx => (h.2.2.2.1 idx hIdx).2.2
 
 private theorem hemFoldCascade_flip_bound
-    (S domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
+    (S domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
     (cert : HemCascadeRbrCert S domPts d₀ A₀ badMca listG)
     (hChain : HemStageChainWellFormed domPts (d₀ + 1) (A₀ + 1) stages)
-    (inst : HemWhirInstance QuarticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
+    (inst : HemWhirInstance QuinticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
     (hDoomed : ¬ hemFoldIopLive domPts d₀ A₀ stages inst s)
     (L : List (Fin (prodPool S).length)) (hNd : L.Nodup)
     (hL : ∀ ch ∈ L, ¬¬ hemFoldIopLive domPts d₀ A₀ stages inst
@@ -610,7 +610,7 @@ private theorem hemFoldCascade_flip_bound
             intro ch
             show hemFoldGuard (decide _) _ = _
             rw [decide_eq_true hWfDec, hemFoldGuard_true]
-          let inst' : HemWhirInstance QuarticGoldilocks :=
+          let inst' : HemWhirInstance QuinticGoldilocks :=
             { batchOracles := inst.batchOracles
               batchClaims := inst.batchClaims
               initDomainPts := inst.initDomainPts
@@ -657,14 +657,14 @@ private theorem hemFoldCascade_flip_bound
       · exact length_le_of_all_dead L hL (fun _ h => h)
 
 private theorem hemFoldCross_flip_bound
-    (S : List QuarticGoldilocks) (hS : S.Nodup)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
-    (st : HemWhirStageSpec QuarticGoldilocks) (b : HemFoldBudget)
+    (S : List QuinticGoldilocks) (hS : S.Nodup)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (curDom : List QuinticGoldilocks) (curDeg curAgree : Nat)
+    (st : HemWhirStageSpec QuinticGoldilocks) (b : HemFoldBudget)
     (hGeom : HemFoldStageGeom curDom curDeg curAgree st)
     (hCert : HemStageFoldCert S st b)
-    (inst : HemWhirInstance QuarticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
+    (inst : HemWhirInstance QuinticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
     (hDoomed : ¬ hemFoldIopLive domPts d₀ A₀ stages inst s)
     (L : List (Fin S.length)) (hNd : L.Nodup)
     (hL : ∀ ch ∈ L, ¬¬ hemFoldIopLive domPts d₀ A₀ stages inst
@@ -698,7 +698,7 @@ private theorem hemFoldCross_flip_bound
         subst hDomEq; subst hDegEq; subst hAgEq
         have hPair := hemFoldStageGeom_antipodal hGeom
         obtain ⟨_, _, _, _, hDeg1, hDeg2, hAg1, _, hAg3⟩ := hGeom
-        have hInvalidIn : ∀ Q : List QuarticGoldilocks,
+        have hInvalidIn : ∀ Q : List QuinticGoldilocks,
             polyWitnessValid dom agree deg oracle kernel claim Q = false := by
           intro Q
           cases hV : polyWitnessValid dom agree deg oracle kernel claim Q
@@ -722,14 +722,14 @@ private theorem hemFoldCross_flip_bound
         exact h
 
 private theorem hemFoldShift_flip_bound
-    (S : List QuarticGoldilocks) (hS : S.Nodup)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
-    (st : HemWhirStageSpec QuarticGoldilocks) (b : HemFoldBudget)
+    (S : List QuinticGoldilocks) (hS : S.Nodup)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (curDom : List QuinticGoldilocks) (curDeg curAgree : Nat)
+    (st : HemWhirStageSpec QuinticGoldilocks) (b : HemFoldBudget)
     (hGeom : HemFoldStageGeom curDom curDeg curAgree st)
     (hCert : HemStageFoldCert S st b)
-    (inst : HemWhirInstance QuarticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
+    (inst : HemWhirInstance QuinticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
     (hDoomed : ¬ hemFoldIopLive domPts d₀ A₀ stages inst s)
     (L : List (Fin (threePool S S).length)) (hNd : L.Nodup)
     (hL : ∀ ch ∈ L, ¬¬ hemFoldIopLive domPts d₀ A₀ stages inst
@@ -798,8 +798,8 @@ private theorem hemFoldShift_flip_bound
         exact h
 
 private theorem polyWitnessValid_congr_oracle
-    (dom : List QuarticGoldilocks) (A d : Nat) (O₁ O₂ : Nat → QuarticGoldilocks)
-    (k : List QuarticGoldilocks) (c : QuarticGoldilocks) (P : List QuarticGoldilocks)
+    (dom : List QuinticGoldilocks) (A d : Nat) (O₁ O₂ : Nat → QuinticGoldilocks)
+    (k : List QuinticGoldilocks) (c : QuinticGoldilocks) (P : List QuinticGoldilocks)
     (h : ∀ i : Nat, i < dom.length → O₁ i = O₂ i) :
     polyWitnessValid dom A d O₁ k c P = polyWitnessValid dom A d O₂ k c P := by
   simp only [polyWitnessValid_def]
@@ -809,15 +809,15 @@ private theorem polyWitnessValid_congr_oracle
     rw [h idx.1 idx.2]
   rw [hCount]
 
-theorem hemTableMatchesOracle_spec (n : Nat) (table : List QuarticGoldilocks)
-    (oracle : Nat → QuarticGoldilocks) (h : hemTableMatchesOracle n table oracle = true)
+theorem hemTableMatchesOracle_spec (n : Nat) (table : List QuinticGoldilocks)
+    (oracle : Nat → QuinticGoldilocks) (h : hemTableMatchesOracle n table oracle = true)
     (i : Nat) (hi : i < n) : tableToOracle table i = oracle i :=
   of_decide_eq_true (List.all_eq_true.mp h i (List.mem_range.mpr hi))
 
 private theorem hemFoldCommit_flip_bound
-    (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (inst : HemWhirInstance QuarticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
     (hDoomed : ¬ hemFoldIopLive domPts d₀ A₀ stages inst s)
     (L : List (Fin 1)) (_hNd : L.Nodup)
     (hL : ∀ ch ∈ L, ¬¬ hemFoldIopLive domPts d₀ A₀ stages inst (hemFoldCommitStep s m)) :
@@ -849,9 +849,9 @@ private theorem hemFoldCommit_flip_bound
         exact hDoomed ⟨P, hP⟩
 
 private theorem hemFoldFinal_flip_bound
-    (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (inst : HemWhirInstance QuarticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks) (s : HemFoldIopState) (m : HemFoldIopMsg)
     (hDoomed : ¬ hemFoldIopLive domPts d₀ A₀ stages inst s)
     (L : List (Fin 1)) (_hNd : L.Nodup)
     (hL : ∀ ch ∈ L, ¬¬ hemFoldIopLive domPts d₀ A₀ stages inst (hemFoldFinalStep s m)) :
@@ -881,15 +881,15 @@ private theorem hemFoldFinal_flip_bound
 /-! ## §4. Round specifications, the IOP and its `RbrStateFunction` -/
 
 /-- Round specification type of the multi-stage IOP. -/
-abbrev HemFoldRoundSpec (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks)) : Type :=
-  SeqRoundSpec (HemWhirInstance QuarticGoldilocks) HemFoldIopState HemFoldIopMsg
+abbrev HemFoldRoundSpec (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks)) : Type :=
+  SeqRoundSpec (HemWhirInstance QuinticGoldilocks) HemFoldIopState HemFoldIopMsg
     (hemFoldIopLive domPts d₀ A₀ stages)
 
 /-- Round 0: flips on at most `badMca + listG * |S|` of the `|S|²` cascade challenges. -/
-def hemFoldCascadeSpec (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
+def hemFoldCascadeSpec (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
     (cert : HemCascadeRbrCert S domPts d₀ A₀ badMca listG)
     (hChain : HemStageChainWellFormed domPts (d₀ + 1) (A₀ + 1) stages) :
     HemFoldRoundSpec domPts d₀ A₀ stages where
@@ -900,11 +900,11 @@ def hemFoldCascadeSpec (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
   flip_bound := hemFoldCascade_flip_bound S domPts d₀ A₀ badMca listG stages cert hChain
 
 /-- `cross` round: flips on at most `listLo²` of the `|S|` challenges `φ`. -/
-def hemFoldCrossSpec (S : List QuarticGoldilocks) (hS : S.Nodup) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
-    (st : HemWhirStageSpec QuarticGoldilocks) (b : HemFoldBudget)
+def hemFoldCrossSpec (S : List QuinticGoldilocks) (hS : S.Nodup) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (curDom : List QuinticGoldilocks) (curDeg curAgree : Nat)
+    (st : HemWhirStageSpec QuinticGoldilocks) (b : HemFoldBudget)
     (hGeom : HemFoldStageGeom curDom curDeg curAgree st)
     (hCert : HemStageFoldCert S st b) :
     HemFoldRoundSpec domPts d₀ A₀ stages where
@@ -917,11 +917,11 @@ def hemFoldCrossSpec (S : List QuarticGoldilocks) (hS : S.Nodup) (hSpos : 0 < S.
 
 /-- `shift` round: flips on at most
     `|S| * badMca + listLo² * |S|² + listHi² * |S|²` of the `|S|³` challenges `(θ, α, β)`. -/
-def hemFoldShiftSpec (S : List QuarticGoldilocks) (hS : S.Nodup) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
-    (st : HemWhirStageSpec QuarticGoldilocks) (b : HemFoldBudget)
+def hemFoldShiftSpec (S : List QuinticGoldilocks) (hS : S.Nodup) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (curDom : List QuinticGoldilocks) (curDeg curAgree : Nat)
+    (st : HemWhirStageSpec QuinticGoldilocks) (b : HemFoldBudget)
     (hGeom : HemFoldStageGeom curDom curDeg curAgree st)
     (hCert : HemStageFoldCert S st b) :
     HemFoldRoundSpec domPts d₀ A₀ stages where
@@ -936,8 +936,8 @@ def hemFoldShiftSpec (S : List QuarticGoldilocks) (hS : S.Nodup) (hSpos : 0 < S.
     hGeom hCert
 
 /-- `commit` round: deterministic (`bad = 0`, one challenge). -/
-def hemFoldCommitSpec (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks)) :
+def hemFoldCommitSpec (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks)) :
     HemFoldRoundSpec domPts d₀ A₀ stages where
   chalCard := 1
   h_pos := Nat.zero_lt_one
@@ -946,8 +946,8 @@ def hemFoldCommitSpec (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
   flip_bound := hemFoldCommit_flip_bound domPts d₀ A₀ stages
 
 /-- Final round: deterministic (`bad = 0`, one challenge). -/
-def hemFoldFinalSpec (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks)) :
+def hemFoldFinalSpec (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks)) :
     HemFoldRoundSpec domPts d₀ A₀ stages where
   chalCard := 1
   h_pos := Nat.zero_lt_one
@@ -957,12 +957,12 @@ def hemFoldFinalSpec (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
 
 /-- Round specifications of the fold stages `remStages` starting from the running geometry
     `(curDom, curDeg, curAgree)`, followed by the final round. -/
-def hemFoldStageSpecs (S : List QuarticGoldilocks) (hS : S.Nodup) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget) :
-    (curDom : List QuarticGoldilocks) → (curDeg curAgree : Nat) →
-    (remStages : List (HemWhirStageSpec QuarticGoldilocks)) →
+def hemFoldStageSpecs (S : List QuinticGoldilocks) (hS : S.Nodup) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget) :
+    (curDom : List QuinticGoldilocks) → (curDeg curAgree : Nat) →
+    (remStages : List (HemWhirStageSpec QuinticGoldilocks)) →
     HemStageChainWellFormed curDom curDeg curAgree remStages →
     (∀ st ∈ remStages, HemStageFoldCert S st (bud st)) →
     List (HemFoldRoundSpec domPts d₀ A₀ stages)
@@ -980,10 +980,10 @@ def hemFoldStageSpecs (S : List QuarticGoldilocks) (hS : S.Nodup) (hSpos : 0 < S
       (fun s hs => hCerts s (.tail st hs))
 
 /-- All `3 * stages.length + 2` round specifications: cascade, three rounds per stage, final. -/
-def hemMultistageSpecs (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+def hemMultistageSpecs (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud) :
     List (HemFoldRoundSpec domPts d₀ A₀ stages) :=
   hemFoldCascadeSpec S hSpos domPts d₀ A₀ badMca listG stages cert.cascade_cert cert.chain ::
@@ -993,8 +993,8 @@ def hemMultistageSpecs (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
 /-- Proof-free run of the stage rounds and the final round, with the `commit` step as a
     parameter. The verifier uses `hemFoldCommitStep`; the test module instantiates a mutant. -/
 def hemFoldRunStagesWith (commitStep : HemFoldIopState → HemFoldIopMsg → HemFoldIopState)
-    (S : List QuarticGoldilocks) :
-    List QuarticGoldilocks → Nat → Nat → List (HemWhirStageSpec QuarticGoldilocks) →
+    (S : List QuinticGoldilocks) :
+    List QuinticGoldilocks → Nat → Nat → List (HemWhirStageSpec QuinticGoldilocks) →
     HemFoldIopState → List (HemFoldIopMsg × Nat) → HemFoldIopState
   | _, _, _, [], s, [] => s
   | _, _, _, [], s, (m, _) :: _ => hemFoldFinalStep s m
@@ -1012,9 +1012,9 @@ def hemFoldRunStagesWith (commitStep : HemFoldIopState → HemFoldIopMsg → Hem
 /-- Proof-free run of the whole IOP on a transcript prefix, with the `commit` step as a
     parameter. -/
 def hemMultistageRunWith (commitStep : HemFoldIopState → HemFoldIopMsg → HemFoldIopState)
-    (S domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (inst : HemWhirInstance QuarticGoldilocks) :
+    (S domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks) :
     List (HemFoldIopMsg × Nat) → HemFoldIopState
   | [] => .init
   | (m, c) :: tr =>
@@ -1027,32 +1027,32 @@ def hemFoldStateAccepted : HemFoldIopState → Bool
   | _ => false
 
 /-- Run of the stage rounds and the final round with the real `commit` step. -/
-def hemFoldRunStages (S : List QuarticGoldilocks) :
-    List QuarticGoldilocks → Nat → Nat → List (HemWhirStageSpec QuarticGoldilocks) →
+def hemFoldRunStages (S : List QuinticGoldilocks) :
+    List QuinticGoldilocks → Nat → Nat → List (HemWhirStageSpec QuinticGoldilocks) →
     HemFoldIopState → List (HemFoldIopMsg × Nat) → HemFoldIopState :=
   hemFoldRunStagesWith hemFoldCommitStep S
 
 /-- Run of the whole IOP with the real `commit` step. -/
-def hemMultistageRun (S domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (inst : HemWhirInstance QuarticGoldilocks) :
+def hemMultistageRun (S domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks) :
     List (HemFoldIopMsg × Nat) → HemFoldIopState :=
   hemMultistageRunWith hemFoldCommitStep S domPts d₀ A₀ stages inst
 
 /-- Verifier of the multi-stage IOP: the run ends in the accepting state. It depends on no
     certificate. -/
-def hemMultistageVerify (S domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (inst : HemWhirInstance QuarticGoldilocks) (tr : List (HemFoldIopMsg × Nat)) : Bool :=
+def hemMultistageVerify (S domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks) (tr : List (HemFoldIopMsg × Nat)) : Bool :=
   hemFoldStateAccepted (hemMultistageRun S domPts d₀ A₀ stages inst tr)
 
-private theorem hemFoldStageSpecs_run (S : List QuarticGoldilocks) (hS : S.Nodup)
-    (hSpos : 0 < S.length) (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
-    (inst : HemWhirInstance QuarticGoldilocks) :
-    ∀ (remStages : List (HemWhirStageSpec QuarticGoldilocks))
-      (curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
+private theorem hemFoldStageSpecs_run (S : List QuinticGoldilocks) (hS : S.Nodup)
+    (hSpos : 0 < S.length) (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
+    (inst : HemWhirInstance QuinticGoldilocks) :
+    ∀ (remStages : List (HemWhirStageSpec QuinticGoldilocks))
+      (curDom : List QuinticGoldilocks) (curDeg curAgree : Nat)
       (hChain : HemStageChainWellFormed curDom curDeg curAgree remStages)
       (hCerts : ∀ st ∈ remStages, HemStageFoldCert S st (bud st))
       (s : HemFoldIopState) (tr : List (HemFoldIopMsg × Nat)),
@@ -1075,12 +1075,12 @@ private theorem hemFoldStageSpecs_run (S : List QuarticGoldilocks) (hS : S.Nodup
         (hemFoldShiftStep S curDom st
           (hemFoldCrossStep S curDom curDeg curAgree st s m₁ c₁) m₂ c₂) m₃) tr
 
-private theorem hemMultistageSpecs_run (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+private theorem hemMultistageSpecs_run (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud)
-    (inst : HemWhirInstance QuarticGoldilocks) (tr : List (HemFoldIopMsg × Nat)) :
+    (inst : HemWhirInstance QuinticGoldilocks) (tr : List (HemFoldIopMsg × Nat)) :
     runSeqSpecs (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert)
         inst .init tr =
       hemMultistageRun S domPts d₀ A₀ stages inst tr := by
@@ -1093,12 +1093,12 @@ private theorem hemMultistageSpecs_run (S : List QuarticGoldilocks) (hSpos : 0 <
 /-- The multi-stage `Hem` affine-WHIR public-coin IOP: cascade, three rounds per fold stage,
     final opening. Its language is the set of well-formed instances with stage list `stages`
     whose statement holds. -/
-def hemMultistageIop (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+def hemMultistageIop (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud) :
-    PublicCoinIop (HemWhirInstance QuarticGoldilocks) HemFoldIopMsg
+    PublicCoinIop (HemWhirInstance QuinticGoldilocks) HemFoldIopMsg
       (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert).length :=
   seqSpecsIop (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert)
     (fun inst => WellFormedHemCascadeInstance 1 domPts d₀ A₀ inst ∧ inst.stages = stages ∧
@@ -1106,12 +1106,12 @@ def hemMultistageIop (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
     (hemMultistageVerify S domPts d₀ A₀ stages)
 
 private theorem hemMultistageAccept_implies_live
-    (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+    (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud)
-    (inst : HemWhirInstance QuarticGoldilocks) (tr : List (HemFoldIopMsg × Nat))
+    (inst : HemWhirInstance QuinticGoldilocks) (tr : List (HemFoldIopMsg × Nat))
     (_hLen : tr.length =
       (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert).length)
     (hVer : hemMultistageVerify S domPts d₀ A₀ stages inst tr = true) :
@@ -1135,10 +1135,10 @@ private theorem hemMultistageAccept_implies_live
     at most `listLo²` of `|S|`, the `shift` round on at most
     `|S| * badMca + (listLo² + listHi²) * |S|²` of `|S|³` (budget `bud st`), and the `commit`
     round on none; the final round flips on none. -/
-def hemMultistageRbrOf (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+def hemMultistageRbrOf (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud) :
     RbrStateFunction (hemMultistageIop S hSpos domPts d₀ A₀ badMca listG stages bud cert) :=
   seqSpecsRbr (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert)
@@ -1154,12 +1154,12 @@ def hemMultistageRbrOf (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
     adaptive rewinding attack `tree` over a round schedule `sched`, the acceptance probability
     is at most the sum of the per-round flip ratios of `hemMultistageRbrOf` along `sched`. -/
 theorem hemMultistage_state_restoration_soundness
-    (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+    (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud)
-    (inst : HemWhirInstance QuarticGoldilocks)
+    (inst : HemWhirInstance QuinticGoldilocks)
     (hInvalid : ¬ HemStatementValid inst)
     (sched : List (Fin
       (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert).length))
@@ -1178,9 +1178,9 @@ theorem hemMultistage_state_restoration_soundness
 
 /-! ## §5. Step equations and explicit round budgets -/
 
-theorem hemFoldCascadeStep_init (S domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (inst : HemWhirInstance QuarticGoldilocks) (s₀ : QuarticGoldilocks) (ch : Nat)
+theorem hemFoldCascadeStep_init (S domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks) (s₀ : QuinticGoldilocks) (ch : Nat)
     (h : inst.batchOracles.length = 1 ∧ inst.batchClaims.length = 1 ∧
       inst.initDomainPts = domPts ∧ inst.initDegBound = d₀ ∧
       inst.initMinAgree = A₀ ∧ inst.stages = stages) :
@@ -1194,9 +1194,9 @@ theorem hemFoldCascadeStep_init (S domPts : List QuarticGoldilocks) (d₀ A₀ :
   show hemFoldGuard (decide _) _ = _
   rw [decide_eq_true h, hemFoldGuard_true]
 
-theorem hemFoldCrossStep_cur (S curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
-    (st : HemWhirStageSpec QuarticGoldilocks) (oracle : Nat → QuarticGoldilocks)
-    (kernel : List QuarticGoldilocks) (claim w₀ w₁ w₂ : QuarticGoldilocks) (ch : Nat)
+theorem hemFoldCrossStep_cur (S curDom : List QuinticGoldilocks) (curDeg curAgree : Nat)
+    (st : HemWhirStageSpec QuinticGoldilocks) (oracle : Nat → QuinticGoldilocks)
+    (kernel : List QuinticGoldilocks) (claim w₀ w₁ w₂ : QuinticGoldilocks) (ch : Nat)
     (hPar : kernel.length % 2 = 0) :
     hemFoldCrossStep S curDom curDeg curAgree st
         (.cur curDom curDeg curAgree oracle kernel claim) (.cross w₀ w₁ w₂) ch =
@@ -1210,9 +1210,9 @@ theorem hemFoldCrossStep_cur (S curDom : List QuarticGoldilocks) (curDeg curAgre
     curDom = curDom ∧ curDeg = curDeg ∧ curAgree = curAgree ∧ kernel.length % 2 = 0),
     hemFoldGuard_true]
 
-theorem hemFoldShiftStep_mid (S curDom : List QuarticGoldilocks)
-    (st : HemWhirStageSpec QuarticGoldilocks) (oracle : Nat → QuarticGoldilocks)
-    (kernel : List QuarticGoldilocks) (e_f e_g c_F c_G : QuarticGoldilocks) (ch : Nat) :
+theorem hemFoldShiftStep_mid (S curDom : List QuinticGoldilocks)
+    (st : HemWhirStageSpec QuinticGoldilocks) (oracle : Nat → QuinticGoldilocks)
+    (kernel : List QuinticGoldilocks) (e_f e_g c_F c_G : QuinticGoldilocks) (ch : Nat) :
     hemFoldShiftStep S curDom st
         (.mid curDom st.domainPts (st.degBound - 1) (st.minAgree - 1) oracle kernel e_f e_g)
         (.shift c_F c_G) ch =
@@ -1232,18 +1232,18 @@ theorem hemFoldShiftStep_mid (S curDom : List QuarticGoldilocks)
     curDom = curDom ∧ st.domainPts = st.domainPts ∧ st.degBound - 1 = st.degBound - 1 ∧
       st.minAgree - 1 = st.minAgree - 1), hemFoldGuard_true]
 
-theorem hemFoldCommitStep_cur (dom : List QuarticGoldilocks) (deg agree : Nat)
-    (oracle : Nat → QuarticGoldilocks) (kernel : List QuarticGoldilocks)
-    (claim : QuarticGoldilocks) (table : List QuarticGoldilocks)
+theorem hemFoldCommitStep_cur (dom : List QuinticGoldilocks) (deg agree : Nat)
+    (oracle : Nat → QuinticGoldilocks) (kernel : List QuinticGoldilocks)
+    (claim : QuinticGoldilocks) (table : List QuinticGoldilocks)
     (h : hemTableMatchesOracle dom.length table oracle = true) :
     hemFoldCommitStep (.cur dom deg agree oracle kernel claim) (.commit table) =
       .cur dom deg agree (tableToOracle table) kernel claim := by
   show hemFoldGuard (hemTableMatchesOracle dom.length table oracle) _ = _
   rw [h, hemFoldGuard_true]
 
-theorem hemFoldFinalStep_cur (dom : List QuarticGoldilocks) (deg agree : Nat)
-    (oracle : Nat → QuarticGoldilocks) (kernel : List QuarticGoldilocks)
-    (claim : QuarticGoldilocks) (coeffs : List QuarticGoldilocks)
+theorem hemFoldFinalStep_cur (dom : List QuinticGoldilocks) (deg agree : Nat)
+    (oracle : Nat → QuinticGoldilocks) (kernel : List QuinticGoldilocks)
+    (claim : QuinticGoldilocks) (coeffs : List QuinticGoldilocks)
     (h : polyWitnessValid dom agree deg oracle kernel claim coeffs = true) :
     hemFoldFinalStep (.cur dom deg agree oracle kernel claim) (.final coeffs) = .accepted := by
   show hemFoldGuard (polyWitnessValid dom agree deg oracle kernel claim coeffs) _ = _
@@ -1251,9 +1251,9 @@ theorem hemFoldFinalStep_cur (dom : List QuarticGoldilocks) (deg agree : Nat)
 
 /-- `(bad, number of challenges)` of the three rounds of each stage followed by the final
     round. -/
-def hemFoldStageRoundBudgets (S : List QuarticGoldilocks)
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget) :
-    List (HemWhirStageSpec QuarticGoldilocks) → List (Nat × Nat)
+def hemFoldStageRoundBudgets (S : List QuinticGoldilocks)
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget) :
+    List (HemWhirStageSpec QuinticGoldilocks) → List (Nat × Nat)
   | [] => [(0, 1)]
   | st :: rest =>
     ((bud st).listLo * (bud st).listLo, S.length) ::
@@ -1261,12 +1261,12 @@ def hemFoldStageRoundBudgets (S : List QuarticGoldilocks)
       (bud st).listHi * (bud st).listHi * (S.length * S.length), (threePool S S).length) ::
     (0, 1) :: hemFoldStageRoundBudgets S bud rest
 
-private theorem hemFoldStageSpecs_budgets (S : List QuarticGoldilocks) (hS : S.Nodup)
-    (hSpos : 0 < S.length) (domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget) :
-    ∀ (remStages : List (HemWhirStageSpec QuarticGoldilocks))
-      (curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
+private theorem hemFoldStageSpecs_budgets (S : List QuinticGoldilocks) (hS : S.Nodup)
+    (hSpos : 0 < S.length) (domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget) :
+    ∀ (remStages : List (HemWhirStageSpec QuinticGoldilocks))
+      (curDom : List QuinticGoldilocks) (curDeg curAgree : Nat)
       (hChain : HemStageChainWellFormed curDom curDeg curAgree remStages)
       (hCerts : ∀ st ∈ remStages, HemStageFoldCert S st (bud st)),
       (hemFoldStageSpecs S hS hSpos domPts d₀ A₀ stages bud curDom curDeg curAgree remStages
@@ -1286,10 +1286,10 @@ private theorem hemFoldStageSpecs_budgets (S : List QuarticGoldilocks) (hS : S.N
 
 /-- **Explicit per-round budgets.** The list of `(badCard, challengeCard)` of the IOP rounds is
     the cascade pair `(badMca + listG * |S|, |S|²)` followed by `hemFoldStageRoundBudgets`. -/
-theorem hemMultistageSpecs_budgets (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+theorem hemMultistageSpecs_budgets (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud) :
     (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert).map
         (fun sp => (sp.bad, sp.chalCard)) =
@@ -1299,9 +1299,9 @@ theorem hemMultistageSpecs_budgets (S : List QuarticGoldilocks) (hSpos : 0 < S.l
     (hemFoldStageSpecs_budgets S cert.cascade_cert.pool_nodup hSpos domPts d₀ A₀ stages bud
       stages domPts (d₀ + 1) (A₀ + 1) cert.chain cert.stage_certs)
 
-theorem hemFoldStageRoundBudgets_length (S : List QuarticGoldilocks)
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget) :
-    ∀ (stages : List (HemWhirStageSpec QuarticGoldilocks)),
+theorem hemFoldStageRoundBudgets_length (S : List QuinticGoldilocks)
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget) :
+    ∀ (stages : List (HemWhirStageSpec QuinticGoldilocks)),
       (hemFoldStageRoundBudgets S bud stages).length = 3 * stages.length + 1
   | [] => by rfl
   | _ :: rest => by
@@ -1309,10 +1309,10 @@ theorem hemFoldStageRoundBudgets_length (S : List QuarticGoldilocks)
     rw [hemFoldStageRoundBudgets_length S bud rest, Nat.mul_succ]
 
 /-- The IOP has `3 * stages.length + 2` rounds. -/
-theorem hemMultistageSpecs_length (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+theorem hemMultistageSpecs_length (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud) :
     (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert).length =
       3 * stages.length + 2 := by
@@ -1323,8 +1323,8 @@ theorem hemMultistageSpecs_length (S : List QuarticGoldilocks) (hSpos : 0 < S.le
 
 /-- **Welch–Berlekamp stage certificate.** In the unique-decoding regime the stage certificate
     holds with `listLo = listHi = 1` and the Welch–Berlekamp exceptional count. -/
-theorem hemWelchBerlekampStageCert (S : List QuarticGoldilocks)
-    (st : HemWhirStageSpec QuarticGoldilocks)
+theorem hemWelchBerlekampStageCert (S : List QuinticGoldilocks)
+    (st : HemWhirStageSpec QuinticGoldilocks)
     (hD : st.domainPts.Nodup) (hS : S.Nodup)
     (hdA : st.degBound + 2 ≤ st.minAgree) (hAD : st.minAgree ≤ st.domainPts.length)
     (hWB : 2 * st.domainPts.length + st.degBound + 1 < 3 * st.minAgree)
@@ -1340,8 +1340,8 @@ theorem hemWelchBerlekampStageCert (S : List QuarticGoldilocks)
 
 /-- **Johnson-radius stage certificate**, conditional on the same `NonExcludedDecompBound`
     hypothesis as `hemCwyz26JohnsonCert`; the list sizes are the Johnson bounds. -/
-theorem hemCwyz26JohnsonStageCert (S : List QuarticGoldilocks)
-    (st : HemWhirStageSpec QuarticGoldilocks) (m Wx Dy rest : Nat)
+theorem hemCwyz26JohnsonStageCert (S : List QuinticGoldilocks)
+    (st : HemWhirStageSpec QuinticGoldilocks) (m Wx Dy rest : Nat)
     (hD : st.domainPts.Nodup) (hS : S.Nodup)
     (hdA : st.degBound + 2 ≤ st.minAgree)
     (hCount : st.domainPts.length * Poly3.triCount 1 m Dy m <
@@ -1365,8 +1365,8 @@ theorem hemCwyz26JohnsonStageCert (S : List QuarticGoldilocks)
 
 /-- The zero-stage case: a `HemCascadeRbrCert` is a multi-stage certificate for `stages = []`,
     and the IOP then has the two rounds (cascade, final) of `HemRbrSoundness`. -/
-theorem hemMultistageRbrCert_nil (S domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+theorem hemMultistageRbrCert_nil (S domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemCascadeRbrCert S domPts d₀ A₀ badMca listG) :
     HemMultistageRbrCert S domPts d₀ A₀ badMca listG [] bud where
   cascade_cert := cert
@@ -1379,22 +1379,22 @@ theorem hemMultistageRbrCert_nil (S domPts : List QuarticGoldilocks) (d₀ A₀ 
     two challenge indices, together with the out-of-domain data and decoded-polynomial hints
     that only the `verifyHemAffineWhir` checker reads. -/
 structure HemFoldStageTrace where
-  w₀ : QuarticGoldilocks
-  w₁ : QuarticGoldilocks
-  w₂ : QuarticGoldilocks
-  c_F : QuarticGoldilocks
-  c_G : QuarticGoldilocks
-  stageTable : List QuarticGoldilocks
+  w₀ : QuinticGoldilocks
+  w₁ : QuinticGoldilocks
+  w₂ : QuinticGoldilocks
+  c_F : QuinticGoldilocks
+  c_G : QuinticGoldilocks
+  stageTable : List QuinticGoldilocks
   chPhi : Nat
   chTriple : Nat
-  z₀ : QuarticGoldilocks
-  z₁ : QuarticGoldilocks
-  ood₀ : QuarticGoldilocks
-  ood₁ : QuarticGoldilocks
-  decoded : List (List QuarticGoldilocks)
+  z₀ : QuinticGoldilocks
+  z₁ : QuinticGoldilocks
+  ood₀ : QuinticGoldilocks
+  ood₁ : QuinticGoldilocks
+  decoded : List (List QuinticGoldilocks)
 
 /-- IOP transcript of the stage rounds and the final round. -/
-def hemFoldIopRounds : List HemFoldStageTrace → List QuarticGoldilocks →
+def hemFoldIopRounds : List HemFoldStageTrace → List QuinticGoldilocks →
     List (HemFoldIopMsg × Nat)
   | [], coeffs => [(.final coeffs, 0)]
   | t :: ts, coeffs =>
@@ -1403,9 +1403,9 @@ def hemFoldIopRounds : List HemFoldStageTrace → List QuarticGoldilocks →
 
 /-- The same rounds as a `verifyHemStages` checker transcript, with the challenges decoded
     from the pool `S`. -/
-def hemFoldCheckerRounds (S : List QuarticGoldilocks) :
-    List HemFoldStageTrace → List QuarticGoldilocks →
-    List (HemTranscriptRound QuarticGoldilocks)
+def hemFoldCheckerRounds (S : List QuinticGoldilocks) :
+    List HemFoldStageTrace → List QuinticGoldilocks →
+    List (HemTranscriptRound QuinticGoldilocks)
   | [], coeffs => [.finalQuery coeffs]
   | t :: ts, coeffs =>
     .stageFold (tableToOracle t.stageTable) t.w₀ t.w₁ t.w₂ t.c_F t.c_G
@@ -1422,9 +1422,9 @@ def hemFoldCheckerRounds (S : List QuarticGoldilocks) :
     running kernel has even length and the stage oracle equals the virtual fold of the previous
     oracle on the whole stage domain. -/
 def hemFoldStageChecks :
-    (Nat → QuarticGoldilocks) → List QuarticGoldilocks → List QuarticGoldilocks →
-    List (HemWhirStageSpec QuarticGoldilocks) →
-    List (HemTranscriptRound QuarticGoldilocks) → Bool
+    (Nat → QuinticGoldilocks) → List QuinticGoldilocks → List QuinticGoldilocks →
+    List (HemWhirStageSpec QuinticGoldilocks) →
+    List (HemTranscriptRound QuinticGoldilocks) → Bool
   | _, _, _, [], _ => true
   | curOracle, curDom, curKernel, st :: remStages,
     .stageFold stageOracle _ _ _ _ _ φ θ α β _ _ _ _ _ :: restTr =>
@@ -1434,8 +1434,8 @@ def hemFoldStageChecks :
     hemFoldStageChecks stageOracle st.domainPts (hemKernelFold φ curKernel) remStages restTr
   | _, _, _, _ :: _, _ => false
 
-private theorem checkQueriedCosets_spec (dom : List QuarticGoldilocks)
-    (O : Nat → QuarticGoldilocks) (P : List QuarticGoldilocks) :
+private theorem checkQueriedCosets_spec (dom : List QuinticGoldilocks)
+    (O : Nat → QuinticGoldilocks) (P : List QuinticGoldilocks) :
     ∀ (idxs : List Nat), checkQueriedCosets dom O P idxs = true →
       ∀ i ∈ idxs, i < dom.length ∧
         O i = RoundPoly.evalCoeffs P (dom.getD i CommRingOps.zero)
@@ -1465,8 +1465,8 @@ private theorem qsum_prefix_indicator :
     rw [hc, qsum_prefix_indicator n k (Nat.le_of_succ_le_succ h), ite_true_eq _ _ (Nat.succ_pos k),
       Nat.add_comm]
 
-private theorem hemCosetAgreeCount_ge_of_prefix (dom : List QuarticGoldilocks)
-    (O : Nat → QuarticGoldilocks) (P : List QuarticGoldilocks) (k : Nat)
+private theorem hemCosetAgreeCount_ge_of_prefix (dom : List QuinticGoldilocks)
+    (O : Nat → QuinticGoldilocks) (P : List QuinticGoldilocks) (k : Nat)
     (hk : k ≤ dom.length)
     (h : checkQueriedCosets dom O P (List.range k) = true) :
     k ≤ hemCosetAgreeCount dom O P := by
@@ -1485,11 +1485,11 @@ private theorem hemCosetAgreeCount_ge_of_prefix (dom : List QuarticGoldilocks)
   rw [qsum_prefix_indicator dom.length k hk] at hLe
   exact hLe
 
-private theorem hemFoldRunStages_of_checker (S : List QuarticGoldilocks) :
-    ∀ (stages : List (HemWhirStageSpec QuarticGoldilocks)) (ts : List HemFoldStageTrace)
-      (coeffs : List QuarticGoldilocks) (curOracle : Nat → QuarticGoldilocks)
-      (curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
-      (curKernel : List QuarticGoldilocks) (curClaim : QuarticGoldilocks),
+private theorem hemFoldRunStages_of_checker (S : List QuinticGoldilocks) :
+    ∀ (stages : List (HemWhirStageSpec QuinticGoldilocks)) (ts : List HemFoldStageTrace)
+      (coeffs : List QuinticGoldilocks) (curOracle : Nat → QuinticGoldilocks)
+      (curDom : List QuinticGoldilocks) (curDeg curAgree : Nat)
+      (curKernel : List QuinticGoldilocks) (curClaim : QuinticGoldilocks),
       curAgree ≤ curDom.length →
       (∀ st ∈ stages, st.minAgree ≤ st.domainPts.length) →
       verifyHemStages curOracle curDom curDeg curAgree curKernel curClaim stages
@@ -1542,10 +1542,10 @@ private theorem hemFoldRunStages_of_checker (S : List QuarticGoldilocks) :
     stage part of a `verifyHemAffineWhir` run whose post-cascade agreement threshold is
     `initMinAgree + 1`; the checker alone, without the fold checks, is not covered
     (`tooth_unconstrained_stageOracle_accepts_false_claim`). -/
-theorem hemMultistageVerify_of_fold_checked_stages (S : List QuarticGoldilocks)
-    (inst : HemWhirInstance QuarticGoldilocks) (s₀ : QuarticGoldilocks) (c₀ : Nat)
+theorem hemMultistageVerify_of_fold_checked_stages (S : List QuinticGoldilocks)
+    (inst : HemWhirInstance QuinticGoldilocks) (s₀ : QuinticGoldilocks) (c₀ : Nat)
     (ts : List HemFoldStageTrace)
-    (coeffs : List QuarticGoldilocks)
+    (coeffs : List QuinticGoldilocks)
     (hOne : inst.batchOracles.length = 1)
     (hClaims : inst.batchClaims.length = 1)
     (hAgree : inst.initMinAgree < inst.initDomainPts.length)
@@ -1583,9 +1583,9 @@ theorem hemMultistageVerify_of_fold_checked_stages (S : List QuarticGoldilocks)
 
 /-! ## §7. Inhabited witness with two fold stages (64 → 32 → 16 points) -/
 
-/-- Base-field element of `QuarticGoldilocks`. -/
-@[expose] def hemFoldQg (n : Nat) : QuarticGoldilocks :=
-  ⟨⟨Goldilocks.ofNat n, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩
+/-- Base-field element of `QuinticGoldilocks`. -/
+@[expose] def hemFoldQg (n : Nat) : QuinticGoldilocks :=
+  QuinticGoldilocks.ofBase (Goldilocks.ofNat n)
 
 /-- Bit-reversed exponents `0 .. 2^k - 1`: entries `2 i` and `2 i + 1` differ by `2^(k-1)`. -/
 @[expose] def hemBitRevExponents : Nat → List Nat
@@ -1594,36 +1594,36 @@ theorem hemMultistageVerify_of_fold_checked_stages (S : List QuarticGoldilocks)
 
 /-- The cyclic group generated by `g` of order `2^k`, in bit-reversed order, so that antipodal
     points are adjacent and the squares form the same list for `g²` and `k - 1`. -/
-@[expose] def hemFoldDomain (g k : Nat) : List QuarticGoldilocks :=
+@[expose] def hemFoldDomain (g k : Nat) : List QuinticGoldilocks :=
   (hemBitRevExponents k).map (fun e => hemFoldQg (g ^ e))
 
 /-- `8` has multiplicative order `64` in the Goldilocks field (`8^32 = 2^96 = -1`). -/
-@[expose] def hemFoldDom64 : List QuarticGoldilocks := hemFoldDomain 8 6
+@[expose] def hemFoldDom64 : List QuinticGoldilocks := hemFoldDomain 8 6
 
 theorem hemFoldDom64_head : hemFoldDom64 = hemFoldQg 1 :: hemFoldDom64.tail := by
   unfold hemFoldDom64 hemFoldDomain
   rfl
 
-def hemFoldDom32 : List QuarticGoldilocks := hemFoldDomain 64 5
+def hemFoldDom32 : List QuinticGoldilocks := hemFoldDomain 64 5
 
-@[expose] def hemFoldDom16 : List QuarticGoldilocks := hemFoldDomain 4096 4
+@[expose] def hemFoldDom16 : List QuinticGoldilocks := hemFoldDomain 4096 4
 
 /-- First fold stage of the witness: 32 points, degree bound 1, agreement 28. -/
-def hemFoldWitnessStage1 : HemWhirStageSpec QuarticGoldilocks :=
+def hemFoldWitnessStage1 : HemWhirStageSpec QuinticGoldilocks :=
   { domainPts := hemFoldDom32, degBound := 1, minAgree := 28, listBound := 1,
     queriedCosets := [] }
 
 /-- Second fold stage of the witness: 16 points, degree bound 1, agreement 16. -/
-def hemFoldWitnessStage2 : HemWhirStageSpec QuarticGoldilocks :=
+def hemFoldWitnessStage2 : HemWhirStageSpec QuinticGoldilocks :=
   { domainPts := hemFoldDom16, degBound := 1, minAgree := 16, listBound := 1,
     queriedCosets := [] }
 
-def hemFoldWitnessStages : List (HemWhirStageSpec QuarticGoldilocks) :=
+def hemFoldWitnessStages : List (HemWhirStageSpec QuinticGoldilocks) :=
   [hemFoldWitnessStage1, hemFoldWitnessStage2]
 
 /-- Welch–Berlekamp budget of a stage for the pool `S`. -/
-def hemWelchBerlekampBudget (S : List QuarticGoldilocks)
-    (st : HemWhirStageSpec QuarticGoldilocks) : HemFoldBudget :=
+def hemWelchBerlekampBudget (S : List QuinticGoldilocks)
+    (st : HemWhirStageSpec QuinticGoldilocks) : HemFoldBudget :=
   ⟨Nat.max S.length (st.domainPts.length * (st.domainPts.length - 1) / 2), 1, 1⟩
 
 set_option maxRecDepth 100000 in
@@ -1668,7 +1668,7 @@ theorem hemFoldWitnessCert :
       · exact nomatch h3
 
 /-- A false statement with two fold stages: the zero oracle with claim `1`. -/
-def hemFoldFalseInst : HemWhirInstance QuarticGoldilocks :=
+def hemFoldFalseInst : HemWhirInstance QuinticGoldilocks :=
   { batchOracles := [fun _ => CommRingOps.zero]
     batchClaims := [CommRingOps.one]
     initDomainPts := hemFoldDom64
@@ -1686,10 +1686,10 @@ theorem hemFoldFalseInst_invalid : ¬ HemStatementValid hemFoldFalseInst := by
     (polyWitnessValid_zeroOracle_claim hemFoldDom64 0 43 [CommRingOps.one, CommRingOps.zero] P
       CommRingOps.one hemFoldDom64_nodup (by decide) hP)
 
-theorem hemMultistageSpecs_one_lt_length (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-    (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+theorem hemMultistageSpecs_one_lt_length (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+    (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
     (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud) :
     1 < (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert).length := by
   rw [hemMultistageSpecs_length]
@@ -1716,12 +1716,12 @@ def hemFoldWitnessTree :
 /-- Inhabitedness witness for `hemMultistage_state_restoration_soundness` with two non-empty
     fold stages and a two-step attack schedule. -/
 theorem inhabited_hemMultistage_state_restoration :
-    ∃ (S : List QuarticGoldilocks) (hSpos : 0 < S.length)
-      (domPts : List QuarticGoldilocks) (d₀ A₀ badMca listG : Nat)
-      (stages : List (HemWhirStageSpec QuarticGoldilocks))
-      (bud : HemWhirStageSpec QuarticGoldilocks → HemFoldBudget)
+    ∃ (S : List QuinticGoldilocks) (hSpos : 0 < S.length)
+      (domPts : List QuinticGoldilocks) (d₀ A₀ badMca listG : Nat)
+      (stages : List (HemWhirStageSpec QuinticGoldilocks))
+      (bud : HemWhirStageSpec QuinticGoldilocks → HemFoldBudget)
       (cert : HemMultistageRbrCert S domPts d₀ A₀ badMca listG stages bud)
-      (inst : HemWhirInstance QuarticGoldilocks)
+      (inst : HemWhirInstance QuinticGoldilocks)
       (sched : List (Fin
         (hemMultistageSpecs S hSpos domPts d₀ A₀ badMca listG stages bud cert).length))
       (tree : SrScheduleTree
@@ -1806,8 +1806,8 @@ theorem linearTable_toOracle {F : Type} [CommRingOps F] (D : List F) (a b : F) (
   simp only [tableToOracle_apply, linearOracle, List.getD_eq_getElem?_getD, List.getElem?_map,
     List.getElem?_eq_getElem hi, Option.map_some, Option.getD_some]
 
-theorem linearFoldTableCheck (D E : List QuarticGoldilocks)
-    (hp : IsAntipodalDomainPair D E) (a b θ α β : QuarticGoldilocks) :
+theorem linearFoldTableCheck (D E : List QuinticGoldilocks)
+    (hp : IsAntipodalDomainPair D E) (a b θ α β : QuinticGoldilocks) :
     hemTableMatchesOracle E.length
       (E.map (fun x => add (add b (mul α (add a (mul θ b))))
         (mul (mul β (add a (mul θ b))) x)))
@@ -1819,8 +1819,8 @@ theorem linearFoldTableCheck (D E : List QuarticGoldilocks)
   rw [linearTable_toOracle _ _ _ _ hlt, linearVirtualFold D E hp a b θ α β i hlt]
   exact decide_eq_true rfl
 
-theorem linearVirtualFold_of (D E : List QuarticGoldilocks)
-    (hp : IsAntipodalDomainPair D E) (O : Nat → QuarticGoldilocks) (a b θ α β : QuarticGoldilocks)
+theorem linearVirtualFold_of (D E : List QuinticGoldilocks)
+    (hp : IsAntipodalDomainPair D E) (O : Nat → QuinticGoldilocks) (a b θ α β : QuinticGoldilocks)
     (hO : ∀ i, i < D.length → O i = linearOracle D a b i) (i : Nat) (hi : i < E.length) :
     hemVirtualFoldOracle θ α β D E O i =
       linearOracle E (add b (mul α (add a (mul θ b)))) (mul β (add a (mul θ b))) i := by
@@ -1831,16 +1831,16 @@ theorem linearVirtualFold_of (D E : List QuarticGoldilocks)
     simp only [hemVirtualFoldOracle_def, hO (2 * i) hE, hO (2 * i + 1) hO']
   exact he.trans (linearVirtualFold D E hp a b θ α β i hi)
 
-def linearNextA (a b θ α : QuarticGoldilocks) : QuarticGoldilocks :=
+def linearNextA (a b θ α : QuinticGoldilocks) : QuinticGoldilocks :=
   add b (mul α (add a (mul θ b)))
-def linearNextB (a b θ β : QuarticGoldilocks) : QuarticGoldilocks :=
+def linearNextB (a b θ β : QuinticGoldilocks) : QuinticGoldilocks :=
   mul β (add a (mul θ b))
-def linearTable (D : List QuarticGoldilocks) (a b : QuarticGoldilocks) :=
+def linearTable (D : List QuinticGoldilocks) (a b : QuinticGoldilocks) :=
   D.map (fun x => add a (mul b x))
 
-theorem linearStage_complete (S D : List QuarticGoldilocks) (st : HemWhirStageSpec QuarticGoldilocks)
+theorem linearStage_complete (S D : List QuinticGoldilocks) (st : HemWhirStageSpec QuinticGoldilocks)
     (hp : IsAntipodalDomainPair D st.domainPts) (hsd : st.degBound = 1)
-    (A : Nat) (O : Nat → QuarticGoldilocks) (a b : QuarticGoldilocks)
+    (A : Nat) (O : Nat → QuinticGoldilocks) (a b : QuinticGoldilocks)
     (hO : ∀ i, i < D.length → O i = linearOracle D a b i) (cp ct : Nat) :
     let t := (threePool S S).getD ct (zero, zero, zero)
     let na := linearNextA a b t.1 t.2.1
@@ -1872,10 +1872,10 @@ theorem linearStage_complete (S D : List QuarticGoldilocks) (st : HemWhirStageSp
     linearTable_toOracle _ _ _ _ hi', linearVirtualFold_of D st.domainPts hp O a b _ _ _ hO i hi']
   exact decide_eq_true rfl
 
-theorem linearTable_final_valid (D : List QuarticGoldilocks) (a b : QuarticGoldilocks)
+theorem linearTable_final_valid (D : List QuinticGoldilocks) (a b : QuinticGoldilocks)
     (A : Nat) (hA : A ≤ D.length) :
     polyWitnessValid D A 1 (tableToOracle (linearTable D a b)) [one, zero] a [a, b] = true := by
-  have hEval (x : QuarticGoldilocks) : RoundPoly.evalCoeffs [a, b] x = add a (mul b x) := by
+  have hEval (x : QuinticGoldilocks) : RoundPoly.evalCoeffs [a, b] x = add a (mul b x) := by
     simp only [RoundPoly.evalCoeffs_cons, RoundPoly.evalCoeffs_nil, LawfulCommRing.mul_zero,
       LawfulCommRing.add_zero]
     rw [LawfulCommRing.mul_comm x b]

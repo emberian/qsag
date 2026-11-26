@@ -40,27 +40,27 @@ def hemFoldCommitStepUnchecked (s : HemFoldIopState) (m : HemFoldIopMsg) : HemFo
 
 /-- MUTANT verifier: `hemMultistageVerify` with `hemFoldCommitStepUnchecked` in place of
     `hemFoldCommitStep`. -/
-def hemMultistageVerifyNoFoldCheck (S domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)
-    (stages : List (HemWhirStageSpec QuarticGoldilocks))
-    (inst : HemWhirInstance QuarticGoldilocks) (tr : List (HemFoldIopMsg × Nat)) : Bool :=
+def hemMultistageVerifyNoFoldCheck (S domPts : List QuinticGoldilocks) (d₀ A₀ : Nat)
+    (stages : List (HemWhirStageSpec QuinticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks) (tr : List (HemFoldIopMsg × Nat)) : Bool :=
   hemFoldStateAccepted
     (hemMultistageRunWith hemFoldCommitStepUnchecked S domPts d₀ A₀ stages inst tr)
 
-private theorem hemFoldCommitStepUnchecked_cur (dom : List QuarticGoldilocks) (deg agree : Nat)
-    (oracle : Nat → QuarticGoldilocks) (kernel : List QuarticGoldilocks)
-    (claim : QuarticGoldilocks) (table : List QuarticGoldilocks) :
+private theorem hemFoldCommitStepUnchecked_cur (dom : List QuinticGoldilocks) (deg agree : Nat)
+    (oracle : Nat → QuinticGoldilocks) (kernel : List QuinticGoldilocks)
+    (claim : QuinticGoldilocks) (table : List QuinticGoldilocks) :
     hemFoldCommitStepUnchecked (.cur dom deg agree oracle kernel claim) (.commit table) =
       .cur dom deg agree (tableToOracle table) kernel claim := by rfl
 
 /-! ## The attack -/
 
 /-- Claim after the cascade round on `hemFoldFalseInst` with absorbed shift `0`. -/
-def attackClaim0 (c₀ : Nat) : QuarticGoldilocks :=
+def attackClaim0 (c₀ : Nat) : QuinticGoldilocks :=
   evalCascadeClaim [CommRingOps.one] [CommRingOps.zero]
     [(prodPool hemFoldDom64).getD c₀ (CommRingOps.zero, CommRingOps.zero)]
 
 /-- Claim after one fold with all five wires zero, challenge indices `cPhi` and `cTriple`. -/
-def attackNextClaim (claim : QuarticGoldilocks) (cPhi cTriple : Nat) : QuarticGoldilocks :=
+def attackNextClaim (claim : QuinticGoldilocks) (cPhi cTriple : Nat) : QuinticGoldilocks :=
   hemFoldClaimUpdate
     (CommRingOps.add CommRingOps.zero
       (CommRingOps.mul (hemFoldDom64.getD cPhi CommRingOps.zero) CommRingOps.zero))
@@ -91,8 +91,8 @@ def attackTranscript (c₀ c₁ c₂ c₃ c₄ : Nat) : List (HemFoldIopMsg × N
 
 /-- A constant table and the constant polynomial pass the final check for any claim, as soon as
     the kernel is `[1, 0]`. -/
-private theorem constTable_final_valid (dom : List QuarticGoldilocks) (deg agree : Nat)
-    (k₀ c : QuarticGoldilocks) (hk : k₀ = CommRingOps.one) (hAg : agree ≤ dom.length) :
+private theorem constTable_final_valid (dom : List QuinticGoldilocks) (deg agree : Nat)
+    (k₀ c : QuinticGoldilocks) (hk : k₀ = CommRingOps.one) (hAg : agree ≤ dom.length) :
     polyWitnessValid dom agree deg (tableToOracle (List.replicate dom.length c))
       [k₀, CommRingOps.zero] c [c] = true := by
   subst hk
@@ -118,7 +118,7 @@ private theorem constTable_final_valid (dom : List QuarticGoldilocks) (deg agree
   rw [polyWitnessValid_def, decide_eq_true hLen, hCount, decide_eq_true hAg, decide_eq_true hDot]
   rfl
 
-private theorem kernelFold_pair_parity (φ a b : QuarticGoldilocks) :
+private theorem kernelFold_pair_parity (φ a b : QuinticGoldilocks) :
     (hemKernelFold φ [a, b]).length % 2 = 0 := by
   simp only [hemKernelFold_cons_cons, hemKernelFold_nil, List.length_cons, List.length_nil,
     Nat.zero_add, Nat.reduceAdd, Nat.reduceMod]
@@ -143,9 +143,9 @@ private theorem falseInst_oracles :
   simp only [hemFoldFalseInst.public_eqs]
 
 /-- The real `commit` step rejects a table that differs from the held oracle at one index. -/
-private theorem commitStep_rejects (dom : List QuarticGoldilocks) (deg agree : Nat)
-    (oracle : Nat → QuarticGoldilocks) (kernel : List QuarticGoldilocks)
-    (claim : QuarticGoldilocks) (table : List QuarticGoldilocks) (i : Nat) (hi : i < dom.length)
+private theorem commitStep_rejects (dom : List QuinticGoldilocks) (deg agree : Nat)
+    (oracle : Nat → QuinticGoldilocks) (kernel : List QuinticGoldilocks)
+    (claim : QuinticGoldilocks) (table : List QuinticGoldilocks) (i : Nat) (hi : i < dom.length)
     (hne : ¬ (tableToOracle table i = oracle i)) :
     hemFoldCommitStep (.cur dom deg agree oracle kernel claim) (.commit table) = .invalid := by
   have hb : hemTableMatchesOracle dom.length table oracle = false := by
@@ -237,7 +237,7 @@ theorem real_verifier_rejects_dropped_check_attack :
 /-! ## An honest accepted run through both fold stages -/
 
 /-- A true statement on the witness chain: the constant polynomial `1`, claim `⟨[1], [1, 0]⟩`. -/
-def honestInst : HemWhirInstance QuarticGoldilocks :=
+def honestInst : HemWhirInstance QuinticGoldilocks :=
   { batchOracles := [fun idx =>
       RoundPoly.evalCoeffs [CommRingOps.one] (hemFoldDom64.getD idx CommRingOps.zero)]
     batchClaims := [ringDot [CommRingOps.one] [CommRingOps.one, CommRingOps.zero]]
@@ -248,18 +248,18 @@ def honestInst : HemWhirInstance QuarticGoldilocks :=
     stages := hemFoldWitnessStages }
 
 /-- Honest cross wires `(⟨cE, kE⟩, ⟨cE, kO⟩, ⟨cO, kE⟩)` of `affine.rs::prove_fold_in_place`. -/
-def honestCross (c k : List QuarticGoldilocks) : HemFoldIopMsg :=
+def honestCross (c k : List QuinticGoldilocks) : HemFoldIopMsg :=
   .cross (ringDot (splitEvenOdd c).1 (splitEvenOdd k).1)
     (ringDot (splitEvenOdd c).1 (splitEvenOdd k).2)
     (ringDot (splitEvenOdd c).2 (splitEvenOdd k).1)
 
 /-- Honest shift wires `(⟨X cE, k'⟩, ⟨X cO, k'⟩)` against the folded kernel. -/
-def honestShift (c k' : List QuarticGoldilocks) : HemFoldIopMsg :=
+def honestShift (c k' : List QuinticGoldilocks) : HemFoldIopMsg :=
   .shift (ringDot (shiftPoly (splitEvenOdd c).1) k') (ringDot (shiftPoly (splitEvenOdd c).2) k')
 
 /-- Honest folded coefficients `cO + (α + β X)(cE + θ cO)` (`fold_coeffs`). -/
-def honestFold (S : List QuarticGoldilocks) (cTriple : Nat) (c : List QuarticGoldilocks) :
-    List QuarticGoldilocks :=
+def honestFold (S : List QuinticGoldilocks) (cTriple : Nat) (c : List QuinticGoldilocks) :
+    List QuinticGoldilocks :=
   affineCombine
     ((threePool S S).getD cTriple (CommRingOps.zero, CommRingOps.zero, CommRingOps.zero)).1
     ((threePool S S).getD cTriple (CommRingOps.zero, CommRingOps.zero, CommRingOps.zero)).2.1
@@ -269,7 +269,7 @@ def honestFold (S : List QuarticGoldilocks) (cTriple : Nat) (c : List QuarticGol
 /-- The honest transcript for challenge indices `(5, 3, 77, 9, 1000)`. -/
 def honestTranscript : List (HemFoldIopMsg × Nat) :=
   let S := hemFoldDom64
-  let k₀ : List QuarticGoldilocks := [CommRingOps.one, CommRingOps.zero]
+  let k₀ : List QuinticGoldilocks := [CommRingOps.one, CommRingOps.zero]
   let p₀ := evalCascadePolySum [[CommRingOps.one]]
     [(prodPool S).getD 5 (CommRingOps.zero, CommRingOps.zero)]
   let k₁ := hemKernelFold (S.getD 3 CommRingOps.zero) k₀
@@ -286,8 +286,8 @@ def honestTranscript : List (HemFoldIopMsg × Nat) :=
    (.final p₂, 0)]
 
 /-- A polynomial is a valid witness for its own evaluation oracle and its own kernel value. -/
-private theorem selfOracle_valid (dom : List QuarticGoldilocks) (A deg : Nat)
-    (k P : List QuarticGoldilocks) (hLen : P.length ≤ deg + 1) (hA : A ≤ dom.length) :
+private theorem selfOracle_valid (dom : List QuinticGoldilocks) (A deg : Nat)
+    (k P : List QuinticGoldilocks) (hLen : P.length ≤ deg + 1) (hA : A ≤ dom.length) :
     polyWitnessValid dom A deg
       (fun idx => RoundPoly.evalCoeffs P (dom.getD idx CommRingOps.zero)) k (ringDot P k) P =
       true := by
@@ -309,27 +309,27 @@ theorem honestInst_valid : HemStatementValid honestInst := by
     ⟨⟨[CommRingOps.one], selfOracle_valid hemFoldDom64 43 0 [CommRingOps.one, CommRingOps.zero]
       [CommRingOps.one] (by decide) (by decide)⟩, HemBatchValid_nil_nil _ _ _ _⟩⟩
 
-private theorem cascadePair (a b : QuarticGoldilocks) :
+private theorem cascadePair (a b : QuinticGoldilocks) :
     evalCascadePolySum [[CommRingOps.one]] [(a,b)] = [a,b] := by
   simp only [evalCascadePolySum.public_eqs, polyScaleVar_def, shiftPoly_eq, List.map_cons, List.map_nil,
     polyAddVar, rawAddCoeffs, LawfulCommRing.mul_one, LawfulCommRing.mul_zero,
     LawfulCommRing.add_zero]
 
-private theorem cascadePair' (p : QuarticGoldilocks × QuarticGoldilocks) :
+private theorem cascadePair' (p : QuinticGoldilocks × QuinticGoldilocks) :
     evalCascadePolySum [[CommRingOps.one]] [p] = [p.1, p.2] := by
   cases p with | mk a b => exact cascadePair a b
 
-private theorem crossPair (a b : QuarticGoldilocks) :
+private theorem crossPair (a b : QuinticGoldilocks) :
     honestCross [a,b] [CommRingOps.one, CommRingOps.zero] = .cross a CommRingOps.zero b := by
   simp only [honestCross, splitEvenOdd.public_eqs, ringDot_cons_cons, ringDot_nil_right, LawfulCommRing.mul_one,
     LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
 
-private theorem shiftPair (a b : QuarticGoldilocks) :
+private theorem shiftPair (a b : QuinticGoldilocks) :
     honestShift [a,b] [CommRingOps.one, CommRingOps.zero] = .shift CommRingOps.zero CommRingOps.zero := by
   simp only [honestShift, splitEvenOdd.public_eqs, shiftPoly_eq, ringDot_cons_cons, ringDot_nil_right,
     LawfulCommRing.zero_mul, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
 
-private theorem foldPair (S : List QuarticGoldilocks) (c : Nat) (a b : QuarticGoldilocks) :
+private theorem foldPair (S : List QuinticGoldilocks) (c : Nat) (a b : QuinticGoldilocks) :
     let t := (threePool S S).getD c (CommRingOps.zero, CommRingOps.zero, CommRingOps.zero)
     honestFold S c [a,b] = [linearNextA a b t.1 t.2.1, linearNextB a b t.1 t.2.2] := by
   simp only [honestFold, splitEvenOdd.public_eqs, affineCombine_def, polyScaleVar_def, shiftPoly_eq,
@@ -337,7 +337,7 @@ private theorem foldPair (S : List QuarticGoldilocks) (c : Nat) (a b : QuarticGo
     linearNextB.public_eqs,
     LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
 
-private theorem mapPair (D : List QuarticGoldilocks) (a b : QuarticGoldilocks) :
+private theorem mapPair (D : List QuinticGoldilocks) (a b : QuinticGoldilocks) :
     D.map (RoundPoly.evalCoeffs [a,b]) = linearTable D a b := by
   rw [linearTable.public_eqs]
   apply List.map_congr_left

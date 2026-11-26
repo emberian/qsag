@@ -11,7 +11,8 @@ import Qsag.Coding.ReedSolomon
 import Qsag.Math.Counting
 import Qsag.Math.CoeffPoly
 import Qsag.Math.PolyRing
-import Qsag.Math.QuarticExt4
+import Qsag.Math.GoldilocksEncoding
+import Qsag.Math.QuinticExt5
 import Qsag.Math.Goldilocks
 import Qsag.Math.Primality
 
@@ -51,14 +52,14 @@ theorem verifyHemAffineWhir_cascade_witness {F : Type} [CommRingOps F] [Decidabl
     coordinate and the accepted combined polynomial. This is the concrete starting event
     for a cascade counting argument; no probability or event-cover hypothesis is assumed. -/
 theorem verifyHemAffineWhir_invalid_coordinate
-    (inst : HemWhirInstance QuarticGoldilocks)
-    (shifts : List QuarticGoldilocks) (weights : List (QuarticGoldilocks × QuarticGoldilocks))
-    (decoded : List (List QuarticGoldilocks)) (rest : List (HemTranscriptRound QuarticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks)
+    (shifts : List QuinticGoldilocks) (weights : List (QuinticGoldilocks × QuinticGoldilocks))
+    (decoded : List (List QuinticGoldilocks)) (rest : List (HemTranscriptRound QuinticGoldilocks))
     (hDom : inst.initDomainPts.Nodup) (hEnough : inst.initDegBound + 1 ≤ inst.initMinAgree)
     (hInvalid : ¬ HemStatementValid inst)
     (hAccept : verifyHemAffineWhir inst (.cascade shifts weights decoded :: rest) = true) :
     ∃ i, i < inst.batchOracles.length ∧
-      (∀ G : List QuarticGoldilocks,
+      (∀ G : List QuinticGoldilocks,
         polyWitnessValid inst.initDomainPts inst.initMinAgree inst.initDegBound
           (inst.batchOracles.getD i (fun _ => CommRingOps.zero)) inst.initKernel
           (inst.batchClaims.getD i CommRingOps.zero) G = false) ∧
@@ -190,24 +191,13 @@ theorem verifyHemZeroOracle_accepted_pairs_le {F : Type} [LawfulField F] [Decida
   simp only [LawfulCommRing.mul_one, LawfulCommRing.zero_add] at hBound
   exact Nat.le_trans (hLe (prodPool S)) hBound
 
-/-- The degree/agreement inequality used by the zero-oracle case holds at each deployed
-    nv=24 row. This checks numerical applicability, not a refinement of those rows to Rust. -/
-theorem hemZeroOracle_nv24_degree_agreement :
-    ∀ w ∈ whirAffineStageWitnesses 24 true, w.d + 2 ≤ w.A := by
-  have h : (whirAffineStageWitnesses 24 true).all (fun w => decide (w.d + 2 ≤ w.A)) = true := by
-    rw [whirAffineStageWitnesses_qrom_eq_deployed.2]
-    decide
-  intro w hw
-  exact of_decide_eq_true ((List.all_eq_true.mp h) w hw)
 
-#verify_constructive
-  Qsag.verifyHemAffineWhir_cascade_witness
+#verify_constructive Qsag.verifyHemAffineWhir_cascade_witness
   Qsag.verifyHemAffineWhir_invalid_coordinate
   Qsag.polyWitnessValid_zeroOracle_claim
   Qsag.hemZeroOracleClaimInstance_invalid
   Qsag.verifyHemZeroOracle_implies_linear_collision
   Qsag.verifyHemZeroOracle_accepted_pairs_le
-  Qsag.hemZeroOracle_nv24_degree_agreement
 
 end Qsag
 
@@ -272,9 +262,9 @@ theorem extractedOpeningValues_eq_claimed {cardX w : Nat} (L : MerkleAddressLayo
     submitted opening; extractor failures remain `none` in the replacement run. -/
 def verifyHemOpeningBatch {cardX w : Nat} (L : MerkleAddressLayout cardX w)
     (slots : List (MerkleOpeningSlot cardX w))
-    (inst : HemWhirInstance QuarticGoldilocks)
+    (inst : HemWhirInstance QuinticGoldilocks)
     (decode : Fin cardX → List (Option (MerkleOpeningValue w)) →
-      List (HemTranscriptRound QuarticGoldilocks))
+      List (HemTranscriptRound QuinticGoldilocks))
     (H : Fin cardX → BitVec w) (x : Fin cardX) : Bool :=
   verifyOpeningBatch L slots H x && verifyHemAffineWhir inst (decode x (claimedOpeningValues slots x))
 
@@ -284,9 +274,9 @@ theorem measured_hem_opening_substitution_bound {cardX w cardAnc Q : Nat}
     (A : QuantumAdv cardX w cardAnc Q) (L : MerkleAddressLayout cardX w)
     (slots : List (MerkleOpeningSlot cardX w))
     (hLevels : ∀ s ∈ slots, s.level + s.depth ≤ L.levels)
-    (inst : HemWhirInstance QuarticGoldilocks)
+    (inst : HemWhirInstance QuinticGoldilocks)
     (decode : Fin cardX → List (Option (MerkleOpeningValue w)) →
-      List (HemTranscriptRound QuarticGoldilocks)) :
+      List (HemTranscriptRound QuinticGoldilocks)) :
     2 ^ w * measuredEventMass A (fun H xs x =>
       verifyHemOpeningBatch L slots inst decode H x &&
       !verifyHemAffineWhir inst (decode x (extractedOpeningValues L slots H xs x))) ≤
@@ -312,9 +302,9 @@ theorem measured_hem_acceptance_from_extracted {cardX w cardAnc Q : Nat}
     (A : QuantumAdv cardX w cardAnc Q) (L : MerkleAddressLayout cardX w)
     (slots : List (MerkleOpeningSlot cardX w))
     (hLevels : ∀ s ∈ slots, s.level + s.depth ≤ L.levels)
-    (inst : HemWhirInstance QuarticGoldilocks)
+    (inst : HemWhirInstance QuinticGoldilocks)
     (decode : Fin cardX → List (Option (MerkleOpeningValue w)) →
-      List (HemTranscriptRound QuarticGoldilocks)) :
+      List (HemTranscriptRound QuinticGoldilocks)) :
     2 ^ w * measuredEventMass A (fun H _ x => verifyHemOpeningBatch L slots inst decode H x) ≤
       2 ^ w * measuredEventMass A (fun H xs x =>
         verifyHemAffineWhir inst (decode x (extractedOpeningValues L slots H xs x))) +
@@ -343,9 +333,9 @@ theorem classical_hem_opening_substitution_bound {cardX w cardAnc Q : Nat}
     (addr : (Fin cardX → BitVec w) → Nat → Fin cardX) (hC : ClassicalQueryAddresses A addr)
     (L : MerkleAddressLayout cardX w) (slots : List (MerkleOpeningSlot cardX w))
     (hLevels : ∀ s ∈ slots, s.level + s.depth ≤ L.levels)
-    (inst : HemWhirInstance QuarticGoldilocks)
+    (inst : HemWhirInstance QuinticGoldilocks)
     (decode : Fin cardX → List (Option (MerkleOpeningValue w)) →
-      List (HemTranscriptRound QuarticGoldilocks)) :
+      List (HemTranscriptRound QuinticGoldilocks)) :
     2 ^ w * uniformOracleSum w cardX (fun H => QVec.queryMassOn (fun x =>
       verifyHemOpeningBatch L slots inst decode H x &&
       !verifyHemAffineWhir inst
@@ -361,12 +351,12 @@ theorem classical_hem_opening_substitution_bound {cardX w cardAnc Q : Nat}
     polynomial occur in the transcript decoded from the extracted opening values. -/
 theorem hem_extracted_invalid_coordinate {cardX w : Nat}
     (L : MerkleAddressLayout cardX w) (slots : List (MerkleOpeningSlot cardX w))
-    (inst : HemWhirInstance QuarticGoldilocks)
+    (inst : HemWhirInstance QuinticGoldilocks)
     (decode : Fin cardX → List (Option (MerkleOpeningValue w)) →
-      List (HemTranscriptRound QuarticGoldilocks))
+      List (HemTranscriptRound QuinticGoldilocks))
     (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (x : Fin cardX)
-    (shifts : List QuarticGoldilocks) (weights : List (QuarticGoldilocks × QuarticGoldilocks))
-    (decoded : List (List QuarticGoldilocks)) (rest : List (HemTranscriptRound QuarticGoldilocks))
+    (shifts : List QuinticGoldilocks) (weights : List (QuinticGoldilocks × QuinticGoldilocks))
+    (decoded : List (List QuinticGoldilocks)) (rest : List (HemTranscriptRound QuinticGoldilocks))
     (hDom : inst.initDomainPts.Nodup) (hEnough : inst.initDegBound + 1 ≤ inst.initMinAgree)
     (hInvalid : ¬ HemStatementValid inst)
     (hAccept : verifyHemOpeningBatch L slots inst decode H x = true)
@@ -374,7 +364,7 @@ theorem hem_extracted_invalid_coordinate {cardX w : Nat}
     (hTranscript : decode x (extractedOpeningValues L slots H xs x) =
       .cascade shifts weights decoded :: rest) :
     ∃ i, i < inst.batchOracles.length ∧
-      (∀ G : List QuarticGoldilocks,
+      (∀ G : List QuinticGoldilocks,
         polyWitnessValid inst.initDomainPts inst.initMinAgree inst.initDegBound
           (inst.batchOracles.getD i (fun _ => CommRingOps.zero)) inst.initKernel
           (inst.batchClaims.getD i CommRingOps.zero) G = false) ∧
@@ -416,15 +406,15 @@ set_option autoImplicit false
 /-- Direct claim-carrying consumer of the proved sliced incidence count. The additional
     list-product term is explicit and is not replaced by the smaller paper constant. -/
 theorem sliced_claimFold_bad_pairs_bound
-    (D S kernel : List QuarticGoldilocks) (d A B m Dy : Nat)
-    (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g s_g : QuarticGoldilocks)
+    (D S kernel : List QuinticGoldilocks) (d A B m Dy : Nat)
+    (f g : QuinticGoldilocks → QuinticGoldilocks) (e_f e_g s_g : QuinticGoldilocks)
     (hD : D.Nodup) (hS : S.Nodup) (hdA : d + 2 ≤ A)
     (hParams : slicedParamsOk D.length (d + 1) (A + 1) B m Dy = true)
-    (hInvalidG : ∀ G : List QuarticGoldilocks, G.length ≤ d + 1 →
+    (hInvalidG : ∀ G : List QuinticGoldilocks, G.length ≤ d + 1 →
       A ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs G z = g z))).length →
       ringDot G kernel ≠ e_g)
     (L : List (Fin (prodPool S).length)) (hNd : L.Nodup)
-    (hFlip : ∀ ch ∈ L, ¬¬ ∃ P : List QuarticGoldilocks,
+    (hFlip : ∀ ch ∈ L, ¬¬ ∃ P : List QuinticGoldilocks,
       affineMcaAccepts D S (d + 1) (A + 1) (f, g) ch.1 P = true ∧
       ringDot P kernel = CommRingOps.add e_f
         (CommRingOps.add (CommRingOps.mul ((prodPool S).get ch).1 e_g)
@@ -440,16 +430,16 @@ theorem sliced_claimFold_bad_pairs_bound
     it for every theta. Counting its exceptional theta values and handling intermediate
     geometries is required before claiming the full equal-degree lift. -/
 theorem sliced_equal_degree_fixed_theta_bound
-    (D S kernel : List QuarticGoldilocks) (d A B m Dy : Nat)
-    (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g c_f c_g θ : QuarticGoldilocks)
+    (D S kernel : List QuinticGoldilocks) (d A B m Dy : Nat)
+    (f g : QuinticGoldilocks → QuinticGoldilocks) (e_f e_g c_f c_g θ : QuinticGoldilocks)
     (hD : D.Nodup) (hS : S.Nodup) (hdA : d + 2 ≤ A)
     (hParams : slicedParamsOk D.length (d + 1) (A + 1) B m Dy = true)
-    (hInvalidMix : ∀ G : List QuarticGoldilocks, G.length ≤ d + 1 →
+    (hInvalidMix : ∀ G : List QuinticGoldilocks, G.length ≤ d + 1 →
       A ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs G z =
         CommRingOps.add (f z) (CommRingOps.mul θ (g z))))).length →
       ringDot G kernel ≠ CommRingOps.add e_f (CommRingOps.mul θ e_g))
     (L : List (Fin (prodPool S).length)) (hNd : L.Nodup)
-    (hFlip : ∀ ch ∈ L, ¬¬ ∃ P : List QuarticGoldilocks,
+    (hFlip : ∀ ch ∈ L, ¬¬ ∃ P : List QuinticGoldilocks,
       affineMcaAccepts D S (d + 1) (A + 1)
         (g, fun z => CommRingOps.add (f z) (CommRingOps.mul θ (g z))) ch.1 P = true ∧
       ringDot P kernel = hemFoldClaimUpdate e_f e_g c_f c_g θ
@@ -467,12 +457,6 @@ theorem sliced_equal_degree_fixed_theta_bound
       rw [hemFoldClaimUpdate_def] at h
       exact h)
 
-/-- Count divided by the actual challenge-pair cardinality. This is a binary decomposition
-    budget, without the claim-list term or any three-challenge/multi-fold lift. -/
-def slicedBinaryStageBound (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
-    (w : Nat × Nat × Nat × Nat) : RatBound :=
-  ⟨slicedStageCount goldilocksExt4Card g r w, goldilocksExt4Card * goldilocksExt4Card,
-    Nat.mul_pos goldilocksExt4Card_pos goldilocksExt4Card_pos⟩
 
 /-- Pure arithmetic: a 184-bit input tolerates this explicit DFM query budget. It does not
     assert that DFM applies to any particular protocol execution. -/
@@ -492,31 +476,6 @@ theorem dfm184_budget_at_2pow27 (b : RatBound) (hb : atLeastBits 184 b)
     exact hb
   exact Nat.le_trans h hb'
 
-/-- Every non-exhaustive canonical row supplies an actual proved binary decomposition
-    count and a 184-bit rational budget. DFM scaling remains an explicitly arithmetic
-    conclusion at Q+1 <= 2^27, not an assertion of a QROM experiment reduction. -/
-theorem sliced_stage_supported_budget (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
-    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
-    (hne : hemJohnsonQromStageExhaustive g = false) :
-    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
-      hemJohnsonQromTableRow nv g.stageIdx = some r ∧ slicedStageRow nv g.stageIdx = some w ∧
-      (∀ D S : List QuarticGoldilocks, D.Nodup → S.Nodup → D.length = g.n →
-        AffineFoldDecompBound D S g.d r.2.2.1 (slicedStageCount S.length g r w)) ∧
-      atLeastBits 184 (slicedBinaryStageBound g r w) ∧
-      (∀ Q : Nat, Q + 1 ≤ 2 ^ 27 → atLeastBits 128 (dfmRoundScale Q (slicedBinaryStageBound g r w))) := by
-  obtain ⟨r, w, hr, hw, hd, hb, hbits⟩ := sliced_stage_decomp_bound nv h2 h24 g hg hne
-  have hb184 : atLeastBits 184 (slicedBinaryStageBound g r w) := by
-    show slicedStageCount goldilocksExt4Card g r w * 2 ^ 184 ≤
-      goldilocksExt4Card * goldilocksExt4Card
-    rw [goldilocksExt4Card_def]
-    exact Nat.le_trans (Nat.mul_le_mul_left _ (Nat.pow_le_pow_right (by decide) hbits)) hb
-  exact ⟨r, w, hr, hw, hd, hb184, fun Q hQ => dfm184_budget_at_2pow27 _ hb184 Q hQ⟩
-
-/-- Total diagnostic accessor. Missing/exhaustive rows get no soundness credit. -/
-def slicedBinaryStageProfile (nv : Nat) (g : HemStageGeom) : RatBound :=
-  match hemJohnsonQromTableRow nv g.stageIdx, slicedStageRow nv g.stageIdx with
-  | some r, some w => slicedBinaryStageBound g r w
-  | _, _ => RatBound.one
 
 /-- The Q+1 convention matters: the universal 184-bit guarantee fails at Q=2^27,
     although particular table rows can be stronger than that universal floor. -/
@@ -526,30 +485,11 @@ theorem tooth_dfm184_query_boundary :
     ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27) b) := by
   decide +kernel
 
-#verify_constructive
-  Qsag.sliced_claimFold_bad_pairs_bound
+#verify_constructive Qsag.sliced_claimFold_bad_pairs_bound
   Qsag.sliced_equal_degree_fixed_theta_bound
   Qsag.dfm184_budget_at_2pow27
-  Qsag.sliced_stage_supported_budget
   Qsag.tooth_dfm184_query_boundary
-/-- Public numerical interface, avoiding unfolding the full field cardinality in clients. -/
-theorem slicedBinaryStageBound_bits_iff (bits : Nat) (g : HemStageGeom)
-    (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat) :
-    atLeastBits bits (slicedBinaryStageBound g r w) ↔
-      slicedStageCount goldilocksExt4Card g r w * 2 ^ bits ≤
-        goldilocksExt4Card * goldilocksExt4Card := Iff.rfl
 
-/-- The executable parameter certificate implies decomposition for an arbitrary
-stage geometry, without a table lookup or a cap on the variable count. -/
-theorem sliced_stage_checked_decomposition (g : HemStageGeom)
-    (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat)
-    (hParams : slicedParamsOk g.n g.d r.2.2.1 w.2.2.1 r.2.2.2.1 r.2.2.2.2 = true)
-    (D S : List QuarticGoldilocks) (hD : D.Nodup) (hS : S.Nodup) (hLen : D.length = g.n) :
-    AffineFoldDecompBound D S g.d r.2.2.1 (slicedStageCount S.length g r w) := by
-  rw [slicedStageCount_def]
-  exact slicedParamsOk_sound g.n g.d r.2.2.1 w.2.2.1 r.2.2.2.1 r.2.2.2.2 hParams D S hD hS hLen
-
-#verify_constructive slicedBinaryStageBound_bits_iff sliced_stage_checked_decomposition
 
 end Qsag
 end
@@ -570,8 +510,8 @@ set_option autoImplicit false
     The bit-output width is explicit; the deployed 256-bit layout is not instantiated here. -/
 theorem coherent_hem_authenticated_event_eq {n cardAnc Q : Nat}
     (A : QuantumAdv n 1 cardAnc Q) (L : MerkleAddressLayout n 1)
-    (slots : List (MerkleOpeningSlot n 1)) (inst : HemWhirInstance QuarticGoldilocks)
-    (decode : Fin n → List (Option (MerkleOpeningValue 1)) → List (HemTranscriptRound QuarticGoldilocks)) :
+    (slots : List (MerkleOpeningSlot n 1)) (inst : HemWhirInstance QuinticGoldilocks)
+    (decode : Fin n → List (Option (MerkleOpeningValue 1)) → List (HemTranscriptRound QuinticGoldilocks)) :
     coherentTableEventMass (verifyHemOpeningBatch L slots inst decode)
       (fourierOracleState (fourierAdvStateAt A Q (Nat.le_refl Q))) =
       4 ^ (n * Q + n) * uniformOracleSum 1 n (fun H =>
@@ -709,8 +649,8 @@ def wordCoherentEventMass {n w cardAnc : Nat}
 independent uniform truth-table bits. In particular w=256 is supported. -/
 theorem coherent_word_hem_authenticated_event_eq {n w cardAnc Q : Nat}
     (A : QuantumAdv n w cardAnc Q) (L : MerkleAddressLayout n w)
-    (slots : List (MerkleOpeningSlot n w)) (inst : HemWhirInstance QuarticGoldilocks)
-    (decode : Fin n → List (Option (MerkleOpeningValue w)) → List (HemTranscriptRound QuarticGoldilocks)) :
+    (slots : List (MerkleOpeningSlot n w)) (inst : HemWhirInstance QuinticGoldilocks)
+    (decode : Fin n → List (Option (MerkleOpeningValue w)) → List (HemTranscriptRound QuinticGoldilocks)) :
     wordCoherentEventMass (verifyHemOpeningBatch L slots inst decode)
       (wordFourier (wordFourierStateAt A Q (Nat.le_refl Q))) =
       4 ^ (n * w * Q + n * w) * oracleTableSum (n * w) (fun h =>
@@ -793,11 +733,6 @@ def hemRecursiveSplitDepth (nv childCap : Nat) : Nat := nv - hemRecursiveChildVa
 
 def hemRecursiveChildCount (nv childCap : Nat) : Nat := 2 ^ hemRecursiveSplitDepth nv childCap
 
-def hemRecursiveStageGeoms (nv childCap : Nat) : List HemStageGeom :=
-  hemStageGeoms (hemRecursiveChildVars nv childCap)
-
-def whirRecursiveAffineStageWitnesses (nv childCap : Nat) (isQrom : Bool) : List WhirAffineWitness :=
-  whirAffineStageWitnesses (hemRecursiveChildVars nv childCap) isQrom
 
 theorem hemRecursiveChildVars_bounds (nv childCap : Nat)
     (h2 : 2 ≤ nv) (hc2 : 2 ≤ childCap) (hc24 : childCap ≤ 24) :
@@ -810,32 +745,6 @@ theorem hemRecursive_capacity (nv childCap : Nat) :
   unfold hemRecursiveChildCount hemRecursiveSplitDepth hemRecursiveChildVars
   rw [← Nat.pow_add, Nat.sub_add_cancel (Nat.min_le_left nv childCap)]
 
-/-- Existing flat callers use exactly one child and the unchanged witness list. -/
-theorem hemRecursive_flat_compat (nv childCap : Nat) (h : nv ≤ childCap) (qrom : Bool) :
-    hemRecursiveChildCount nv childCap = 1 ∧
-    hemRecursiveStageGeoms nv childCap = hemStageGeoms nv ∧
-    whirRecursiveAffineStageWitnesses nv childCap qrom = whirAffineStageWitnesses nv qrom := by
-  unfold hemRecursiveChildCount hemRecursiveSplitDepth hemRecursiveStageGeoms
-    whirRecursiveAffineStageWitnesses hemRecursiveChildVars
-  rw [Nat.min_eq_left h, Nat.sub_self, Nat.pow_zero]
-  exact ⟨rfl, rfl, rfl⟩
-
-/-- Parametric child geometry and QROM coverage, without a cap on parent dimension. -/
-theorem hem_recursive_qrom_witnesses_cover_every_child_stage
-    (nv childCap : Nat) (h2 : 2 ≤ nv) (hc2 : 2 ≤ childCap) (hc24 : childCap ≤ 24) :
-    hemStageGeometryValid (hemRecursiveChildVars nv childCap) = true ∧
-    ∀ g ∈ hemRecursiveStageGeoms nv childCap,
-      hemJohnsonQromStageCovered (goldilocksPrime ^ 4) (hemRecursiveChildVars nv childCap) g = true := by
-  obtain ⟨hlo, hhi⟩ := hemRecursiveChildVars_bounds nv childCap h2 hc2 hc24
-  exact ⟨(hemStageGeometry_valid_and_under_query_cap _ hlo hhi).1,
-    hem_johnson_qrom_witnesses_cover_every_canonical_stage.1 _ hlo hhi⟩
-
-theorem hem_recursive_gs_deployed_degree_lt_agreement
-    (nv childCap : Nat) (h2 : 2 ≤ nv) (hc2 : 2 ≤ childCap) (hc24 : childCap ≤ 24)
-    (w : WhirAffineWitness) (hw : w ∈ whirRecursiveAffineStageWitnesses nv childCap true) :
-    w.d < w.A := by
-  obtain ⟨hlo, hhi⟩ := hemRecursiveChildVars_bounds nv childCap h2 hc2 hc24
-  exact hem_gs_deployed_degree_lt_agreement _ hlo hhi w hw
 
 /-- With the existing 24-variable child profile, parents through 30 need at most 64
     children. This is an arithmetic capacity bound, not a validator-to-row size estimate. -/
@@ -858,9 +767,8 @@ theorem tooth_recursive_nv30_needs_all_children :
 
 #tooth_pair hemRecursive_capacity vs tooth_recursive_nv30_needs_all_children
 #verify_constructive hemRecursive_capacity
-#verify_constructive hemRecursive_flat_compat
-#verify_constructive hem_recursive_qrom_witnesses_cover_every_child_stage
-#verify_constructive hem_recursive_gs_deployed_degree_lt_agreement
+
+
 #verify_constructive hem_recursive_nv30_capacity
 
 /-! ## §1. Equal-Degree `θ`-Exception Bound & Three-Challenge `(θ, α, β)` Lift -/
@@ -931,20 +839,20 @@ private theorem linear_theta_fin_le_one {F : Type} [LawfulField F] [DecidableEq 
     at most `badTheta + |gsDecodeList d (A - 1) D f| · |gsDecodeList d (A - 1) D g|` indices `iθ ∈ Fin S.length`
     admit a degree-`≤ d` witness `H` (`H.length ≤ d + 1`) at agreement `≥ A` for `(f + θ g, e_f + θ e_g)`. -/
 theorem equal_degree_bad_theta_bound
-    (D S kernel : List QuarticGoldilocks) (d A badTheta : Nat)
-    (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g : QuarticGoldilocks)
-    (hD : D.Nodup) (hS : S.Nodup) (hZeroS : (CommRingOps.zero : QuarticGoldilocks) ∈ S)
+    (D S kernel : List QuinticGoldilocks) (d A badTheta : Nat)
+    (f g : QuinticGoldilocks → QuinticGoldilocks) (e_f e_g : QuinticGoldilocks)
+    (hD : D.Nodup) (hS : S.Nodup) (hZeroS : (CommRingOps.zero : QuinticGoldilocks) ∈ S)
     (hdA : d + 3 ≤ A) (hAD : A ≤ D.length)
     (hDecompTheta : AffineFoldDecompBound D S (d + 1) A badTheta)
     (hInvalidFG :
-      (∀ Fp : List QuarticGoldilocks, Fp.length ≤ d + 1 →
+      (∀ Fp : List QuinticGoldilocks, Fp.length ≤ d + 1 →
         A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Fp z = f z))).length →
         ringDot Fp kernel ≠ e_f) ∨
-      (∀ Gp : List QuarticGoldilocks, Gp.length ≤ d + 1 →
+      (∀ Gp : List QuinticGoldilocks, Gp.length ≤ d + 1 →
         A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Gp z = g z))).length →
         ringDot Gp kernel ≠ e_g))
     (L_θ : List (Fin S.length)) (hNd : L_θ.Nodup)
-    (hBadθ : ∀ iθ ∈ L_θ, ¬¬ ∃ H : List QuarticGoldilocks,
+    (hBadθ : ∀ iθ ∈ L_θ, ¬¬ ∃ H : List QuinticGoldilocks,
       H.length ≤ d + 1 ∧
       A ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs H z =
         CommRingOps.add (f z) (CommRingOps.mul (S.get iθ) (g z))))).length ∧
@@ -961,7 +869,7 @@ theorem equal_degree_bad_theta_bound
     | cons _ rest ih =>
       simp only [List.flatMap_cons, List.length_append, List.length_map, List.length_cons, ih]
       rw [Nat.succ_mul, Nat.add_comm]
-  let matchTheta : GsUniPoly QuarticGoldilocks × GsUniPoly QuarticGoldilocks → Fin S.length → Bool :=
+  let matchTheta : GsUniPoly QuinticGoldilocks × GsUniPoly QuinticGoldilocks → Fin S.length → Bool :=
     fun fg iθ =>
       decide (CommRingOps.add (ringDot fg.1.val kernel)
         (CommRingOps.mul (S.get iθ) (ringDot fg.2.val kernel)) =
@@ -1022,7 +930,7 @@ theorem equal_degree_bad_theta_bound
   have hPoolNd : L_pool.Nodup := by
     refine List.Pairwise.map _ ?_ (List.Pairwise.filter _ hNd)
     intro i₁ i₂ hNe hEqIdx
-    have hPairEq : (S.get i₁, (CommRingOps.zero : QuarticGoldilocks)) = (S.get i₂, CommRingOps.zero) :=
+    have hPairEq : (S.get i₁, (CommRingOps.zero : QuinticGoldilocks)) = (S.get i₂, CommRingOps.zero) :=
       (embedZero i₁).2.symm.trans ((congrArg (prodPool S).get hEqIdx).trans (embedZero i₂).2)
     exact hNe (nodup_get_inj hS (Prod.mk.inj hPairEq).1)
   have hNonLe : L_pool.length ≤ badTheta := by
@@ -1068,8 +976,8 @@ theorem equal_degree_bad_theta_bound
       have hTrimFEq : trimPoly F_poly = trimPoly F_sub :=
         trimPoly_eq_of_agree_on_nodup (d := d + 1) hFLen
           (Nat.le_trans hFsubLen (Nat.le_succ _)) hD (by omega) hAgreeAll
-      let pF : GsUniPoly QuarticGoldilocks := GsUniPoly.ofCoeffs F_poly
-      let pG : GsUniPoly QuarticGoldilocks := GsUniPoly.ofCoeffs G_poly
+      let pF : GsUniPoly QuinticGoldilocks := GsUniPoly.ofCoeffs F_poly
+      let pG : GsUniPoly QuinticGoldilocks := GsUniPoly.ofCoeffs G_poly
       have hpFLen : pF.val.length ≤ d + 1 := by
         change (trimPoly F_poly).length ≤ d + 1
         rw [hTrimFEq]
@@ -1095,12 +1003,12 @@ theorem equal_degree_bad_theta_bound
       have hpGMem : pG ∈ candG :=
         (mem_gsDecodeList_iff g hD (by omega) pG).mpr
           ⟨Nat.le_trans (trimPoly_length_le G_poly) hGLen, hJointG⟩
-      have hZeroScale : polyScaleVar (CommRingOps.zero : QuarticGoldilocks) (shiftPoly G_poly) =
+      have hZeroScale : polyScaleVar (CommRingOps.zero : QuinticGoldilocks) (shiftPoly G_poly) =
           (shiftPoly G_poly).map (fun _ => CommRingOps.zero) := by
         rw [polyScaleVar_def]
         apply List.map_congr_left
         intro a _; exact LawfulCommRing.zero_mul a
-      have hDotZero : ringDot (polyScaleVar (CommRingOps.zero : QuarticGoldilocks) (shiftPoly G_poly)) kernel =
+      have hDotZero : ringDot (polyScaleVar (CommRingOps.zero : QuinticGoldilocks) (shiftPoly G_poly)) kernel =
           CommRingOps.zero := by
         rw [ringDot_polyScaleVar, LawfulCommRing.zero_mul]
       have hDotEq : CommRingOps.add (ringDot pF.val kernel)
@@ -1151,23 +1059,23 @@ private theorem nodup_map_snd_filter_fst {α β : Type} [DecidableEq α] (a : α
     Eliminates `hInvalidMix` entirely by uniting `equal_degree_bad_theta_bound` (for `θ ∈ S`) with
     `claimFold_bad_pairs_bound` (for `(α, β) ∈ prodPool S` on every non-exceptional `θ`). -/
 theorem equal_degree_three_challenge_bound
-    (D S kernel : List QuarticGoldilocks) (d A badTheta badAlphaBeta maxMixList : Nat)
-    (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g c_f c_g : QuarticGoldilocks)
-    (hD : D.Nodup) (hS : S.Nodup) (hZeroS : (CommRingOps.zero : QuarticGoldilocks) ∈ S)
+    (D S kernel : List QuinticGoldilocks) (d A badTheta badAlphaBeta maxMixList : Nat)
+    (f g : QuinticGoldilocks → QuinticGoldilocks) (e_f e_g c_f c_g : QuinticGoldilocks)
+    (hD : D.Nodup) (hS : S.Nodup) (hZeroS : (CommRingOps.zero : QuinticGoldilocks) ∈ S)
     (hdA : d + 3 ≤ A) (hAD : A ≤ D.length)
     (hDecompTheta : AffineFoldDecompBound D S (d + 1) A badTheta)
     (hDecompAB : AffineFoldDecompBound D S (d + 1) (A + 1) badAlphaBeta)
-    (hMixList : ∀ θ : QuarticGoldilocks,
+    (hMixList : ∀ θ : QuinticGoldilocks,
       (gsDecodeList d A D (fun z => CommRingOps.add (f z) (CommRingOps.mul θ (g z)))).length ≤ maxMixList)
     (hInvalidFG :
-      (∀ Fp : List QuarticGoldilocks, Fp.length ≤ d + 1 →
+      (∀ Fp : List QuinticGoldilocks, Fp.length ≤ d + 1 →
         A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Fp z = f z))).length →
         ringDot Fp kernel ≠ e_f) ∨
-      (∀ Gp : List QuarticGoldilocks, Gp.length ≤ d + 1 →
+      (∀ Gp : List QuinticGoldilocks, Gp.length ≤ d + 1 →
         A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Gp z = g z))).length →
         ringDot Gp kernel ≠ e_g))
     (triples : List (Fin S.length × Fin (prodPool S).length)) (hNd : triples.Nodup)
-    (hFlip : ∀ tr ∈ triples, ¬¬ ∃ P : List QuarticGoldilocks,
+    (hFlip : ∀ tr ∈ triples, ¬¬ ∃ P : List QuinticGoldilocks,
       affineMcaAccepts D S (d + 1) (A + 1)
         (g, fun z => CommRingOps.add (f z) (CommRingOps.mul (S.get tr.1) (g z))) tr.2.1 P = true ∧
       ringDot P kernel = hemFoldClaimUpdate e_f e_g c_f c_g (S.get tr.1)
@@ -1219,11 +1127,11 @@ theorem equal_degree_three_challenge_bound
     cases hIsEx : isExcTheta iθ
     · let θ := S.get iθ
       let mixWord := fun z => CommRingOps.add (f z) (CommRingOps.mul θ (g z))
-      have hInvMix : ∀ G : List QuarticGoldilocks, G.length ≤ d + 1 →
+      have hInvMix : ∀ G : List QuinticGoldilocks, G.length ≤ d + 1 →
           A ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs G z = mixWord z))).length →
           ringDot G kernel ≠ CommRingOps.add e_f (CommRingOps.mul θ e_g) := by
         intro G hGLen hGAg hGDot
-        let pG : GsUniPoly QuarticGoldilocks := GsUniPoly.ofCoeffs G
+        let pG : GsUniPoly QuinticGoldilocks := GsUniPoly.ofCoeffs G
         have hpGAg : A ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs pG.val z = mixWord z))).length := by
           have hEqF : D.filter (fun z => decide (RoundPoly.evalCoeffs pG.val z = mixWord z)) =
               D.filter (fun z => decide (RoundPoly.evalCoeffs G z = mixWord z)) :=
@@ -1310,24 +1218,24 @@ theorem equal_degree_three_challenge_bound
 /-- Specialization of `equal_degree_three_challenge_bound` to `slicedParamsOk` certificates at
     agreement thresholds `A` (for the `θ`-exception slice) and `A + 1` (for the `(α, β)` fold). -/
 theorem sliced_equal_degree_theta_slice_challenge_bound
-    (D S kernel : List QuarticGoldilocks)
+    (D S kernel : List QuinticGoldilocks)
     (d A B₀ m₀ Dy₀ B₁ m₁ Dy₁ maxMixList : Nat)
-    (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g c_f c_g : QuarticGoldilocks)
-    (hD : D.Nodup) (hS : S.Nodup) (hZeroS : (CommRingOps.zero : QuarticGoldilocks) ∈ S)
+    (f g : QuinticGoldilocks → QuinticGoldilocks) (e_f e_g c_f c_g : QuinticGoldilocks)
+    (hD : D.Nodup) (hS : S.Nodup) (hZeroS : (CommRingOps.zero : QuinticGoldilocks) ∈ S)
     (hdA : d + 3 ≤ A) (hAD : A ≤ D.length)
     (hParamsTheta : slicedParamsOk D.length (d + 1) A B₀ m₀ Dy₀ = true)
     (hParamsAB : slicedParamsOk D.length (d + 1) (A + 1) B₁ m₁ Dy₁ = true)
-    (hMixList : ∀ θ : QuarticGoldilocks,
+    (hMixList : ∀ θ : QuinticGoldilocks,
       (gsDecodeList d A D (fun z => CommRingOps.add (f z) (CommRingOps.mul θ (g z)))).length ≤ maxMixList)
     (hInvalidFG :
-      (∀ Fp : List QuarticGoldilocks, Fp.length ≤ d + 1 →
+      (∀ Fp : List QuinticGoldilocks, Fp.length ≤ d + 1 →
         A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Fp z = f z))).length →
         ringDot Fp kernel ≠ e_f) ∨
-      (∀ Gp : List QuarticGoldilocks, Gp.length ≤ d + 1 →
+      (∀ Gp : List QuinticGoldilocks, Gp.length ≤ d + 1 →
         A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Gp z = g z))).length →
         ringDot Gp kernel ≠ e_g))
     (triples : List (Fin S.length × Fin (prodPool S).length)) (hNd : triples.Nodup)
-    (hFlip : ∀ tr ∈ triples, ¬¬ ∃ P : List QuarticGoldilocks,
+    (hFlip : ∀ tr ∈ triples, ¬¬ ∃ P : List QuinticGoldilocks,
       affineMcaAccepts D S (d + 1) (A + 1)
         (g, fun z => CommRingOps.add (f z) (CommRingOps.mul (S.get tr.1) (g z))) tr.2.1 P = true ∧
       ringDot P kernel = hemFoldClaimUpdate e_f e_g c_f c_g (S.get tr.1)
@@ -1347,9 +1255,9 @@ theorem sliced_equal_degree_theta_slice_challenge_bound
 /-! ## §2. Arbitrary-Batch (`1 ≤ m ≤ 16`) Multi-Stage `verifyHemAffineWhir` & Extracted-Opening Bridge -/
 
 private theorem evalCascadeClaim_set_split :
-    ∀ (es shifts : List QuarticGoldilocks)
-      (ws : List (QuarticGoldilocks × QuarticGoldilocks))
-      (i : Nat) (p : QuarticGoldilocks × QuarticGoldilocks),
+    ∀ (es shifts : List QuinticGoldilocks)
+      (ws : List (QuinticGoldilocks × QuinticGoldilocks))
+      (i : Nat) (p : QuinticGoldilocks × QuinticGoldilocks),
       i < es.length → es.length = shifts.length → shifts.length = ws.length →
       evalCascadeClaim es shifts (ws.set i p) =
         CommRingOps.add
@@ -1371,10 +1279,10 @@ private theorem evalCascadeClaim_set_split :
     rw [ih]
     constructive_ring
 
-private theorem evalCascadeOracle_set_split (domPts : List QuarticGoldilocks) :
-    ∀ (os : List (Nat → QuarticGoldilocks))
-      (ws : List (QuarticGoldilocks × QuarticGoldilocks))
-      (i idx : Nat) (p : QuarticGoldilocks × QuarticGoldilocks),
+private theorem evalCascadeOracle_set_split (domPts : List QuinticGoldilocks) :
+    ∀ (os : List (Nat → QuinticGoldilocks))
+      (ws : List (QuinticGoldilocks × QuinticGoldilocks))
+      (i idx : Nat) (p : QuinticGoldilocks × QuinticGoldilocks),
       i < os.length → os.length = ws.length →
       evalCascadeOracle domPts os (ws.set i p) idx =
         CommRingOps.add
@@ -1399,12 +1307,12 @@ private theorem evalCascadeOracle_set_split (domPts : List QuarticGoldilocks) :
     constructive_ring
 
 private theorem lookupDomOracle_evalCascadeOracle_set
-    (domPts : List QuarticGoldilocks) (hDom : domPts.Nodup)
-    (os : List (Nat → QuarticGoldilocks))
-    (ws : List (QuarticGoldilocks × QuarticGoldilocks))
-    (i : Nat) (p : QuarticGoldilocks × QuarticGoldilocks)
+    (domPts : List QuinticGoldilocks) (hDom : domPts.Nodup)
+    (os : List (Nat → QuinticGoldilocks))
+    (ws : List (QuinticGoldilocks × QuinticGoldilocks))
+    (i : Nat) (p : QuinticGoldilocks × QuinticGoldilocks)
     (hi : i < os.length) (hOW : os.length = ws.length)
-    (z : QuarticGoldilocks) (hz : z ∈ domPts) :
+    (z : QuinticGoldilocks) (hz : z ∈ domPts) :
     lookupDomOracle domPts (evalCascadeOracle domPts os (ws.set i p)) z =
       CommRingOps.add
         (lookupDomOracle domPts
@@ -1422,7 +1330,7 @@ private theorem lookupDomOracle_evalCascadeOracle_set
 
 /-- **Arbitrary-Batch (`1 ≤ m ≤ 16`), Multi-Stage `verifyHemAffineWhir` Cascade Fiber Bound
     (`arbitrary_batch_cascade_fiber_bound`)**:
-    For ANY `inst : HemWhirInstance QuarticGoldilocks` with `1 ≤ m ≤ 16` batch oracles, ANY stage
+    For ANY `inst : HemWhirInstance QuinticGoldilocks` with `1 ≤ m ≤ 16` batch oracles, ANY stage
     schedule `inst.stages`, `inst.initDomainPts.Nodup`, `inst.initDegBound + 3 ≤ inst.initMinAgree`,
     and `¬ HemStatementValid { inst with initMinAgree := inst.initMinAgree - 1 }` (accounting for
     the legacy, weaker input premise; the verifier now increments agreement at `.cascade`), constructively extracts an
@@ -1430,10 +1338,10 @@ private theorem lookupDomOracle_evalCascadeOracle_set
     ANY adaptive continuation `(decoded, rest)`, at most `badMca + listRest · listTarget · |S|`
     challenge pairs `ch ∈ L` pass `verifyHemAffineWhir`. -/
 theorem arbitrary_batch_cascade_fiber_bound
-    (inst : HemWhirInstance QuarticGoldilocks)
-    (S : List QuarticGoldilocks) (badMca : Nat)
-    (shifts : List QuarticGoldilocks)
-    (baseWeights : List (QuarticGoldilocks × QuarticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks)
+    (S : List QuinticGoldilocks) (badMca : Nat)
+    (shifts : List QuinticGoldilocks)
+    (baseWeights : List (QuinticGoldilocks × QuinticGoldilocks))
     (hShape : 1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16)
     (hArity : inst.batchClaims.length = inst.batchOracles.length)
     (hShifts : shifts.length = inst.batchClaims.length)
@@ -1444,8 +1352,8 @@ theorem arbitrary_batch_cascade_fiber_bound
       (inst.initDegBound + 1) inst.initMinAgree badMca)
     (hInvalid : ¬ HemStatementValid { inst with initMinAgree := inst.initMinAgree - 1 }) :
     ∃ i₀ : Nat, i₀ < inst.batchOracles.length ∧
-      ∀ (decoded : QuarticGoldilocks × QuarticGoldilocks → List (List QuarticGoldilocks))
-        (rest : QuarticGoldilocks × QuarticGoldilocks → List (HemTranscriptRound QuarticGoldilocks))
+      ∀ (decoded : QuinticGoldilocks × QuinticGoldilocks → List (List QuinticGoldilocks))
+        (rest : QuinticGoldilocks × QuinticGoldilocks → List (HemTranscriptRound QuinticGoldilocks))
         (L : List (Fin (prodPool S).length)),
         L.Nodup →
         (∀ ch ∈ L, verifyHemAffineWhir inst
@@ -1483,7 +1391,7 @@ theorem arbitrary_batch_cascade_fiber_bound
     (baseWeights.set i₀ (CommRingOps.zero, CommRingOps.zero))
   let e_g := inst.batchClaims.getD i₀ CommRingOps.zero
   let s_g := shifts.getD i₀ CommRingOps.zero
-  have hInvalidG : ∀ G : List QuarticGoldilocks, G.length ≤ d₀ + 1 →
+  have hInvalidG : ∀ G : List QuinticGoldilocks, G.length ≤ d₀ + 1 →
       A₀ - 1 ≤ (domPts.filter (fun z => decide (RoundPoly.evalCoeffs G z = gWord z))).length →
       ringDot G inst.initKernel ≠ e_g := by
     intro G hGLen hGAg hGDot
@@ -1526,7 +1434,7 @@ theorem arbitrary_batch_cascade_fiber_bound
             lookupDomOracle inst.initDomainPts
               (evalCascadeOracle inst.initDomainPts inst.batchOracles
                 (baseWeights.set i₀ ((prodPool S).get ch))) z)) := by
-      have hMemCongr : ∀ xs : List QuarticGoldilocks, (∀ z ∈ xs, z ∈ inst.initDomainPts) →
+      have hMemCongr : ∀ xs : List QuinticGoldilocks, (∀ z ∈ xs, z ∈ inst.initDomainPts) →
           xs.filter (fun z =>
             decide (RoundPoly.evalCoeffs P z =
               CommRingOps.add
@@ -1559,10 +1467,10 @@ theorem arbitrary_batch_cascade_fiber_bound
     threshold. The non-exhaustive slack premise makes the transition exactly A + 1,
     so no stronger invalidity assumption at A - 1 is needed. -/
 theorem arbitrary_batch_incremented_cascade_fiber_bound
-    (inst : HemWhirInstance QuarticGoldilocks)
-    (S : List QuarticGoldilocks) (badMca : Nat)
-    (shifts : List QuarticGoldilocks)
-    (baseWeights : List (QuarticGoldilocks × QuarticGoldilocks))
+    (inst : HemWhirInstance QuinticGoldilocks)
+    (S : List QuinticGoldilocks) (badMca : Nat)
+    (shifts : List QuinticGoldilocks)
+    (baseWeights : List (QuinticGoldilocks × QuinticGoldilocks))
     (hShape : 1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16)
     (hArity : inst.batchClaims.length = inst.batchOracles.length)
     (hShifts : shifts.length = inst.batchClaims.length)
@@ -1574,8 +1482,8 @@ theorem arbitrary_batch_incremented_cascade_fiber_bound
       (inst.initDegBound + 1) (inst.initMinAgree + 1) badMca)
     (hInvalid : ¬ HemStatementValid inst) :
     ∃ i₀ : Nat, i₀ < inst.batchOracles.length ∧
-      ∀ (decoded : QuarticGoldilocks × QuarticGoldilocks → List (List QuarticGoldilocks))
-        (rest : QuarticGoldilocks × QuarticGoldilocks → List (HemTranscriptRound QuarticGoldilocks))
+      ∀ (decoded : QuinticGoldilocks × QuinticGoldilocks → List (List QuinticGoldilocks))
+        (rest : QuinticGoldilocks × QuinticGoldilocks → List (HemTranscriptRound QuinticGoldilocks))
         (L : List (Fin (prodPool S).length)),
         L.Nodup →
         (∀ ch ∈ L, verifyHemAffineWhir inst
@@ -1612,7 +1520,7 @@ theorem arbitrary_batch_incremented_cascade_fiber_bound
     (baseWeights.set i₀ (CommRingOps.zero, CommRingOps.zero))
   let e_g := inst.batchClaims.getD i₀ CommRingOps.zero
   let s_g := shifts.getD i₀ CommRingOps.zero
-  have hInvalidG : ∀ G : List QuarticGoldilocks, G.length ≤ d₀ + 1 →
+  have hInvalidG : ∀ G : List QuinticGoldilocks, G.length ≤ d₀ + 1 →
       A₀ ≤ (domPts.filter (fun z => decide (RoundPoly.evalCoeffs G z = gWord z))).length →
       ringDot G inst.initKernel ≠ e_g := by
     intro G hGLen hGAg hGDot
@@ -1656,7 +1564,7 @@ theorem arbitrary_batch_incremented_cascade_fiber_bound
             lookupDomOracle inst.initDomainPts
               (evalCascadeOracle inst.initDomainPts inst.batchOracles
                 (baseWeights.set i₀ ((prodPool S).get ch))) z)) := by
-      have hMemCongr : ∀ xs : List QuarticGoldilocks, (∀ z ∈ xs, z ∈ inst.initDomainPts) →
+      have hMemCongr : ∀ xs : List QuinticGoldilocks, (∀ z ∈ xs, z ∈ inst.initDomainPts) →
           xs.filter (fun z =>
             decide (RoundPoly.evalCoeffs P z =
               CommRingOps.add
@@ -1696,12 +1604,12 @@ theorem hem_multistage_extracted_acceptance_and_fiber_bound
     (A : QuantumAdv cardX w cardAnc Q) (L_merkle : MerkleAddressLayout cardX w)
     (slots : List (MerkleOpeningSlot cardX w))
     (hLevels : ∀ s ∈ slots, s.level + s.depth ≤ L_merkle.levels)
-    (inst : HemWhirInstance QuarticGoldilocks)
+    (inst : HemWhirInstance QuinticGoldilocks)
     (decode : Fin cardX → List (Option (MerkleOpeningValue w)) →
-      List (HemTranscriptRound QuarticGoldilocks))
-    (S : List QuarticGoldilocks) (badMca : Nat)
-    (shifts : List QuarticGoldilocks)
-    (baseWeights : List (QuarticGoldilocks × QuarticGoldilocks))
+      List (HemTranscriptRound QuinticGoldilocks))
+    (S : List QuinticGoldilocks) (badMca : Nat)
+    (shifts : List QuinticGoldilocks)
+    (baseWeights : List (QuinticGoldilocks × QuinticGoldilocks))
     (hShape : 1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16)
     (hArity : inst.batchClaims.length = inst.batchOracles.length)
     (hShifts : shifts.length = inst.batchClaims.length)
@@ -1716,8 +1624,8 @@ theorem hem_multistage_extracted_acceptance_and_fiber_bound
         verifyHemAffineWhir inst (decode x (extractedOpeningValues L_merkle slots H xs x))) +
       batchMerkleCost Q slots * quantumExperimentTotal A) ∧
     ∃ i₀ : Nat, i₀ < inst.batchOracles.length ∧
-      ∀ (decoded : QuarticGoldilocks × QuarticGoldilocks → List (List QuarticGoldilocks))
-        (rest : QuarticGoldilocks × QuarticGoldilocks → List (HemTranscriptRound QuarticGoldilocks))
+      ∀ (decoded : QuinticGoldilocks × QuinticGoldilocks → List (List QuinticGoldilocks))
+        (rest : QuinticGoldilocks × QuinticGoldilocks → List (HemTranscriptRound QuinticGoldilocks))
         (L_ch : List (Fin (prodPool S).length)),
         L_ch.Nodup →
         (∀ ch ∈ L_ch, verifyHemAffineWhir inst
@@ -1819,46 +1727,6 @@ theorem cdhzSaltedMerkle_clears_128bits_at_2pow50 (Q : Nat) (hQ : Q ≤ 2 ^ 50) 
     Nat.mul_le_mul_right (2 ^ 128) (Nat.mul_le_mul_left 16 hSq)
   exact Nat.le_trans hMul (by decide)
 
-/-- **All Non-Exhaustive Canonical Sliced Stages (`nv ∈ [2, 24]`) Clear `128`-Bit Security at `Q ≤ 2^50`
-    Under State-Restoration + Salted-Merkle QROM Scaling (`cdhz_sliced_stage_clears_128bits_at_2pow50`)**:
-    Without waiting on `[CWYZ26]` Claim 4.8's multi-sheet space-curve constant, every already-proved
-    `sliced_stage_supported_budget` row (`≥ 184` bits) clears `atLeastBits 128` at `Q ≤ 2^50` and
-    `numRounds ≤ 63`, together with the `256`-bit salted-Merkle compressed-oracle tail. -/
-theorem cdhz_sliced_stage_clears_128bits_at_2pow50
-    (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
-    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
-    (hne : hemJohnsonQromStageExhaustive g = false) :
-    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
-      hemJohnsonQromTableRow nv g.stageIdx = some r ∧
-      slicedStageRow nv g.stageIdx = some w ∧
-      (∀ D S : List QuarticGoldilocks, D.Nodup → S.Nodup → D.length = g.n →
-        AffineFoldDecompBound D S g.d r.2.2.1 (slicedStageCount S.length g r w)) ∧
-      (∀ Q numRounds : Nat, Q ≤ 2 ^ 50 → numRounds ≤ 63 →
-        atLeastBits 128 (cdhzStateRestorationScale Q numRounds (slicedBinaryStageBound g r w)) ∧
-        atLeastBits 128 (cdhzSaltedMerkleCollisionBound Q)) := by
-  obtain ⟨r, w, hr, hw, hd, hb184, _⟩ := sliced_stage_supported_budget nv h2 h24 g hg hne
-  exact ⟨r, w, hr, hw, hd, fun Q numRounds hQ hR =>
-    ⟨cdhz184_budget_at_2pow50 _ hb184 Q numRounds hQ hR,
-     cdhzSaltedMerkle_clears_128bits_at_2pow50 Q hQ⟩⟩
-
-/-- The 128-bit sliced-stage result for every child of a recursive WHIR parent.
-    `nv` is unrestricted (in particular nv ≤ 30); the flat child cap is configurable.
-    The query and round budgets apply to this stage. A whole recursive proof must charge
-    all children in its total round budget or separately union-bound their failures. -/
-theorem cdhz_recursive_sliced_stage_clears_128bits_at_2pow50
-    (nv childCap : Nat) (h2 : 2 ≤ nv) (hc2 : 2 ≤ childCap) (hc24 : childCap ≤ 24)
-    (g : HemStageGeom) (hg : g ∈ hemRecursiveStageGeoms nv childCap)
-    (hne : hemJohnsonQromStageExhaustive g = false) :
-    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
-      hemJohnsonQromTableRow (hemRecursiveChildVars nv childCap) g.stageIdx = some r ∧
-      slicedStageRow (hemRecursiveChildVars nv childCap) g.stageIdx = some w ∧
-      (∀ D S : List QuarticGoldilocks, D.Nodup → S.Nodup → D.length = g.n →
-        AffineFoldDecompBound D S g.d r.2.2.1 (slicedStageCount S.length g r w)) ∧
-      (∀ Q numRounds : Nat, Q ≤ 2 ^ 50 → numRounds ≤ 63 →
-        atLeastBits 128 (cdhzStateRestorationScale Q numRounds (slicedBinaryStageBound g r w)) ∧
-        atLeastBits 128 (cdhzSaltedMerkleCollisionBound Q)) := by
-  obtain ⟨hlo, hhi⟩ := hemRecursiveChildVars_bounds nv childCap h2 hc2 hc24
-  exact cdhz_sliced_stage_clears_128bits_at_2pow50 _ hlo hhi g hg hne
 
 /-- Charging every child explicitly costs up to six additional bits when nv ≤ 30
     and childCap = 24. A 184-bit binary-stage bound then tolerates Q ≤ 2^44 with
@@ -1881,25 +1749,6 @@ theorem cdhz184_recursive_budget_at_2pow44
   rw [hPow]
   exact hb
 
-/-- All children are charged in the nv ≤ 30 bound; the flat sliced theorem is reused
-    only at the actual child dimension. Commitment/binding and recursive composition
-    remain the responsibility of the consuming verifier. -/
-theorem cdhz_recursive_sliced_stage_clears_128bits_at_2pow44
-    (nv : Nat) (h2 : 2 ≤ nv) (h30 : nv ≤ 30)
-    (g : HemStageGeom) (hg : g ∈ hemRecursiveStageGeoms nv 24)
-    (hne : hemJohnsonQromStageExhaustive g = false) :
-    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
-      hemJohnsonQromTableRow (hemRecursiveChildVars nv 24) g.stageIdx = some r ∧
-      slicedStageRow (hemRecursiveChildVars nv 24) g.stageIdx = some w ∧
-      (∀ D S : List QuarticGoldilocks, D.Nodup → S.Nodup → D.length = g.n →
-        AffineFoldDecompBound D S g.d r.2.2.1 (slicedStageCount S.length g r w)) ∧
-      (∀ Q roundsPerChild : Nat, Q ≤ 2 ^ 44 → roundsPerChild ≤ 63 →
-        atLeastBits 128 (cdhzStateRestorationScale Q
-          (hemRecursiveChildCount nv 24 * roundsPerChild) (slicedBinaryStageBound g r w))) := by
-  obtain ⟨hlo, hhi⟩ := hemRecursiveChildVars_bounds nv 24 h2 (by decide) (by decide)
-  obtain ⟨r, w, hr, hw, hd, hb, _⟩ := sliced_stage_supported_budget _ hlo hhi g hg hne
-  exact ⟨r, w, hr, hw, hd, fun Q rounds hQ hR =>
-    cdhz184_recursive_budget_at_2pow44 nv h30 _ hb Q rounds hQ hR⟩
 
 /-- `#tooth`: the per-child Q ≤ 2^50 guarantee cannot silently be reused for 64
     children at 63 rounds each and the universal 184-bit input floor. -/
@@ -1909,10 +1758,9 @@ theorem tooth_recursive_fanout_requires_budget :
   decide +kernel
 
 #tooth_pair cdhz184_recursive_budget_at_2pow44 vs tooth_recursive_fanout_requires_budget
-#verify_constructive cdhz_recursive_sliced_stage_clears_128bits_at_2pow44
 
-#verify_constructive
-  Qsag.equal_degree_bad_theta_bound
+
+#verify_constructive Qsag.equal_degree_bad_theta_bound
   Qsag.equal_degree_three_challenge_bound
   Qsag.sliced_equal_degree_theta_slice_challenge_bound
   Qsag.arbitrary_batch_cascade_fiber_bound
@@ -1921,18 +1769,10 @@ theorem tooth_recursive_fanout_requires_budget :
   Qsag.cdhzPqsrPow16_clears_128bits
   Qsag.cdhz184_budget_at_2pow50
   Qsag.cdhzSaltedMerkle_clears_128bits_at_2pow50
-  Qsag.cdhz_sliced_stage_clears_128bits_at_2pow50
-  Qsag.cdhz_recursive_sliced_stage_clears_128bits_at_2pow50
 
 /-! ### Exports for lane agg-whir-cert -/
 
-theorem slicedBinaryStageBound_num (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
-    (w : Nat × Nat × Nat × Nat) :
-    (slicedBinaryStageBound g r w).num = slicedStageCount goldilocksExt4Card g r w := by rfl
 
-theorem slicedBinaryStageBound_den (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
-    (w : Nat × Nat × Nat × Nat) :
-    (slicedBinaryStageBound g r w).den = goldilocksExt4Card * goldilocksExt4Card := by rfl
 -- (end exports for lane agg-whir-cert)
 
 /-! ## Executed fixtures and teeth (audited and paired in `Tests/HemExtractedOpeningBridgeTests`)
@@ -1943,12 +1783,12 @@ lower modules are cited from the certificates proved there: the toy Merkle game 
 checker in `MultiRoundFsQrom`. -/
 
 def toyHemDecode (_ : Fin 4) (values : List (Option (MerkleOpeningValue 1))) :
-    List (HemTranscriptRound QuarticGoldilocks) :=
+    List (HemTranscriptRound QuinticGoldilocks) :=
   if values = [some (0#1, [1#1])] then
     [.cascade [CommRingOps.zero] [(CommRingOps.zero, CommRingOps.one)] [[]], .finalQuery []]
   else []
 
-def toyHemInstance : HemWhirInstance QuarticGoldilocks :=
+def toyHemInstance : HemWhirInstance QuinticGoldilocks :=
   hemZeroOracleClaimInstance [CommRingOps.zero, CommRingOps.one] 0 2 []
 
 private theorem toyHemInstance_accepts_claimed :
@@ -2075,7 +1915,7 @@ theorem toy_hem_substitution_bound_instance :
 /-- The concrete bound has both accepting and rejecting challenges on an invalid instance:
     exactly two of the four pairs survive. This tests more than an empty attack schedule. -/
 theorem hemZeroOracle_acceptance_nontrivial :
-    let D : List QuarticGoldilocks := [CommRingOps.zero, CommRingOps.one]
+    let D : List QuinticGoldilocks := [CommRingOps.zero, CommRingOps.one]
     let inst := hemZeroOracleClaimInstance D 0 2 []
     ¬ HemStatementValid inst ∧
     ((prodPool D).filter (fun p => verifyHemAffineWhir inst
@@ -2086,60 +1926,15 @@ theorem hemZeroOracle_acceptance_nontrivial :
   · rw [prodPool_length]
     decide
 
-private theorem slicedBinaryStageProfile_nv24_stage0 :
-    slicedBinaryStageProfile 24 ((hemStageGeoms 24).get ⟨0, by decide⟩) =
-      slicedBinaryStageBound ((hemStageGeoms 24).get ⟨0, by decide⟩)
-        (24, 0, 527170, 64, 27164) (24, 0, 524291, 185) := by
-  unfold slicedBinaryStageProfile
-  rw [hemJohnsonQrom_nv24_stage0_rows.2.1, hemJohnsonQrom_nv24_stage0_rows.2.2]
 
-/-- The actual proved nv24 stage-0 expression cannot replace the much smaller paper input.
-    Nor does widening commitment digests repair this DFM-scaled arithmetic term. These
-    are counterexamples about bounds, not attacks achieving their upper bounds. -/
-theorem tooth_sliced_nv24_profile_margin :
-    let g := (hemStageGeoms 24).get ⟨0, by decide⟩
-    let b := slicedBinaryStageProfile 24 g
-    atLeastBits 185 b ∧ ¬ atLeastBits 186 b ∧ ¬ atLeastBits 244 b ∧
-    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 28) b) ∧
-    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 40) b) ∧
-    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 56) b) ∧
-    ¬ RatBound.le b (whirAffineEqualDegreeCommitFoldBound
-      ((whirAffineStageWitnesses 24 true).get ⟨0, whirAffineStageWitnesses_nv24_qrom_pos⟩)) := by
-  -- The table rows are sealed in `Coding/Cwyz26`; their lookups are certified there.
-  intro g b
-  rw [show b = _ from slicedBinaryStageProfile_nv24_stage0, whirAffineStageWitnesses_nv24_qrom_head]
-  simp only [atLeastBits, dfmRoundScale, RatBound.le, whirAffineEqualDegreeCommitFoldBound,
-    slicedBinaryStageBound_num, slicedBinaryStageBound_den, goldilocksExt4Card_def]
-  decide +kernel
-
-/-- **DFM vs State-Restoration Scaling Contrast at `Q = 2^50` (`tooth_dfmRoundScale_fails_128bits_at_2pow50`)**:
-    On `nv = 24` stage `0`, `cdhzStateRestorationScale (2^50) 32 b` and `cdhzSaltedMerkleCollisionBound (2^50)`
-    both clear `128` bits, whereas naive `[DFM20]` `dfmRoundScale (2^50) b` fails `128` bits. -/
-theorem tooth_dfmRoundScale_fails_128bits_at_2pow50 :
-    ∃ g : HemStageGeom, g ∈ hemStageGeoms 24 ∧
-      atLeastBits 128 (cdhzStateRestorationScale (2 ^ 50) 32 (slicedBinaryStageProfile 24 g)) ∧
-      atLeastBits 128 (cdhzSaltedMerkleCollisionBound (2 ^ 50)) ∧
-      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 50) (slicedBinaryStageProfile 24 g)) :=
-  ⟨(hemStageGeoms 24).get ⟨0, by decide⟩, list_get_mem (hemStageGeoms 24) ⟨0, by decide⟩,
-   by
-    rw [slicedBinaryStageProfile_nv24_stage0]
-    simp only [atLeastBits, cdhzStateRestorationScale, slicedBinaryStageBound_num,
-      slicedBinaryStageBound_den, goldilocksExt4Card_def]
-    decide +kernel,
-   by decide +kernel,
-   by
-    rw [slicedBinaryStageProfile_nv24_stage0]
-    simp only [atLeastBits, dfmRoundScale]
-    decide +kernel⟩
-
-private def witEqDegDom : List QuarticGoldilocks := [qgNat 0, qgNat 1, qgNat 2, qgNat 3]
+private def witEqDegDom : List QuinticGoldilocks := [qgNat 0, qgNat 1, qgNat 2, qgNat 3]
 
 private theorem witEqDegDom_eq : witEqDegDom = toothDeg1Dom := toothDeg1Dom_eq.symm
 
 private theorem witEqDegDom_nodup : witEqDegDom.Nodup := by
   rw [witEqDegDom_eq]; exact toothDeg1Dom_fixture_facts.1
 
-private theorem witEqDegDom_zero_mem : (CommRingOps.zero : QuarticGoldilocks) ∈ witEqDegDom := by
+private theorem witEqDegDom_zero_mem : (CommRingOps.zero : QuinticGoldilocks) ∈ witEqDegDom := by
   rw [witEqDegDom_eq]; exact toothDeg1Dom_fixture_facts.2.1
 
 private theorem witEqDegDecomp3 :
@@ -2159,28 +1954,28 @@ private theorem witEqDegDecomp4 :
     (Nat.le_of_eq List.length_finRange)
 
 private theorem witEqDegMixList :
-    ∀ θ : QuarticGoldilocks,
+    ∀ θ : QuinticGoldilocks,
       (gsDecodeList 0 3 witEqDegDom
         (fun _ => CommRingOps.add (qgNat 0) (CommRingOps.mul θ (qgNat 0)))).length ≤ 1 := by
   intro θ
-  have hZero : (fun _ : QuarticGoldilocks => CommRingOps.add (qgNat 0) (CommRingOps.mul θ (qgNat 0))) =
+  have hZero : (fun _ : QuinticGoldilocks => CommRingOps.add (qgNat 0) (CommRingOps.mul θ (qgNat 0))) =
       (fun _ => CommRingOps.zero) := by
     funext _; rw [qgNat_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
   rw [hZero]
   exact gsDecodeList_zeroOracle_length_le_one witEqDegDom 0 3 witEqDegDom_nodup (by decide)
 
 private theorem witEqDegInvalid :
-    (∀ Fp : List QuarticGoldilocks, Fp.length ≤ 1 →
+    (∀ Fp : List QuinticGoldilocks, Fp.length ≤ 1 →
       2 ≤ (witEqDegDom.filter (fun z => decide (RoundPoly.evalCoeffs Fp z = qgNat 0))).length →
       ringDot Fp [qgNat 1] ≠ qgNat 1) ∨
-    (∀ Gp : List QuarticGoldilocks, Gp.length ≤ 1 →
+    (∀ Gp : List QuinticGoldilocks, Gp.length ≤ 1 →
       2 ≤ (witEqDegDom.filter (fun z => decide (RoundPoly.evalCoeffs Gp z = qgNat 0))).length →
       ringDot Gp [qgNat 1] ≠ qgNat 0) := by
   refine .inl (fun Fp hLen hAg hDot => ?_)
   rcases Fp with _ | ⟨c, _ | _⟩
   · change CommRingOps.zero = qgNat 1 at hDot
     rw [qgNat_one] at hDot
-    exact (by decide : (CommRingOps.zero : QuarticGoldilocks) ≠ CommRingOps.one) hDot
+    exact (by decide : (CommRingOps.zero : QuinticGoldilocks) ≠ CommRingOps.one) hDot
   · have hOne : qgNat 1 = CommRingOps.one := qgNat_one
     have hc1 : c = CommRingOps.one := by
       rw [hOne] at hDot
@@ -2192,23 +1987,23 @@ private theorem witEqDegInvalid :
     omega
 
 theorem witness_equal_degree_three_challenge_bound :
-    ∃ (D S kernel : List QuarticGoldilocks) (d A badTheta badAB maxMix : Nat)
-      (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g c_f c_g : QuarticGoldilocks)
+    ∃ (D S kernel : List QuinticGoldilocks) (d A badTheta badAB maxMix : Nat)
+      (f g : QuinticGoldilocks → QuinticGoldilocks) (e_f e_g c_f c_g : QuinticGoldilocks)
       (triples : List (Fin S.length × Fin (prodPool S).length)),
-      D.Nodup ∧ S.Nodup ∧ (CommRingOps.zero : QuarticGoldilocks) ∈ S ∧
+      D.Nodup ∧ S.Nodup ∧ (CommRingOps.zero : QuinticGoldilocks) ∈ S ∧
       d + 3 ≤ A ∧ A ≤ D.length ∧
       AffineFoldDecompBound D S (d + 1) A badTheta ∧
       AffineFoldDecompBound D S (d + 1) (A + 1) badAB ∧
-      (∀ θ : QuarticGoldilocks,
+      (∀ θ : QuinticGoldilocks,
         (gsDecodeList d A D (fun z => CommRingOps.add (f z) (CommRingOps.mul θ (g z)))).length ≤ maxMix) ∧
-      ((∀ Fp : List QuarticGoldilocks, Fp.length ≤ d + 1 →
+      ((∀ Fp : List QuinticGoldilocks, Fp.length ≤ d + 1 →
           A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Fp z = f z))).length →
           ringDot Fp kernel ≠ e_f) ∨
-       (∀ Gp : List QuarticGoldilocks, Gp.length ≤ d + 1 →
+       (∀ Gp : List QuinticGoldilocks, Gp.length ≤ d + 1 →
           A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Gp z = g z))).length →
           ringDot Gp kernel ≠ e_g)) ∧
       triples.Nodup ∧
-      (∀ tr ∈ triples, ¬¬ ∃ P : List QuarticGoldilocks,
+      (∀ tr ∈ triples, ¬¬ ∃ P : List QuinticGoldilocks,
         affineMcaAccepts D S (d + 1) (A + 1)
           (g, fun z => CommRingOps.add (f z) (CommRingOps.mul (S.get tr.1) (g z))) tr.2.1 P = true ∧
         ringDot P kernel = hemFoldClaimUpdate e_f e_g c_f c_g (S.get tr.1)
@@ -2218,7 +2013,7 @@ theorem witness_equal_degree_three_challenge_bound :
    witEqDegDom_nodup, witEqDegDom_nodup, witEqDegDom_zero_mem, by decide, by decide,
    witEqDegDecomp3, witEqDegDecomp4, witEqDegMixList, witEqDegInvalid, .nil, fun _ h => nomatch h⟩
 
-private def witCascInst : HemWhirInstance QuarticGoldilocks :=
+private def witCascInst : HemWhirInstance QuinticGoldilocks :=
   hemZeroOracleClaimInstance witEqDegDom 0 3 []
 
 private theorem witCascInstInvalidPrev :
@@ -2226,10 +2021,10 @@ private theorem witCascInstInvalidPrev :
   hemZeroOracleClaimInstance_invalid witEqDegDom 0 2 [] witEqDegDom_nodup (by decide)
 
 theorem witness_arbitrary_batch_cascade_fiber_bound :
-    ∃ (inst : HemWhirInstance QuarticGoldilocks)
-      (S : List QuarticGoldilocks) (badMca : Nat)
-      (shifts : List QuarticGoldilocks)
-      (baseWeights : List (QuarticGoldilocks × QuarticGoldilocks)),
+    ∃ (inst : HemWhirInstance QuinticGoldilocks)
+      (S : List QuinticGoldilocks) (badMca : Nat)
+      (shifts : List QuinticGoldilocks)
+      (baseWeights : List (QuinticGoldilocks × QuinticGoldilocks)),
       (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) ∧
       inst.batchClaims.length = inst.batchOracles.length ∧
       shifts.length = inst.batchClaims.length ∧
@@ -2242,37 +2037,17 @@ theorem witness_arbitrary_batch_cascade_fiber_bound :
    by decide, rfl, rfl, rfl, witEqDegDom_nodup, witEqDegDom_nodup, by decide,
    witEqDegDecomp3, witCascInstInvalidPrev⟩
 
-private def witStage24 : HemStageGeom := (hemStageGeoms 24).get ⟨0, by decide⟩
 
-theorem witness_cdhz_sliced_stage_clears_128bits_at_2pow50 :
-    ∃ (nv : Nat) (g : HemStageGeom),
-      2 ≤ nv ∧ nv ≤ 24 ∧ g ∈ hemStageGeoms nv ∧ hemJohnsonQromStageExhaustive g = false :=
-  ⟨24, witStage24, by decide, by decide, list_get_mem (hemStageGeoms 24) ⟨0, by decide⟩,
-    hemJohnsonQrom_nv24_stage0_rows.1⟩
-
-theorem inhabited_recursive_nv30_sliced_stage :
-    ∃ (nv childCap : Nat) (g : HemStageGeom),
-      nv = 30 ∧ childCap = 24 ∧ 2 ≤ nv ∧ 2 ≤ childCap ∧ childCap ≤ 24 ∧
-      g ∈ hemRecursiveStageGeoms nv childCap ∧ hemJohnsonQromStageExhaustive g = false := by
-  refine ⟨30, 24, witStage24, rfl, rfl, by decide, by decide, by decide, ?_, ?_⟩
-  · exact list_get_mem (hemStageGeoms 24) ⟨0, by decide⟩
-  · exact hemJohnsonQrom_nv24_stage0_rows.1
-
-#verify_constructive
-  Qsag.toy_hem_substitution_execution
-  Qsag.tooth_sliced_nv24_profile_margin
-  Qsag.tooth_dfmRoundScale_fails_128bits_at_2pow50
+#verify_constructive Qsag.toy_hem_substitution_execution
   Qsag.witness_equal_degree_three_challenge_bound
   Qsag.witness_arbitrary_batch_cascade_fiber_bound
-  Qsag.witness_cdhz_sliced_stage_clears_128bits_at_2pow50
-  Qsag.inhabited_recursive_nv30_sliced_stage
   Qsag.toy_hem_substitution_bound_instance
   Qsag.toyHemInstance_invalid
   Qsag.hemZeroOracle_acceptance_nontrivial
-#verify_inhabited cdhz_recursive_sliced_stage_clears_128bits_at_2pow50 witness_cdhz_sliced_stage_clears_128bits_at_2pow50
+
 #verify_inhabited Qsag.equal_degree_three_challenge_bound Qsag.witness_equal_degree_three_challenge_bound
 #verify_inhabited Qsag.arbitrary_batch_cascade_fiber_bound Qsag.witness_arbitrary_batch_cascade_fiber_bound
-#verify_inhabited Qsag.cdhz_sliced_stage_clears_128bits_at_2pow50 Qsag.witness_cdhz_sliced_stage_clears_128bits_at_2pow50
+
 
 end Qsag
 end
