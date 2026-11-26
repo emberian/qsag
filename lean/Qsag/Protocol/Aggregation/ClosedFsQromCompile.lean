@@ -1465,6 +1465,16 @@ end
 
 public section
 namespace Qsag.ClosedFs
+
+/-- Probability of a Boolean outcome measured after a quantum run with a uniform
+    random oracle. The denominator normalizes both the oracle and final state. -/
+@[expose] def measuredWinProb {cardX cardAnc Q w : Nat} (A : QuantumAdv cardX w cardAnc Q)
+    (event : (Fin cardX → BitVec w) → Fin cardX → Bool) : RatBound :=
+  ⟨uniformOracleSum w cardX (fun H => QVec.queryMassOn (event H) (runQuantumAdv A H)),
+    (2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+    Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+      (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+
 #export_eqns fsAux succinctFsAccept framedSetup
 #export_eqns openingOk fsTranscript treeNode MerkleSetup.root MerkleSetup.oracleLeaves
 end Qsag.ClosedFs

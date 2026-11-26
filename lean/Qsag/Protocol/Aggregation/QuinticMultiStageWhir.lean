@@ -228,7 +228,28 @@ theorem foldBlock_stageQueries (env : WhirEnv K) (he : env.fold2 = quinticWhirFo
     combiner also uses a field slot, disjoint from every sampled position. -/
 def whirField (c j : Nat) : K := decodeQuintic400 ((c >>> (400 * (j % 5))) % 2 ^ 400)
 
+theorem whirField_first (c : Nat) : whirField c 0 = decodeQuintic400 (c % 2^400) := by
+  simp [whirField]
+
 def whirPosition (c j n : Nat) : Nat := ((c >>> (2000 + 32 * j)) % 2 ^ 32) % n
+
+/-- A full transcript squeeze can select leaf one as its first query. -/
+theorem whirPosition_reaches_second_leaf : whirPosition (2 ^ 2000) 0 2 = 1 := by decide +kernel
+
+/-- A scalar 400-bit round supplies none of the bits used to choose positions in
+    the packed verifier. Every such seed selects the same leaf in every query. -/
+theorem scalar_digest_collapses_packed_positions (seed : BitVec 400) (j n : Nat) :
+    whirPosition seed.toNat j n = 0 := by
+  have h : 2 ^ 400 ≤ 2 ^ (2000 + 32 * j) := Nat.pow_le_pow_right (by decide) (by omega)
+  simp [whirPosition, Nat.shiftRight_eq_div_pow, Nat.div_eq_of_lt (Nat.lt_of_lt_of_le seed.isLt h)]
+
+theorem tooth_scalar_digest_cannot_reach_second_leaf :
+    ¬ ∃ seed : BitVec 400, whirPosition seed.toNat 0 2 = 1 := by
+  rintro ⟨seed, hit⟩
+  rw [scalar_digest_collapses_packed_positions] at hit
+  contradiction
+
+#tooth_pair whirPosition_reaches_second_leaf vs tooth_scalar_digest_cannot_reach_second_leaf
 
 /-- Count full-width round seeds mapping into a list of exceptional fold challenges.
     The additive one accounts for the bias in reducing a 400-bit word modulo p^5. -/
@@ -550,6 +571,75 @@ theorem packedQuinticWhir_geometry (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28) :
   have h : n = 16 ∨ n = 17 ∨ n = 18 ∨ n = 19 ∨ n = 20 ∨ n = 21 ∨ n = 22 ∨ n = 23 ∨
     n = 24 ∨ n = 25 ∨ n = 26 ∨ n = 27 ∨ n = 28 := by omega
   rcases h with h|h|h|h|h|h|h|h|h|h|h|h|h <;> subst n <;> decide +kernel
+
+/-- For every stage of all thirteen packed schedules, count the position words
+    that hit a chosen set on every query. The low five field slices are free. -/
+theorem packedStage_query_hit_bound (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28)
+    (st : WhirStage) (mem : st ∈ (packedProdSched n).stages) (B : Nat) (good : Nat → Bool)
+    (bound : qsum (2^st.logDomain) (fun i => if good i.val then 1 else 0) ≤ B) :
+    qsum ((2^32)^st.queryCount * 2^2000) (fun c => if (List.range st.queryCount).all
+        (fun j => good ((packedQuinticWhirEnv n).chalPos c.val j (2^st.logDomain)))
+      then 1 else 0) ≤ (2^(32-st.logDomain)*B)^st.queryCount * 2^2000 := by
+  have geom := of_decide_eq_true (List.all_eq_true.mp (packedQuinticWhir_geometry n lo hi).2.2 st mem)
+  exact whirPosition_all_good_seeds _ _ B (by omega) good bound
+
+/-- Width of five field draws and the maximum number of 32-bit position draws. -/
+@[expose] def packedChallengeBits : Nat := 2000 + 32 * 267
+
+private theorem position_digit_mod (c a b : Nat) (ha : 0 < a) (hb : 0 < b) :
+    c % (a*b) / a = c / a % b := by
+  have hr := Nat.mod_lt c (Nat.mul_pos ha hb)
+  have hd := Nat.div_add_mod (c % (a*b)) a
+  have lt : c % (a*b) / a < b := by
+    by_cases h : b ≤ c % (a*b) / a
+    · have hm := Nat.mul_le_mul_left a h
+      omega
+    · omega
+  conv => rhs; rw [← Nat.mod_add_div c (a*b)]
+  rw [Nat.mul_assoc, Nat.add_mul_div_left _ _ ha, Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt lt]
+
+/-- Count the full-width challenge words whose sampled positions all hit the
+    chosen set. Unused high bits contribute the same multiplicity to each event. -/
+theorem packedStage_full_width_query_bound (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28)
+    (st : WhirStage) (mem : st ∈ (packedProdSched n).stages) (B : Nat) (good : Nat → Bool)
+    (bound : qsum (2^st.logDomain) (fun i => if good i.val then 1 else 0) ≤ B) :
+    qsum (2^packedChallengeBits) (fun c => if (List.range st.queryCount).all
+        (fun j => good ((packedQuinticWhirEnv n).chalPos c.val j (2^st.logDomain)))
+      then 1 else 0) ≤
+      2^(32*(267-st.queryCount)) * ((2^(32-st.logDomain)*B)^st.queryCount * 2^2000) := by
+  let t := st.queryCount
+  let used := 2000 + 32*t
+  have geom := of_decide_eq_true (List.all_eq_true.mp (packedQuinticWhir_geometry n lo hi).2.2 st mem)
+  have room : t ≤ 267 := geom.2.2.2.1
+  have width : 2^packedChallengeBits = 2^(32*(267-t)) * 2^used := by
+    rw [← Nat.pow_add]; congr 1; dsimp [packedChallengeBits, used]; omega
+  have trunc (c j : Nat) (hj : j < t) :
+      whirPosition (c % 2^used) j (2^st.logDomain) = whirPosition c j (2^st.logDomain) := by
+    let start := 2000 + 32*j
+    have split : 2^used = 2^start * 2^(used-start) := by
+      rw [← Nat.pow_add]; congr 1; dsimp [used,start]; omega
+    simp only [whirPosition, Nat.shiftRight_eq_div_pow]
+    change (c % 2^used / 2^start % 2^32) % _ = (c / 2^start % 2^32) % _
+    rw [split, position_digit_mod _ _ _ (Nat.two_pow_pos _) (Nat.two_pow_pos _),
+      Nat.mod_mod_of_dvd _ (Nat.pow_dvd_pow 2 (show 32 ≤ used-start by dsimp [used,start]; omega))]
+  let hit := fun c => if (List.range t).all (fun j => good (whirPosition c j (2^st.logDomain))) then 1 else 0
+  have same (c : Nat) : hit c = hit (c % 2^used) := by
+    have eq : (List.range t).all (fun j => good (whirPosition (c % 2^used) j (2^st.logDomain))) =
+        (List.range t).all (fun j => good (whirPosition c j (2^st.logDomain))) := by
+      apply Bool.eq_iff_iff.mpr
+      simp only [List.all_eq_true]
+      constructor <;> intro h j hj <;> specialize h j hj <;>
+        simpa only [trunc c j (List.mem_range.mp hj)] using h
+    simp only [hit, eq]
+  change qsum _ (fun c => hit c.val) ≤ _
+  rw [qsum_mul_mod_eq width (Nat.two_pow_pos _) _ hit (fun c => same c.val)]
+  apply Nat.mul_le_mul_left
+  have core := packedStage_query_hit_bound n lo hi st mem B good bound
+  have words : 2^used = (2^32)^t * 2^2000 := by rw [← Nat.pow_mul, ← Nat.pow_add]; congr 1; dsimp [used]; omega
+  rw [words]
+  exact core
+
+#verify_constructive packedStage_query_hit_bound packedStage_full_width_query_bound
 
 /-- Degree bounds, agreement thresholds and query counts for the 256-point schedule. -/
 @[expose] def zkHemV2MultiStageSched : WhirVerifierSchedule :=
