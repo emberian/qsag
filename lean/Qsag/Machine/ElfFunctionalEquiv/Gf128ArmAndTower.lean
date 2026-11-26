@@ -596,3 +596,603 @@ def gf128BdozPmullProg : List (DecodedInstr Arm64Instr) := [
   ⟨288, 4, .ret⟩
 ]
 
+theorem gf128BdozPmull_current_decode :
+    (findSliceByNameBytes currentAarch64ExtractedSlices gf128BdozPmullName).map
+      (fun s => decodeArm64Stream s.code) = some (some gf128BdozPmullProg) := by
+  decide +kernel
+
+def gf128ArmBdozLo (a b : Vec128) : Vec128 :=
+  let p := clmul64 a.w0 b.w0
+  let c := gf128ArmXor (clmul64 a.w0 b.w1) (clmul64 a.w1 b.w0)
+  ⟨p.w0, p.w1 ^^^ c.w0⟩
+
+def gf128ArmBdozHi (a b : Vec128) : Vec128 :=
+  let p := clmul64 a.w1 b.w1
+  let c := gf128ArmXor (clmul64 a.w0 b.w1) (clmul64 a.w1 b.w0)
+  ⟨p.w0 ^^^ c.w1, p.w1⟩
+
+/-- The four-product polynomial represented by one accumulator pair. -/
+def gf128ArmBdozPoly (lo hi : Vec128) : BitVec 256 :=
+  gf128Words hi.w0 hi.w1 ++ gf128Words lo.w0 lo.w1
+
+private theorem gf128ArmBdozPoly_xor (lo hi l h : Vec128) :
+    gf128ArmBdozPoly (gf128ArmXor lo l) (gf128ArmXor hi h) =
+      gf128ArmBdozPoly lo hi ^^^ gf128ArmBdozPoly l h := by
+  simp only [gf128ArmBdozPoly, gf128ArmXor, gf128Words_xor]
+  apply BitVec.eq_of_getLsbD_eq
+  intro j hj
+  simp only [BitVec.getLsbD_append, BitVec.getLsbD_xor]
+  split <;> rfl
+
+private theorem gf128ArmBdozPoly_mul (a b : Vec128) :
+    gf128ArmBdozPoly (gf128ArmBdozLo a b) (gf128ArmBdozHi a b) =
+      gf128PolyMul ((gf128Words a.w0 a.w1).setWidth 256) (gf128Words b.w0 b.w1) := by
+  simpa only [gf128ArmBdozPoly, gf128ArmBdozLo, gf128ArmBdozHi, gf128ArmXor,
+    UInt64.xor_assoc] using gf128_clmul_four_words a.w0 a.w1 b.w0 b.w1
+
+/-- One lane's fourteen-instruction register update. -/
+def gf128ArmBdozLaneVec (v : Bank32 Vec128) (a b : Vec128) (rLo rHi : Nat) : Bank32 Vec128 :=
+  let p := clmul64 a.w0 b.w0
+  let q := clmul64 a.w1 b.w1
+  let cross0 := clmul64 a.w0 b.w1
+  let cross1 := clmul64 a.w1 b.w0
+  let mid := gf128ArmXor cross0 cross1
+  let l := gf128ArmBdozLo a b
+  let h := gf128ArmBdozHi a b
+  let v := ((((v.set 4 a).set 5 b).set 6 p).set 7 q).set 16 ⟨b.w1, b.w0⟩
+  let v := (((v.set 17 cross0).set 18 cross1).set 17 mid).set 19 ⟨0, mid.w0⟩
+  let v := ((v.set 20 ⟨mid.w1, 0⟩).set 6 l).set 7 h
+  (v.set rLo (gf128ArmXor (v.get rLo) l)).set rHi (gf128ArmXor (v.get rHi) h)
+
+def gf128ArmBdozBodyVec (v : Bank32 Vec128) (mem : UInt64 → UInt8) (pL pR : UInt64) : Bank32 Vec128 :=
+  let v := gf128ArmBdozLaneVec v (readMem128 mem pL) (readMem128 mem pR) 0 1
+  gf128ArmBdozLaneVec v (readMem128 mem (pL+16)) (readMem128 mem (pR+16)) 2 3
+
+def gf128ArmBdozIterVec : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → Bank32 Vec128 → Bank32 Vec128
+  | 0, _, _, _, v => v
+  | n+1, mem, pL, pR, v => gf128ArmBdozIterVec n mem (pL+32) (pR+32)
+      (gf128ArmBdozBodyVec v mem pL pR)
+
+/-- XOR of one fixed 128-bit lane from each 32-byte input block. -/
+def gf128ArmBdozFieldSum (laneOff : UInt64) : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → BitVec 128
+  | 0, _, _, _ => 0
+  | n+1, mem, pL, pR =>
+    let a := readMem128 mem (pL+laneOff)
+    let b := readMem128 mem (pR+laneOff)
+    gf128FieldMul (gf128Words a.w0 a.w1) (gf128Words b.w0 b.w1) ^^^
+      gf128ArmBdozFieldSum laneOff n mem (pL+32) (pR+32)
+
+section Gf128BdozArmProof
+-- Shared instruction-normalization lists intentionally cover multiple opcodes.
+set_option linter.unusedSimpArgs false
+
+private theorem gf128BdozArm_lane0_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8)
+    (hv : v.get 22 = Vec128.zero) :
+    ExecReachesArm64 gf128BdozPmullProg 14
+      ⟨20, g, v, cf, zf, dit, false, m⟩
+      ⟨76, g, gf128ArmBdozLaneVec v (readMem128 m (g.get 1))
+        (readMem128 m (g.get 2)) 0 1, cf, zf, dit, false, m⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 4
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, getArmGpr, Nat.reduceBEq,
+        Bool.false_eq_true, eq_self, ite_false, ite_true, u64_add_zero,
+        Bank32.get_set_eq, Bank32.get_set_ne, UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [gf128Arm_ext8, Bank32.get_set_eq,
+        Bank32.get_set_ne, hv, Vec128.zero] <;> rfl
+  iterate 3
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, getArmGpr, Nat.reduceBEq,
+        Bool.false_eq_true, eq_self, ite_false, ite_true, u64_add_zero,
+        Bank32.get_set_eq, Bank32.get_set_ne, UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  iterate 2
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [gf128Arm_ext8, Bank32.get_set_eq,
+        Bank32.get_set_ne, hv, Vec128.zero] <;> rfl
+  iterate 4
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, getArmGpr, Nat.reduceBEq,
+        Bool.false_eq_true, eq_self, ite_false, ite_true, u64_add_zero,
+        Bank32.get_set_eq, Bank32.get_set_ne, UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  unfold gf128ArmBdozLaneVec gf128ArmBdozLo gf128ArmBdozHi gf128ArmXor
+  simp (disch := decide) only [Bank32.get_set_eq, Bank32.get_set_ne,
+    UInt64.xor_zero, UInt64.zero_xor]
+  exact StepsArm64.zero _
+
+private theorem gf128BdozArm_lane1_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8)
+    (hv : v.get 22 = Vec128.zero) :
+    ExecReachesArm64 gf128BdozPmullProg 14
+      ⟨76, g, v, cf, zf, dit, false, m⟩
+      ⟨132, g, gf128ArmBdozLaneVec v (readMem128 m (g.get 1+16))
+        (readMem128 m (g.get 2+16)) 2 3, cf, zf, dit, false, m⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 4
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, getArmGpr, Nat.reduceBEq,
+        Bool.false_eq_true, eq_self, ite_false, ite_true, u64_add_zero,
+        Bank32.get_set_eq, Bank32.get_set_ne, UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [gf128Arm_ext8, Bank32.get_set_eq,
+        Bank32.get_set_ne, hv, Vec128.zero] <;> rfl
+  iterate 3
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, getArmGpr, Nat.reduceBEq,
+        Bool.false_eq_true, eq_self, ite_false, ite_true, u64_add_zero,
+        Bank32.get_set_eq, Bank32.get_set_ne, UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  iterate 2
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [gf128Arm_ext8, Bank32.get_set_eq,
+        Bank32.get_set_ne, hv, Vec128.zero] <;> rfl
+  iterate 4
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, getArmGpr, Nat.reduceBEq,
+        Bool.false_eq_true, eq_self, ite_false, ite_true, u64_add_zero,
+        Bank32.get_set_eq, Bank32.get_set_ne, UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  unfold gf128ArmBdozLaneVec gf128ArmBdozLo gf128ArmBdozHi gf128ArmXor
+  simp (disch := decide) only [Bank32.get_set_eq, Bank32.get_set_ne,
+    UInt64.xor_zero, UInt64.zero_xor]
+  exact StepsArm64.zero _
+
+private theorem gf128BdozArm_control_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ExecReachesArm64 gf128BdozPmullProg 4
+      ⟨132, g, v, cf, zf, dit, false, m⟩
+      ⟨if (g.get 3 - 1) == 0 then 148 else 20,
+        ((g.set 1 (g.get 1+32)).set 2 (g.get 2+32)).set 3 (g.get 3-1), v,
+        decide ((g.get 3).toNat ≥ 1), (g.get 3-1) == 0, dit, false, m⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 2
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [gf128Arm_addImm, getArmGpr, setArmGpr,
+        Nat.reduceBEq, Bool.false_eq_true, eq_self, ite_false, ite_true,
+        Bank32.get_set_ne] <;> rfl
+  apply StepsArm64.cons rfl rfl
+  · simp (disch := decide) only [gf128Arm_subsImm, getArmGpr, setArmGpr,
+      Nat.reduceBEq, Bool.false_eq_true, eq_self, ite_false, ite_true,
+      Bank32.get_set_ne] <;> rfl
+  apply StepsArm64.cons rfl rfl
+  · rw [gf128Arm_bne _ _ _ (by decide)]
+  exact StepsArm64.zero _
+
+private theorem gf128BdozArm_lane_keep22 (v : Bank32 Vec128) (a b : Vec128)
+    (rLo rHi : Nat) (hLo : rLo < 4) (hHi : rHi < 4) :
+    (gf128ArmBdozLaneVec v a b rLo rHi).get 22 = v.get 22 := by
+  simp (disch := omega) only [gf128ArmBdozLaneVec, Bank32.get_set_ne]
+
+private theorem gf128BdozArm_body_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8)
+    (hv : v.get 22 = Vec128.zero) :
+    ExecReachesArm64 gf128BdozPmullProg 32
+      ⟨20, g, v, cf, zf, dit, false, m⟩
+      ⟨if (g.get 3 - 1) == 0 then 148 else 20,
+        ((g.set 1 (g.get 1+32)).set 2 (g.get 2+32)).set 3 (g.get 3-1),
+        gf128ArmBdozBodyVec v m (g.get 1) (g.get 2),
+        decide ((g.get 3).toNat ≥ 1), (g.get 3-1) == 0, dit, false, m⟩ := by
+  have h0 := gf128BdozArm_lane0_reaches g v cf zf dit m hv
+  have hv' : (gf128ArmBdozLaneVec v (readMem128 m (g.get 1))
+      (readMem128 m (g.get 2)) 0 1).get 22 = Vec128.zero := by
+    rw [gf128BdozArm_lane_keep22 _ _ _ _ _ (by decide) (by decide), hv]
+  have h1 := gf128BdozArm_lane1_reaches g _ cf zf dit m hv'
+  exact ExecReachesArm64_trans h0 (ExecReachesArm64_trans h1
+    (gf128BdozArm_control_reaches g _ cf zf dit m))
+
+private theorem gf128BdozArm_body_keep22 (v : Bank32 Vec128) (m : UInt64 → UInt8) (pL pR : UInt64) :
+    (gf128ArmBdozBodyVec v m pL pR).get 22 = v.get 22 := by
+  unfold gf128ArmBdozBodyVec
+  rw [gf128BdozArm_lane_keep22 _ _ _ _ _ (by decide) (by decide),
+    gf128BdozArm_lane_keep22 _ _ _ _ _ (by decide) (by decide)]
+
+private theorem gf128BdozArm_iter_keep22 (n : Nat) (m : UInt64 → UInt8)
+    (pL pR : UInt64) (v : Bank32 Vec128) :
+    (gf128ArmBdozIterVec n m pL pR v).get 22 = v.get 22 := by
+  induction n generalizing pL pR v with
+  | zero => rfl
+  | succ n ih => rw [gf128ArmBdozIterVec, ih, gf128BdozArm_body_keep22]
+
+private theorem gf128BdozArm_body_get0 (v : Bank32 Vec128) (m : UInt64 → UInt8) (pL pR : UInt64) :
+    (gf128ArmBdozBodyVec v m pL pR).get 0 =
+      gf128ArmXor (v.get 0) (gf128ArmBdozLo
+        (readMem128 m (pL+0)) (readMem128 m (pR+0))) := by
+  simp (disch := decide) only [gf128ArmBdozBodyVec, gf128ArmBdozLaneVec,
+    Bank32.get_set_eq, Bank32.get_set_ne, UInt64.add_zero]
+
+private theorem gf128BdozArm_body_get1 (v : Bank32 Vec128) (m : UInt64 → UInt8) (pL pR : UInt64) :
+    (gf128ArmBdozBodyVec v m pL pR).get 1 =
+      gf128ArmXor (v.get 1) (gf128ArmBdozHi
+        (readMem128 m (pL+0)) (readMem128 m (pR+0))) := by
+  simp (disch := decide) only [gf128ArmBdozBodyVec, gf128ArmBdozLaneVec,
+    Bank32.get_set_eq, Bank32.get_set_ne, UInt64.add_zero]
+
+private theorem gf128BdozArm_body_get2 (v : Bank32 Vec128) (m : UInt64 → UInt8) (pL pR : UInt64) :
+    (gf128ArmBdozBodyVec v m pL pR).get 2 =
+      gf128ArmXor (v.get 2) (gf128ArmBdozLo
+        (readMem128 m (pL+16)) (readMem128 m (pR+16))) := by
+  simp (disch := decide) only [gf128ArmBdozBodyVec, gf128ArmBdozLaneVec,
+    Bank32.get_set_eq, Bank32.get_set_ne, UInt64.add_zero]
+
+private theorem gf128BdozArm_body_get3 (v : Bank32 Vec128) (m : UInt64 → UInt8) (pL pR : UInt64) :
+    (gf128ArmBdozBodyVec v m pL pR).get 3 =
+      gf128ArmXor (v.get 3) (gf128ArmBdozHi
+        (readMem128 m (pL+16)) (readMem128 m (pR+16))) := by
+  simp (disch := decide) only [gf128ArmBdozBodyVec, gf128ArmBdozLaneVec,
+    Bank32.get_set_eq, Bank32.get_set_ne, UInt64.add_zero]
+
+private theorem gf128BdozArm_iter_field0 (n : Nat) (m : UInt64 → UInt8)
+    (pL pR : UInt64) (v : Bank32 Vec128) :
+    gf128Reduce (gf128ArmBdozPoly ((gf128ArmBdozIterVec n m pL pR v).get 0)
+      ((gf128ArmBdozIterVec n m pL pR v).get 1)) =
+      gf128Reduce (gf128ArmBdozPoly (v.get 0) (v.get 1)) ^^^
+        gf128ArmBdozFieldSum 0 n m pL pR := by
+  induction n generalizing pL pR v with
+  | zero => simp [gf128ArmBdozIterVec, gf128ArmBdozFieldSum]
+  | succ n ih =>
+    rw [gf128ArmBdozIterVec, ih, gf128BdozArm_body_get0, gf128BdozArm_body_get1,
+      gf128ArmBdozPoly_xor, gf128Reduce_xor, gf128ArmBdozPoly_mul]
+    simp only [gf128ArmBdozFieldSum, gf128FieldMul.public_eq_1, BitVec.xor_assoc]
+
+private theorem gf128BdozArm_iter_field1 (n : Nat) (m : UInt64 → UInt8)
+    (pL pR : UInt64) (v : Bank32 Vec128) :
+    gf128Reduce (gf128ArmBdozPoly ((gf128ArmBdozIterVec n m pL pR v).get 2)
+      ((gf128ArmBdozIterVec n m pL pR v).get 3)) =
+      gf128Reduce (gf128ArmBdozPoly (v.get 2) (v.get 3)) ^^^
+        gf128ArmBdozFieldSum 16 n m pL pR := by
+  induction n generalizing pL pR v with
+  | zero => simp [gf128ArmBdozIterVec, gf128ArmBdozFieldSum]
+  | succ n ih =>
+    rw [gf128ArmBdozIterVec, ih, gf128BdozArm_body_get2, gf128BdozArm_body_get3,
+      gf128ArmBdozPoly_xor, gf128Reduce_xor, gf128ArmBdozPoly_mul]
+    simp only [gf128ArmBdozFieldSum, gf128FieldMul.public_eq_1, BitVec.xor_assoc]
+
+private theorem gf128BdozArm_iter_succ (n : Nat) (m : UInt64 → UInt8)
+    (pL pR : UInt64) (v : Bank32 Vec128) :
+    gf128ArmBdozIterVec (n+1) m pL pR v =
+      gf128ArmBdozIterVec n m (pL+32) (pR+32) (gf128ArmBdozBodyVec v m pL pR) := rfl
+
+private theorem gf128BdozArm_iter_zero (m : UInt64 → UInt8)
+    (pL pR : UInt64) (v : Bank32 Vec128) : gf128ArmBdozIterVec 0 m pL pR v = v := rfl
+
+attribute [local irreducible] gf128ArmBdozBodyVec gf128ArmBdozIterVec
+
+private theorem gf128BdozArm_loop_reaches (k : Nat) (hk : k+1 < 2^64)
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) (hv : v.get 22 = Vec128.zero) :
+    ExecReachesArm64 gf128BdozPmullProg (32 * (k+1))
+      ⟨20, g.set 3 (UInt64.ofNat (k+1)), v, cf, zf, dit, false, m⟩
+      ⟨148, ((g.set 1 (g.get 1 + UInt64.ofNat (32*(k+1)))).set
+        2 (g.get 2 + UInt64.ofNat (32*(k+1)))).set 3 0,
+        gf128ArmBdozIterVec (k+1) m (g.get 1) (g.get 2) v, true, true, dit, false, m⟩ := by
+  induction k generalizing g v cf zf with
+  | zero =>
+    rw [gf128BdozArm_iter_succ, gf128BdozArm_iter_zero]
+    change ExecReachesArm64 gf128BdozPmullProg 32
+      ⟨20, g.set 3 1, v, cf, zf, dit, false, m⟩
+      ⟨148, ((g.set 1 (g.get 1+32)).set 2 (g.get 2+32)).set 3 0,
+        gf128ArmBdozBodyVec v m (g.get 1) (g.get 2), true, true, dit, false, m⟩
+    have h := (gf128BdozArm_body_reaches (g.set 3 1) v cf zf dit m hv)
+    simpa (disch := decide) only [Bank32.get_set_eq, Bank32.get_set_ne,
+      show (1 : UInt64)-1 = 0 from rfl, u64_zero_beq_zero, eq_self, ite_true,
+      show decide ((1 : UInt64).toNat ≥ 1) = true from rfl,
+      gf128Arm_set3123] using h
+  | succ k ih =>
+    have hd : UInt64.ofNat (k+1+1) - 1 = UInt64.ofNat (k+1) := by
+      rw [UInt64.ofNat_add]
+      apply UInt64.eq_of_toBitVec_eq
+      simp
+    have hz : (UInt64.ofNat (k+1) == 0) = false := by
+      cases h : UInt64.ofNat (k+1) == 0
+      · rfl
+      · have hn := congrArg UInt64.toNat (beq_iff_eq.mp h)
+        have hb : k+1 < 2^64 := by omega
+        rw [show (UInt64.ofNat (k+1)).toNat = k+1 from Nat.mod_eq_of_lt hb] at hn
+        simp only [UInt64.toNat_zero] at hn
+        omega
+    have h := (gf128BdozArm_body_reaches (g.set 3 (UInt64.ofNat (k+1+1))) v cf zf dit m hv)
+    simp (disch := decide) only [Bank32.get_set_eq, Bank32.get_set_ne, hd, hz,
+      Bool.false_eq_true, ite_false, gf128Arm_set3123] at h
+    have hvbody : (gf128ArmBdozBodyVec v m (g.get 1) (g.get 2)).get 22 = Vec128.zero := by
+      rw [gf128BdozArm_body_keep22, hv]
+    have hr := ih (by omega) ((g.set 1 (g.get 1+32)).set 2 (g.get 2+32))
+      (gf128ArmBdozBodyVec v m (g.get 1) (g.get 2))
+      (decide ((UInt64.ofNat (k+1+1)).toNat ≥ 1)) false hvbody
+    have hc := ExecReachesArm64_trans h hr
+    have he : 32 + 32*(k+1) = 32*(k+1+1) := by omega
+    have hp (p : UInt64) : (p+32) + UInt64.ofNat (32*(k+1)) = p + UInt64.ofNat (32*(k+1+1)) := by
+      rw [← he, UInt64.ofNat_add 32 (32*(k+1))]
+      exact UInt64.add_assoc p 32 _
+    rw [gf128BdozArm_iter_succ]
+    simpa (disch := decide) only [he, Bank32.get_set_eq, Bank32.get_set_ne, hp,
+      gf128Arm_set1212] using hc
+
+def gf128BdozArmReduceVec (lo hi : Vec128) : Vec128 :=
+  let r1 := clmul64 hi.w1 0x87
+  let r0 := clmul64 (hi.w0 ^^^ r1.w1) 0x87
+  ⟨lo.w0 ^^^ r0.w0, lo.w1 ^^^ r1.w0 ^^^ r0.w1⟩
+
+private theorem gf128BdozArmReduceVec_field (lo hi : Vec128) :
+    gf128Words (gf128BdozArmReduceVec lo hi).w0 (gf128BdozArmReduceVec lo hi).w1 =
+      gf128Reduce (gf128ArmBdozPoly lo hi) := by
+  rw [gf128ArmBdozPoly, ← gf128WordReduce_eq_reduce, gf128WordReduce.public_eq_1]
+  rfl
+
+def gf128BdozArmReduceLaneVec (v : Bank32 Vec128) (rLo rHi : Nat) : Bank32 Vec128 :=
+  let lo := v.get rLo
+  let hi := v.get rHi
+  let r1 := clmul64 hi.w1 0x87
+  let r0 := clmul64 (hi.w0 ^^^ r1.w1) 0x87
+  let v := (((v.set 16 ⟨hi.w1, 0⟩).set 6 r1).set 19 ⟨0, r1.w0⟩).set 20 ⟨r1.w1, 0⟩
+  let v := (v.set rLo ⟨lo.w0, lo.w1 ^^^ r1.w0⟩).set rHi ⟨hi.w0 ^^^ r1.w1, hi.w1⟩
+  (v.set 6 r0).set rLo (gf128BdozArmReduceVec lo hi)
+
+private theorem gf128BdozArm_tailprep_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ExecReachesArm64 gf128BdozPmullProg 2
+      ⟨148, g, v, cf, zf, dit, false, m⟩
+      ⟨156, g.set 4 0x87, v.set 21 ⟨0x87, 0⟩, cf, zf, dit, false, m⟩ := by
+  apply StepsArm64.toExecReaches
+  apply StepsArm64.cons rfl rfl
+  · rw [gf128Arm_mov87]
+  apply StepsArm64.cons rfl rfl
+  · simp (disch := decide) only [stepArm64, getArmGpr, Nat.reduceBEq,
+      Bool.false_eq_true, eq_self, ite_false, ite_true,
+      Bank32.get_set_eq, Bank32.get_set_ne] <;> rfl
+  exact StepsArm64.zero _
+private theorem gf128BdozArm_reduce0_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8)
+    (hv : v.get 22 = Vec128.zero) (h21 : v.get 21 = ⟨0x87, 0⟩) :
+    ExecReachesArm64 gf128BdozPmullProg 9
+      ⟨156, g, v, cf, zf, dit, false, m⟩
+      ⟨192, g, gf128BdozArmReduceLaneVec v 0 1, cf, zf, dit, false,
+        writeMem128 m (g.get 0+0) (gf128BdozArmReduceVec (v.get 0) (v.get 1))⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [gf128Arm_ext8,
+        Bank32.get_set_eq, Bank32.get_set_ne, hv, Vec128.zero] <;> rfl
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne,
+        h21] <;> rfl
+  iterate 2
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [gf128Arm_ext8,
+        Bank32.get_set_eq, Bank32.get_set_ne, hv, Vec128.zero] <;> rfl
+  iterate 2
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne,
+        UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne,
+        h21] <;> rfl
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne,
+        UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  apply StepsArm64.cons rfl rfl
+  · simp (disch := decide) only [stepArm64, getArmGpr, Nat.reduceBEq,
+      Bool.false_eq_true, eq_self, ite_false, ite_true, u64_add_zero,
+      Bank32.get_set_eq, Bank32.get_set_ne] <;> rfl
+  unfold gf128BdozArmReduceLaneVec gf128BdozArmReduceVec
+  simp (disch := decide) only [Bank32.get_set_eq, Bank32.get_set_ne,
+    UInt64.xor_zero, UInt64.zero_xor, UInt64.add_zero]
+  exact StepsArm64.zero _
+
+private theorem gf128BdozArm_reduce1_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8)
+    (hv : v.get 22 = Vec128.zero) (h21 : v.get 21 = ⟨0x87, 0⟩) :
+    ExecReachesArm64 gf128BdozPmullProg 9
+      ⟨192, g, v, cf, zf, dit, false, m⟩
+      ⟨228, g, gf128BdozArmReduceLaneVec v 2 3, cf, zf, dit, false,
+        writeMem128 m (g.get 0+16) (gf128BdozArmReduceVec (v.get 2) (v.get 3))⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [gf128Arm_ext8,
+        Bank32.get_set_eq, Bank32.get_set_ne, hv, Vec128.zero] <;> rfl
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne,
+        h21] <;> rfl
+  iterate 2
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [gf128Arm_ext8,
+        Bank32.get_set_eq, Bank32.get_set_ne, hv, Vec128.zero] <;> rfl
+  iterate 2
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne,
+        UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne,
+        h21] <;> rfl
+  iterate 1
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne,
+        UInt64.xor_zero, UInt64.zero_xor] <;> rfl
+  apply StepsArm64.cons rfl rfl
+  · simp (disch := decide) only [stepArm64, getArmGpr, Nat.reduceBEq,
+      Bool.false_eq_true, eq_self, ite_false, ite_true, u64_add_zero,
+      Bank32.get_set_eq, Bank32.get_set_ne] <;> rfl
+  unfold gf128BdozArmReduceLaneVec gf128BdozArmReduceVec
+  simp (disch := decide) only [Bank32.get_set_eq, Bank32.get_set_ne,
+    UInt64.xor_zero, UInt64.zero_xor, UInt64.add_zero]
+  exact StepsArm64.zero _
+
+def gf128BdozArmCleanVec (v : Bank32 Vec128) : Bank32 Vec128 :=
+  ((((((((((((((v.set 0 Vec128.zero).set 1 Vec128.zero).set 2 Vec128.zero).set 3 Vec128.zero).set 4 Vec128.zero).set 5 Vec128.zero).set 6 Vec128.zero).set 7 Vec128.zero).set 16 Vec128.zero).set 17 Vec128.zero).set 18 Vec128.zero).set 19 Vec128.zero).set 20 Vec128.zero).set 21 Vec128.zero)
+
+private theorem gf128BdozArm_clean_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ExecReachesArm64 gf128BdozPmullProg 15
+      ⟨228, g, v, cf, zf, dit, false, m⟩
+      ⟨288, g.set 4 0, gf128BdozArmCleanVec v, cf, zf, dit, false, m⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 14
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, UInt64.xor_self,
+        Bank32.get_set_eq, Bank32.get_set_ne] <;> rfl
+  apply StepsArm64.cons rfl rfl
+  · rw [gf128Arm_mov0]
+  exact StepsArm64.zero _
+
+private theorem gf128BdozArm_reduce0_keep (v : Bank32 Vec128) :
+    (gf128BdozArmReduceLaneVec v 0 1).get 2 = v.get 2 ∧
+    (gf128BdozArmReduceLaneVec v 0 1).get 3 = v.get 3 ∧
+    (gf128BdozArmReduceLaneVec v 0 1).get 21 = v.get 21 ∧
+    (gf128BdozArmReduceLaneVec v 0 1).get 22 = v.get 22 := by
+  simp (disch := decide) only [gf128BdozArmReduceLaneVec, Bank32.get_set_ne,
+    and_self]
+
+attribute [local irreducible] gf128BdozArmReduceLaneVec
+
+private theorem gf128BdozArm_tail_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8)
+    (hv : v.get 22 = Vec128.zero) :
+    ∃ g' v', ExecReachesArm64 gf128BdozPmullProg 35
+      ⟨148, g, v, cf, zf, dit, false, m⟩
+      ⟨288, g', v', cf, zf, dit, false,
+        writeMem128 (writeMem128 m (g.get 0) (gf128BdozArmReduceVec (v.get 0) (v.get 1)))
+          (g.get 0+16) (gf128BdozArmReduceVec (v.get 2) (v.get 3))⟩ := by
+  let v1 := v.set 21 ⟨0x87, 0⟩
+  let g1 := g.set 4 0x87
+  have hv1 : v1.get 22 = Vec128.zero := by
+    simpa [v1, Bank32.get_set_ne] using hv
+  have hc1 : v1.get 21 = ⟨0x87, 0⟩ := Bank32.get_set_eq _ _ _
+  have hp := gf128BdozArm_tailprep_reaches g v cf zf dit m
+  have h0 := gf128BdozArm_reduce0_reaches g1 v1 cf zf dit m hv1 hc1
+  let v2 := gf128BdozArmReduceLaneVec v1 0 1
+  let m1 := writeMem128 m (g1.get 0+0) (gf128BdozArmReduceVec (v1.get 0) (v1.get 1))
+  have hk := gf128BdozArm_reduce0_keep v1
+  have hv2 : v2.get 22 = Vec128.zero := hk.2.2.2.trans hv1
+  have hc2 : v2.get 21 = ⟨0x87, 0⟩ := hk.2.2.1.trans hc1
+  have h1 := gf128BdozArm_reduce1_reaches g1 v2 cf zf dit m1 hv2 hc2
+  have hclean := gf128BdozArm_clean_reaches g1 (gf128BdozArmReduceLaneVec v2 2 3)
+    cf zf dit (writeMem128 m1 (g1.get 0+16) (gf128BdozArmReduceVec (v2.get 2) (v2.get 3)))
+  have h := ExecReachesArm64_trans hp (ExecReachesArm64_trans h0 (ExecReachesArm64_trans h1 hclean))
+  have hm : writeMem128 m1 (g1.get 0+16) (gf128BdozArmReduceVec (v2.get 2) (v2.get 3)) =
+      writeMem128 (writeMem128 m (g.get 0) (gf128BdozArmReduceVec (v.get 0) (v.get 1)))
+        (g.get 0+16) (gf128BdozArmReduceVec (v.get 2) (v.get 3)) := by
+    rw [show v2.get 2 = v1.get 2 from hk.1, show v2.get 3 = v1.get 3 from hk.2.1]
+    simp (disch := decide) only [m1, g1, v1, Bank32.get_set_ne, UInt64.add_zero]
+  refine ⟨g1.set 4 0, gf128BdozArmCleanVec (gf128BdozArmReduceLaneVec v2 2 3), ?_⟩
+  rw [hm] at h
+  exact h
+
+def gf128BdozArmInitVec (v : Bank32 Vec128) : Bank32 Vec128 :=
+  ((((v.set 0 Vec128.zero).set 1 Vec128.zero).set 2 Vec128.zero).set 3 Vec128.zero).set 22 Vec128.zero
+
+private theorem gf128BdozArm_entry_reaches
+    (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ExecReachesArm64 gf128BdozPmullProg 5
+      ⟨0, g, v, cf, zf, dit, false, m⟩
+      ⟨20, g, gf128BdozArmInitVec v, cf, zf, dit, false, m⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 5
+    apply StepsArm64.cons rfl rfl
+    · simp (disch := decide) only [stepArm64, UInt64.xor_self,
+        Bank32.get_set_eq, Bank32.get_set_ne] <;> rfl
+  exact StepsArm64.zero _
+
+private theorem gf128BdozArm_init_zero (v : Bank32 Vec128) :
+    gf128ArmBdozPoly ((gf128BdozArmInitVec v).get 0) ((gf128BdozArmInitVec v).get 1) = 0 ∧
+    gf128ArmBdozPoly ((gf128BdozArmInitVec v).get 2) ((gf128BdozArmInitVec v).get 3) = 0 := by
+  have h : gf128ArmBdozPoly Vec128.zero Vec128.zero = 0 := by
+    simp only [gf128ArmBdozPoly, gf128Words.public_eq_1]
+    decide +kernel
+  exact ⟨h, h⟩
+
+/-- Fresh-byte two-lane polynomial MAC on AArch64, for every positive 64-bit ABI
+count. The two output lanes are independent XOR sums of field products.
+All reads precede both stores, so input/output aliasing and pointer wrapping
+are admitted; the zero-count wrapper return is not modelled as kernel execution. -/
+theorem current_rlib_gf128_tower128_bdoz_mac_pmull_functional
+    (n : Nat) (hn : 0 < n) (hbound : n < 2^64) (s : Arm64State)
+    (hpc : s.pc = 0) (hh : s.halted = false) (hc : s.gpr.get 3 = UInt64.ofNat n) :
+    ∃ slice : ElfFuncSlice,
+      findSliceByNameBytes currentAarch64ExtractedSlices gf128BdozPmullName = some slice ∧
+      decodeArm64Stream slice.code = some gf128BdozPmullProg ∧
+      ∀ extra : Nat, ∃ out0 out1 : Vec128,
+        (runArm64 gf128BdozPmullProg (41 + 32*n + extra) s).1.halted = true ∧
+        (runArm64 gf128BdozPmullProg (41 + 32*n + extra) s).1.pc = 288 ∧
+        (runArm64 gf128BdozPmullProg (41 + 32*n + extra) s).2.length = 41 + 32*n ∧
+        (runArm64 gf128BdozPmullProg (41 + 32*n + extra) s).1.mem =
+          writeMem128 (writeMem128 s.mem (s.gpr.get 0) out0) (s.gpr.get 0+16) out1 ∧
+        gf128Words out0.w0 out0.w1 = gf128ArmBdozFieldSum 0 n s.mem (s.gpr.get 1) (s.gpr.get 2) ∧
+        gf128Words out1.w0 out1.w1 = gf128ArmBdozFieldSum 16 n s.mem (s.gpr.get 1) (s.gpr.get 2) := by
+  have hdec := gf128BdozPmull_current_decode
+  cases hfind : findSliceByNameBytes currentAarch64ExtractedSlices gf128BdozPmullName with
+  | none => simp [hfind] at hdec
+  | some slice =>
+    simp only [hfind, Option.map_some, Option.some.injEq] at hdec
+    refine ⟨slice, rfl, hdec, ?_⟩
+    cases n with
+    | zero => exact False.elim (Nat.not_lt_zero 0 hn)
+    | succ k =>
+      rcases s with ⟨pc, g, v, cf, zf, dit, halted, m⟩
+      dsimp only at hpc hh hc ⊢
+      subst pc
+      subst halted
+      have hg : g.set 3 (UInt64.ofNat (k+1)) = g := by rw [← hc]; rfl
+      have he := gf128BdozArm_entry_reaches g v cf zf dit m
+      have hv : (gf128BdozArmInitVec v).get 22 = Vec128.zero := Bank32.get_set_eq _ _ _
+      have hl := gf128BdozArm_loop_reaches k hbound g (gf128BdozArmInitVec v) cf zf dit m hv
+      rw [hg] at hl
+      let gEnd := ((g.set 1 (g.get 1 + UInt64.ofNat (32*(k+1)))).set
+        2 (g.get 2 + UInt64.ofNat (32*(k+1)))).set 3 0
+      let vEnd := gf128ArmBdozIterVec (k+1) m (g.get 1) (g.get 2) (gf128BdozArmInitVec v)
+      have hvEnd : vEnd.get 22 = Vec128.zero := by
+        rw [gf128BdozArm_iter_keep22]
+        exact hv
+      obtain ⟨g', v', ht⟩ := gf128BdozArm_tail_reaches gEnd vEnd true true dit m hvEnd
+      have hfull := ExecReachesArm64_trans he (ExecReachesArm64_trans hl ht)
+      have hret := ExecReachesArm64_ret hfull rfl (by rfl)
+      intro extra
+      have hr := hret.2.2 extra
+      have hsteps : 5 + (32*(k+1) + 35) + 1 = 41 + 32*(k+1) := by omega
+      rw [hsteps] at hr
+      let out0 := gf128BdozArmReduceVec (vEnd.get 0) (vEnd.get 1)
+      let out1 := gf128BdozArmReduceVec (vEnd.get 2) (vEnd.get 3)
+      refine ⟨out0, out1, ?_, ?_, hr.2, ?_, ?_, ?_⟩
+      · rw [hr.1]
+      · rw [hr.1]
+      · rw [hr.1]
+        rfl
+      · change gf128Words (gf128BdozArmReduceVec _ _).w0 (gf128BdozArmReduceVec _ _).w1 = _
+        rw [gf128BdozArmReduceVec_field, gf128BdozArm_iter_field0, (gf128BdozArm_init_zero v).1]
+        have hz : gf128Reduce 0 = 0 := elf_gf128Reduce_zero
+        rw [hz]
+        simp only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor]
+      · change gf128Words (gf128BdozArmReduceVec _ _).w0 (gf128BdozArmReduceVec _ _).w1 = _
+        rw [gf128BdozArmReduceVec_field, gf128BdozArm_iter_field1, (gf128BdozArm_init_zero v).2]
+        have hz : gf128Reduce 0 = 0 := elf_gf128Reduce_zero
+        rw [hz]
+        simp only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor]
+
+end Gf128BdozArmProof
+
+def gf128BdozArmWitness : Arm64State :=
+  ⟨0, (Bank32.const 0).set 3 1, Bank32.const Vec128.zero,
+    false, false, false, false, fun a => if a == 0 then 1 else 0⟩
+
+/-- Dropping the constant-coefficient product contradicts the actual fresh run. -/
+theorem current_rlib_gf128_tower128_bdoz_mac_pmull_tooth :
+    (runArm64 gf128BdozPmullProg 73 gf128BdozArmWitness).1.mem 0 ≠ 0 := by
+  decide +kernel
+
+theorem current_rlib_gf128_tower128_bdoz_mac_pmull_inhabited :
+    ∃ n : Nat, ∃ s : Arm64State,
+      0 < n ∧ n < 2^64 ∧ s.pc = 0 ∧ s.halted = false ∧ s.gpr.get 3 = UInt64.ofNat n := by
+  refine ⟨1, gf128BdozArmWitness, ?_⟩
+  decide +kernel
+
+#tooth_pair current_rlib_gf128_tower128_bdoz_mac_pmull_functional vs current_rlib_gf128_tower128_bdoz_mac_pmull_tooth
+#verify_inhabited current_rlib_gf128_tower128_bdoz_mac_pmull_functional current_rlib_gf128_tower128_bdoz_mac_pmull_inhabited
+
+end Gf128KernelEquivalence
+
+end Qsag
+end
