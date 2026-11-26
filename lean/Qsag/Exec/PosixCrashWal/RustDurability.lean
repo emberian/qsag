@@ -780,3 +780,811 @@ hold the current snapshot, so a crash can only disturb that other slot. Whatever
 slot then decodes to (the old snapshot, the new one, garbage that fails its MAC, an
 unavailable sidecar), recovery succeeds and returns a generation at least the current one:
 the intact slot or a newer usable snapshot, never an older state. -/
+theorem recoverLedger_intact_slot_never_rolls_back {anchor : ExternalMonotoneAnchor}
+    {cur : Snapshot} (other : Option Snapshot) :
+    (usableSnapshot anchor 0 (some cur) = some cur →
+      ∃ out, recoverLedger true anchor (some cur) other = some out ∧
+        cur.generation ≤ out.generation ∧
+        (out = cur ∨ usableSnapshot anchor 1 other = some out)) ∧
+    (usableSnapshot anchor 1 (some cur) = some cur →
+      ∃ out, recoverLedger true anchor other (some cur) = some out ∧
+        cur.generation ≤ out.generation ∧
+        (out = cur ∨ usableSnapshot anchor 0 other = some out)) := by
+  constructor
+  · intro hCur
+    cases hO : usableSnapshot anchor 1 other with
+    | none => exact ⟨cur, by simp [recoverLedger, hCur, hO, selectSnapshots], Nat.le_refl _, Or.inl rfl⟩
+    | some y =>
+      by_cases hLt : cur.generation < y.generation
+      · exact ⟨y, by simp [recoverLedger, hCur, hO, selectSnapshots, hLt], Nat.le_of_lt hLt, Or.inr rfl⟩
+      · exact ⟨cur, by simp [recoverLedger, hCur, hO, selectSnapshots, hLt], Nat.le_refl _, Or.inl rfl⟩
+  · intro hCur
+    cases hO : usableSnapshot anchor 0 other with
+    | none => exact ⟨cur, by simp [recoverLedger, hCur, hO, selectSnapshots], Nat.le_refl _, Or.inl rfl⟩
+    | some y =>
+      by_cases hLt : y.generation < cur.generation
+      · exact ⟨cur, by simp [recoverLedger, hCur, hO, selectSnapshots, hLt], Nat.le_refl _, Or.inl rfl⟩
+      · exact ⟨y, by simp [recoverLedger, hCur, hO, selectSnapshots, hLt], Nat.le_of_not_lt hLt, Or.inr rfl⟩
+
+/-- Missing genesis cannot be replaced by an empty fallback snapshot. -/
+theorem recoverLedger_missing_genesis (anchor : ExternalMonotoneAnchor) (a b : Option Snapshot) :
+    recoverLedger false anchor a b = none := by
+  unfold recoverLedger; rfl
+
+/-- Full FTS framing, including the number of frames and each little-endian u64 length. -/
+def burnTag (domain : Bytes) (frames : List Bytes) : Bytes :=
+  cshake256Bytes domain (framed64 frames)
+
+/-- `QSBURN05` header body: magic, 32-byte key id, 32-byte genesis salt. -/
+def burnHeaderBody (keyId genesis : Bytes) : Bytes :=
+  [0x51, 0x53, 0x42, 0x55, 0x52, 0x4e, 0x30, 0x35] ++ keyId ++ genesis
+
+/-- `file_identity`: device and inode of the held descriptor, big-endian. -/
+def burnIdentity (device inode : Nat) : Bytes := encodeU64BeNat device ++ encodeU64BeNat inode
+
+/-- V4 genesis tag (`QSAG.BURN.GENESIS.V4`): binds the MAC key, the data inode's identity and the 72-byte header body.
+It is also the initial `last_tag` of the record chain. -/
+def burnGenesisTag (key identity keyId genesis : Bytes) : Bytes :=
+  burnTag [0x51, 0x53, 0x41, 0x47, 0x2e, 0x42, 0x55, 0x52, 0x4e, 0x2e, 0x47, 0x45, 0x4e, 0x45, 0x53, 0x49, 0x53, 0x2e, 0x56, 0x34]
+    [key, identity, burnHeaderBody keyId genesis]
+
+def burnHeader (key identity keyId genesis : Bytes) : Bytes :=
+  burnHeaderBody keyId genesis ++ burnGenesisTag key identity keyId genesis
+
+def burnRecordBody (party epoch : Nat) : Bytes :=
+  [UInt8.ofNat (party / 256), UInt8.ofNat party] ++ encodeU64BeNat epoch
+
+def burnRecordTag (key keyId genesis previous body : Bytes) : Bytes :=
+  burnTag [0x51, 0x53, 0x41, 0x47, 0x2e, 0x42, 0x55, 0x52, 0x4e, 0x2e, 0x52, 0x45, 0x43, 0x4f, 0x52, 0x44, 0x2e, 0x56, 0x32] [key, keyId, genesis, previous, body]
+
+def burnRecord (key keyId genesis previous : Bytes) (party epoch : Nat) : Bytes :=
+  let body := burnRecordBody party epoch
+  body ++ burnRecordTag key keyId genesis previous body
+
+theorem burnGenesisTag_length (key identity keyId genesis : Bytes) :
+    (burnGenesisTag key identity keyId genesis).length = 32 := by
+  simp [burnGenesisTag, burnTag, cshake256Bytes_length]
+
+theorem burnHeader_length {key identity keyId genesis : Bytes}
+    (hk : keyId.length = 32) (hg : genesis.length = 32) :
+    (burnHeader key identity keyId genesis).length = 104 := by
+  simp [burnHeader, burnHeaderBody, burnGenesisTag_length, hk, hg]
+
+theorem burnRecord_length (key keyId genesis previous : Bytes) (party epoch : Nat) :
+    (burnRecord key keyId genesis previous party epoch).length = 42 := by
+  simp [burnRecord, burnRecordBody, burnRecordTag, burnTag, encodeU64BeNat_length,
+    cshake256Bytes_length]
+
+/-- Byte decoder: split full chunks into 10-byte bodies and 32-byte tags. Fuel is the record
+count derived from the input length. -/
+def burnChunks : Nat → Bytes → Option (List (Bytes × Bytes))
+  | 0, bs => if bs = [] then some [] else none
+  | n+1, bs =>
+    if bs = [] then some [] else
+    if bs.length < 42 then none else
+    match burnChunks n (bs.drop 42) with
+    | none => none
+    | some rest => some ((bs.take 10, (bs.drop 10).take 32) :: rest)
+
+/-- `DurableBurnJournal::load` on the raw file bytes, for the descriptor identity `identity`:
+length check, magic and key id, genesis tag over the first 72 bytes, then the record chain
+from the genesis tag with duplicate rejection. -/
+def openBurnBytes (key identity keyId bytes : Bytes) : Option (List Bytes × Bytes) :=
+  if bytes.length < 104 ∨ (bytes.length - 104) % 42 ≠ 0 then none else
+  if bytes.take 104 ≠ burnHeader key identity keyId ((bytes.drop 40).take 32) then none else
+  match burnChunks ((bytes.length - 104) / 42) (bytes.drop 104) with
+  | none => none
+  | some chunks =>
+    openBurnJournal (burnRecordTag key keyId ((bytes.drop 40).take 32))
+      (burnGenesisTag key identity keyId ((bytes.drop 40).take 32)) ⟨chunks, []⟩
+
+theorem openBurnBytes_short_tail (key identity keyId bytes : Bytes)
+    (h : (bytes.length - 104) % 42 ≠ 0) : openBurnBytes key identity keyId bytes = none := by
+  simp [openBurnBytes, h]
+
+/-- The file a writer with these parameters produces: header, then 42-byte records. -/
+def burnJournalBytes (key identity keyId genesis : Bytes) (records : List (Bytes × Bytes)) :
+    Bytes :=
+  burnHeader key identity keyId genesis ++ records.flatMap (fun r => r.1 ++ r.2)
+
+private theorem burnRecords_flat_length (records : List (Bytes × Bytes))
+    (hr : ∀ r ∈ records, r.1.length = 10 ∧ r.2.length = 32) :
+    (records.flatMap (fun r => r.1 ++ r.2)).length = 42 * records.length := by
+  induction records with
+  | nil => rfl
+  | cons r rest ih =>
+    have h0 := hr r (List.mem_cons_self ..)
+    have ih' := ih (fun x hx => hr x (List.mem_cons_of_mem _ hx))
+    simp only [List.flatMap_cons, List.length_append, List.length_cons, ih', h0.1, h0.2]
+    omega
+
+private theorem burnChunks_flat (records : List (Bytes × Bytes))
+    (hr : ∀ r ∈ records, r.1.length = 10 ∧ r.2.length = 32) :
+    burnChunks records.length (records.flatMap (fun r => r.1 ++ r.2)) = some records := by
+  induction records with
+  | nil => rfl
+  | cons r rest ih =>
+    obtain ⟨b, t⟩ := r
+    have h0 := hr (b, t) (List.mem_cons_self ..)
+    have hb : b.length = 10 := h0.1
+    have ht : t.length = 32 := h0.2
+    have ih' := ih (fun x hx => hr x (List.mem_cons_of_mem _ hx))
+    have hbt : (b ++ t).length = 42 := by rw [List.length_append, hb, ht]
+    have hNe : (b ++ t) ++ rest.flatMap (fun r => r.1 ++ r.2) ≠ [] := by
+      intro h
+      have := congrArg List.length h
+      rw [List.length_append, hbt] at this
+      simp at this
+    have hLen : ¬ ((b ++ t) ++ rest.flatMap (fun r => r.1 ++ r.2)).length < 42 := by
+      rw [List.length_append, hbt]; omega
+    have hDrop : ((b ++ t) ++ rest.flatMap (fun r => r.1 ++ r.2)).drop 42 =
+        rest.flatMap (fun r => r.1 ++ r.2) := List.drop_left' hbt
+    have hTake : ((b ++ t) ++ rest.flatMap (fun r => r.1 ++ r.2)).take 10 = b := by
+      rw [List.append_assoc]; exact List.take_left' hb
+    have hMid : (((b ++ t) ++ rest.flatMap (fun r => r.1 ++ r.2)).drop 10).take 32 = t := by
+      rw [List.append_assoc, List.drop_left' hb]; exact List.take_left' ht
+    show burnChunks (rest.length + 1) ((b ++ t) ++ rest.flatMap (fun r => r.1 ++ r.2)) = _
+    rw [burnChunks, ite_eq_right hNe, ite_eq_right hLen, hDrop, ih', hTake, hMid]
+
+/-- **Byte decoder ↔ record model**: on the bytes an honest writer lays down, `load` is exactly
+the chained-record recovery `openBurnJournal`, started from the V3 genesis tag. Every
+record-level theorem about `openBurnJournal` therefore speaks about the real 104 + 42·n byte
+file, and the decoder is not vacuous. -/
+theorem openBurnBytes_journalBytes (key identity keyId genesis : Bytes)
+    (records : List (Bytes × Bytes))
+    (hk : keyId.length = 32) (hg : genesis.length = 32)
+    (hr : ∀ r ∈ records, r.1.length = 10 ∧ r.2.length = 32) :
+    openBurnBytes key identity keyId (burnJournalBytes key identity keyId genesis records) =
+      openBurnJournal (burnRecordTag key keyId genesis)
+        (burnGenesisTag key identity keyId genesis) ⟨records, []⟩ := by
+  have hH : (burnHeader key identity keyId genesis).length = 104 := burnHeader_length hk hg
+  have hF := burnRecords_flat_length records hr
+  have hLen : (burnJournalBytes key identity keyId genesis records).length =
+      104 + 42 * records.length := by
+    rw [burnJournalBytes, List.length_append, hH, hF]
+  have hTake : (burnJournalBytes key identity keyId genesis records).take 104 =
+      burnHeader key identity keyId genesis := List.take_left' hH
+  have hDrop : (burnJournalBytes key identity keyId genesis records).drop 104 =
+      records.flatMap (fun r => r.1 ++ r.2) := List.drop_left' hH
+  have hGen : ((burnJournalBytes key identity keyId genesis records).drop 40).take 32 =
+      genesis := by
+    have hSplit : burnJournalBytes key identity keyId genesis records =
+        ([0x51, 0x53, 0x42, 0x55, 0x52, 0x4e, 0x30, 0x35] ++ keyId) ++
+          (genesis ++ (burnGenesisTag key identity keyId genesis ++
+            records.flatMap (fun r => r.1 ++ r.2))) := by
+      simp [burnJournalBytes, burnHeader, burnHeaderBody, List.append_assoc]
+    rw [hSplit, List.drop_left' (by simp [hk]), List.take_left' hg]
+  have hC1 : ¬ ((burnJournalBytes key identity keyId genesis records).length < 104 ∨
+      ((burnJournalBytes key identity keyId genesis records).length - 104) % 42 ≠ 0) := by
+    rw [hLen]; omega
+  have hDiv : ((burnJournalBytes key identity keyId genesis records).length - 104) / 42 =
+      records.length := by
+    rw [hLen]; omega
+  unfold openBurnBytes
+  rw [ite_eq_right hC1, hGen, hTake, ite_eq_right (fun h => h rfl), hDrop, hDiv,
+    burnChunks_flat records hr]
+
+/-- A journal copied to another inode fails closed: the V3 genesis tag is recomputed for the
+identity of the descriptor actually held, so the copy opens only if the two genesis tags
+collide (the stated premise is that this one concrete pair of tags differs). -/
+theorem openBurnBytes_copied_inode_refused (key identity identity' keyId genesis : Bytes)
+    (records : List (Bytes × Bytes))
+    (hk : keyId.length = 32) (hg : genesis.length = 32)
+    (distinct : burnGenesisTag key identity' keyId genesis ≠
+      burnGenesisTag key identity keyId genesis) :
+    openBurnBytes key identity' keyId (burnJournalBytes key identity keyId genesis records) =
+      none := by
+  have hH : (burnHeader key identity keyId genesis).length = 104 := burnHeader_length hk hg
+  have hTake : (burnJournalBytes key identity keyId genesis records).take 104 =
+      burnHeader key identity keyId genesis := List.take_left' hH
+  have hGen : ((burnJournalBytes key identity keyId genesis records).drop 40).take 32 =
+      genesis := by
+    have hSplit : burnJournalBytes key identity keyId genesis records =
+        ([0x51, 0x53, 0x42, 0x55, 0x52, 0x4e, 0x30, 0x35] ++ keyId) ++
+          (genesis ++ (burnGenesisTag key identity keyId genesis ++
+            records.flatMap (fun r => r.1 ++ r.2))) := by
+      simp [burnJournalBytes, burnHeader, burnHeaderBody, List.append_assoc]
+    rw [hSplit, List.drop_left' (by simp [hk]), List.take_left' hg]
+  have hNe : burnHeader key identity keyId genesis ≠ burnHeader key identity' keyId genesis := by
+    intro h
+    exact distinct (List.append_cancel_left h).symm
+  unfold openBurnBytes
+  split
+  · rfl
+  · rw [hGen, hTake, ite_eq_left hNe]
+
+/-- A partial `write_all` is observable in file length. It is not atomic replacement. -/
+theorem partial_append_refuses (key identity keyId old tail : Bytes) (n : Nat)
+    (hOld : old.length = 104 + 42*n) (hTail : 0 < tail.length ∧ tail.length < 42) :
+    openBurnBytes key identity keyId (old ++ tail) = none := by
+  apply openBurnBytes_short_tail
+  rw [List.length_append, hOld]
+  have h : 104 + 42*n + tail.length - 104 = 42*n + tail.length := by omega
+  rw [h, Nat.add_mod, Nat.mul_mod_right, Nat.zero_add, Nat.mod_eq_of_lt hTail.2]
+  omega
+
+/-- `LockedRecord::replace` syscall stages (identity check, type check, temp create, three
+writes, temp sync, re-check, rename, parent sync). The journal machines in
+`CeremonyAtomicityAndAbort` step through these and allow a crash or an I/O error at each one.
+The POSIX `replaceAtomic` model of this file writes the record in one `pwrite` and closes the
+temp descriptor before the rename; it is not a syscall-for-syscall model of `LockedRecord`. -/
+inductive ReplacePc where
+  | checkBefore | checkTypes | createTemp | writeMagic | writeSeal | writePayload
+  | syncTemp | checkAfter | rename | syncParent | done | poisoned
+  deriving Repr, DecidableEq
+
+/-- Adaptive adversary with access only to the signing oracle's returned tags. Its final
+record is the candidate, not an existential quantifier over all mathematically valid tags. -/
+inductive WalMacAttack where
+  | output (candidate : WalRecord)
+  | query (body : WalRecordBody) (wellFormed : body.WellFormed) (next : Bytes → WalMacAttack)
+
+def runWalMacAttack (mac : KeyedMacFn) (key : Bytes) :
+    WalMacAttack → List WalRecordBody × WalRecord
+  | .output r => ([], r)
+  | .query b _ next =>
+    let result := runWalMacAttack mac key (next (computeWalMac mac key b))
+    (b :: result.1, result.2)
+
+theorem runWalMacAttack_queries_wellFormed (mac : KeyedMacFn) (key : Bytes)
+    (attack : WalMacAttack) :
+    ∀ b ∈ (runWalMacAttack mac key attack).1, b.WellFormed := by
+  induction attack with
+  | output r => simp [runWalMacAttack]
+  | query b wf next ih =>
+    intro x hx
+    simp only [runWalMacAttack, List.mem_cons] at hx
+    rcases hx with rfl | hx
+    · exact wf
+    · exact ih _ x hx
+
+/-- The standard primitive-game output: a candidate preimage/tag pair and the actual oracle
+query preimages. Width and authentication security are deliberately separate obligations. -/
+def primitiveMacWin (mac : KeyedMacFn) (key : Bytes)
+    (queries : List Bytes) (message tag : Bytes) : Prop :=
+  message ∉ queries ∧ tag = mac key message
+
+theorem wal_forgery_extracts_primitive_forgery (mac : KeyedMacFn) (key : Bytes)
+    (queries : List WalRecordBody) (r : WalRecord)
+    (wf : ∀ b ∈ queries, b.WellFormed) (bad : MacForgery mac key queries r) :
+    primitiveMacWin mac key (queries.map encodeWalBody) (encodeWalBody r.body) r.keyedMac := by
+  rw [MacForgery.public_eq_1] at bad
+  refine ⟨?_, ?_⟩
+  · intro hm
+    obtain ⟨b, hb, he⟩ := List.mem_map.mp hm
+    have eq := encodeWalBody_injective (wf b hb) bad.1.1 he
+    exact bad.2.1 (eq ▸ hb)
+  · have h := bad.2.2
+    rw [verifyWalMac.public_eq_1, computeWalMac.public_eq_1] at h
+    exact eq_of_beq h
+
+/-- Explicit finite probability transfer. Each sample fixes key and adversary coins; the
+adversary may adapt its queries to returned tags. Counts divided by `samples.length` are
+probabilities when the list is nonempty. Any primitive-game bound transfers with no loss. -/
+theorem wal_mac_experiment_bound (mac : KeyedMacFn) (samples : List (Bytes × WalMacAttack))
+    (walWin primitiveWin : Bytes × WalMacAttack → Bool)
+    (walSpec : ∀ sample, walWin sample = true →
+      MacForgery mac sample.1 (runWalMacAttack mac sample.1 sample.2).1
+        (runWalMacAttack mac sample.1 sample.2).2)
+    (primitiveSpec : ∀ sample,
+      primitiveMacWin mac sample.1 ((runWalMacAttack mac sample.1 sample.2).1.map encodeWalBody)
+        (encodeWalBody (runWalMacAttack mac sample.1 sample.2).2.body)
+        (runWalMacAttack mac sample.1 sample.2).2.keyedMac → primitiveWin sample = true) :
+    (samples.filter walWin).length ≤ (samples.filter primitiveWin).length := by
+  have pointwise : ∀ sample, walWin sample = true → primitiveWin sample = true := by
+    intro sample h
+    exact primitiveSpec sample (wal_forgery_extracts_primitive_forgery mac sample.1 _ _
+      (runWalMacAttack_queries_wellFormed mac sample.1 sample.2) (walSpec sample h))
+  induction samples with
+  | nil => simp
+  | cons sample rest ih =>
+    cases hw : walWin sample <;> cases hp : primitiveWin sample <;>
+      simp_all <;> omega
+
+/-- Belt's resource identity is key-scoped; identical replay is permitted, different
+message/salt/digits for the same epoch are not. Capacity and bounded forward jumps are real
+checks in `latched_salt`, not a globally unique receipt-epoch abstraction. -/
+structure BeltBinding where
+  epoch : Nat
+  digest : Bytes
+  retrySalt : Bytes
+  digits : Bytes
+  deriving Repr, DecidableEq
+
+structure BeltState where
+  keyId : Bytes
+  nextEpoch : Nat
+  inFlight : Option BeltBinding
+  poisoned : Bool
+  deriving Repr, DecidableEq
+
+inductive BeltBindOutcome where
+  | fresh | replay
+  deriving Repr, DecidableEq
+
+/-- Binding decision and post-state on successful persistence. `beltPersistFailure` is the
+error branch; this function alone is not an I/O refinement theorem. -/
+def beltBind (capacityLog2 : Nat) (s : BeltState) (r : BeltBinding) :
+    Option (BeltState × BeltBindOutcome) :=
+  if s.poisoned then none else
+  if s.inFlight = some r then some (s, .replay) else
+  if (s.inFlight.any fun old => old.epoch == r.epoch) then none else
+  if s.nextEpoch ≤ r.epoch ∧ r.epoch < 2^capacityLog2 ∧ r.epoch ≤ s.nextEpoch + 64 then
+    some ({ s with nextEpoch := r.epoch + 1, inFlight := some r }, .fresh)
+  else none
+
+theorem belt_replay_identical {cap : Nat} {s s' : BeltState} {r : BeltBinding}
+    (h : beltBind cap s r = some (s', .replay)) : s.inFlight = some r := by
+  unfold beltBind at h
+  split at h
+  · cases h
+  · split at h
+    · assumption
+    · split at h
+      · cases h
+      · split at h <;> cases h
+
+theorem belt_same_epoch_different_binding_rejected {cap : Nat} {s : BeltState}
+    {old r : BeltBinding} (held : s.inFlight = some old) (epoch : old.epoch = r.epoch)
+    (different : old ≠ r) : beltBind cap s r = none := by
+  simp [beltBind, held, different, epoch]
+
+/-- Decode exactly one fixed-width reservation, with key identity supplied by the header. -/
+def decodeReservation (keyId bytes : Bytes) : Option Reservation := do
+  let (cid, b1) ← splitExactBytes 32 bytes
+  let (codeword, b2) ← splitExactBytes 32 b1
+  let (seed, b3) ← splitExactBytes 8 b2
+  let (hedge, tail) ← splitExactBytes 8 b3
+  if tail ≠ [] then none else do
+    let seed ← decodeU64BeNat seed
+    let hedge ← decodeU64BeNat hedge
+    pure ⟨cid, keyId, codeword, seed, hedge⟩
+
+/-- Decode and validate in insertion order, just as `open_existing` calls `validate` before
+pushing each entry. This rejects duplicate ceremony/codeword IDs and non-increasing cursors. -/
+def decodeReservations (keyId : Bytes) : Nat → Bytes → List Reservation → Option (List Reservation)
+  | 0, bytes, entries => if bytes = [] then some entries else none
+  | n+1, bytes, entries => do
+    let (entry, tail) ← splitExactBytes 137 bytes
+    if entry.drop 80 ≠ List.replicate 57 0 then none else do
+    let r ← decodeReservation keyId (entry.take 80)
+    if reservationValid keyId entries r then
+      decodeReservations keyId n tail (entries ++ [r])
+    else none
+
+/-- Decoder restricted to the fresh-unbound subprotocol. Full retries use
+`openCeremonyBytesV3` below; they must not be projected to an all-codewords-Nodup claim. -/
+def openCeremonyBytes (key lockSeal keyId bytes : Bytes) : Option (List Reservation) :=
+  if bytes.length < 80 ∨ (bytes.length - 80) % 137 ≠ 0 then none else do
+    let body := bytes.take (bytes.length - 32)
+    let count := (bytes.length - 80) / 137
+    if bytes.take 40 ≠ [81,83,65,71,67,82,74,51] ++ keyId ∨
+        bytes.drop (bytes.length - 32) ≠ ceremonyTag key lockSeal body then none else do
+    let generation ← decodeU64BeNat ((bytes.drop 40).take 8)
+    if generation ≠ count + 1 then none else
+    decodeReservations keyId count (body.drop 48) []
+
+theorem openCeremonyBytes_short_tail (key lockSeal keyId bytes : Bytes)
+    (h : (bytes.length - 80) % 137 ≠ 0) : openCeremonyBytes key lockSeal keyId bytes = none := by
+  simp [openCeremonyBytes, h]
+
+/-- Snapshot parser consumes all bytes and rejects duplicate map keys instead of silently
+letting insertion overwrite an earlier value. -/
+def decodeLedgerRecords : Nat → Bytes → List (Bytes × Bytes) → Option (List (Bytes × Bytes))
+  | 0, bytes, records => if bytes = [] then some records else none
+  | n+1, bytes, records => do
+    let (kb, b1) ← splitExactBytes 4 bytes
+    let (vb, b2) ← splitExactBytes 4 b1
+    let k ← pcwDecodeU32Be kb.reverse
+    let v ← pcwDecodeU32Be vb.reverse
+    let (key, b3) ← splitExactBytes k b2
+    let (value, tail) ← splitExactBytes v b3
+    if records.any (fun kv => kv.1 == key) then none else
+    decodeLedgerRecords n tail (records ++ [(key, value)])
+
+private theorem decodeLedgerRecords_roundtrip_aux :
+    ∀ (records acc : List (Bytes × Bytes)),
+      (records.map Prod.fst).Nodup →
+      (∀ kv ∈ records, kv.1.length < 2 ^ 32 ∧ kv.2.length < 2 ^ 32) →
+      (∀ old ∈ acc, ∀ r ∈ records, old.1 ≠ r.1) →
+      decodeLedgerRecords records.length (records.flatMap fun kv =>
+        u32le kv.1.length ++ u32le kv.2.length ++ kv.1 ++ kv.2) acc = some (acc ++ records) := by
+  intro records
+  induction records with
+  | nil => intro acc _ _ _; simp [decodeLedgerRecords]
+  | cons r rest ih =>
+    rcases r with ⟨k, v⟩
+    intro acc hNd hBounds hDisjoint
+    have hKv := hBounds (k, v) List.mem_cons_self
+    have hNdTail : (rest.map Prod.fst).Nodup := (List.nodup_cons.mp hNd).2
+    have hFresh : k ∉ rest.map Prod.fst := (List.nodup_cons.mp hNd).1
+    have hNot : (acc.any fun old => old.1 == k) = false := by
+      apply List.any_eq_false.mpr
+      intro old hOld hTrue
+      exact hDisjoint old hOld (k, v) List.mem_cons_self (eq_of_beq hTrue)
+    have hKLen : (u32le k.length).length = 4 := by simp [u32le, pcwEncodeU32Be_length]
+    have hVLen : (u32le v.length).length = 4 := by simp [u32le, pcwEncodeU32Be_length]
+    have hKDec : pcwDecodeU32Be (u32le k.length).reverse = some k.length := by
+      simpa [u32le] using pcwDecodeU32Be_encodeU32Be hKv.1
+    have hVDec : pcwDecodeU32Be (u32le v.length).reverse = some v.length := by
+      simpa [u32le] using pcwDecodeU32Be_encodeU32Be hKv.2
+    simp only [List.length_cons, List.flatMap_cons, List.append_assoc, decodeLedgerRecords,
+      bind, Option.bind, splitExactBytes_append hKLen, splitExactBytes_append hVLen,
+      hKDec, hVDec, splitExactBytes_append rfl, hNot, Bool.false_eq_true, ↓reduceIte]
+    have hNext : ∀ old ∈ acc ++ [(k, v)], ∀ r ∈ rest, old.1 ≠ r.1 := by
+      intro old hOld r hr
+      rcases List.mem_append.mp hOld with hPrev | hNew
+      · exact hDisjoint old hPrev r (List.mem_cons_of_mem (k, v) hr)
+      · rcases List.mem_singleton.mp hNew with rfl
+        intro hEq
+        apply hFresh
+        have hm : r.1 ∈ rest.map Prod.fst := List.mem_map.mpr ⟨r, hr, rfl⟩
+        exact Eq.mp (congrArg (· ∈ rest.map Prod.fst) hEq.symm) hm
+    simpa only [List.append_assoc, List.cons_append, List.nil_append] using
+      ih (acc ++ [(k, v)]) hNdTail
+        (fun kv hkv => hBounds kv (List.mem_cons_of_mem (k, v) hkv)) hNext
+
+/-- General snapshot-record roundtrip: canonical fixed-width lengths and duplicate-free keys
+    decode to exactly the original association list, with no accumulator or fixture restriction. -/
+theorem decodeLedgerRecords_roundtrip (records : List (Bytes × Bytes))
+    (hNd : (records.map Prod.fst).Nodup)
+    (hBounds : ∀ kv ∈ records, kv.1.length < 2 ^ 32 ∧ kv.2.length < 2 ^ 32) :
+    decodeLedgerRecords records.length (records.flatMap fun kv =>
+      u32le kv.1.length ++ u32le kv.2.length ++ kv.1 ++ kv.2) [] = some records := by
+  simpa using decodeLedgerRecords_roundtrip_aux records [] hNd hBounds (by simp)
+
+/-- `read_slot` after the LockedRecord wrapper and seal checks. The byte-size limit,
+MAC, parity, bounded count, duplicate keys, and exact parser exhaustion are all checked. -/
+def openLedgerSlot (domain key genesisSeal ledgerId : Bytes) (parity : Nat)
+    (bytes : Bytes) : Option Snapshot :=
+  if bytes.length < 48 ∨ 16 * 1024 * 1024 < bytes.length then none else do
+    let body := bytes.take (bytes.length - 32)
+    let tag := bytes.drop (bytes.length - 32)
+    if tag ≠ ledgerTag domain key genesisSeal ledgerId [115,110,97,112,115,104,111,116] body
+      then none else do
+    let (gb, b1) ← splitExactBytes 8 body
+    let (cb, recordsBytes) ← splitExactBytes 8 b1
+    let generation ← decodeU64BeNat gb.reverse
+    let count ← decodeU64BeNat cb.reverse
+    if generation % 2 ≠ parity ∨ recordsBytes.length / 8 < count then none else do
+      let records ← decodeLedgerRecords count recordsBytes []
+      pure ⟨generation, records, tag⟩
+
+def ledgerGenesisBytes (domain key genesisSeal ledgerId sealA sealB : Bytes) : Bytes :=
+  let body := ledgerGenesisBody ledgerId sealA sealB
+  body ++ ledgerTag domain key genesisSeal ledgerId [103,101,110,101,115,105,115] body
+
+/-- An unavailable slot remains unavailable for future writes. Opening the surviving slot
+never recreates a sidecar or silently changes its genesis-authenticated seal. -/
+def recoverLedgerBytes (domain key genesisSeal ledgerId sealA sealB genesisBytes : Bytes)
+    (anchor : ExternalMonotoneAnchor) (slotA slotB : Option Bytes) : Option Snapshot :=
+  recoverLedger (genesisBytes == ledgerGenesisBytes domain key genesisSeal ledgerId sealA sealB)
+    anchor (slotA.bind (openLedgerSlot domain key genesisSeal ledgerId 0))
+      (slotB.bind (openLedgerSlot domain key genesisSeal ledgerId 1))
+
+theorem recoverLedgerBytes_checkpoint {domain key genesisSeal ledgerId sealA sealB genesis : Bytes}
+    {anchor : ExternalMonotoneAnchor} {a b : Option Bytes} {out : Snapshot}
+    (h : recoverLedgerBytes domain key genesisSeal ledgerId sealA sealB genesis anchor a b = some out) :
+    verifyAgainstExternalAnchor anchor out.generation out.tag = true :=
+  recoverLedger_anchor h
+
+/-- Locked FTS descriptor state. The same journal inode remains locked throughout append;
+there is no temp inode and no rename. `failed` is set before identity checking or writing. -/
+structure BurnAppendState where
+  keyId : Bytes
+  genesis : Bytes
+  lastTag : Bytes
+  bodies : List Bytes
+  inode : Nat
+  descriptor : Nat
+  locked : Bool
+  failed : Bool
+  disk : Bytes
+  visible : Bytes
+  pending : Option Bytes := none
+  dirty : Bool := false
+  deriving Repr, DecidableEq
+
+/-- Caller supplies the observed pathname inode and length from `check_identity`. -/
+def beginBurnAppend (key : Bytes) (s : BurnAppendState) (requestedKey : Bytes)
+    (pathInode party epoch : Nat) : BurnAppendState :=
+  if s.failed ∨ requestedKey ≠ s.keyId ∨ burnRecordBody party epoch ∈ s.bodies then s else
+  let failed := { s with failed := true }
+  if !s.locked ∨ pathInode ≠ s.inode ∨ s.visible.length ≠ 104 + 42*s.bodies.length ∨
+      2^16 ≤ party ∨ 2^64 ≤ epoch then failed else
+  { failed with pending := some (burnRecord key s.keyId s.genesis s.lastTag party epoch) }
+
+/-- Partial progress of `write_all`; 0 through 42 bytes can be present at a crash cut. -/
+def writeBurnAppend (s : BurnAppendState) (written : Nat) : BurnAppendState :=
+  match s.pending with
+  | none => s
+  | some record => { s with visible := s.disk ++ record.take written, dirty := true }
+
+/-- Full media sync is the commit point. No receipt exists for partial append or failed sync. -/
+def syncBurnAppend (s : BurnAppendState) (ioSucceeded : Bool) : BurnAppendState × Option Bytes :=
+  match s.pending with
+  | none => (s, none)
+  | some record =>
+    if ioSucceeded ∧ s.visible = s.disk ++ record ∧ record.length = 42 then
+      ({ s with disk := s.visible, bodies := s.bodies ++ [record.take 10], lastTag := record.drop 10, pending := none, failed := false, dirty := false }, some (record.take 10))
+    else ({ s with failed := true, pending := none }, none)
+
+/-- Physical sectors overlap the old tail and new append: corruption is applied to the whole
+inode, not only to the appended 42 bytes. Process/descriptor lifetime ends on power loss. -/
+def crashBurnAppend (s : BurnAppendState) (mask : SectorTearMask) : Bytes :=
+  if s.dirty then mixSectors mask.geometry.byteWidth mask.sectorChoices s.disk s.visible
+  else s.disk
+
+/-- Direct weld to the existing inode crash semantics. In particular a tear can damage an
+already present record sharing the append sector; the byte decoder may then refuse recovery. -/
+theorem burnAppend_posix_crash_outcomes {fs crashed : PosixFsState} {inode : Nat}
+    {old : Bytes} (disk : assocLookup fs.nand.fileBlocks inode = some old)
+    (crash : CrashStep fs crashed) :
+    assocLookup crashed.nand.fileBlocks inode = some old ∨
+    (∃ cache, assocLookup fs.driveCache.cachedFiles inode = some cache ∧
+      assocLookup crashed.nand.fileBlocks inode = some cache) ∨
+    (∃ (pending : Bytes) (mask : SectorTearMask), pendingVolatileWrite fs inode = some pending ∧
+      assocLookup crashed.nand.fileBlocks inode =
+        some (mixSectors mask.geometry.byteWidth mask.sectorChoices old pending)) :=
+  crashStep_inode_outcome disk crash
+
+theorem syncBurnAppend_release_durable {s s' : BurnAppendState} {ok : Bool} {body : Bytes}
+    (h : syncBurnAppend s ok = (s', some body)) :
+    s'.disk = s.visible ∧ body ∈ s'.bodies ∧ s'.failed = false := by
+  unfold syncBurnAppend at h
+  cases hp : s.pending with
+  | none => simp [hp] at h
+  | some record =>
+    simp only [hp] at h
+    split at h
+    · cases h
+      exact ⟨rfl, List.mem_append_right _ (List.mem_singleton_self _), rfl⟩
+    · cases h
+
+/-- Record-level host view of the byte-oriented append machine. Failed handles are closed;
+    every successfully synced body is both recovered state and a burned host leaf. -/
+def burnAppendHostOfFile (s : BurnAppendState) (f : BurnJournalFile) : BurnHost :=
+  { file := f
+    handle := if s.failed then none else some (s.bodies, s.lastTag)
+    burned := s.bodies }
+
+theorem burnAppendHostOfFile_inv (tagFn : List UInt8 → List UInt8 → List UInt8)
+    (genesisTag : List UInt8) (s : BurnAppendState) (f : BurnJournalFile)
+    (hOpen : openBurnJournal tagFn genesisTag f = some (s.bodies, s.lastTag)) :
+    BurnHostInv tagFn genesisTag (burnAppendHostOfFile s f) := by
+  have hNd := (openBurnJournal_some hOpen).2.2
+  rw [BurnHostInv.public_eq_1]
+  right
+  refine ⟨?_, ?_, ?_⟩
+  · simpa [burnAppendHostOfFile] using hNd
+  · intro bodies last h b hb
+    have hEq := Option.some.inj (hOpen.symm.trans h)
+    have hBodies : s.bodies = bodies := (Prod.mk.inj hEq).1
+    rw [← hBodies]
+    exact hb
+  · intro bodies last h
+    simp only [burnAppendHostOfFile] at h
+    split at h
+    · cases h
+    · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj h)
+      exact hOpen
+
+private theorem burnRecordBody_length (party epoch : Nat) :
+    (burnRecordBody party epoch).length = 10 := by
+  simp [burnRecordBody, encodeU64BeNat_length]
+
+private theorem burnRecord_take_10 (key keyId genesis previous : Bytes) (party epoch : Nat) :
+    (burnRecord key keyId genesis previous party epoch).take 10 = burnRecordBody party epoch := by
+  unfold burnRecord
+  exact List.take_left' (burnRecordBody_length party epoch)
+
+private theorem burnRecord_drop_10 (key keyId genesis previous : Bytes) (party epoch : Nat) :
+    (burnRecord key keyId genesis previous party epoch).drop 10 =
+      burnRecordTag key keyId genesis previous (burnRecordBody party epoch) := by
+  unfold burnRecord
+  exact List.drop_left' (burnRecordBody_length party epoch)
+
+/-- A successful full-length `fsync` append is an exact host `reserve` step and preserves
+    `BurnHostInv` on the resulting record-level host state. -/
+theorem burnAppend_sync_welds_host_reserve (key identity keyId genesis : Bytes)
+    (s : BurnAppendState) (f : BurnJournalFile) (party epoch : Nat)
+    (hOpen : openBurnJournal (burnRecordTag key keyId genesis)
+      (burnGenesisTag key identity keyId genesis) f = some (s.bodies, s.lastTag))
+    (hPending : s.pending = some (burnRecord key keyId genesis s.lastTag party epoch))
+    (hVisible : s.visible = s.disk ++ burnRecord key keyId genesis s.lastTag party epoch)
+    (hFailed : s.failed = false)
+    (hFresh : burnRecordBody party epoch ∉ s.bodies) :
+    BurnHostStep (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+      (burnAppendHostOfFile s f)
+      (burnAppendHostOfFile (syncBurnAppend s true).1
+        (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag
+          (burnRecordBody party epoch) f)) ∧
+    BurnHostInv (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+      (burnAppendHostOfFile (syncBurnAppend s true).1
+        (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag
+          (burnRecordBody party epoch) f)) := by
+  let body := burnRecordBody party epoch
+  let next : BurnAppendState :=
+    { s with
+      disk := s.visible
+      bodies := s.bodies ++ [body]
+      lastTag := burnRecordTag key keyId genesis s.lastTag body
+      pending := none
+      failed := false
+      dirty := false }
+  have hSync : syncBurnAppend s true = (next, some body) := by
+    simp only [syncBurnAppend, hPending, hVisible, burnRecord_length, and_self, ↓reduceIte,
+      burnRecord_take_10, burnRecord_drop_10, next, body]
+  have hLive : (burnAppendHostOfFile s f).handle = some (s.bodies, s.lastTag) := by
+    simp [burnAppendHostOfFile, hFailed]
+  have hStep0 := BurnHostStep.reserve (tagFn := burnRecordTag key keyId genesis)
+    (genesisTag := burnGenesisTag key identity keyId genesis)
+    (burnAppendHostOfFile s f) s.bodies s.lastTag body hLive hFresh
+  have hStep :
+      BurnHostStep (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+        (burnAppendHostOfFile s f)
+        (burnAppendHostOfFile (syncBurnAppend s true).1
+          (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag body f)) := by
+    rw [hSync]
+    simpa only [burnAppendHostOfFile, Bool.false_eq_true, ↓reduceIte, next, body] using hStep0
+  exact ⟨hStep, burnHostStep_preserves hStep (burnAppendHostOfFile_inv _ _ s f hOpen)⟩
+
+/-- Full-write failure poisons Belt's in-memory handle; it does not roll back the on-disk
+write or authorize retry with a different binding. Recovery uses a new handle. -/
+def beltPersistFailure (s : BeltState) : BeltState := { s with poisoned := true }
+
+theorem beltPersistFailure_refuses (cap : Nat) (s : BeltState) (r : BeltBinding) :
+    beltBind cap (beltPersistFailure s) r = none := by
+  simp [beltBind, beltPersistFailure]
+
+/-- Exact v3 validation: retries may repeat only the current binding; fresh numeric epochs
+must exceed every previously bound epoch. Ceremony IDs are always fresh. -/
+def journalEntryValid (keyId : Bytes) (entries : List JournalEntry) (e : JournalEntry) : Bool :=
+  e.reservation.keyId == keyId &&
+  !(entries.any fun old => old.reservation.ceremonyId == e.reservation.ceremonyId) &&
+  (match entries.getLast? with
+   | none => true
+   | some old => decide (old.reservation.seedBurnCursor < e.reservation.seedBurnCursor ∧
+       old.reservation.hedgeGeneration < e.reservation.hedgeGeneration ∧
+       (e.context = {} ∧ old.context = {} ∨ old.context.mpcNonceEpoch < e.context.mpcNonceEpoch))) &&
+  (if e.isRetry then
+    match entries.getLast? with
+    | none => false
+    | some old => (old.boundEpoch == e.boundEpoch &&
+        old.reservation.epochOrCodeword == e.reservation.epochOrCodeword) &&
+        decide (old.context.policyId = e.context.policyId ∧ old.context.spendAmount = e.context.spendAmount)
+  else
+    !(entries.any fun old => old.reservation.epochOrCodeword == e.reservation.epochOrCodeword) &&
+    (match e.boundEpoch with
+     | none => true
+     | some epoch => entries.all fun old =>
+       match old.boundEpoch with | none => true | some prior => decide (prior < epoch)))
+
+def ceremonyBytesV3 (key lockSeal keyId : Bytes) (entries : List JournalEntry) : Bytes :=
+  let body := ceremonyBodyV3 keyId entries
+  body ++ ceremonyTag key lockSeal body
+
+def decodeJournalEntry (keyId bytes : Bytes) : Option JournalEntry := do
+  let (rb, tail) ← splitExactBytes 80 bytes
+  let r ← decodeReservation keyId rb
+  match tail with
+  | [] => none
+  | flag :: fields =>
+    let (epochBytes, ctx) ← splitExactBytes 8 fields
+    let (policy, ctx) ← splitExactBytes 32 ctx
+    let (spend, nonce) ← splitExactBytes 8 ctx
+    let spend ← decodeU64BeNat spend
+    let nonce ← decodeU64BeNat nonce
+    let epoch ← decodeU64BeNat epochBytes
+    if 4 ≤ flag.toNat then none else
+    let hasEpoch := flag.toNat % 2 == 1
+    if !hasEpoch ∧ epoch ≠ 0 then none else
+    pure ⟨r, if hasEpoch then some epoch else none, decide (2 ≤ flag.toNat),
+      ⟨BitVec.ofNat 256 (policy.foldl (fun n b => 256 * n + b.toNat) 0),
+        UInt64.ofNat spend, UInt64.ofNat nonce⟩⟩
+
+theorem ceremony_v3_nonzero_context_roundtrip :
+    let e : JournalEntry := ⟨⟨List.replicate 32 1, List.replicate 32 2,
+      List.replicate 32 3, 4, 5⟩, some 6, true, ⟨7, 8, 9⟩⟩
+    decodeJournalEntry e.reservation.keyId (journalEntryBytes e) = some e := by
+  simp only [journalEntryBytes, reservationBytes, ceremonyContextBytes, decodeJournalEntry,
+    decodeReservation, encodeU64BeNat.public_eq_1, decodeU64BeNat.public_eq_1]
+  decide +kernel
+
+def decodeJournalEntries (keyId : Bytes) : Nat → Bytes → List JournalEntry → Option (List JournalEntry)
+  | 0, bytes, entries => if bytes = [] then some entries else none
+  | n+1, bytes, entries => do
+    let (entry, tail) ← splitExactBytes 137 bytes
+    let e ← decodeJournalEntry keyId entry
+    if journalEntryValid keyId entries e then
+      decodeJournalEntries keyId n tail (entries ++ [e])
+    else none
+
+/-- Current `QSAGCRJ3` open: 48-byte header, 137-byte entries, 32-byte tag, generation=count+1,
+checkpoint generation/tag filter, reserved flag-bit rejection and strict replay validation. -/
+def openCeremonyBytesV3 (key lockSeal keyId bytes : Bytes) (anchor : ExternalMonotoneAnchor) :
+    Option (Nat × List JournalEntry) :=
+  if bytes.length < 80 ∨ (bytes.length - 80) % 137 ≠ 0 then none else do
+    let body := bytes.take (bytes.length - 32)
+    let tag := bytes.drop (bytes.length - 32)
+    let count := (bytes.length - 80) / 137
+    if bytes.take 40 ≠ [81,83,65,71,67,82,74,51] ++ keyId ∨
+        tag ≠ ceremonyTag key lockSeal body then none else do
+    let generation ← decodeU64BeNat ((bytes.drop 40).take 8)
+    if generation ≠ count + 1 ∨ verifyAgainstExternalAnchor anchor generation tag ≠ true
+      then none else do
+    let entries ← decodeJournalEntries keyId count (body.drop 48) []
+    pure (generation, entries)
+
+/-- Retry validity extracts the exact prior binding, rather than claiming codeword uniqueness. -/
+theorem journal_retry_preserves_binding {key : Bytes} {entries : List JournalEntry}
+    {e : JournalEntry} (retry : e.isRetry = true) (valid : journalEntryValid key entries e = true) :
+    ∃ old, entries.getLast? = some old ∧ old.boundEpoch = e.boundEpoch ∧
+      old.reservation.epochOrCodeword = e.reservation.epochOrCodeword := by
+  simp only [journalEntryValid, retry, ↓reduceIte, Bool.and_eq_true] at valid
+  cases hl : entries.getLast? with
+  | none => simp [hl] at valid
+  | some old =>
+    refine ⟨old, rfl, ?_⟩
+    have hv := valid.2
+    simp only [hl, Bool.and_eq_true, beq_iff_eq] at hv
+    exact hv.1
+
+theorem journalEntryValid_fresh_attempt {key : Bytes} {entries : List JournalEntry}
+    {e : JournalEntry} (valid : journalEntryValid key entries e = true) :
+    ∀ old ∈ entries, old.reservation.ceremonyId ≠ e.reservation.ceremonyId := by
+  simp only [journalEntryValid, Bool.and_eq_true, Bool.not_eq_true'] at valid
+  intro old ho
+  have h := List.any_eq_false.mp valid.1.1.2 old ho
+  simpa only [beq_iff_eq] using h
+
+/-- Permit contains all v3 identity fields. The machine must additionally own and consume it;
+this pure checker does not turn freely constructible Lean values into linear capabilities. -/
+structure JournalPermitV3 where
+  entry : JournalEntry
+  generation : Nat
+  lockSeal : Bytes
+  deriving Repr, DecidableEq
+
+def verifyCurrentPermitV3 (key lockSeal keyId : Bytes) (entries : List JournalEntry)
+    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV3) : Bool :=
+  permit.lockSeal == lockSeal && permit.generation == checkpoint.attestedEpoch &&
+  permit.entry.reservation.keyId == keyId && entries.getLast? == some permit.entry &&
+  checkpoint.attestedEpoch == entries.length + 1 &&
+  checkpoint.attestedTag == ceremonyTag key lockSeal (ceremonyBodyV3 keyId entries) &&
+  readBack == ceremonyBytesV3 key lockSeal keyId entries
+
+/-- Policy-aware release must match the complete committed context. -/
+def verifyCurrentPermitWithContext (key lockSeal keyId : Bytes) (entries : List JournalEntry)
+    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV3)
+    (expected : CeremonyContext) : Bool :=
+  decide (permit.entry.context = expected) &&
+    verifyCurrentPermitV3 key lockSeal keyId entries checkpoint readBack permit
+
+theorem ceremony_context_mismatch_rejected (key lockSeal keyId : Bytes) (entries : List JournalEntry)
+    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV3)
+    (expected : CeremonyContext) (hm : permit.entry.context ≠ expected) :
+    verifyCurrentPermitWithContext key lockSeal keyId entries checkpoint readBack permit expected = false := by
+  simp [verifyCurrentPermitWithContext, hm]
+
+theorem stale_v3_permit_refused (key lockSeal keyId : Bytes) (entries : List JournalEntry)
+    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV3)
+    (stale : permit.generation ≠ checkpoint.attestedEpoch) :
+    verifyCurrentPermitV3 key lockSeal keyId entries checkpoint readBack permit = false := by
+  simp [verifyCurrentPermitV3, stale]
+
+/-- Retry attempts need fresh randomness even though the epoch/codeword binding is unchanged. -/
+theorem journalEntryValid_advances_cursors {key : Bytes} {entries : List JournalEntry}
+    {e old : JournalEntry} (last : entries.getLast? = some old)
+    (valid : journalEntryValid key entries e = true) :
+    old.reservation.seedBurnCursor < e.reservation.seedBurnCursor ∧
+    old.reservation.hedgeGeneration < e.reservation.hedgeGeneration := by
+  simp only [journalEntryValid, Bool.and_eq_true] at valid
+  have hv := valid.1.2
+  simp only [last, decide_eq_true_eq] at hv
+  exact ⟨hv.1, hv.2.1⟩
+
+end RustDurability
+
+end Qsag
+end
