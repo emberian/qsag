@@ -6829,28 +6829,6 @@ theorem retryJournal_trace_no_attempt_reuse {s t : RetryJournalState}
 
 end RustDurability
 
-/-! ## §5. Post-Round-3 Rushing Selective-Abort Unbiasedness & `QSAG.R_COMMIT/v1` Coin-Tossing
-
-Hardens hedged threshold signing randomness (`CommittedHedgedRandomizer` in
-`crates/qsag-core/src/fips205.rs`) and proves **`post_round3_rushing_abort_unbiased`**:
-1. **Round-1 `QSAG.R_COMMIT/v1` Commitment Binding**: Every custodian commits to its randomizer
-   contribution `R_i` via length-framed `H("QSAG.R_COMMIT/v1" || sid || party_id || len || R_i || salt_i)`
-   prior to Round-2 openings and strictly prior to Round-3 message-dependent share release.
-   Any rushing attempt to alter `R_i` after observing honest shares yields a concrete `HashCollision H`.
-2. **Zero-Bias Coin-Tossed Hedged Randomness + Pre-Round-3 Cut-the-Hash Abort**: Once `rCorrupt`
-   is bound in Round 1, `R = rHonest ^^^ rCorrupt` is uniformly distributed (`fiber = 1` per target
-   `R`, zero bit bias), any pre-open abort scales acceptance rate `p_acc` independently of `R`,
-   and surviving executions match the unbiased uniform-`R` standalone signer (`Δ = 0`).
-3. **Deterministic Threshold PRF Post-Round-3 Rushing Abort Unbiasedness (`Δ = 0`)**: When `R` is
-   uniquely determined prior to Round-3 share release via deterministic PRF (`addrnd = None` or
-   `ParallelSeededSignSession`), even a rushing custodian whose post-Round-3 abort predicate
-   `abortPostRound3 : AdvPreOpenView Q w → BitVec w → Bool` inspects the reconstructed signature
-   can ONLY scale overall acceptance `p_acc`; conditioned on non-abort, the output distribution is
-   pointwise identical (`Δ = 0`) to `singleSign sk msg`.
-4. **`#tooth` Counterexample (`tooth_uncommitted_round3_randomizer_biases_bit`)**: Without a
-   binding Round-1 commitment on `rCorrupt`, a rushing party choosing `rCorrupt(rHonest) := rHonest`
-   forces `lsb(R) = false` on ALL `256 / 256` honest 8-bit inputs (vs `128 / 256` unbiased), biasing
-   a full bit of `R`. -/
 
 /-- Exact 16-byte ASCII domain tag `"QSAG.R_COMMIT/v1"` matching `R_COMMIT_DOMAIN_V1` in
     `crates/qsag-core/src/fips205.rs`. -/
@@ -6969,10 +6947,7 @@ theorem coinTossRand_exact_fiber_one {rw : Nat} (rCorrupt targetR : BitVec rw) :
       simp only [hEq, hNe, ↓reduceIte]
   rw [hCong, qsum_eq_indicator]
 
-/-- Post-Round-3 rushing execution when `R` is uniquely fixed prior to Round-3 share opening
-    (e.g., deterministic threshold PRF `addrnd = None` or `ParallelSeededSignSession`):
-    the rushing custodian inspects both its pre-open view and the reconstructed Round-3 signature
-    `singleSign sk msg`, and may selectively abort via arbitrary `abortPostRound3`. -/
+
 def execDetPostRound3Rushing {SK Msg CorruptIn : Type} {Q w : Nat}
     (spec : CutTheHashProtocolSpec SK Msg Unit CorruptIn Q w)
     (sk : SK) (msg : Msg) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)

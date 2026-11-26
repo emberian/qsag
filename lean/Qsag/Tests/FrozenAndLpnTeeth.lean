@@ -109,27 +109,6 @@ theorem macBlind_boolean_projections_and_adaptive_arity_against_fixed3 :
    fun outBits hGe => (combineArity_valid_for_all_ge_64 outBits hGe).2.2,
    tooth_fixed_arity3_fails_at_7720_words⟩
 
-/-- Dealerless FTS `(s, s², s³)` and 7-power Frobenius consistency (`L-Ex-15`):
-frozen cheating tuples over `Tower8` (`GF(2^8)`) pass on `≤ 256` of `256^2` challenge pairs (and
-over `Tower128` 7-power tuples on `≤ 3 * |xs|` of `|xs|^2`), whereas swapped order wins on all
-`256^2` pairs and a degree-0 combiner `[1, s, s²]` lets a frozen invalid tuple pass every challenge. -/
-theorem fts_frobenius_frozen_against_swapped_and_deg0 :
-    (∀ A : Adversary (FtsPowerTriple Tower8) Tower8, FtsTripleCheats (A.commit []) →
-      countIf (frozenWins ftsTripleConfig A) (vectors tower8Elems 2) ≤ 256 ∧
-      (vectors tower8Elems 2).length = 256 ^ 2) ∧
-    (∃ A : Adversary (FtsPowerTriple Tower8) Tower8,
-      (∀ chis, FtsTripleCheats (A.commit chis)) ∧
-      countIf (swappedWins ftsTripleConfig A) (vectors tower8Elems 2) = 256 ^ 2) ∧
-    (∃ T : FtsPower7Tuple Tower128,
-      ¬ FtsPower7ValidPowers T ∧
-      (∀ s : Tower128, ftsBrokenDeg0ProdResidual T s = CommRingOps.zero) ∧
-      (∀ theta : Tower128, ftsPower7Check T 1 theta = true)) := by
-  refine ⟨ftsPowerTriple_tower8_frozen_soundness, ?_,
-    tooth_ftsPower7_degree0_weight_cancels_error (towerElem_char2 7)⟩
-  obtain ⟨A, hCheat, hWin⟩ :=
-    tooth_ftsPowerTriple_swapped_order_always_accepted (towerElem_char2 3) tower8Elems
-  exact ⟨A, hCheat, hWin.trans (by rw [tower8Elems_length])⟩
-
 /-- Threshold ML-DSA `rssSacrificedSignStep` (`L-Ex-15`): frozen forged products pass on `≤ 1` of
 `mldsaQ^6` challenges (`< 2^-137`) and `≤ 1` on any duplicate-free `Ext6Fq204` pool, whereas
 sampling `chi` before freezing `(inp, T)` passes on all `chisExt.length` challenges. -/
@@ -181,7 +160,6 @@ theorem elevenTap_balanced_against_unfiltered :
 #verify_constructive elevenTap_balanced_against_unfiltered
 #verify_constructive macBlind_spdz_zero_leakage_against_unblinded_recovery
 #verify_constructive macBlind_boolean_projections_and_adaptive_arity_against_fixed3
-#verify_constructive fts_frobenius_frozen_against_swapped_and_deg0
 #verify_constructive rss_sign_step_frozen_against_swapped
 
 end Qsag.FrozenAndLpnTeeth

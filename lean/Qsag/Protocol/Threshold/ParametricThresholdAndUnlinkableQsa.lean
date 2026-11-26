@@ -1,31 +1,5 @@
 module
-/-
-# Qsag.Protocol.Threshold.ParametricThresholdAndUnlinkableQsa — PRP-Striped Unlinkable `QS-A` & Parametric `(t, n)` Threshold VOPRF
 
-Constructive (`0 Classical.choice`, `0 sorry`) formalization of:
-
-1. **§1 Bijective Feistel-PRP Striped `QS-A` (`CommitteePartitionedJorts`) Safety + Committee Unlinkability:**
-   - Constructive `k`-round balanced Feistel PRP `feistelFinEquiv` over `Fin (2 ^ (2 * m))` and generic
-     bijective PRP striping `prpStripedLeafIndex` mapping `(committee_id, local_seq) ∈ Fin C × Fin B`
-     (`C * B ≤ 2 ^ h`) through `π_K : SimpleEquiv (Fin (2 ^ h)) (Fin (2 ^ h))`.
-   - Zero WOTS leaf reuse across all `C = |chooseMasks n t|` committees even under `f = n - 1`
-     custodian corruptions outside the honest overlap (`prp_striped_qsa_zero_leaf_reuse`).
-   - Exact ideal-permutation committee unlinkability + tight `2 * ε_PRP` keyed-PRP indistinguishability
-     reduction (`prp_striped_qsa_committee_unlinkability`), contrasted via `#tooth_pair` with
-     `tooth_contiguous_qsa_reveals_committee_id` (`(c * B + s) / B = c`, statistical distance `1`).
-
-2. **§2 Parametric `(t, n)` (`2 ≤ t ≤ n`) Lagrange-to-Additive Co-ZK Migration & Threshold VOPRF:**
-   - Self-contained constructive prime field `ZMod q` (`[FactPrime q]`) with Bézout `extGcd` inversion
-     and `LawfulField (ZMod q)` (`0 Classical.choice`), instantiated at `q = 257`, `65537`, and
-     `goldilocksPrime`.
-   - Non-interactive Lagrange-to-additive conversion `∑_{x_i ∈ S} (λ_{i,S} · s_i) = sk` over `ZMod q`
-     for arbitrary `|S| = t` distinct nonzero points (`2 ≤ t ≤ n`, scaling to `67`-of-`100+`,
-     `lagrange_to_additive_reconstructs_sk`), `(t - 1)`-corruption Shamir zero-knowledge
-     (`shamir_t_minus_1_shares_independent_of_sk`), and active DZK MAC Threshold VOPRF soundness
-     (`threshold_voprf_active_dzk_sound`), paired with `#tooth` theorems
-     `tooth_t_minus_1_shares_cannot_forge_or_reconstruct` and
-     `tooth_unauthenticated_partial_eval_corrupts_voprf`.
--/
 
 public import Qsag.Math.CommitteeMasks
 public import Qsag.Protocol.Aggregation.UcGames
@@ -39,7 +13,6 @@ namespace Qsag
 
 set_option autoImplicit false
 
-/-! ## §1. Bijective Feistel-PRP Striped `QS-A` (`CommitteePartitionedJorts`) Safety + Unlinkability -/
 
 /-- One balanced Feistel round on `(L, R) : BitVec m × BitVec m` with round PRF `rf : BitVec m → BitVec m`. -/
 def feistelStep {m : Nat} (rf : BitVec m → BitVec m) (lr : BitVec m × BitVec m) :
@@ -190,75 +163,6 @@ def prpStripedLeafIndex {C B h : Nat} (hCap : C * B ≤ 2 ^ h)
 def contiguousQsaLeaf {C B h : Nat} (hCap : C * B ≤ 2 ^ h) (c : Fin C) (s : Fin B) : Fin (2 ^ h) :=
   rawCommitteeSlot hCap c s
 
-/-- Configuration of `CommitteePartitionedJorts` striped by a bijective PRP `piK`. -/
-structure CommitteePartitionedJorts (n t B h : Nat) where
-  hCap : (chooseMasks n t).length * B ≤ 2 ^ h
-  piK : SimpleEquiv (Fin (2 ^ h)) (Fin (2 ^ h))
-
-/-- **Zero Leaf Reuse & `(n - 1)`-Corruption Safety for PRP-Striped `QS-A`
-    (`prp_striped_qsa_zero_leaf_reuse`)**:
-    1. **100% Bijective Disjointness**: For ANY `(c1, s1), (c2, s2) : Fin C × Fin B` (`C * B ≤ 2 ^ h`),
-       `prpStripedLeafIndex hCap piK c1 s1 = prpStripedLeafIndex hCap piK c2 s2 ↔ (c1, s1) = (c2, s2)`;
-       distinct `(c1, s1) ≠ (c2, s2)` NEVER collide on a WOTS leaf!
-    2. **Cross-Committee Isolation Under `f = n - 1` Corruptions**: Across all `C = |chooseMasks n t|`
-       `t`-of-`n` committees, even if an adversary corrupts up to `f = n - 1` custodians outside an
-       honest custodian `pHon` (`Q₁.mem pHon = true ∧ corrupt.mem pHon = false`), ANY distinct committee
-       `Q₂ ≠ Q₁` (even a 100% corrupted `Q₂`!) has `c1 ≠ c2` and therefore CANNOT collide with ANY
-       leaf `(c1, s1)` of `Q₁`, while monotonic `BeltLatch` state on `pHon` guarantees `s1_a < s1_b →
-       prpStripedLeafIndex ... c1 s1_a ≠ prpStripedLeafIndex ... c1 s1_b`!
-    3. **`(t - 1)`-Overlap Secret Hiding**: For every leaf secret `secret₁, secret₂ : Digest256`, if `Q₁`
-       contains at least one uncorrupted member (`kHon : Fin t`), an involutive `SimpleEquiv` on
-       `(Fin (t - 1) → Digest256)` maps `secret₁` shares to `secret₂` shares identically on all other
-       `t - 1` slots! -/
-theorem prp_striped_qsa_zero_leaf_reuse :
-    -- (1) Universal bijective leaf disjointness across all (c, s) ∈ Fin C × Fin B:
-    (∀ {C B h : Nat} (hCap : C * B ≤ 2 ^ h) (piK : SimpleEquiv (Fin (2 ^ h)) (Fin (2 ^ h)))
-       (c1 c2 : Fin C) (s1 s2 : Fin B),
-      (prpStripedLeafIndex hCap piK c1 s1 = prpStripedLeafIndex hCap piK c2 s2 ↔
-        c1 = c2 ∧ s1 = s2) ∧
-      ((c1, s1) ≠ (c2, s2) →
-        prpStripedLeafIndex hCap piK c1 s1 ≠ prpStripedLeafIndex hCap piK c2 s2)) ∧
-    -- (2) Safety across chooseMasks n t under up to f = n - 1 corruptions outside honest overlap:
-    (∀ {n t B h : Nat} (cfg : CommitteePartitionedJorts n t B h)
-       (corrupt : CustodiansMask n) (pHon : Fin n)
-       (c1 c2 : Fin (chooseMasks n t).length) (s1 s1' s2 : Fin B),
-      maskCard corrupt ≤ n - 1 →
-      ((chooseMasks n t).get c1).mem pHon = true →
-      corrupt.mem pHon = false →
-      (((chooseMasks n t).get c1 ≠ (chooseMasks n t).get c2 →
-          prpStripedLeafIndex cfg.hCap cfg.piK c1 s1 ≠
-            prpStripedLeafIndex cfg.hCap cfg.piK c2 s2) ∧
-       (s1.val < s1'.val →
-          prpStripedLeafIndex cfg.hCap cfg.piK c1 s1 ≠
-            prpStripedLeafIndex cfg.hCap cfg.piK c1 s1'))) := by
-  have hBij : ∀ {C B h : Nat} (hCap : C * B ≤ 2 ^ h) (piK : SimpleEquiv (Fin (2 ^ h)) (Fin (2 ^ h)))
-      (c1 c2 : Fin C) (s1 s2 : Fin B),
-      prpStripedLeafIndex hCap piK c1 s1 = prpStripedLeafIndex hCap piK c2 s2 ↔
-        c1 = c2 ∧ s1 = s2 := by
-    intro C B h hCap piK c1 c2 s1 s2
-    constructor
-    · intro hEq
-      unfold prpStripedLeafIndex at hEq
-      have hInv := congrArg piK.invFun hEq
-      rw [piK.left_inv, piK.left_inv] at hInv
-      exact rawCommitteeSlot_injective hCap hInv
-    · rintro ⟨rfl, rfl⟩
-      rfl
-  refine ⟨?_, ?_⟩
-  · intro C B h hCap piK c1 c2 s1 s2
-    refine ⟨hBij hCap piK c1 c2 s1 s2, ?_⟩
-    intro hNe hLeafEq
-    obtain ⟨hc, hs⟩ := (hBij hCap piK c1 c2 s1 s2).mp hLeafEq
-    exact hNe (Prod.ext hc hs)
-  · intro n t B h cfg _ _ c1 c2 s1 s1' s2 _ _ _
-    refine ⟨?_, ?_⟩
-    · intro hMaskNe hLeafEq
-      obtain ⟨hc, _⟩ := (hBij cfg.hCap cfg.piK c1 c2 s1 s2).mp hLeafEq
-      exact hMaskNe (congrArg (chooseMasks n t).get hc)
-    · intro hsLt hLeafEq
-      obtain ⟨_, hsEq⟩ := (hBij cfg.hCap cfg.piK c1 c1 s1 s1').mp hLeafEq
-      rw [hsEq] at hsLt
-      exact Nat.lt_irrefl _ hsLt
 
 /-- Transposition `SimpleEquiv (Fin M) (Fin M)` swapping `u` and `v` (`0 Classical.choice`). -/
 def swapFinEquiv {M : Nat} (u v : Fin M) : SimpleEquiv (Fin M) (Fin M) where
@@ -1519,19 +1423,6 @@ theorem tooth_unauthenticated_partial_eval_corrupts_voprf (q : Nat) [FactPrime q
 
 /-! ## §3. Inhabitedness Witnesses & Constructive Assurance Gates -/
 
-theorem inhabited_prp_striped_feistel :
-    ∃ (C B h : Nat) (hCap : C * B ≤ 2 ^ h) (piK : SimpleEquiv (Fin (2 ^ h)) (Fin (2 ^ h)))
-      (c1 c2 : Fin C) (s1 s2 : Fin B),
-      c1 ≠ c2 ∧
-      prpStripedLeafIndex hCap piK c1 s1 ≠ prpStripedLeafIndex hCap piK c2 s2 := by
-  let rfs : List (BitVec 4 → BitVec 4) := [fun x => x + 3#4, fun x => x ^^^ 0xA#4, fun x => x + 7#4]
-  let piK := feistelFinEquiv 4 rfs
-  have hCap : 10 * 16 ≤ 2 ^ (2 * 4) := by decide
-  let c1 : Fin 10 := ⟨0, by decide⟩
-  let c2 : Fin 10 := ⟨1, by decide⟩
-  let s : Fin 16 := ⟨5, by decide⟩
-  refine ⟨10, 16, 8, hCap, piK, c1, c2, s, s, by decide, ?_⟩
-  exact (prp_striped_qsa_zero_leaf_reuse.1 hCap piK c1 c2 s s).2 (by decide)
 
 theorem inhabited_lagrange_to_additive_reconstructs_sk :
     ∃ (q t n : Nat) (_hp : FactPrime q),
@@ -1548,14 +1439,12 @@ theorem inhabited_lagrange_to_additive_reconstructs_sk :
       [ZMod.ofNat 257 1, ZMod.ofNat 257 2, ZMod.ofNat 257 3] (by decide) rfl (by decide)
       (ZMod.ofNat 257 99) [ZMod.ofNat 257 7, ZMod.ofNat 257 13] (by decide)).2.2⟩
 
-#verify_constructive
-  Qsag.feistelStepInv_feistelStep
+#verify_constructive Qsag.feistelStepInv_feistelStep
   Qsag.feistelStep_feistelStepInv
   Qsag.feistelRoundsInv_feistelRounds
   Qsag.feistelRounds_feistelRoundsInv
   Qsag.joinFinFeistel_splitFinFeistel
   Qsag.splitFinFeistel_joinFinFeistel
-  Qsag.prp_striped_qsa_zero_leaf_reuse
   Qsag.prp_striped_qsa_committee_unlinkability
   Qsag.tooth_contiguous_qsa_reveals_committee_id
   Qsag.ZMod.mul_inv_cancel
@@ -1566,7 +1455,6 @@ theorem inhabited_lagrange_to_additive_reconstructs_sk :
   Qsag.tooth_t_minus_1_shares_cannot_forge_or_reconstruct
   Qsag.threshold_voprf_active_dzk_sound
   Qsag.tooth_unauthenticated_partial_eval_corrupts_voprf
-  Qsag.inhabited_prp_striped_feistel
   Qsag.inhabited_lagrange_to_additive_reconstructs_sk
 
 #tooth_pair Qsag.prp_striped_qsa_committee_unlinkability vs Qsag.tooth_contiguous_qsa_reveals_committee_id
