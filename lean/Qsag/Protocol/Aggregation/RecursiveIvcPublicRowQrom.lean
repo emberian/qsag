@@ -465,3 +465,473 @@ inductive SpineSearch where
   | target (id : Nat)
   | excess (cap : Nat → Nat)
 
+def SpineSearch.applies : SpineSearch → Nat → IvcTreeStatement → Prop
+  | .target id, d, s => s.lo ≤ id ∧ id < s.lo + 2^d
+  | .excess cap, d, s => rangeCap cap s.lo (2^d) < s.totalQuorums
+
+def SpineSearch.left (q : SpineSearch) (m : Nat) (l : IvcTreeStatement) : Bool :=
+  match q with
+  | .target id => decide (id < l.lo + 2^m)
+  | .excess cap => decide (rangeCap cap l.lo (2^m) < l.totalQuorums)
+
+def SpineSearch.found {n : Nat} : SpineSearch → ExtractedLeafShard n → Prop
+  | .target id, sh => sh.shardId = id
+  | .excess cap, sh => cap sh.shardId < sh.quorumCount
+
+section Spine
+variable {n : Nat} (env : IvcExtractionContext n) (H : IvcAlgebra.RO) (T : QromQueryTranscript)
+abbrev ProofAt {n : Nat} (env : IvcExtractionContext n) := FixedShapeWhirProof env.cfg.params
+abbrev Child {n : Nat} (env : IvcExtractionContext n) := IvcTreeStatement × ProofAt env
+abbrev Located {n : Nat} (env : IvcExtractionContext n) := Nat × Child env
+
+def leafChecks (s : IvcTreeStatement) (sh : ExtractedLeafShard n) : Bool :=
+  decide (sh.shardId = s.lo ∧ s.hi = s.lo + 1 ∧ sh.quorumCount = s.totalQuorums ∧
+    0 < sh.quorumCount ∧ sh.threshold ≤ Composed.weight sh.stmt.bitmap ∧
+    sh.stmt.message = s.message ∧ registryMember H s.policyRegistryRoot sh = true ∧
+    0 < sh.threshold ∧ sh.quorumCount = Composed.weight sh.stmt.bitmap) &&
+  (List.finRange n).all (fun i =>
+    !sh.stmt.bitmap.getLsbD i.val || ((sh.stmt.roster i).profile == env.profile)) &&
+  stepOp256TableOk env.profile (succinctCommitteeSlots sh.stmt) sh.rows
+
+@[expose] def checkedLeaf (s : IvcTreeStatement) (p : ProofAt env) : Option (ExtractedLeafShard n) :=
+  if verifyConcreteIvcRoot env.profile env.cfg H 0 s p then
+    match extractIvcStepFromTranscript n env.profile H T 0 s p with
+    | some (.leaf sh) => if leafChecks env H s sh then some sh else none
+    | _ => none
+  else none
+
+@[expose] def checkedChildren (m : Nat) (s : IvcTreeStatement) (p : ProofAt env) :
+    Option (Child env × Child env) :=
+  if verifyConcreteIvcRoot env.profile env.cfg H (m+1) s p then
+    match extractIvcStepFromTranscript n env.profile H T (m+1) s p with
+    | some (.parent l r pl pr fold) =>
+      if parentStitchCheck env H m s l r pl pr p fold then some ((l,pl),(r,pr)) else none
+    | _ => none
+  else none
+
+/-- Each recursive call opens exactly one child witness from the recorded transcript.
+The parent stitch verifies both child arguments. -/
+def walk (q : SpineSearch) : (d : Nat) → IvcTreeStatement → ProofAt env →
+    List (Located env) × Option (ExtractedLeafShard n)
+  | 0, s, p => ([(0,s,p)], checkedLeaf env H T s p)
+  | m+1, s, p =>
+    match checkedChildren env H T m s p with
+    | none => ([(m+1,s,p)], none)
+    | some (l,r) =>
+      let child := if q.left m l.1 then l else r
+      let tail := walk q m child.1 child.2
+      ((m+1,s,p) :: tail.1, tail.2)
+
+def extractLeafAlongSpine (d : Nat) (s : IvcTreeStatement) (p : ProofAt env) (offset : Nat) :=
+  (walk env H T (.target (s.lo + offset)) d s p).2
+
+def spineNodeAt (d : Nat) (s : IvcTreeStatement) (p : ProofAt env) (offset k : Nat) :=
+  (walk env H T (.target (s.lo + offset)) d s p).1[k]?
+
+def extractOverclaimedSpine (d : Nat) (s : IvcTreeStatement) (p : ProofAt env) (cap : Nat → Nat) :=
+  (walk env H T (.excess cap) d s p).2
+
+def overclaimedSpineNodeAt (d : Nat) (s : IvcTreeStatement) (p : ProofAt env) (cap : Nat → Nat) (k : Nat) :=
+  (walk env H T (.excess cap) d s p).1[k]?
+
+def spineStepBad : Nat → IvcTreeStatement → ProofAt env → Bool
+  | 0, s, p => verifyConcreteIvcRoot env.profile env.cfg H 0 s p && !hasQueryCollision T &&
+      (checkedLeaf env H T s p).isNone
+  | m+1, s, p => verifyConcreteIvcRoot env.profile env.cfg H (m+1) s p && !hasQueryCollision T &&
+      (checkedChildren env H T m s p).isNone
+
+def LocatedBad (d : Nat) (atNode : Nat → Option (Located env)) : Prop :=
+  ∃ k < d+1, ∃ level s p, atNode k = some (level,s,p) ∧ spineStepBad env H T level s p = true
+
+private theorem leaf_spec {s : IvcTreeStatement} {p : ProofAt env} {sh : ExtractedLeafShard n}
+    (dep : IsDeployedAggProfile env.profile) (ok : checkedLeaf env H T s p = some sh) :
+    sh.shardId = s.lo ∧ sh.quorumCount = s.totalQuorums ∧
+    sh.quorumCount = Composed.weight sh.stmt.bitmap ∧
+    ValidQuorumSignatures env.profile H s.policyRegistryRoot s.message sh := by
+  unfold checkedLeaf at ok
+  split at ok <;> try contradiction
+  split at ok <;> try contradiction
+  split at ok <;> try contradiction
+  rename_i hc
+  cases ok
+  obtain ⟨pair,table⟩ := Bool.and_eq_true_iff.mp hc
+  obtain ⟨hd,prof⟩ := Bool.and_eq_true_iff.mp pair
+  obtain ⟨id,_,count,pos,threshold,msg,reg,_,weight⟩ := of_decide_eq_true hd
+  exact ⟨id,count,weight,pos,threshold,msg,prof,table,
+    stepOp256TableOk_bothProfiles_extract env.profile dep _ _ prof table,reg⟩
+
+private theorem children_spec {m : Nat} {s : IvcTreeStatement} {p : ProofAt env} {l r : Child env}
+    (ok : checkedChildren env H T m s p = some (l,r)) :
+    checkChildHeaders m s l.1 r.1 = true ∧ verifyConcreteIvcRoot env.profile env.cfg H m l.1 l.2 = true ∧
+      verifyConcreteIvcRoot env.profile env.cfg H m r.1 r.2 = true := by
+  unfold checkedChildren at ok
+  split at ok <;> try contradiction
+  split at ok <;> try contradiction
+  split at ok <;> try contradiction
+  rename_i hs
+  cases ok
+  obtain ⟨h1,_⟩ := Bool.and_eq_true_iff.mp hs
+  obtain ⟨h2,right⟩ := Bool.and_eq_true_iff.mp h1
+  obtain ⟨headers,left⟩ := Bool.and_eq_true_iff.mp h2
+  exact ⟨headers,left,right⟩
+
+private theorem selected_spec (q : SpineSearch) {m : Nat} {s : IvcTreeStatement} {p : ProofAt env}
+    {l r : Child env} (ok : checkedChildren env H T m s p = some (l,r)) (app : q.applies (m+1) s) :
+    let c := if q.left m l.1 then l else r
+    q.applies m c.1 ∧ verifyConcreteIvcRoot env.profile env.cfg H m c.1 c.2 = true ∧
+      s.lo ≤ c.1.lo ∧ c.1.lo + 2^m ≤ s.lo + 2^(m+1) ∧
+      c.1.policyRegistryRoot = s.policyRegistryRoot ∧ c.1.message = s.message := by
+  obtain ⟨headers,vl,vr⟩ := children_spec env H T ok
+  obtain ⟨rl,rr,_,_,ml,mr,ll,lh,mid,_,count⟩ := of_decide_eq_true headers
+  have rightLo : r.1.lo = s.lo + 2^m := mid.symm.trans lh
+  have pow : 2^(m+1) = 2^m + 2^m := by rw [Nat.pow_succ, Nat.mul_two]
+  have endL : l.1.lo + 2^m ≤ s.lo + 2^(m+1) := by
+    rw [ll,pow]
+    exact Nat.add_le_add_left (Nat.le_add_right _ _) _
+  have endR : r.1.lo + 2^m ≤ s.lo + 2^(m+1) := by
+    rw [rightLo,pow,Nat.add_assoc]
+    exact Nat.le_refl _
+  cases q with
+  | target id =>
+    change s.lo ≤ id ∧ id < s.lo + 2^(m+1) at app
+    simp only [SpineSearch.left, decide_eq_true_eq, SpineSearch.applies]
+    split
+    · exact ⟨⟨by omega, by omega⟩,vl,by omega,endL,rl,ml⟩
+    · exact ⟨⟨by omega, by omega⟩,vr,by omega,endR,rr,mr⟩
+  | excess cap =>
+    change rangeCap cap s.lo (2^(m+1)) < s.totalQuorums at app
+    rw [rangeCap_double, ← ll, count] at app
+    simp only [SpineSearch.left, decide_eq_true_eq, SpineSearch.applies]
+    split
+    · exact ⟨by assumption,vl,by omega,endL,rl,ml⟩
+    · have he : r.1.lo = l.1.lo + 2^m := by omega
+      exact ⟨by rw [he]; omega,vr,by omega,endR,rr,mr⟩
+
+theorem walk_length_le (q : SpineSearch) (d : Nat) (s : IvcTreeStatement) (p : ProofAt env) :
+    (walk env H T q d s p).1.length ≤ d+1 := by
+  induction d generalizing s p with
+  | zero => exact Nat.le_refl 1
+  | succ m ih =>
+    rw [walk]
+    split
+    · simp
+    · exact Nat.succ_le_succ (ih _ _)
+
+private theorem walk_sound (dep : IsDeployedAggProfile env.profile) (hc : hasQueryCollision T = false)
+    (q : SpineSearch) (d : Nat) (s : IvcTreeStatement) (p : ProofAt env)
+    (accept : verifyConcreteIvcRoot env.profile env.cfg H d s p = true) (app : q.applies d s) :
+    (∃ sh, (walk env H T q d s p).2 = some sh ∧ q.found sh ∧ s.lo ≤ sh.shardId ∧
+      sh.shardId < s.lo + 2^d ∧ sh.quorumCount = Composed.weight sh.stmt.bitmap ∧
+      ValidQuorumSignatures env.profile H s.policyRegistryRoot s.message sh) ∨
+    LocatedBad env H T d (fun k => (walk env H T q d s p).1[k]?) := by
+  induction d generalizing s p with
+  | zero =>
+    cases h : checkedLeaf env H T s p with
+    | none => exact .inr ⟨0, by decide, 0,s,p,rfl,by simp [spineStepBad,accept,hc,h]⟩
+    | some sh =>
+      obtain ⟨id,count,weight,valid⟩ := leaf_spec env H T dep h
+      refine .inl ⟨sh,h,?_,by omega,by simp [id],weight,valid⟩
+      cases q with
+      | target target =>
+        change s.lo ≤ target ∧ target < s.lo + 1 at app
+        change sh.shardId = target
+        omega
+      | excess cap =>
+        change rangeCap cap s.lo 1 < s.totalQuorums at app
+        simpa [SpineSearch.found,rangeCap,id,count,List.range'_succ] using app
+  | succ m ih =>
+    cases h : checkedChildren env H T m s p with
+    | none =>
+      exact .inr ⟨0,by omega,m+1,s,p,by simp [walk,h],by simp [spineStepBad,accept,hc,h]⟩
+    | some lr =>
+      obtain ⟨l,r⟩ := lr
+      obtain ⟨childApp,v,lo,hi,reg,msg⟩ := selected_spec env H T q h app
+      rcases ih _ _ v childApp with ⟨sh,ex,found,a,b,w,valid⟩ | ⟨k,hk,lv,t,pi,atK,bad⟩
+      · exact .inl ⟨sh,by simpa only [walk,h] using ex,found,by omega,by omega,w,
+          by rwa [reg,msg] at valid⟩
+      · exact .inr ⟨k+1,by omega,lv,t,pi,by simpa only [walk,h,List.getElem?_cons_succ] using atK,bad⟩
+
+theorem extractLeafAlongSpine_sound (dep : IsDeployedAggProfile env.profile) (hc : hasQueryCollision T = false)
+    (d : Nat) (s : IvcTreeStatement) (p : ProofAt env) (offset : Nat) (ho : offset < 2^d)
+    (accept : verifyConcreteIvcRoot env.profile env.cfg H d s p = true) :
+    (∃ sh, extractLeafAlongSpine env H T d s p offset = some sh ∧ sh.shardId = s.lo + offset ∧
+      0 < sh.quorumCount ∧ ValidQuorumSignatures env.profile H s.policyRegistryRoot s.message sh) ∨
+    LocatedBad env H T d (spineNodeAt env H T d s p offset) := by
+  rcases walk_sound env H T dep hc (.target (s.lo+offset)) d s p accept
+    ⟨Nat.le_add_right _ _, Nat.add_lt_add_left ho _⟩ with
+    ⟨sh,ex,id,_,_,_,v⟩ | bad
+  · exact .inl ⟨sh,ex,id,v.1,v⟩
+  · exact .inr bad
+
+theorem extractOverclaimedSpine_sound (dep : IsDeployedAggProfile env.profile) (hc : hasQueryCollision T = false)
+    (d : Nat) (s : IvcTreeStatement) (p : ProofAt env) (cap : Nat → Nat)
+    (over : rangeCap cap s.lo (2^d) < s.totalQuorums)
+    (accept : verifyConcreteIvcRoot env.profile env.cfg H d s p = true) :
+    (∃ sh, extractOverclaimedSpine env H T d s p cap = some sh ∧ s.lo ≤ sh.shardId ∧
+      sh.shardId < s.lo + 2^d ∧ cap sh.shardId < sh.quorumCount ∧
+      sh.quorumCount = Composed.weight sh.stmt.bitmap ∧
+      ValidQuorumSignatures env.profile H s.policyRegistryRoot s.message sh) ∨
+    LocatedBad env H T d (overclaimedSpineNodeAt env H T d s p cap) := by
+  rcases walk_sound env H T dep hc (.excess cap) d s p accept over with
+    ⟨sh,ex,h,a,b,w,v⟩ | bad
+  · exact .inl ⟨sh,ex,a,b,h,w,v⟩
+  · exact .inr bad
+
+end Spine
+
+def honestShardParticipated {n : Nat} (custody : Nat → Fin n → Composed.Custody)
+    (msg : Spec.Bytes) (id : Nat) : Nat :=
+  ((List.finRange n).filter fun v => Composed.quorumParticipated (custody id v) msg).length
+
+private theorem count_participating {n : Nat} (part : Fin n → Bool) :
+    ((List.finRange n).filter part).length = qsum n (fun i => if part i then 1 else 0) := by
+  induction n with
+  | zero => rfl
+  | succ m ih =>
+    rw [List.finRange_succ, List.filter_cons, List.filter_map]
+    simp only [qsum_succ]
+    cases h : part 0 <;> simp [ih, h, Function.comp_def, Nat.add_comm] <;> rfl
+
+/-- An authenticated excess leaf identifies an active key with a verifying signature
+and a missing quorum approval, when its roster agrees with the custody registry. -/
+theorem overclaimed_spine_euf_cma_forgery {n : Nat} (env : IvcExtractionContext n)
+    (H : IvcAlgebra.RO) (T : QromQueryTranscript) (dep : IsDeployedAggProfile env.profile)
+    (hc : hasQueryCollision T = false) (d : Nat) (s : IvcTreeStatement) (p : ProofAt env)
+    (custody : Nat → Fin n → Composed.Custody)
+    (over : rangeCap (honestShardParticipated custody s.message) s.lo (2^d) < s.totalQuorums)
+    (accept : verifyConcreteIvcRoot env.profile env.cfg H d s p = true) :
+    let cap := honestShardParticipated custody s.message
+    LocatedBad env H T d (overclaimedSpineNodeAt env H T d s p cap) ∨
+      ∃ sh, extractOverclaimedSpine env H T d s p cap = some sh ∧
+        s.lo ≤ sh.shardId ∧ sh.shardId < s.lo + 2^d ∧ cap sh.shardId < sh.quorumCount ∧
+        ValidQuorumSignatures env.profile H s.policyRegistryRoot s.message sh ∧
+        ((∀ v, sh.stmt.roster v = (custody sh.shardId v).state.pk) →
+          ∃ v, sh.stmt.bitmap.getLsbD v.val = true ∧
+            Composed.QuorumForgery (profileGeom env.profile) (custody sh.shardId v) s.message) := by
+  intro cap
+  rcases extractOverclaimedSpine_sound env H T dep hc d s p cap over accept with
+    ⟨sh,ex,lo,hi,gt,weight,valid⟩ | bad
+  · refine .inr ⟨sh,ex,lo,hi,gt,valid,fun keys => ?_⟩
+    let active (v : Fin n) := sh.stmt.bitmap.getLsbD v.val
+    let part (v : Fin n) := Composed.quorumParticipated (custody sh.shardId v) s.message
+    cases h : (List.finRange n).find? (fun v => active v && !part v) with
+    | some v =>
+      have hv : (active v && !part v) = true :=
+        List.find?_some (p := fun i => active i && !part i) h
+      obtain ⟨act,no⟩ := Bool.and_eq_true_iff.mp hv
+      obtain ⟨sig,_,ok⟩ := (Spec.ValidAggregateWitness_iff _ _ _).mp valid.2.2.2.2.2.1 v act
+      rw [keys v, valid.2.2.1] at ok
+      exact ⟨v,act,sig,ok,(by cases hp : part v <;> simp_all : part v = false)⟩
+    | none =>
+      have le : Composed.weight sh.stmt.bitmap ≤ cap sh.shardId := by
+        change qsum n (fun i => if active i then 1 else 0) ≤ ((List.finRange n).filter part).length
+        rw [count_participating]
+        apply qsum_le_qsum
+        intro v
+        have no := List.find?_eq_none.mp h v (List.mem_finRange v)
+        cases ha : active v <;> cases hp : part v <;> simp_all
+      rw [← weight] at le
+      exact False.elim (Nat.not_lt_of_ge le gt)
+  · exact .inl bad
+
+def spineBudget (d Q : Nat) : RatBound :=
+  RatBound.add (RatBound.scale (d+1)
+    (RatBound.add (sumcheckBudget Q) (scheduleQromError (zkHemV2ProdSched 23) Q)))
+    (merkleProfileQromBound .poseidon2Gl24 Q)
+
+theorem spineBudget_lt_130 {d Q : Nat} (hd : d ≤ 64) (hq : Q ≤ 2^64) :
+    RatBound.lt (spineBudget d Q) (RatBound.invPow2 130) := by
+  apply ratBound_lt_of_le_of_lt (b := spineBudget 64 (2^64))
+  · apply RatBound.add_le_add _ (merkleProfileQromBound_mono _ hq)
+    apply scale_le (Nat.succ_le_succ hd)
+    apply RatBound.add_le_add _ (scheduleQromError_mono _ hq)
+    apply scale_le _ (RatBound.le_refl _)
+    exact Nat.pow_le_pow_left (by omega) 2
+  · simp only [spineBudget, scheduleQromError_eq, WhirVerifierSchedule.roundBounds_eq,
+      zkHemV2ProdSched.public_eq_1, zkHemV2ProdStages.public_eq_8, stagesRoundBounds_cons,
+      stagesRoundBounds_nil, WhirStage.roundBounds_eq, WhirStage.foldBound_eq, WhirStage.oodBound_eq,
+      WhirStage.shiftBound_eq, binom2_eq]
+    decide +kernel
+
+theorem spineBudget_lt_128 {d Q : Nat} (hd : d ≤ 64) (hq : Q ≤ 2^64) :
+    RatBound.lt (spineBudget d Q) (RatBound.invPow2 128) :=
+  ratBound_lt_of_le_of_lt (b := RatBound.invPow2 130) (Nat.le_of_lt (spineBudget_lt_130 hd hq))
+    (by decide +kernel)
+
+instance (q : SpineSearch) (d : Nat) (s : IvcTreeStatement) : Decidable (q.applies d s) := by
+  cases q with
+  | target id => exact inferInstanceAs (Decidable (s.lo ≤ id ∧ id < s.lo + 2^d))
+  | excess cap => exact inferInstanceAs (Decidable (rangeCap cap s.lo (2^d) < s.totalQuorums))
+
+def spineEvents {n nv : Nat} (env : IvcExtractionContext nv) (d : Nat) (select : IvcTreeStatement → SpineSearch)
+    (H : Fin n → IvcAlgebra.RO) (run : Fin n → Child env × QromQueryTranscript) :
+    (Fin (d+1) → Fin n → Bool) × (Fin n → Bool) × (Fin n → Bool) :=
+  let path := fun w => walk env (H w) (run w).2 (select (run w).1.1) d (run w).1.1 (run w).1.2
+  let bad := fun (k : Fin (d+1)) (w : Fin n) => (path w).1[k.val]?.any fun (lv,s,p) =>
+      spineStepBad env (H w) (run w).2 lv s p
+  let collision := fun w => hasQueryCollision (run w).2
+  let fail := fun w => decide ((select (run w).1.1).applies d (run w).1.1) &&
+      verifyConcreteIvcRoot env.profile env.cfg (H w) d (run w).1.1 (run w).1.2 && (path w).2.isNone
+  (bad,collision,fail)
+
+/-- The games at position k inspect the node selected on that same sample.
+Instantiating their bounds with the production schedule requires a reduction
+for adaptive transcript extraction at the selected node. -/
+theorem multidepth_spine_qrom_extractor_sound {n nc na nv : Nat}
+    (env : IvcExtractionContext nv) (dep : IsDeployedAggProfile env.profile)
+    (d Q : Nat) (hn : 0 < n) (coins : Spec.CoinSplit n nc na)
+    (oracle : Fin nc → IvcAlgebra.RO) (prover : Fin na → OracleComp Spec.Bytes Spec.Bytes (Child env))
+    (queries : ∀ i, QueryBounded Q (prover i)) (select : IvcTreeStatement → SpineSearch)
+    (step coll : RatBound) :
+    let H := fun w => oracle (coins.chal w)
+    let run := fun w => recordedIvcRun (H w) (prover (coins.advc w))
+    let ev := spineEvents env d select H run
+    (∀ k, Spec.GameBound (Spec.FinGame.mk hn (ev.1 k)).winProb (toSpecRatBound step)) →
+    Spec.GameBound (Spec.FinGame.mk hn ev.2.1).winProb (toSpecRatBound coll) →
+    (∀ w, (run w).2.length ≤ Q) ∧ Spec.GameBound (Spec.FinGame.mk hn ev.2.2).winProb
+      (toSpecRatBound (RatBound.add (RatBound.scale (d+1) step) coll)) := by
+  intro H run ev each col
+  let bad := ev.1
+  let collision := ev.2.1
+  let fail := ev.2.2
+  let games := fun k => Spec.FinGame.mk hn (bad k)
+  refine ⟨fun w => (recordedIvcRun_spec _ _ (queries (coins.advc w))).1, ?_⟩
+  refine Spec.GameBound.trans (Spec.event_le_two_reductions (Spec.FinGame.mk hn fail)
+    (Spec.FinGame.mk hn (anySlotWins (d+1) games)) (Spec.FinGame.mk hn collision) ?_)
+    (Spec.RatBound.add_le_add (anySlotWins_bound hn _ games each) col)
+  intro w loss
+  cases hc : collision w with
+  | true => exact .inr hc
+  | false =>
+    obtain ⟨eligible,miss⟩ := Bool.and_eq_true_iff.mp loss
+    obtain ⟨app,accept⟩ := Bool.and_eq_true_iff.mp eligible
+    rcases walk_sound env (H w) (run w).2 dep hc _ d _ _ accept (of_decide_eq_true app) with
+      ⟨_,ok,_⟩ | ⟨k,hk,lv,s,p,atK,broken⟩
+    · change (walk env (H w) (run w).2 _ d _ _).2.isNone = true at miss
+      rw [ok] at miss
+      cases miss
+    · apply Or.inl (anySlotWins_of_win _ games w ⟨k,hk⟩ ?_)
+      change ((walk env (H w) (run w).2 _ d _ _).1[k]?).any _ = true
+      simp only [atK,Option.any_some,broken]
+
+theorem selected_spine_failure_lt_128 {n nc na nv : Nat}
+    (env : IvcExtractionContext nv) (dep : IsDeployedAggProfile env.profile)
+    (d Q : Nat) (hn : 0 < n) (coins : Spec.CoinSplit n nc na)
+    (oracle : Fin nc → IvcAlgebra.RO) (prover : Fin na → OracleComp Spec.Bytes Spec.Bytes (Child env))
+    (queries : ∀ i, QueryBounded Q (prover i)) (select : IvcTreeStatement → SpineSearch)
+    (hd : d ≤ 64) (hq : Q ≤ 2^64) :
+    let H := fun w => oracle (coins.chal w)
+    let run := fun w => recordedIvcRun (H w) (prover (coins.advc w))
+    let step := RatBound.add (sumcheckBudget Q) (scheduleQromError (zkHemV2ProdSched 23) Q)
+    let coll := merkleProfileQromBound .poseidon2Gl24 Q
+    let ev := spineEvents env d select H run
+    (∀ k, Spec.GameBound (Spec.FinGame.mk hn (ev.1 k)).winProb (toSpecRatBound step)) →
+    Spec.GameBound (Spec.FinGame.mk hn ev.2.1).winProb (toSpecRatBound coll) →
+    let win := (Spec.FinGame.mk hn ev.2.2).winProb
+    RatBound.lt ⟨win.num,win.den,win.den_pos⟩ (RatBound.invPow2 128) := by
+  intro H run step coll ev perPosition collision win
+  have measured := (multidepth_spine_qrom_extractor_sound env dep d Q hn coins oracle prover
+    queries select step coll perPosition collision).2
+  exact ratBound_lt_of_le_of_lt (b := spineBudget d Q) measured (spineBudget_lt_128 hd hq)
+
+#verify_constructive rangeCap_double walk_length_le extractLeafAlongSpine_sound
+  extractOverclaimedSpine_sound overclaimed_spine_euf_cma_forgery spineBudget_lt_130 spineBudget_lt_128
+  multidepth_spine_qrom_extractor_sound selected_spine_failure_lt_128
+#print axioms extractLeafAlongSpine_sound
+#print axioms overclaimed_spine_euf_cma_forgery
+#print axioms spineBudget_lt_128
+#print axioms multidepth_spine_qrom_extractor_sound
+
+theorem spine_public_sumchecks_qrom {d cardX anc Q : Nat} (hd : d ≤ 64) (hq : Q ≤ 2^64)
+    (A : Fin (d+1) → QuantumAdv cardX 320 anc Q)
+    (codec : Fin (d+1) → FsCodec PublicMessage 95 cardX) (claims : Fin (d+1) → RoundClaims)
+    (hg : ∀ i pre m, pre.length < 95 → ((claims i).honest pre m).length ≤ roundDegree pre.length + 1) :
+    RatBound.lt (RatBound.sumList ((List.finRange (d+1)).map
+      fun i => publicFsMass (A i) (codec i) (claims i))) (RatBound.invPow2 160) := by
+  apply ratBound_lt_of_le_of_lt _ (tree_sumcheck_budget_lt_160 (d := 20) (Nat.le_refl _) hq)
+  have each := RatBound.sumList_le_length_mul (bound := sumcheckBudget Q)
+    ((List.finRange (d+1)).map fun i => publicFsMass (A i) (codec i) (claims i))
+    (fun _ hm => by
+      obtain ⟨i,_,rfl⟩ := List.mem_map.mp hm
+      exact public_sumchecks_qrom (A i) (codec i) (claims i) (hg i))
+  rw [List.length_map,List.length_finRange] at each
+  exact RatBound.le_trans each (scale_le (Nat.le_trans (Nat.succ_le_succ hd)
+    (by decide : 65 ≤ treeNodeCount 20)) (RatBound.le_refl _))
+
+theorem wire_interval_depth_lt_64 {d lo hi : Nat} (wire : hi < 2^64) (interval : hi = lo + 2^d) :
+    d < 64 := by
+  apply Nat.lt_of_not_ge
+  intro h
+  have pow := Nat.pow_le_pow_right (by decide : 0 < 2) h
+  omega
+
+#verify_constructive spine_public_sumchecks_qrom wire_interval_depth_lt_64
+
+/-- A successful path requires the query for the complete encoded root witness.
+A table commitment and bounded public-round agreement alone do not supply this record. -/
+theorem successful_spine_requires_node_query {n : Nat} (env : IvcExtractionContext n)
+    (H : IvcAlgebra.RO) (T : QromQueryTranscript) (q : SpineSearch) (d : Nat)
+    (s : IvcTreeStatement) (p : ProofAt env) (sh : ExtractedLeafShard n)
+    (found : (walk env H T q d s p).2 = some sh) :
+    ∃ w : CommittedIvcNodeWitness env.cfg.params n,
+      let input := nodeCommitmentInput env.profile d s p.stage0Nonce (NodeWire.node w)
+      let output := encodeNatLeBytes 56 p.witnessCommitRoot.toNat
+      (input,output) ∈ T ∧ H input = output := by
+  cases h : extractIvcStepFromTranscript n env.profile H T d s p with
+  | some w => exact ⟨w,extractIvcStepFromTranscript_recorded _ _ _ _ _ _ _ h⟩
+  | none =>
+    cases d with
+    | zero =>
+      cases v : verifyConcreteIvcRoot env.profile env.cfg H 0 s p <;>
+        simp [walk,checkedLeaf,v,h] at found
+    | succ m =>
+      cases v : verifyConcreteIvcRoot env.profile env.cfg H (m+1) s p <;>
+        simp [walk,checkedChildren,v,h] at found
+
+open Depth2Cert in
+/-- A fixed-oracle control for the recorded game. Replaying the certified
+depth-two argument with an empty log makes the target extractor fail on the
+only sample, even though the numerical budget at zero queries clears 128 bits. -/
+theorem tooth_fixed_oracle_spine_replay :
+    ¬ Spec.GameBound (Spec.FinGame.mk (n := 1) (by decide) (fun _ =>
+      verifyConcreteIvcRoot fastEnv.profile fastEnv.cfg natXof56 2 rootStmt rootPi &&
+      (extractLeafAlongSpine fastEnv natXof56 [] 2 rootStmt rootPi 0).isNone)).winProb
+      (Spec.RatBound.invPow2 128) := by
+  have empty : checkedChildren fastEnv natXof56 [] 1 rootStmt rootPi = none := by
+    simp [checkedChildren,fast_root_accepts,extractIvcStepFromTranscript_nil]
+  have miss : extractLeafAlongSpine fastEnv natXof56 [] 2 rootStmt rootPi 0 = none := by
+    unfold extractLeafAlongSpine
+    rw [walk,empty]
+  rw [fast_root_accepts,miss]
+  change ¬ (1 * 2^128 ≤ 1 * 1)
+  decide
+
+#tooth_pair selected_spine_failure_lt_128 vs tooth_fixed_oracle_spine_replay
+#export_eqns rangeCap SpineSearch.applies SpineSearch.left SpineSearch.found
+#export_eqns leafChecks walk spineStepBad LocatedBad
+#export_eqns extractLeafAlongSpine spineNodeAt extractOverclaimedSpine overclaimedSpineNodeAt
+#export_eqns spineBudget spineEvents honestShardParticipated
+#verify_constructive successful_spine_requires_node_query
+
+#verify_constructive tree_public_sumchecks_qrom first_fold_tree_budget_gt_2_neg_120
+  checked_agreement_is_hit depth20_budget_interval tree_sumcheck_budget_lt_160
+  fieldPool_spec public_sumchecks_qrom sumcheck_absorbs_before_challenge tooth_row_width_admits_three_agreements
+  public_round_bad_challenges quadratic_bad_challenges
+  tooth_unabsorbed_public_row_sumcheck_forges_claim treeBudget_lt_128
+  tooth_dkt26_tree_budget_exceeds_target extract_outside_node_failures
+#tooth_pair quadratic_bad_challenges vs tooth_unabsorbed_public_row_sumcheck_forges_claim
+#tooth_pair treeBudget_lt_128 vs tooth_dkt26_tree_budget_exceeds_target
+#print axioms tree_public_sumchecks_qrom
+#print axioms first_fold_tree_budget_gt_2_neg_120
+#print axioms public_sumchecks_qrom
+#print axioms sumcheck_absorbs_before_challenge
+#print axioms public_round_bad_challenges
+#print axioms tooth_row_width_admits_three_agreements
+#print axioms quadratic_bad_challenges
+#print axioms tooth_unabsorbed_public_row_sumcheck_forges_claim
+#print axioms treeBudget_lt_128
+#print axioms tooth_dkt26_tree_budget_exceeds_target
+#print axioms extract_outside_node_failures
+
+end Qsag.RecursiveIvcPublicRowQrom
+end
