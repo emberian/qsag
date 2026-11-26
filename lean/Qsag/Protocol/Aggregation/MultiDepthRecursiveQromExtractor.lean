@@ -17,6 +17,37 @@ structure IvcExtractionContext (_committeeSize : Nat) where
   profile : AggSigProfile
   cfg : ConcreteIvcConfig
 
+/-- Recover the R1CS node witness from authenticated stage-zero codeword reads.
+    Check exactly the public prefix and arithmetic rows used by the prover.
+    The prefix includes the statement, accumulator and application commitment. -/
+private def recoverIvcCells {n : Nat} (env : IvcExtractionContext n) (ro : IvcAlgebra.RO)
+    (log : QromQueryTranscript) (stmt : IvcTreeStatement)
+    (pi : FixedShapeWhirProof env.cfg.params) : Option (Array Goldilocks) := do
+  let cs ← IvcAlgebra.recoverNodeCoefficients pi (log.filter fun (x,y) => ro x == y)
+  let k := env.cfg.params.logCells
+  let arg ← IvcAlgebra.parseArgument k pi.algebraWords
+  let digest := ro (encodeMultiFrame [[73,86,67,45,77,65,84,82,73,88,45,80,79,73,78,84],arg.acc.encode])
+  guard (digest.length = 56)
+  let inputs ← IvcAlgebra.fixedPublicCells env.cfg (IvcAlgebra.argumentPublicFrame stmt digest pi.witnessCommitRoot)
+  let z := (Array.range (2^k)).map (WhirAssignmentRecovery.vertex cs)
+  guard (z.toList.take (1 + inputs.length) = Goldilocks.one :: inputs)
+  return z
+
+def recoverIvcAssignment {n : Nat} (env : IvcExtractionContext n) (ro : IvcAlgebra.RO)
+    (log : QromQueryTranscript) (d : Nat) (stmt : IvcTreeStatement)
+    (pi : FixedShapeWhirProof env.cfg.params) : Option (Array Goldilocks) :=
+  (recoverIvcCells env ro log stmt pi).filter fun z =>
+    (IvcAlgebra.checkedRowTables env.cfg d (z.map QuinticGoldilocks.ofBase)).isSome
+
+theorem recovered_assignment_satisfies_rows {n : Nat} (env : IvcExtractionContext n)
+    (ro : IvcAlgebra.RO) (log : QromQueryTranscript) (d : Nat) (stmt : IvcTreeStatement)
+    (pi : FixedShapeWhirProof env.cfg.params) (z : Array Goldilocks)
+    (success : recoverIvcAssignment env ro log d stmt pi = some z) :
+    (IvcAlgebra.checkedRowTables env.cfg d (z.map QuinticGoldilocks.ofBase)).isSome = true := by
+  exact (Option.filter_eq_some_iff.mp success).2
+
+#verify_constructive recovered_assignment_satisfies_rows
+
 /-- Every active validator in an extracted leaf shard has a valid native signature (`XMSS` or `Corduroy`),
     `0 < quorumCount`, and `threshold ≤ Composed.weight stmt.bitmap`. -/
 @[expose] def ValidQuorumSignatures {nVal : Nat} (profile : AggSigProfile)
@@ -560,7 +591,7 @@ theorem multidepth_recursive_euf_cma_reduction {nVal : Nat}
       | true => exact .inr rfl
     · exact .inr (.inl hBad)
 
-theorem multidepth_recursive_qrom_lt_2_neg_128
+theorem multidepth_recursive_budget_lt_128
     (prof : WhirCommitmentProfile) {d Q : Nat} (hd : d ≤ 16) (hQ : Q ≤ 2 ^ 64) :
     RatBound.lt
       (RatBound.add (RatBound.scale (treeNodeCount d) (scheduleQromError zkHemV2RecursiveMarginSched Q))
@@ -605,7 +636,7 @@ theorem inhabited_multidepth_lt_128 :
   ⟨.poseidon2Gl24,16,2^64,Nat.le_refl _,Nat.le_refl _,(merkleProfileQromBound .poseidon2Gl24 (2^64)).h_pos⟩
 
 #verify_constructive activeXmssLeaf_validQuorum inhabited_multidepth_lt_128
-#verify_inhabited multidepth_recursive_qrom_lt_2_neg_128 inhabited_multidepth_lt_128
+#verify_inhabited multidepth_recursive_budget_lt_128 inhabited_multidepth_lt_128
 theorem parentStitchCheck_verifies_both {n : Nat} (env : IvcExtractionContext n)
     (ro : Spec.Bytes → Spec.Bytes) (d : Nat) (s l r : IvcTreeStatement)
     (pl pr parent : FixedShapeWhirProof env.cfg.params) (fold : List Goldilocks)
@@ -664,7 +695,7 @@ theorem tooth_child_boundary_bit_flip :
 
 #verify_constructive treeNodeCount_zero treeNodeCount_succ extractMultiDepthQrom_inductive_sound
   multidepth_recursive_refines_idealAggregate multidepth_recursive_euf_cma_reduction
-  multidepth_recursive_qrom_lt_2_neg_128
+  multidepth_recursive_budget_lt_128
 
 #tooth_pair ivcRootProof_byteSize_independent_of_depth vs tooth_unbounded_proof_violates_constant_openingByteLen
 #tooth_pair poseidon2W24_twoChildStep_fits_2pow20_rows vs tooth_poseidon2_w12_twoChildStep_exceeds_2pow20_rows
@@ -867,7 +898,7 @@ def realDepth2AcceptsAndExtracts : Bool :=
     verifyConcreteIvcRoot realDepth2Env.profile realDepth2Env.cfg ivcFastXof56 2 s p &&
     (extractMultiDepthQrom realDepth2Env ivcFastXof56 2 t s p).any realDepth2Coverage
 
-theorem realDepth2AcceptsAndExtracts_spec (checked : realDepth2AcceptsAndExtracts = true) :
+theorem realDepth2AcceptsAndExtracts_of_check (checked : realDepth2AcceptsAndExtracts = true) :
     ∃ shards, realDepth2Run = some (realDepth2Stmt, realDepth2IvcProof, realDepth2Transcript) ∧
       hasQueryCollision realDepth2Transcript = false ∧
       verifyConcreteIvcRoot realDepth2Env.profile realDepth2Env.cfg ivcFastXof56
@@ -898,7 +929,7 @@ theorem realDepth2AcceptsAndExtracts_spec (checked : realDepth2AcceptsAndExtract
       exact ⟨by simpa using nc, verified, he, len, ids, total,
         extractedQuorums_valid _ (.inl rfl) _ _ _ _ _ _ he⟩
 
-#verify_constructive realDepth2AcceptsAndExtracts_spec
+#verify_constructive realDepth2AcceptsAndExtracts_of_check
 
 end Qsag.MultiDepthQrom
 end

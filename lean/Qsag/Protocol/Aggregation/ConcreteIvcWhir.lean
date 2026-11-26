@@ -1,5 +1,6 @@
 module
 public import Qsag.Protocol.Aggregation.ConcreteIvcSumcheck
+public import Qsag.Protocol.Aggregation.WhirAssignmentRecovery
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -195,6 +196,36 @@ structure WhirStage where
     vars := vars - g.stepVars
   checkOpt (vars == params.earlyStopVars)
   return result.reverse
+
+/-- Follow a recorded authentication path from the stage-zero root down to a
+    leaf. Each parent must have the verifier's canonical input, level and hash. -/
+private def recordedChild (log : List (Spec.Bytes × Spec.Bytes)) (idx : Nat) :
+    Nat → Spec.Bytes → Option Spec.Bytes
+  | 0, digest => some digest
+  | level+1, digest => do
+    let child ← log.findSome? fun (input,out) => do
+      guard (out = digest)
+      let [_,_,_,left,right] ← decodeMultiFrameBytes input | none
+      guard (left.length = 56 ∧ right.length = 56 ∧ input = fiberParent 0 level left right)
+      return if idx.testBit level then right else left
+    recordedChild log idx level child
+
+/-- Recover the node's table from the verifier proof and recording alone. Read
+    the base values after the four salt and five mask words in each stage-zero
+    leaf. Authenticate them under the transmitted nonce and first-stage root. -/
+def recoverNodeCoefficients {p : IvcWhirParams} (pi : FixedShapeWhirProof p)
+    (log : List (Spec.Bytes × Spec.Bytes)) : Option (List Goldilocks) := do
+  let st ← (← prepareStages pi).head?
+  let root := NodeWire.digest st.data.root
+  let fibers := log.filterMap fun (input,out) => do
+    let [_,_,indexBytes,_,payload] ← decodeMultiFrameBytes input | none
+    let (i,[]) ← Aggregation.decodeLeb128 indexBytes | none
+    guard (i < 2^st.height)
+    let ws ← NodeWire.readWords payload
+    guard (ws.length = st.geom.fiberLen ∧ input = fiberLeaf 0 i pi.stage0Nonce ws)
+    guard (recordedChild log i st.height root = some out)
+    return (i,ws.drop 9)
+  WhirAssignmentRecovery.decode p.logCells st.height st.geom.stepVars fibers
 
 @[expose] def tensorEval (coeffs : List E) (point : List E) : Option E := do
   let mut terms := coeffs.take (2 ^ point.length)

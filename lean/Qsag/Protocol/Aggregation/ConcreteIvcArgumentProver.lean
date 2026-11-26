@@ -65,6 +65,26 @@ def R1csArgument.encode (p : R1csArgument) : List Goldilocks :=
   (p.acc.point ++ [p.acc.value] ++ p.row.flatten ++ [p.a,p.b,p.c] ++ p.col.flatten ++
     [p.matrixEval,p.zEval]).flatMap limbs
 
+/-- Compute all three sparse matrix products and check each multiplication
+    or seventh-power row of the leaf or step circuit. -/
+def checkedRowTables (cfg : ConcreteIvcConfig) (d : Nat) (table : Array E) :
+    Option (Array (Array E)) := do
+  let n := 2^cfg.params.logCells
+  guard (table.size = n)
+  let mut abc := Array.replicate 3 (Array.replicate n QuinticGoldilocks.zero)
+  for entry in cfg.matrixEntries do
+    guard (decide (entry.row < n ∧ entry.col < n))
+    if entry.step == (d != 0) then
+      abc := abc.modify entry.plane.val (fun r => r.modify entry.row
+        (fun a => a +ₑ .ofBase entry.coeff *ₑ table[entry.col]!))
+  let sbox := if d == 0 then cfg.numSboxLeaf else cfg.numSboxStep
+  guard (decide (sbox ≤ n))
+  for i in [:n] do
+    let a := abc[0]![i]!
+    let aa := a *ₑ a
+    guard ((if i < sbox then aa *ₑ aa *ₑ aa *ₑ a else a *ₑ abc[1]![i]!) == abc[2]![i]!)
+  return abc
+
 /-- Prove satisfiability of the verifier's numeric matrices for the supplied private cells.
 The prover computes all public cells and verifies every row before committing its assignment. -/
 def proveR1csArgument (profile : AggSigProfile) (cfg : ConcreteIvcConfig) (ro : RO)
@@ -83,18 +103,8 @@ def proveR1csArgument (profile : AggSigProfile) (cfg : ConcreteIvcConfig) (ro : 
   guard (decide (cells.length ≤ n))
   let z := (cells ++ List.replicate (n - cells.length) Goldilocks.zero).toArray
   let table := z.map QuinticGoldilocks.ofBase
-  let mut abc := Array.replicate 3 (Array.replicate n QuinticGoldilocks.zero)
-  for entry in cfg.matrixEntries do
-    guard (decide (entry.row < n ∧ entry.col < n))
-    if entry.step == (d != 0) then
-      abc := abc.modify entry.plane.val (fun r => r.modify entry.row
-        (fun a => a +ₑ .ofBase entry.coeff *ₑ table[entry.col]!))
+  let abc ← liftM (m := Option) (checkedRowTables cfg d table)
   let sbox := if d == 0 then cfg.numSboxLeaf else cfg.numSboxStep
-  guard (decide (sbox ≤ n))
-  for i in [:n] do
-    let a := abc[0]![i]!
-    let aa := a *ₑ a
-    guard ((if i < sbox then aa *ₑ aa *ₑ aa *ₑ a else a *ₑ abc[1]![i]!) == abc[2]![i]!)
   -- "IVC-PROVER-NONCE"
   let nonceHash ← askHash ro (encodeMultiFrame [[73, 86, 67, 45, 80, 82, 79, 86, 69, 82, 45, 78, 79, 78, 67, 69], seed])
   guard (nonceHash.length == 56)
