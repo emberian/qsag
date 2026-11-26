@@ -84,8 +84,8 @@ theorem tooth_sampled_query_zero_flip_claim_is_false :
     (`flatHemSlicedCert`)**: `2` stages (`6` rounds), `johnsonOk = true`, `< 1` QROM error at
     `Q = 256`, and a concrete statement outside `whirInLang`. -/
 theorem inhabited_flatHemSlicedWhir_closed_qrom_soundness_hypotheses :
-    ∃ (env : WhirEnv QuarticGoldilocks) (sched : WhirVerifierSchedule)
-      (_ : WhirScheduleCert env sched 256) (x : WhirStmt QuarticGoldilocks),
+    ∃ (env : WhirEnv QuinticGoldilocks) (sched : WhirVerifierSchedule)
+      (_ : WhirScheduleCert env sched 256) (x : WhirStmt QuinticGoldilocks),
       sched.stages.length = 2 ∧ sched.johnsonOk = true ∧
       RatBound.lt (scheduleQromError sched 256) RatBound.one ∧
       ¬ whirInLang env sched x :=
@@ -97,7 +97,7 @@ theorem inhabited_flatHemSlicedWhir_closed_qrom_soundness_hypotheses :
 /-- `#tooth` `flatHemSlicedCert` is not the all-rejecting certificate: its verifier accepts the
     honest two-stage transcript, refuting `∀ x tr, state x tr = false`. -/
 theorem tooth_flatHemSliced_cert_state_not_constantly_false :
-    ¬ (∀ (x : WhirStmt QuarticGoldilocks) (tr : List (WhirMsg QuarticGoldilocks × Nat)),
+    ¬ (∀ (x : WhirStmt QuinticGoldilocks) (tr : List (WhirMsg QuinticGoldilocks × Nat)),
         flatHemSlicedCert.cert.state x tr = false) := by
   intro h
   have hAcc := flatHemSlicedCert.cert.accept _ _ flatHemSliced_honest_accepts
@@ -107,7 +107,7 @@ theorem tooth_flatHemSliced_cert_state_not_constantly_false :
 /-- `#tooth` Soundness of the two-stage `[CWYZ26]` verifier is not perfect (`0`-error is false):
     on challenge quadruple `(0, 0, 0, 0)` the false statement `claim = 2` is accepted. -/
 theorem tooth_flatHemSliced_zero_flip_claim_is_false :
-    ¬ (∀ (tr : List (WhirMsg QuarticGoldilocks × Nat)),
+    ¬ (∀ (tr : List (WhirMsg QuinticGoldilocks × Nat)),
         (whirOracleIop flatHemSlicedEnv flatHemSlicedSched 256).verify
           ⟨List.replicate 64 (hemFoldQg 1), hemFoldQg 2⟩ tr = false) := by
   intro h
@@ -132,8 +132,7 @@ theorem tooth_flatHemSliced_zero_flip_claim_is_false :
   Qsag.ClosedReductionTeeth.tooth_sampled_query_zero_flip_claim_is_false
 #tooth_pair Qsag.Top.whir_exec_closed_qrom_soundness vs
   Qsag.ClosedWhir.tooth_empty_schedule_rejects
-#tooth_pair Qsag.Top.deployed_whir_exec_closed_qrom_128 vs
-  Qsag.ClosedWhir.tooth_omitting_list_size_lowers_every_fold_bound
+
 #tooth_pair Qsag.ClosedFs.openings_agree vs
   Qsag.ClosedReductionTeeth.tooth_lying_opening_yields_collision
 

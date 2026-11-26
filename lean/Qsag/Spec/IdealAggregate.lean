@@ -933,23 +933,49 @@ structure AggregateSubmission (PK Proof : Type) (w : Nat) where
   proof : Proof
   log : List (Bytes × Bytes)
 
-/-- Concrete succinct verifier machine guarded outside the explicitly bounded bad events
-    (`aggregateFailure` and `transcriptCollision`). -/
-def verifiedAggregateMachine {PK Sig Proof : Type} {w : Nat}
-    (verifySingle : PK → Bytes → Sig → Bool)
+/-- The public verifier receives only the statement and its wire proof. -/
+def verifiedAggregateMachine {PK Proof : Type} {w : Nat}
     (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
-    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
     (H : Bytes → Bytes) :
-    Machine (VerifiedAggregateState PK w) (AggregateSubmission PK Proof w) Unit where
+    Machine (VerifiedAggregateState PK w) (AggregateStatement PK w × Proof) Unit where
   Init s := s.accepted = [] ∧ s.rejectedCount = 0
   step s sub :=
-    if verifyAgg H sub.stmt sub.proof &&
-       !aggregateFailure verifySingle verifyAgg extract H ((sub.stmt, sub.proof), sub.log) &&
-       !transcriptCollision sub.log then
-      some ({ s with accepted := s.accepted ++ [sub.stmt] }, ())
-    else
-      none
-  errStep s _ := { s with rejectedCount := s.rejectedCount + 1 }
+    if verifyAgg H sub.1 sub.2 then some ({s with accepted := s.accepted ++ [sub.1]}, ())
+    else none
+  errStep s _ := {s with rejectedCount := s.rejectedCount + 1}
+
+/-- Concrete acceptance with ideal rejection on the same recorded run. Only the
+    extractor receives the log. A collision stays in the event if extraction fails. -/
+def aggregateRefinementGame {PK Proof Sig : Type} {w n : Nat} (hn : 0 < n)
+    (single : PK → Bytes → Sig → Bool)
+    (verify : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (Q : Nat) (H : Fin n → Bytes → Bytes)
+    (prover : Fin n → Code byteOracleIface (AggregateStatement PK w × Proof)) : FinGame n :=
+  ⟨hn, fun ω =>
+    let r := aggregateRun (H ω) Q (prover ω)
+    ((verifiedAggregateMachine verify (H ω)).step ⟨[],0⟩ r.1).isSome &&
+      ((idealAggregateMachine single).step [] (r.1.1, extract r.2 r.1.1 r.1.2)).isNone⟩
+
+theorem aggregateRefinementGame_win {PK Proof Sig : Type} {w n : Nat} (hn : 0 < n)
+    (single : PK → Bytes → Sig → Bool)
+    (verify : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (Q : Nat) (H : Fin n → Bytes → Bytes)
+    (prover : Fin n → Code byteOracleIface (AggregateStatement PK w × Proof)) (ω : Fin n) :
+    let r := aggregateRun (H ω) Q (prover ω)
+    (aggregateRefinementGame hn single verify extract Q H prover).win ω = true ↔
+      verify (H ω) r.1.1 r.1.2 = true ∧ ¬ ValidAggregateWitness single r.1.1 (extract r.2 r.1.1 r.1.2) := by
+  intro r
+  have iffCheck : aggregateWitnessCheck single r.1.1 (extract r.2 r.1.1 r.1.2) = true ↔
+      ValidAggregateWitness single r.1.1 (extract r.2 r.1.1 r.1.2) :=
+    ⟨aggregateWitnessCheck_sound _ _ _, aggregateWitnessCheck_complete _ _ _⟩
+  rw [← iffCheck]
+  change (((verifiedAggregateMachine verify (H ω)).step ⟨[],0⟩ r.1).isSome &&
+    ((idealAggregateMachine single).step [] (r.1.1, extract r.2 r.1.1 r.1.2)).isNone) = true ↔ _
+  cases hv : verify (H ω) r.1.1 r.1.2 <;>
+    cases hc : aggregateWitnessCheck single r.1.1 (extract r.2 r.1.1 r.1.2) <;>
+    simp [verifiedAggregateMachine, idealAggregateMachine, hv, hc]
 
 /-- Visibility projection extracting `(stmt, extract log stmt proof)` for `idealAggregateMachine`. -/
 def verifiedAggregateVisIn {PK Sig Proof : Type} {w : Nat}
@@ -957,71 +983,6 @@ def verifiedAggregateVisIn {PK Sig Proof : Type} {w : Nat}
     (sub : AggregateSubmission PK Proof w) :
     Option (AggregateStatement PK w × (Fin w → Option Sig)) :=
   some (sub.stmt, extract sub.log sub.stmt sub.proof)
-
-/-- **Forward Simulation (`verifiedAggregate_dataRefines_ideal`)**:
-    Outside the bounded knowledge-extraction and transcript-collision bad events, any concrete
-    aggregate verifier `verifyAgg` refines `idealAggregateMachine verifySingle` via `DataRefines`
-    with non-identity state abstraction `VerifiedAggregateState.accepted`. -/
-def verifiedAggregate_dataRefines_ideal {PK Sig Proof : Type} {w : Nat}
-    (verifySingle : PK → Bytes → Sig → Bool)
-    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
-    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
-    (H : Bytes → Bytes) :
-    DataRefines
-      (verifiedAggregateMachine verifySingle verifyAgg extract H)
-      (idealAggregateMachine verifySingle)
-      (verifiedAggregateVisIn extract)
-      id where
-  Rel c a := c.accepted = a
-  absInit c₀ := c₀.accepted
-  init_ok {c₀} hInit := ⟨hInit.1, rfl⟩
-  sim_visible {c c' a sub out j} hRel hStepC hVis := by
-    subst hRel
-    injection hVis with hJ
-    subst hJ
-    dsimp only [verifiedAggregateMachine] at hStepC
-    cases hVer : verifyAgg H sub.stmt sub.proof with
-    | false => rw [hVer] at hStepC; cases hStepC
-    | true =>
-      cases hW : aggregateWitnessCheck verifySingle sub.stmt (extract sub.log sub.stmt sub.proof) with
-      | true =>
-        cases hColl : transcriptCollision sub.log with
-        | true =>
-          have hGuard :
-              (true && !aggregateFailure verifySingle verifyAgg extract H
-                ((sub.stmt, sub.proof), sub.log) && !true) = false := by
-            simp
-          rw [hVer, hColl] at hStepC
-          simp at hStepC
-        | false =>
-          have hFailFalse :
-              aggregateFailure verifySingle verifyAgg extract H ((sub.stmt, sub.proof), sub.log) = false := by
-            unfold aggregateFailure
-            rw [hVer, hW, hColl]
-            rfl
-          rw [hVer, hFailFalse, hColl] at hStepC
-          injection hStepC with hPair
-          obtain ⟨hC, hO⟩ := Prod.mk.inj hPair
-          subst hC; subst hO
-          refine ⟨c.accepted ++ [sub.stmt], ?_, rfl⟩
-          dsimp only [idealAggregateMachine]
-          rw [hW]
-          rfl
-      | false =>
-        cases hColl : transcriptCollision sub.log with
-        | true =>
-          rw [hVer, hColl] at hStepC
-          simp at hStepC
-        | false =>
-          have hFailTrue :
-              aggregateFailure verifySingle verifyAgg extract H ((sub.stmt, sub.proof), sub.log) = true := by
-            unfold aggregateFailure
-            rw [hVer, hW, hColl]
-            rfl
-          rw [hVer, hFailTrue] at hStepC
-          cases hStepC
-  sim_internal {_ _ _ _ _} _ _ hVis := by cases hVis
-  sim_reject {c a _} hRel _ := hRel
 
 /-- Unfiltered concrete aggregate verifier machine running `verifyAgg H sub.stmt sub.proof` directly. -/
 def rawAggregateVerifierMachine {PK Proof : Type} {w : Nat}

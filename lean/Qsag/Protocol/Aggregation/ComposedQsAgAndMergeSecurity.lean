@@ -32,88 +32,8 @@ def SigningMode.message (m : SigningMode) (v : Nat) : List UInt8 :=
   match m with
   | .shared msg => msg
   | .perSigner msgs => msgs.getD v []
-structure Header where
-  committeeRoot : List UInt8
-  profile : AggSigProfile
-  regime : Qsag.WhirSecurityRegime
-  mode : SigningMode
-  deriving DecidableEq
-structure Shard (n : Nat) where
-  header : Header
-  bitmap : BitVec n
-  /-- Bytes supplied to the leaf verifier; no plaintext signature openings are assumed. -/
-  proof : List UInt8
-  numVars : Nat
-  schedule : WhirSchedule
-inductive MergeTree (n : Nat) where
-  | leaf (shard : Shard n)
-  | branch (left right : MergeTree n) (mergedBitmap : BitVec n)
-def MergeTree.bitmap {n : Nat} : MergeTree n → BitVec n
-  | .leaf s => s.bitmap
-  | .branch _ _ b => b
-def MergeTree.leaves {n : Nat} : MergeTree n → List (Shard n)
-  | .leaf s => [s]
-  | .branch l r _ => l.leaves ++ r.leaves
 def firstActive {n : Nat} (b : BitVec n) : Nat :=
   ((List.range n).find? b.getLsbD).getD n
-/-- The budget counts branches, as in Rust; a leaf is permitted at remaining depth zero.
-Header equality pins both supported regimes; classical acceptance is never promoted to QROM. -/
-@[expose] def checkTree {n : Nat} (root : Header) (verify : Shard n → Bool) :
-    Nat → MergeTree n → Bool
-  | _, .leaf s => decide (s.header = root) &&
-    decide (2 ≤ s.numVars ∧ s.numVars ≤ 28 ∧ s.schedule = root.regime.schedule s.numVars) &&
-    decide (0 < weight s.bitmap) && verify s
-  | 0, .branch _ _ _ => false
-  | d + 1, .branch l r b =>
-    decide (l.bitmap &&& r.bitmap = 0#n) && decide (b = l.bitmap ||| r.bitmap) &&
-    decide (firstActive l.bitmap < firstActive r.bitmap) &&
-    checkTree root verify d l && checkTree root verify d r
-/-- Every validator has exactly one leaf occurrence, and all leaf headers and proofs verify.
-`countP = 1` counts occurrences, including repeated identical leaf objects. -/
-theorem binary_merge_sound {n : Nat} (root : Header) (verify : Shard n → Bool)
-    (tree : MergeTree n) (d : Nat) (h : checkTree root verify d tree = true) :
-    weight tree.bitmap = (tree.leaves.map fun s => weight s.bitmap).sum ∧
-    (∀ v : Nat, (tree.leaves.countP fun s => s.bitmap.getLsbD v) =
-      if tree.bitmap.getLsbD v then 1 else 0) ∧
-    (∀ s ∈ tree.leaves, s.header = root ∧ verify s = true ∧
-      2 ≤ s.numVars ∧ s.numVars ≤ 28 ∧ s.schedule = root.regime.schedule s.numVars) ∧
-    tree.leaves.length ≤ 2 ^ d := by
-  induction tree generalizing d with
-  | leaf s =>
-    simp only [checkTree, Bool.and_eq_true, decide_eq_true_eq] at h
-    refine ⟨by simp [MergeTree.bitmap, MergeTree.leaves], ?_, ?_, ?_⟩
-    · intro v; change (if s.bitmap.getLsbD v then 1 else 0) = _; rfl
-    · intro a ha; simp only [MergeTree.leaves, List.mem_singleton] at ha
-      subst a; exact ⟨h.1.1.1, h.2, h.1.1.2⟩
-    · simpa [MergeTree.leaves] using Nat.one_le_two_pow
-  | branch l r b il ir =>
-    cases d with
-    | zero => cases h
-    | succ d =>
-      simp only [checkTree, Bool.and_eq_true, decide_eq_true_eq] at h
-      obtain ⟨⟨⟨⟨hd, hb⟩, _⟩, hl⟩, hr⟩ := h
-      obtain ⟨wl, cl, sl, dl⟩ := il d hl
-      obtain ⟨wr, cr, sr, dr⟩ := ir d hr
-      refine ⟨?_, ?_, ?_, ?_⟩
-      · change weight b = _
-        rw [hb, weight_union _ _ hd, wl, wr]
-        simp only [MergeTree.leaves, List.map_append, List.sum_append]
-      · intro v
-        have hz := congrArg (fun x : BitVec n => x.getLsbD v) hd
-        simp only [BitVec.getLsbD_and, BitVec.getLsbD_zero] at hz
-        change List.countP _ (l.leaves ++ r.leaves) = if b.getLsbD v then 1 else 0
-        rw [List.countP_append, cl, cr, hb, BitVec.getLsbD_or]
-        cases ha : l.bitmap.getLsbD v <;> cases hb : r.bitmap.getLsbD v <;>
-          simp_all
-      · intro s hs
-        rcases List.mem_append.mp hs with hs | hs
-        · exact sl s hs
-        · exact sr s hs
-      · simp only [MergeTree.leaves, List.length_append, Nat.pow_succ]
-        omega
-theorem depth_sixteen {n : Nat} (root : Header) (verify : Shard n → Bool)
-    (tree : MergeTree n) (h : checkTree root verify 16 tree = true) :
-    tree.leaves.length ≤ 65536 := (binary_merge_sound root verify tree 16 h).2.2.2
 /-- Honest approvals are log entries bound to the same epoch and native message. -/
 structure Custody where
   state : IdealTsigState AggValidatorPk (List UInt8)
@@ -145,31 +65,6 @@ bad event. Its probability is a cryptographic premise, not a consequence of sign
 @[expose] def QuorumForgery (geom : AggSigGeometry) (q : Custody) (msg : List UInt8) : Prop :=
   ∃ sig : AggNativeSignature,
     verifyAggNativeSig geom q.state.pk msg sig = true ∧ quorumParticipated q msg = false
-/-- The outer adapter must be discharged by WHIR/Merkle extraction for the deployed AIR.
-It binds the accepted bytes to the enrolled keys and exact per-validator messages. -/
-structure ExtractionBoundary {n : Nat} (geom : AggSigGeometry)
-    (custody : Fin n → Custody) (verify : Shard n → Bool) (bad : Shard n → Prop) : Prop where
-  extract : ∀ s, verify s = true → bad s ∨
-    ∀ v : Fin n, s.bitmap.getLsbD v.val = true →
-      ∃ sig, verifyAggNativeSig geom (custody v).state.pk
-        (s.header.mode.message v.val) sig = true
-theorem quorum_aggregation_reduction {n : Nat} (geom : AggSigGeometry)
-    (custody : Fin n → Custody) (verify : Shard n → Bool) (bad : Shard n → Prop)
-    (boundary : ExtractionBoundary geom custody verify bad) (s : Shard n)
-    (accepted : verify s = true) (v : Fin n) (active : s.bitmap.getLsbD v.val = true) :
-    bad s ∨ QuorumForgery geom (custody v) (s.header.mode.message v.val) ∨
-    (1 ≤ (custody v).state.threshold - (custody v).state.corruptParties.length ∧
-     (custody v).state.threshold - (custody v).state.corruptParties.length ≤
-       (custody v).honestApprovers.length ∧
-     (custody v).honestApprovers.Nodup ∧
-     ∀ p ∈ (custody v).honestApprovers, p ∉ (custody v).state.corruptParties ∧
-       (custody v).approvalLog p (custody v).epoch (s.header.mode.message v.val) = true) := by
-  rcases boundary.extract s accepted with hb | hs
-  · exact .inl hb
-  · obtain ⟨sig, hv⟩ := hs v active
-    cases hq : quorumParticipated (custody v) (s.header.mode.message v.val) with
-    | false => exact .inr (.inl ⟨sig, hv, hq⟩)
-    | true => exact .inr (.inr (honest_threshold _ _ hq))
 /-- Exact finite-tape union accounting. Divide all terms by the common tape count to obtain
 `ε_total ≤ ε_whir_qrom + Σ_{v∈B} ε_quorum_v`; no independence is needed. -/
 theorem composed_advantage_bound {tapes validators : Nat}
@@ -539,104 +434,10 @@ theorem retained_shares_determine_secret (inv : F → F)
     rw [hs, ht, List.mem_singleton] at pm qm
     exact ⟨pm.trans qm.symm, congrArg (fun p => RoundPoly.evalCoeffs p zero) (pm.trans qm.symm)⟩
 end Epochs
-/-- Composed finite-tape advantage from the extraction adapter, with no numerical security
-literals. The forgery event is tested on the concrete native verifier and approval log. -/
-theorem quorum_advantage_from_extraction {n tapes : Nat} (geom : AggSigGeometry)
-    (custody : Fin n → Custody) (verify : Shard n → Bool) (outer : Shard n → Bool)
-    (boundary : ExtractionBoundary geom custody verify (fun s => outer s = true))
-    (shards : Fin tapes → Shard n) (attack : Fin tapes → Bool) (B : BitVec n)
-    (forgery : Fin tapes → Fin n → Bool)
-    (game : ∀ ω, attack ω = true → verify (shards ω) = true ∧
-      ∃ v : Fin n, B.getLsbD v.val = true ∧ (shards ω).bitmap.getLsbD v.val = true ∧
-        quorumParticipated (custody v) ((shards ω).header.mode.message v.val) = false)
-    (detect : ∀ ω v, QuorumForgery geom (custody v)
-      ((shards ω).header.mode.message v.val) → forgery ω v = true) :
-    (qsum tapes fun ω => if attack ω then 1 else 0) ≤
-    (qsum tapes fun ω => if outer (shards ω) then 1 else 0) +
-    qsum n (fun v => if B.getLsbD v.val then
-      qsum tapes (fun ω => if forgery ω v then 1 else 0) else 0) := by
-  apply composed_advantage_bound
-  intro ω hw
-  obtain ⟨ha, v, hb, hv, hq⟩ := game ω hw
-  rcases boundary.extract (shards ω) ha with ho | hs
-  · exact .inl ho
-  · obtain ⟨sig, hsig⟩ := hs v hv
-    exact .inr ⟨v, hb, detect ω v ⟨sig, hsig, hq⟩⟩
-/-- The bad event is a union over independently verified leaf batches, not over internal
-branches. This also applies when leaf proofs and adversary coins are arbitrarily correlated. -/
-def treeBad {n : Nat} (bad : Shard n → Bool) : MergeTree n → Bool
-  | .leaf s => bad s
-  | .branch l r _ => treeBad bad l || treeBad bad r
-theorem tree_union_bound {n tapes : Nat} (bad : Fin tapes → Shard n → Bool)
-    (tree : MergeTree n) :
-    (qsum tapes fun ω => if treeBad (bad ω) tree then 1 else 0) ≤
-      (tree.leaves.map fun s => qsum tapes fun ω => if bad ω s then 1 else 0).sum := by
-  induction tree with
-  | leaf s =>
-    change (qsum tapes fun ω => if bad ω s then 1 else 0) ≤ _
-    simp only [MergeTree.leaves, List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, Nat.add_zero]
-    exact Nat.le_refl _
-  | branch l r b il ir =>
-    have h := qsum_indicator_or_le (fun ω => treeBad (bad ω) l)
-      (fun ω => treeBad (bad ω) r)
-    change (qsum tapes fun ω => if treeBad (bad ω) l || treeBad (bad ω) r then 1 else 0) ≤ _
-    simp only [MergeTree.leaves, List.map_append, List.sum_append]
-    omega
-theorem additive_shard_bound {n tapes : Nat} (bad : Fin tapes → Shard n → Bool)
-    (root : Header) (verify : Shard n → Bool) (tree : MergeTree n)
-    (_accepted : checkTree root verify 16 tree = true) :
-    tree.leaves.length ≤ 65536 ∧
-    (qsum tapes fun ω => if treeBad (bad ω) tree then 1 else 0) ≤
-      (tree.leaves.map fun s => qsum tapes fun ω => if bad ω s then 1 else 0).sum :=
-  ⟨depth_sixteen root verify tree _accepted, tree_union_bound bad tree⟩
-/-- An accepted root bit selects an accepted leaf under exactly the root statement.
-Use this witness in the quorum reduction and sum its bad events with the preceding bound. -/
-theorem selected_leaf {n : Nat} (root : Header) (verify : Shard n → Bool)
-    (tree : MergeTree n) (v : Nat) (h : checkTree root verify 16 tree = true)
-    (active : tree.bitmap.getLsbD v = true) :
-    ∃ s ∈ tree.leaves, s.bitmap.getLsbD v = true ∧ s.header = root ∧ verify s = true := by
-  have hs := binary_merge_sound root verify tree 16 h
-  have hc := hs.2.1 v
-  simp only [active, ite_true] at hc
-  have hp : 0 < tree.leaves.countP (fun s => s.bitmap.getLsbD v) := by omega
-  obtain ⟨s, hm, hb⟩ := List.countP_pos_iff.mp hp
-  exact ⟨s, hm, hb, (hs.2.2.1 s hm).1, (hs.2.2.1 s hm).2.1⟩
-theorem merged_quorum_reduction {n : Nat} (geom : AggSigGeometry)
-    (custody : Fin n → Custody) (verify : Shard n → Bool) (bad : Shard n → Prop)
-    (boundary : ExtractionBoundary geom custody verify bad) (root : Header)
-    (tree : MergeTree n) (h : checkTree root verify 16 tree = true) (v : Fin n)
-    (active : tree.bitmap.getLsbD v.val = true) :
-    (∃ s ∈ tree.leaves, bad s) ∨
-    QuorumForgery geom (custody v) (root.mode.message v.val) ∨
-    quorumParticipated (custody v) (root.mode.message v.val) = true := by
-  obtain ⟨s, hs, hv, hh, ha⟩ := selected_leaf root verify tree v.val h active
-  rcases boundary.extract s ha with hb | hex
-  · exact .inl ⟨s, hs, hb⟩
-  · obtain ⟨sig, hsig⟩ := hex v hv
-    rw [hh] at hsig
-    cases hq : quorumParticipated (custody v) (root.mode.message v.val) with
-    | false => exact .inr (.inl ⟨sig, hsig, hq⟩)
-    | true => exact .inr (.inr rfl)
-theorem schedule_floor {n : Nat} (root : Header) (verify : Shard n → Bool)
-    (tree : MergeTree n) (h : checkTree root verify 16 tree = true)
-    (s : Shard n) (hs : s ∈ tree.leaves) (st : WhirStageSpec) (ht : st ∈ s.schedule.stages) :
-    2 ^ root.regime.queryExponentBits ≤ st.queryErrorDenominator := by
-  obtain ⟨_, _, h2, h28, he⟩ := (binary_merge_sound root verify tree 16 h).2.2.1 s hs
-  rw [he] at ht
-  exact whirSchedule_stage_query_ge root.regime s.numVars h2 h28 st ht
 /-! Reachable fixtures and mutations. The fixtures that evaluate `checkTree` on `exampleTree`
 (`inhabited_tree`, `tooth_overlap`, `inhabited_reduction`, `inhabited_shard_bound`) and their
 audits are in `Tests/CompositionInstances.lean`. The leaf-verifier fixture tests the structural layer;
 it is deliberately not represented as a deployed WHIR proof. -/
-@[expose] def exampleHeader : Header := ⟨[0], .xmssPoseidon2, .bciksJohnsonQrom128, .shared [1]⟩
-@[expose] def exampleShard (b : BitVec 2) : Shard 2 := ⟨exampleHeader, b, [1], 2, (Qsag.WhirSecurityRegime.bciksJohnsonQrom128).schedule 2⟩
-@[expose] def exampleVerifier (s : Shard 2) : Bool := s.proof == [1]
-def exampleTree : MergeTree 2 := .branch (.leaf (exampleShard 1#2))
-  (.leaf (exampleShard 2#2)) 3#2
-theorem tooth_downgrade : ∃ s : Shard 2,
-    s.header.regime ≠ exampleHeader.regime ∧
-    checkTree exampleHeader exampleVerifier 16 (.leaf s) = false :=
-  ⟨{ exampleShard 1#2 with header.regime := .bciksJohnsonClassical128 }, by decide, by decide⟩
 def exampleCustody : Custody :=
   ⟨⟨⟨.xmssPoseidon2, ⟨Goldilocks.zero,Goldilocks.zero,Goldilocks.zero,Goldilocks.zero⟩, ⟨Goldilocks.zero,Goldilocks.zero,Goldilocks.zero,Goldilocks.zero⟩⟩, 2, 3, [0], [], []⟩,
     7, [1], fun p ep msg => decide (p = 1 ∧ ep = 7 ∧ msg = [1])⟩
@@ -707,22 +508,6 @@ theorem inhabited_union : ∃ total outer : Fin 2 → Bool,
   · decide
   · show (qsum 2 fun _ => 1) = 2
     rw [qsum_const]
-theorem inhabited_composed_game : ∃ (geom : AggSigGeometry) (custody : Fin 2 → Custody)
-    (verify outer : Shard 2 → Bool),
-    ExtractionBoundary (n := 2) geom custody verify (fun s => outer s = true) ∧
-    ∃ shards : Fin 1 → Shard 2, ∃ attack : Fin 1 → Bool, ∃ B : BitVec 2,
-    ∃ forgery : Fin 1 → Fin 2 → Bool,
-    (∀ ω, attack ω = true → verify (shards ω) = true ∧
-      ∃ v : Fin 2, B.getLsbD v.val = true ∧ (shards ω).bitmap.getLsbD v.val = true ∧
-        quorumParticipated (custody v) ((shards ω).header.mode.message v.val) = false) ∧
-    (∀ ω v, QuorumForgery geom (custody v)
-      ((shards ω).header.mode.message v.val) → forgery ω v = true) := by
-  refine ⟨compactAuditGeom, (fun _ => { exampleCustody with honestApprovers := [] }),
-    exampleVerifier, (fun _ => true), ⟨fun _ _ => .inl rfl⟩,
-    (fun _ => exampleShard 1#2), (fun _ => true), 1#2, (fun _ _ => true), ?_, ?_⟩
-  · intro ω _; exact ⟨rfl, ⟨0, by decide⟩, by decide,
-      by change (1#2).getLsbD 0 = true; decide, rfl⟩
-  · intro _ _ _; rfl
 theorem inhabited_reconstruction : ∃ domain : List (TowerElem 1),
     domain.Nodup ∧ (∀ x : TowerElem 1, x ∈ domain) ∧
     (∀ x : TowerElem 1, x ≠ CommRingOps.zero →
@@ -733,25 +518,25 @@ theorem inhabited_reconstruction : ∃ domain : List (TowerElem 1),
   refine ⟨fourElements, by decide, four_complete, towerMul_inv 1, [((true,false),(false,true)),((false,true),(false,false))],
     by decide, [(true,false),(true,true)], [(true,false),(true,true)], ?_, ?_⟩ <;>
     (unfold Matches; decide)
-#verify_constructive weight_union binary_merge_sound depth_sixteen honest_threshold
-#verify_constructive quorum_aggregation_reduction composed_advantage_bound quorum_advantage_from_extraction
+#verify_constructive weight_union honest_threshold
+#verify_constructive composed_advantage_bound
 #verify_constructive insert_length eval_insert eval_insert_self quot_insert insert_quot
 #verify_constructive vectors_length vectors_mem vectors_nodup solutions_length solutions_nodup
 #verify_constructive pivot solutions_exact epoch_exact transcripts_exact transcripts_nodup
 #verify_constructive mobile_uniform_fibers retained_shares_determine_secret
-#verify_constructive tree_union_bound additive_shard_bound selected_leaf schedule_floor
-#verify_constructive merged_quorum_reduction mobile_covers_entire_roster
+
+#verify_constructive mobile_covers_entire_roster
 #verify_inhabited honest_threshold inhabited_approval
-#verify_inhabited quorum_advantage_from_extraction inhabited_composed_game
+
 #verify_constructive inhabited_union tooth_omit_outer
 #verify_inhabited retained_shares_determine_secret inhabited_reconstruction
 #verify_inhabited solutions_exact inhabited_reconstruction
 #verify_inhabited mobile_uniform_fibers inhabited_mobile
-#tooth_pair binary_merge_sound vs tooth_downgrade
-#tooth_pair schedule_floor vs tooth_downgrade
+
+
 #tooth_pair honest_threshold vs tooth_full_corrupt
-#tooth_pair quorum_aggregation_reduction vs tooth_full_corrupt
-#tooth_pair merged_quorum_reduction vs tooth_full_corrupt
+
+
 #tooth_pair mobile_uniform_fibers vs tooth_retained_polynomial
 #tooth_pair epoch_exact vs tooth_retained_polynomial
 #tooth_pair solutions_exact vs tooth_retained_polynomial
@@ -770,68 +555,6 @@ end Qsag.Composed
 namespace Qsag.CompositionInstances
 open Qsag.Composed
 
-/-- Consumer bridge to the row-committed AIR of `SuccinctAggregationIop`. The boundary follows
-from (a) knowledge extraction of a constraint-satisfying trace for the statement the shard
-decodes to, and (b) that statement naming the enrolled key and the header message of each
-active validator. AIR soundness (`extractValidCommitteeSigsFromTrace`) supplies the native
-signatures. `AggArithPublicStmt` carries one message, so (b) holds only when all active
-validators share it. -/
-theorem boundary_of_committee_trace {n : Nat} (geom : AggSigGeometry)
-    (custody : Fin n → Custody) (verify : Shard n → Bool) (bad : Shard n → Prop)
-    (stmt : Shard n → AggArithPublicStmt) (slot : Fin n → Nat)
-    (knowledge : ∀ s, verify s = true →
-      bad s ∨ ∃ tr, traceSatisfiesAllConstraints (stmt s) tr = true)
-    (binds : ∀ s, verify s = true → (stmt s).geom = geom ∧
-      ∀ v : Fin n, s.bitmap.getLsbD v.val = true →
-        (stmt s).committeePks[slot v]? = some (custody v).state.pk ∧
-        (stmt s).msg = s.header.mode.message v.val) :
-    ExtractionBoundary geom custody verify bad := by
-  refine ⟨fun s h => ?_⟩
-  rcases knowledge s h with hb | ⟨tr, hsat⟩
-  · exact .inl hb
-  · refine .inr fun v hv => ?_
-    obtain ⟨hg, hb⟩ := binds s h
-    obtain ⟨hpk, hm⟩ := hb v hv
-    obtain ⟨hk, he⟩ := List.getElem?_eq_some_iff.mp hpk
-    obtain ⟨sig, hsig⟩ := extractValidCommitteeSigsFromTrace (stmt s) tr hsat (slot v) hk
-    rw [he, hg, hm] at hsig
-    exact ⟨sig, hsig⟩
-
-/-- Consumer bridge from authenticated `verifyHemOpeningBatch` (`verifyOpeningBatch` + multistage
-`verifyHemAffineWhir`) + `SuccinctAggregationIop` AIR trace constraints directly to
-`Composed.ExtractionBoundary`, eliminating `transparentVerify`'s signature-table premise for any
-succinct shard verifier factored through `verifyHemOpeningBatch`. -/
-theorem boundary_of_hem_opening_batch {n cardX w : Nat}
-    (geom : AggSigGeometry) (custody : Fin n → Custody) (bad : Shard n → Prop)
-    (L : MerkleAddressLayout cardX w) (slots : List (MerkleOpeningSlot cardX w))
-    (hemInst : Shard n → HemWhirInstance QuarticGoldilocks)
-    (decode : Shard n → Fin cardX → List (Option (MerkleOpeningValue w)) →
-      List (HemTranscriptRound QuarticGoldilocks))
-    (oracleOf : Shard n → Fin cardX → BitVec w)
-    (outOf : Shard n → Fin cardX)
-    (modeOk : Shard n → Bool)
-    (stmt : Shard n → AggArithPublicStmt) (slot : Fin n → Nat)
-    (hemSound : ∀ s,
-      verifyHemOpeningBatch L slots (hemInst s) (decode s) (oracleOf s) (outOf s) = true →
-      modeOk s = true →
-      bad s ∨ HemStatementValid (hemInst s))
-    (hemToTrace : ∀ s, HemStatementValid (hemInst s) → modeOk s = true →
-      ∃ tr, traceSatisfiesAllConstraints (stmt s) tr = true)
-    (binds : ∀ s, modeOk s = true → (stmt s).geom = geom ∧
-      ∀ v : Fin n, s.bitmap.getLsbD v.val = true →
-        (stmt s).committeePks[slot v]? = some (custody v).state.pk ∧
-        (stmt s).msg = s.header.mode.message v.val) :
-    ExtractionBoundary geom custody
-      (fun s => verifyHemOpeningBatch L slots (hemInst s) (decode s) (oracleOf s) (outOf s) && modeOk s)
-      bad := by
-  refine boundary_of_committee_trace geom custody _ bad stmt slot (fun s h => ?_) (fun s h => ?_)
-  · obtain ⟨hHem, hMode⟩ := Bool.and_eq_true_iff.mp h
-    rcases hemSound s hHem hMode with hb | hValid
-    · exact .inl hb
-    · exact .inr (hemToTrace s hValid hMode)
-  · exact binds s (Bool.and_eq_true_iff.mp h).2
-
-#verify_constructive boundary_of_committee_trace boundary_of_hem_opening_batch
 
 end Qsag.CompositionInstances
 
@@ -847,7 +570,7 @@ theorem quorumForgery_iff (geom : AggSigGeometry) (q : Custody) (msg : List UInt
   Iff.rfl
 
 -- Equations for the symbolic instances of `Tests/CompositionInstances`; no body is exposed.
-#export_eqns MergeTree.bitmap MergeTree.leaves firstActive treeBad exampleTree quorumParticipated
+#export_eqns firstActive quorumParticipated
   SigningMode.message
 -- `inhabited_union` is this module's witness; the pair is certified here for `Tests/CompositionInstances`.
 #verify_inhabited composed_advantage_bound inhabited_union

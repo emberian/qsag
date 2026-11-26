@@ -53,26 +53,6 @@ theorem not_true_of_false {b : Bool} (h : b = false) : ¬ (b = true) :=
 section Composed
 open Qsag.Composed
 
-/-- Reference aggregator whose proof object is the signature table itself. Every active bit is
-checked with the native verifier against the header's message for that validator. -/
-def transparentVerify {n : Nat} (geom : AggSigGeometry) (pk : Fin n → AggValidatorPk)
-    (sigs : Fin n → AggNativeSignature) (s : Shard n) : Bool :=
-  (List.finRange n).all fun v =>
-    !s.bitmap.getLsbD v.val ||
-      verifyAggNativeSig geom (pk v) (s.header.mode.message v.val) (sigs v)
-
-/-- The reference aggregator meets `ExtractionBoundary` for every `bad`, in particular for
-`bad := fun _ => False`: extraction reads the table. -/
-theorem transparent_boundary {n : Nat} (geom : AggSigGeometry) (custody : Fin n → Custody)
-    (sigs : Fin n → AggNativeSignature) (bad : Shard n → Prop) :
-    ExtractionBoundary geom custody
-      (transparentVerify geom (fun v => (custody v).state.pk) sigs) bad := by
-  refine ⟨fun s h => .inr fun v hv => ⟨sigs v, ?_⟩⟩
-  unfold transparentVerify at h
-  have hall := List.all_eq_true.mp h v (List.mem_finRange v)
-  rw [hv] at hall
-  simp only [Bool.not_true, Bool.false_or] at hall
-  exact hall
 
 /-- Two distinct secret seeds. -/
 def skOf (v : Fin 2) : Digest4 :=
@@ -186,76 +166,13 @@ theorem native_rejects_tampered_randomizer :
 def custodyOf (v : Fin 2) : Custody :=
   ⟨⟨pkOf v, 2, 3, [0], [auditMsg], []⟩, 7, [1],
     fun p ep msg => decide (p = 1 ∧ ep = 7 ∧ msg = auditMsg)⟩
-def goodVerify : Shard 2 → Bool :=
-  transparentVerify compactAuditGeom (fun v => (custodyOf v).state.pk) sigOf
-def headerFor (mode : SigningMode) : Header :=
-  ⟨[0xC0], .xmssPoseidon2, .bciksJohnsonQrom128, mode⟩
-def goodHeader : Header := headerFor (.shared auditMsg)
-def shardFor (h : Header) (b : BitVec 2) : Shard 2 :=
-  ⟨h, b, [], 2, (Qsag.WhirSecurityRegime.bciksJohnsonQrom128).schedule 2⟩
-def fullShard : Shard 2 := shardFor goodHeader 3#2
-def goodTree : MergeTree 2 :=
-  .branch (.leaf (shardFor goodHeader 1#2)) (.leaf (shardFor goodHeader 2#2)) 3#2
 
 private theorem finRange_two : List.finRange 2 = [0, 1] := rfl
 
-private theorem goodVerify_shardFor (b : BitVec 2) :
-    goodVerify (shardFor goodHeader b) = true := by
-  unfold goodVerify transparentVerify
-  rw [finRange_two, List.all_cons, List.all_cons, List.all_nil]
-  have hm0 : (SigningMode.shared auditMsg).message (0 : Fin 2).val = auditMsg := by
-    rw [SigningMode.message.public_eqs.1]
-  have hm1 : (SigningMode.shared auditMsg).message (1 : Fin 2).val = auditMsg := by
-    rw [SigningMode.message.public_eqs.1]
-  dsimp only [shardFor, goodHeader, headerFor, custodyOf]
-  rw [hm0, hm1, native_accepts 0, native_accepts 1, Bool.or_true, Bool.or_true]
-  rfl
 
-private theorem shardFor_leaf_accepts (mode : SigningMode) (verify : Shard 2 → Bool)
-    (d : Nat) (b : BitVec 2) (hw : 0 < weight b)
-    (hver : verify (shardFor (headerFor mode) b) = true) :
-    checkTree (headerFor mode) verify d (.leaf (shardFor (headerFor mode) b)) = true := by
-  have hh : (shardFor (headerFor mode) b).header = headerFor mode := rfl
-  have hv : 2 ≤ (shardFor (headerFor mode) b).numVars ∧
-      (shardFor (headerFor mode) b).numVars ≤ 28 ∧
-      (shardFor (headerFor mode) b).schedule =
-        (headerFor mode).regime.schedule (shardFor (headerFor mode) b).numVars :=
-    ⟨show (2 : Nat) ≤ 2 by decide, show (2 : Nat) ≤ 28 by decide, rfl⟩
-  have hw' : 0 < weight (shardFor (headerFor mode) b).bitmap := hw
-  cases d <;> simp only [checkTree] <;>
-    rw [decide_eq_true hh, decide_eq_true hv, decide_eq_true hw', hver] <;> rfl
-
-private theorem branch16_accepts (root : Header) (verify : Shard 2 → Bool)
-    (l r : MergeTree 2) (b : BitVec 2) (hd : l.bitmap &&& r.bitmap = 0#2)
-    (hb : b = l.bitmap ||| r.bitmap) (hf : firstActive l.bitmap < firstActive r.bitmap)
-    (hl : checkTree root verify 15 l = true) (hr : checkTree root verify 15 r = true) :
-    checkTree root verify 16 (.branch l r b) = true := by
-  change checkTree root verify (15 + 1) (.branch l r b) = true
-  generalize (15 : Nat) = d at hl hr ⊢
-  simp only [checkTree]
-  rw [decide_eq_true hd, decide_eq_true hb, decide_eq_true hf, hl, hr]
-  rfl
-
-theorem good_full_accepts : goodVerify fullShard = true :=
-  goodVerify_shardFor 3#2
-
-theorem good_tree_accepts : checkTree goodHeader goodVerify 16 goodTree = true :=
-  branch16_accepts goodHeader goodVerify
-    (.leaf (shardFor goodHeader 1#2)) (.leaf (shardFor goodHeader 2#2)) 3#2
-    (by simp only [MergeTree.bitmap.public_eqs, shardFor]; decide)
-    (by simp only [MergeTree.bitmap.public_eqs, shardFor]; decide)
-    (by simp only [MergeTree.bitmap.public_eqs, firstActive.public_eqs, shardFor]; decide)
-    (shardFor_leaf_accepts (.shared auditMsg) goodVerify 15 1#2 (by decide)
-      (goodVerify_shardFor 1#2))
-    (shardFor_leaf_accepts (.shared auditMsg) goodVerify 15 2#2 (by decide)
-      (goodVerify_shardFor 2#2))
 /-- `SigningMode.message` on the shared mode, through its exported equation. -/
 theorem shared_message (m : List UInt8) (v : Nat) : (SigningMode.shared m).message v = m := by
   simp only [SigningMode.message.public_eqs]
-theorem fullShard_bits : ∀ v : Fin 2, fullShard.bitmap.getLsbD v.val = true := by decide +kernel
-theorem good_bits : ∀ v : Fin 2, goodTree.bitmap.getLsbD v.val = true := by
-  simp only [goodTree, MergeTree.bitmap.public_eqs]
-  decide +kernel
 /-- The custody shape of `custodyOf`, over an arbitrary key and message: `quorumParticipated`
 is run through its exported equation, the key and the message are not inspected. -/
 theorem logged_custody_participates (pk : AggValidatorPk) (m : List UInt8) :
@@ -284,38 +201,7 @@ theorem good_no_forgery (v : Fin 2) :
   rw [good_participation v] at hq
   cases hq
 
-/-- Good regime of `merged_quorum_reduction`: the tree is accepted, no leaf is bad, no quorum
-forgery exists, and the reduction resolves to the approval branch for both validators. -/
-theorem good_regime_resolves (v : Fin 2) :
-    quorumParticipated (custodyOf v) (goodHeader.mode.message v.val) = true ∧
-    ¬ QuorumForgery compactAuditGeom (custodyOf v) (goodHeader.mode.message v.val) ∧
-    ¬ ∃ s ∈ goodTree.leaves, False := by
-  have hbad : ¬ ∃ s ∈ goodTree.leaves, False := fun ⟨_, _, h⟩ => h
-  have hm : goodHeader.mode.message v.val = auditMsg := shared_message auditMsg v.val
-  have hred := merged_quorum_reduction compactAuditGeom custodyOf goodVerify (fun _ => False)
-      (transparent_boundary compactAuditGeom custodyOf sigOf _) goodHeader goodTree
-      good_tree_accepts v (good_bits v)
-  rw [hm] at hred ⊢
-  have hnf : ¬ QuorumForgery compactAuditGeom (custodyOf v) auditMsg := good_no_forgery v
-  rcases hred with hb | hf | hq
-  · exact absurd hb hbad
-  · exact absurd hf hnf
-  · exact ⟨hq, hnf, hbad⟩
 
-theorem good_regime_instance : ∃ geom custody verify bad,
-    ExtractionBoundary (n := 2) geom custody verify bad ∧
-    ∃ s : Shard 2, ∃ v : Fin 2, verify s = true ∧ s.bitmap.getLsbD v.val = true ∧
-    ∃ root tree, checkTree root verify 16 tree = true ∧ tree.bitmap.getLsbD v.val = true :=
-  ⟨compactAuditGeom, custodyOf, goodVerify, fun _ => False,
-    transparent_boundary compactAuditGeom custodyOf sigOf _, fullShard, 0,
-    good_full_accepts, fullShard_bits 0, goodHeader, goodTree, good_tree_accepts, good_bits 0⟩
-
-/-- The bridge premises hold with `bad := fun _ => False` on the row-committed AIR: the
-verifier is restricted to the shared-message mode, the statement is the two-key committee,
-and the extracted trace is the honest one. Knowledge extraction is trivial here because the
-verifier holds the signatures; a succinct verifier needs WHIR knowledge soundness instead. -/
-def sharedVerify (s : Shard 2) : Bool :=
-  goodVerify s && decide (s.header.mode = .shared auditMsg)
 def committeeStmt : AggArithPublicStmt := ⟨compactAuditGeom, auditMsg, [pkOf 0, pkOf 1], 1⟩
 /-- Well-formedness of the two-key committee statement, from the owner's geometry fact, the
 exported geometry fields and the inequality of the two literal keys. -/
@@ -352,28 +238,6 @@ theorem committee_slots : ∀ v : Fin 2,
   fun v => match v with
     | ⟨0, _⟩ => rfl
     | ⟨1, _⟩ => rfl
-theorem committee_trace_boundary :
-    ExtractionBoundary compactAuditGeom custodyOf sharedVerify (fun _ => False) :=
-  boundary_of_committee_trace compactAuditGeom custodyOf sharedVerify _
-    (fun _ => committeeStmt) (fun v => v.val)
-    (fun _ _ => .inr ⟨_, committee_trace_satisfied⟩)
-    (fun s h => ⟨rfl, fun v _ => ⟨committee_slots v, by
-      have h' : (goodVerify s && decide (s.header.mode = .shared auditMsg)) = true := h
-      rw [of_decide_eq_true (Bool.and_eq_true_iff.mp h').2]
-      exact (shared_message auditMsg v.val).symm⟩⟩)
-theorem shared_verify_accepts : sharedVerify fullShard = true := by
-  show (goodVerify fullShard && decide (fullShard.header.mode = .shared auditMsg)) = true
-  have hm : fullShard.header.mode = SigningMode.shared auditMsg := rfl
-  rw [good_full_accepts, decide_eq_true hm]
-  rfl
-theorem shared_verify_rejects_per_signer_mode :
-    sharedVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) = false := by
-  have hne : ¬ ((shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2).header.mode =
-      SigningMode.shared auditMsg) := fun h => SigningMode.noConfusion h
-  show (goodVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) &&
-    decide ((shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2).header.mode =
-      SigningMode.shared auditMsg)) = false
-  rw [decide_eq_false hne, Bool.and_false]
 
 /-- Concrete 1-level 8-bit `MerkleAddressLayout` (`65536` addresses = `u || v`) exercising both
 `verifyOpeningBatch` path verification and `verifyHemAffineWhir` transcript verification without
@@ -422,151 +286,7 @@ def compactHemSlot : MerkleOpeningSlot 65536 8 where
       leaf := 0x11#8
       path := [0x22#8] }
 
-def compactHemInst : HemWhirInstance QuarticGoldilocks where
-  batchOracles := [fun _ => CommRingOps.one]
-  batchClaims := [CommRingOps.one]
-  initDomainPts := [CommRingOps.zero, CommRingOps.one]
-  initDegBound := 0
-  initMinAgree := 2
-  initKernel := [CommRingOps.one]
-  stages := []
 
-def compactHemDecode : Fin 65536 → List (Option (MerkleOpeningValue 8)) →
-    List (HemTranscriptRound QuarticGoldilocks)
-  | _, [some _] =>
-    [.cascade [CommRingOps.zero] [(CommRingOps.one, CommRingOps.zero)] [[CommRingOps.one]],
-     .finalQuery [CommRingOps.one]]
-  | _, _ => []
-
-/-- Shard verifier backed by `verifyHemOpeningBatch` (`fullShard.proof = []`, zero signature table). -/
-def hemOpeningShardVerify (s : Shard 2) : Bool :=
-  verifyHemOpeningBatch compactMerkleLayout [compactHemSlot] compactHemInst compactHemDecode
-    compactHemOracle ⟨0, by decide⟩ &&
-  decide (s.header = goodHeader)
-
-theorem compactHemInst_valid : HemStatementValid compactHemInst :=
-  verifyHemAffineWhir_oneOracleClaim_dom01_kat.1
-
-private theorem hemOpeningShardVerify_shardFor (b : BitVec 2) :
-    hemOpeningShardVerify (shardFor goodHeader b) = true := by
-  unfold hemOpeningShardVerify
-  have hh : (shardFor goodHeader b).header = goodHeader := rfl
-  rw [decide_eq_true hh, Bool.and_true,
-      verifyHemOpeningBatch.public_eqs, claimedOpeningValues.public_eqs]
-  dsimp only [List.map, compactHemSlot, compactHemDecode]
-  have hWhir : verifyHemAffineWhir compactHemInst
-      [.cascade [CommRingOps.zero] [(CommRingOps.one, CommRingOps.zero)] [[CommRingOps.one]],
-       .finalQuery [CommRingOps.one]] = true :=
-    verifyHemAffineWhir_oneOracleClaim_dom01_kat.2
-  rw [hWhir, Bool.and_true, verifyOpeningBatch.public_eqs]
-  simp only [List.all_cons, List.all_nil, Bool.and_true,
-    merkleOpeningShape_eq, merkleRootFromPath_cons, merkleRootFromPath_nil,
-    MerkleAddressLayout.hash_eq, compactMerkleLayout,
-    compactHemOracle]
-  decide +kernel
-
-theorem hemOpeningShardVerify_accepts : hemOpeningShardVerify fullShard = true :=
-  hemOpeningShardVerify_shardFor 3#2
-
-theorem hemOpeningShardVerify_tree_accepts :
-    checkTree goodHeader hemOpeningShardVerify 16 goodTree = true :=
-  branch16_accepts goodHeader hemOpeningShardVerify
-    (.leaf (shardFor goodHeader 1#2)) (.leaf (shardFor goodHeader 2#2)) 3#2
-    (by simp only [MergeTree.bitmap.public_eqs, shardFor]; decide)
-    (by simp only [MergeTree.bitmap.public_eqs, shardFor]; decide)
-    (by simp only [MergeTree.bitmap.public_eqs, firstActive.public_eqs, shardFor]; decide)
-    (shardFor_leaf_accepts (.shared auditMsg) hemOpeningShardVerify 15 1#2 (by decide)
-      (hemOpeningShardVerify_shardFor 1#2))
-    (shardFor_leaf_accepts (.shared auditMsg) hemOpeningShardVerify 15 2#2 (by decide)
-      (hemOpeningShardVerify_shardFor 2#2))
-
-theorem hemOpeningShardVerify_rejects_per_signer :
-    hemOpeningShardVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) = false := by
-  have hne : ¬ ((shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2).header = goodHeader) :=
-    fun h => SigningMode.noConfusion (congrArg Header.mode h)
-  show (verifyHemOpeningBatch compactMerkleLayout [compactHemSlot] compactHemInst compactHemDecode
-      compactHemOracle ⟨0, by decide⟩ &&
-    decide ((shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2).header = goodHeader)) = false
-  rw [decide_eq_false hne, Bool.and_false]
-
-theorem hemOpeningShardVerify_boundary :
-    ExtractionBoundary compactAuditGeom custodyOf hemOpeningShardVerify (fun _ => False) :=
-  boundary_of_hem_opening_batch compactAuditGeom custodyOf (fun _ => False)
-    compactMerkleLayout [compactHemSlot]
-    (fun _ => compactHemInst) (fun _ => compactHemDecode)
-    (fun _ => compactHemOracle) (fun _ => ⟨0, by decide⟩)
-    (fun s => decide (s.header = goodHeader))
-    (fun _ => committeeStmt) (fun v => v.val)
-    (fun _ _ _ => .inr compactHemInst_valid)
-    (fun _ _ _ => ⟨_, committee_trace_satisfied⟩)
-    (fun s hMode => ⟨rfl, fun v _ => ⟨committee_slots v, by
-      rw [of_decide_eq_true hMode]; exact (shared_message auditMsg v.val).symm⟩⟩)
-
-theorem hem_opening_regime_instance : ∃ geom custody verify bad,
-    ExtractionBoundary (n := 2) geom custody verify bad ∧
-    ∃ s : Shard 2, ∃ v : Fin 2, verify s = true ∧ s.bitmap.getLsbD v.val = true ∧
-    ∃ root tree, checkTree root verify 16 tree = true ∧ tree.bitmap.getLsbD v.val = true :=
-  ⟨compactAuditGeom, custodyOf, hemOpeningShardVerify, fun _ => False,
-    hemOpeningShardVerify_boundary, fullShard, 0,
-    hemOpeningShardVerify_accepts, fullShard_bits 0,
-    goodHeader, goodTree, hemOpeningShardVerify_tree_accepts, good_bits 0⟩
-
-/-- Validator `1` is assigned a message it did not sign: the leaf is rejected. -/
-theorem rejects_unsigned_per_signer_message :
-    checkTree (headerFor (.perSigner [auditMsg, otherMsg])) goodVerify 16
-      (.leaf (shardFor (headerFor (.perSigner [auditMsg, otherMsg])) 3#2)) = false := by
-  have hVer : goodVerify (shardFor (headerFor (.perSigner [auditMsg, otherMsg])) 3#2) = false := by
-    unfold goodVerify transparentVerify
-    rw [finRange_two, List.all_cons, List.all_cons, List.all_nil]
-    have hb1 : ((3#2 : BitVec 2).getLsbD (1 : Fin 2).val) = true := by decide
-    have hm1 : (SigningMode.perSigner [auditMsg, otherMsg]).message (1 : Fin 2).val = otherMsg := by
-      rw [SigningMode.message.public_eqs.2]; rfl
-    dsimp only [shardFor, headerFor, custodyOf]
-    rw [hb1, hm1, native_rejects_other_message 1]
-    simp only [Bool.not_true, Bool.false_or, Bool.false_and, Bool.and_false]
-  simp only [checkTree, hVer, Bool.and_false]
-/-- The same per-signer header with the signed message in both slots is accepted. -/
-theorem accepts_signed_per_signer_messages :
-    checkTree (headerFor (.perSigner [auditMsg, auditMsg])) goodVerify 16
-      (.leaf (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2)) = true := by
-  refine shardFor_leaf_accepts (.perSigner [auditMsg, auditMsg]) goodVerify 16 3#2 (by decide) ?_
-  unfold goodVerify transparentVerify
-  rw [finRange_two, List.all_cons, List.all_cons, List.all_nil]
-  have hm0 : (SigningMode.perSigner [auditMsg, auditMsg]).message (0 : Fin 2).val = auditMsg := by
-    rw [SigningMode.message.public_eqs.2]; rfl
-  have hm1 : (SigningMode.perSigner [auditMsg, auditMsg]).message (1 : Fin 2).val = auditMsg := by
-    rw [SigningMode.message.public_eqs.2]; rfl
-  dsimp only [shardFor, headerFor, custodyOf]
-  rw [hm0, hm1, native_accepts 0, native_accepts 1, Bool.or_true, Bool.or_true]
-  rfl
-theorem rejects_swapped_signature_table :
-    transparentVerify compactAuditGeom pkOf (fun v => sigOf (if v.val = 0 then 1 else 0))
-      fullShard = false := by
-  unfold transparentVerify
-  rw [finRange_two, List.all_cons, List.all_cons, List.all_nil]
-  have hb1 : fullShard.bitmap.getLsbD (1 : Fin 2).val = true := fullShard_bits 1
-  have hm1 : fullShard.header.mode.message (1 : Fin 2).val = auditMsg := shared_message auditMsg 1
-  have h10 : ¬ ((1 : Fin 2).val = 0) := by decide
-  rw [hb1, hm1]
-  simp only [h10, ↓reduceIte, native_rejects_other_key, Bool.not_true, Bool.false_or,
-    Bool.false_and, Bool.and_false]
-/-- A leaf under another committee root cannot be merged, although its signature verifies. -/
-theorem rejects_foreign_committee_leaf :
-    checkTree goodHeader goodVerify 16
-      (.branch (.leaf (shardFor { goodHeader with committeeRoot := [0xC1] } 1#2))
-        (.leaf (shardFor goodHeader 2#2)) 3#2) = false := by
-  have hne : (shardFor { goodHeader with committeeRoot := [0xC1] } 1#2).header ≠ goodHeader :=
-    fun h => absurd (congrArg Header.committeeRoot h) (by decide)
-  simp only [checkTree, decide_eq_false hne, Bool.false_and, Bool.and_false]
-theorem foreign_committee_leaf_not_accepted :
-    ¬ (checkTree goodHeader goodVerify 16
-      (.branch (.leaf (shardFor { goodHeader with committeeRoot := [0xC1] } 1#2))
-        (.leaf (shardFor goodHeader 2#2)) 3#2) = true) :=
-  not_true_of_false rejects_foreign_committee_leaf
-theorem unsigned_per_signer_message_not_accepted :
-    ¬ (checkTree (headerFor (.perSigner [auditMsg, otherMsg])) goodVerify 16
-      (.leaf (shardFor (headerFor (.perSigner [auditMsg, otherMsg])) 3#2)) = true) :=
-  not_true_of_false rejects_unsigned_per_signer_message
 theorem other_key_not_accepted :
     ¬ (verifyAggNativeSig compactAuditGeom (pkOf 1) auditMsg (sigOf 0) = true) :=
   not_true_of_false native_rejects_other_key
@@ -582,17 +302,6 @@ theorem unapproved_signature_is_forgery (v : Fin 2) :
   (quorumForgery_iff _ _ _).mpr ⟨sigOf v, native_accepts v, rogue_not_participated v⟩
 
 def mixedCustody (v : Fin 2) : Custody := if v.val = 0 then custodyOf v else rogueCustody v
-def mixedVerify : Shard 2 → Bool :=
-  transparentVerify compactAuditGeom (fun v => (mixedCustody v).state.pk) sigOf
-theorem mixed_accepts : mixedVerify fullShard = true := by
-  have hPk : (fun v : Fin 2 => (mixedCustody v).state.pk) = (fun v => (custodyOf v).state.pk) := by
-    funext v
-    match v with
-    | ⟨0, _⟩ => rfl
-    | ⟨1, _⟩ => rfl
-  unfold mixedVerify
-  rw [hPk]
-  exact good_full_accepts
 theorem mixed_unapproved_is_one : ∀ v : Fin 2,
     quorumParticipated (mixedCustody v) auditMsg = false → decide (v.val = 1) = true := by
   intro v
@@ -606,31 +315,6 @@ theorem mixed_unapproved_is_one : ∀ v : Fin 2,
 theorem mixed_one_unapproved : quorumParticipated (mixedCustody 1) auditMsg = false :=
   unlogged_custody_not_participated (pkOf 1) auditMsg
 
-/-- `quorum_advantage_from_extraction` with the outer event identically false: the whole
-attack mass is carried by the forgery term of the one validator whose custody did not approve. -/
-theorem forgery_regime_instance : ∃ (geom : AggSigGeometry) (custody : Fin 2 → Custody)
-    (verify outer : Shard 2 → Bool),
-    ExtractionBoundary (n := 2) geom custody verify (fun s => outer s = true) ∧
-    ∃ shards : Fin 1 → Shard 2, ∃ attack : Fin 1 → Bool, ∃ B : BitVec 2,
-    ∃ forgery : Fin 1 → Fin 2 → Bool,
-    (∀ ω, attack ω = true → verify (shards ω) = true ∧
-      ∃ v : Fin 2, B.getLsbD v.val = true ∧ (shards ω).bitmap.getLsbD v.val = true ∧
-        quorumParticipated (custody v) ((shards ω).header.mode.message v.val) = false) ∧
-    (∀ ω v, QuorumForgery geom (custody v)
-      ((shards ω).header.mode.message v.val) → forgery ω v = true) :=
-  ⟨compactAuditGeom, mixedCustody, mixedVerify, fun _ => false,
-    transparent_boundary compactAuditGeom mixedCustody sigOf _,
-    fun _ => fullShard, fun _ => true, 2#2, fun _ v => decide (v.val = 1),
-    fun _ _ => ⟨mixed_accepts, 1, by decide, fullShard_bits 1, by
-      show quorumParticipated (mixedCustody 1) ((SigningMode.shared auditMsg).message 1) = false
-      rw [shared_message]
-      exact mixed_one_unapproved⟩,
-    fun _ v hf => mixed_unapproved_is_one v (by
-      obtain ⟨_, _, hq⟩ := (quorumForgery_iff _ _ _).mp hf
-      have hq' : quorumParticipated (mixedCustody v)
-          ((SigningMode.shared auditMsg).message v.val) = false := hq
-      rw [shared_message] at hq'
-      exact hq')⟩
 
 /-- The three masses of that instance: attack `1`, outer `0`, forgery `1`. -/
 theorem forgery_regime_masses :
@@ -1322,11 +1006,10 @@ theorem same_label_reprogram_changes_game :
 end Cross
 
 -- Audited here and now: every instance that does not kernel-execute a sealed primitive.
-#verify_constructive transparent_boundary boundary_of_committee_trace boundary_of_hem_opening_batch
-  hemOpeningShardVerify_rejects_per_signer good_bits good_participation good_no_forgery
-  committee_slots shared_verify_rejects_per_signer_mode rejects_foreign_committee_leaf
-  foreign_committee_leaf_not_accepted rogue_not_participated mixed_unapproved_is_one
-  mixed_one_unapproved forgery_regime_masses shared_message fullShard_bits
+#verify_constructive good_participation good_no_forgery
+  committee_slots
+  rogue_not_participated mixed_unapproved_is_one
+  mixed_one_unapproved forgery_regime_masses shared_message
   logged_custody_participates unlogged_custody_not_participated committeeStmt_wellFormed
 #verify_constructive hybrid_honest_accepts hybrid_rejects_other_message hybrid_envelope_valid_for_every_network
   hybrid_rejects_relabelled_hrp hybrid_rejects_relabelled_version
@@ -1344,34 +1027,27 @@ end Cross
   foreign_label_reprogram_instance same_label_reprogram_changes_game
 -- Modelled primitive fixtures (native signature, HEM opening batch, cSHAKE, Poseidon2),
 -- discharged via owner-evaluated KATs and `#export_eqns` with sealed primitive modules:
-#verify_constructive compactHemInst_valid hemOpeningShardVerify_accepts hemOpeningShardVerify_tree_accepts
-  hemOpeningShardVerify_boundary hem_opening_regime_instance fixtures_are_modelled_outputs
+#verify_constructive fixtures_are_modelled_outputs
   native_accepts native_rejects_other_message native_rejects_other_key
-  native_rejects_tampered_randomizer good_full_accepts good_tree_accepts
-  good_regime_resolves good_regime_instance committee_trace_satisfied
-  committee_trace_boundary shared_verify_accepts rejects_unsigned_per_signer_message
-  accepts_signed_per_signer_messages rejects_swapped_signature_table
-  unsigned_per_signer_message_not_accepted other_key_not_accepted
-  unapproved_signature_is_forgery mixed_accepts forgery_regime_instance
+  native_rejects_tampered_randomizer
+  committee_trace_satisfied
+  other_key_not_accepted
+  unapproved_signature_is_forgery
 #verify_constructive real_hybrid_sigs_are_modelled_outputs real_hybrid_honest_accepts
   real_hybrid_rejects_other_message real_hybrid_rejects_rogue_partner
   real_hybrid_keybound_instance
 #verify_constructive real_poseidon_nondegenerate real_poseidon_raw_vs_feedforward
   real_poseidon_feedforward_misses
-#verify_inhabited Qsag.Composed.merged_quorum_reduction good_regime_instance
-#verify_inhabited Qsag.Composed.merged_quorum_reduction hem_opening_regime_instance
-#verify_inhabited Qsag.Composed.quorum_aggregation_reduction good_regime_instance
-#verify_inhabited Qsag.Composed.quorum_aggregation_reduction hem_opening_regime_instance
-#verify_inhabited Qsag.Composed.quorum_advantage_from_extraction forgery_regime_instance
+
+
 -- The toy-hash and policy instances are evaluated, audited (`#verify_inhabited`, `#tooth_pair`) in
 -- `Protocol/Signing/HybridAddrPolicyAndFullPresetSecurity`, where the checked definitions unfold.
 #verify_inhabited Qsag.HybridSecurity.dual_key_euf_cma real_hybrid_keybound_instance
 #verify_inhabited Qsag.CrossProtocol.checked_preimage_is_transcript_hit real_transcript_instance
 #verify_inhabited Qsag.CrossProtocol.universal_customization_partition
   real_label_partition_instance
-#tooth_pair Qsag.Composed.merged_quorum_reduction vs foreign_committee_leaf_not_accepted
-#tooth_pair Qsag.Composed.binary_merge_sound vs unsigned_per_signer_message_not_accepted
-#tooth_pair Qsag.Composed.quorum_aggregation_reduction vs other_key_not_accepted
+
+
 #tooth_pair Qsag.CrossProtocol.inverse_feedforward_relation vs real_poseidon_feedforward_misses
 #tooth_pair Qsag.CrossProtocol.isolated_game_zero_drift vs same_label_reprogram_changes_game
 
@@ -1381,91 +1057,15 @@ end Qsag.CompositionInstances
 namespace Qsag.Composed
 set_option autoImplicit false
 
-/-- Leaf case of the exposed `checkTree`, from its four checks. -/
-theorem checkTree_leaf_intro {n : Nat} (root : Header) (verify : Shard n → Bool) (d : Nat)
-    (s : Shard n) (hh : s.header = root)
-    (hv : 2 ≤ s.numVars ∧ s.numVars ≤ 28 ∧ s.schedule = root.regime.schedule s.numVars)
-    (hw : 0 < weight s.bitmap) (hver : verify s = true) :
-    checkTree root verify d (.leaf s) = true := by
-  cases d <;> simp only [checkTree] <;>
-    rw [decide_eq_true hh, decide_eq_true hv, decide_eq_true hw, hver] <;> rfl
-/-- Branch case of the exposed `checkTree`, from its three bitmap checks and the two subtrees. -/
-theorem checkTree_branch_intro {n : Nat} (root : Header) (verify : Shard n → Bool) (d : Nat)
-    (l r : MergeTree n) (b : BitVec n) (hd : l.bitmap &&& r.bitmap = 0#n)
-    (hb : b = l.bitmap ||| r.bitmap) (hf : firstActive l.bitmap < firstActive r.bitmap)
-    (hl : checkTree root verify d l = true) (hr : checkTree root verify d r = true) :
-    checkTree root verify (d + 1) (.branch l r b) = true := by
-  simp only [checkTree]
-  rw [decide_eq_true hd, decide_eq_true hb, decide_eq_true hf, hl, hr]
-  rfl
-theorem exampleShard_leaf_accepts (b : BitVec 2) (hw : 0 < weight b) (d : Nat) :
-    checkTree exampleHeader exampleVerifier d (.leaf (exampleShard b)) = true :=
-  checkTree_leaf_intro exampleHeader exampleVerifier d (exampleShard b) rfl
-    ⟨show (2 : Nat) ≤ 2 from Nat.le_refl 2, show (2 : Nat) ≤ 28 by decide, rfl⟩ hw rfl
-theorem exampleTree_accepts : checkTree exampleHeader exampleVerifier 16 exampleTree = true := by
-  rw [exampleTree.public_eqs]
-  exact checkTree_branch_intro exampleHeader exampleVerifier 15 _ _ _
-    (by simp only [MergeTree.bitmap.public_eqs]; decide)
-    (by simp only [MergeTree.bitmap.public_eqs]; decide)
-    (by simp only [MergeTree.bitmap.public_eqs, firstActive.public_eqs]; decide)
-    (exampleShard_leaf_accepts 1#2 (by decide) 15) (exampleShard_leaf_accepts 2#2 (by decide) 15)
-theorem exampleTree_bit0 : exampleTree.bitmap.getLsbD 0 = true := by
-  simp only [exampleTree.public_eqs, MergeTree.bitmap.public_eqs]; decide
 theorem headD_mem_of_ne_nil {α : Type} (l : List α) (d : α) (h : l ≠ []) : l.headD d ∈ l := by
   cases l with
   | nil => exact absurd rfl h
   | cons a t => exact List.mem_cons_self
 
-theorem inhabited_tree : ∃ root verify tree,
-    checkTree (n := 2) root verify 16 tree = true ∧ tree.bitmap.getLsbD 0 = true ∧
-    ∃ s ∈ tree.leaves, ∃ st : WhirStageSpec, st ∈ s.schedule.stages :=
-  ⟨exampleHeader, exampleVerifier, exampleTree, exampleTree_accepts, exampleTree_bit0,
-    exampleShard 1#2, by
-      simp only [exampleTree.public_eqs, MergeTree.leaves.public_eqs]
-      exact List.mem_append_left _ (List.mem_singleton.mpr rfl),
-    (whirStageSchedule 2).stages.headD ⟨0,0,0⟩,
-    headD_mem_of_ne_nil _ _ (fun e => absurd (congrArg List.length e) (by decide))⟩
 
-theorem tooth_overlap : ∃ a b : BitVec 2,
-    a &&& b ≠ 0#2 ∧ weight (a ||| b) < weight a + weight b ∧
-    checkTree exampleHeader exampleVerifier 16
-      (.branch (.leaf (exampleShard a)) (.leaf (exampleShard b)) (a ||| b)) = false :=
-  ⟨1#2, 1#2, by decide, by decide, by
-    simp only [checkTree, MergeTree.bitmap.public_eqs]
-    decide⟩
-
-/-- The outer-bad branch is reachable; the honest approval branch has its own fixture. -/
-theorem inhabited_reduction : ∃ geom custody verify bad,
-    ExtractionBoundary (n := 2) geom custody verify bad ∧
-    ∃ s : Shard 2, ∃ v : Fin 2, verify s = true ∧ s.bitmap.getLsbD v.val = true ∧
-    ∃ root tree, checkTree root verify 16 tree = true ∧ tree.bitmap.getLsbD v.val = true := by
-  refine ⟨compactAuditGeom, (fun _ => exampleCustody), exampleVerifier,
-    (fun _ => True), ⟨fun _ _ => .inl trivial⟩, exampleShard 1#2, ⟨0, by decide⟩,
-    by decide, by decide, exampleHeader, exampleTree, exampleTree_accepts, exampleTree_bit0⟩
-
-theorem inhabited_shard_bound : ∃ root verify tree, ∃ bad : Fin 2 → Shard 2 → Bool,
-    checkTree root verify 16 tree = true ∧
-    (qsum 2 fun ω => if treeBad (bad ω) tree then 1 else 0) = 2 :=
-  ⟨exampleHeader, exampleVerifier, exampleTree, (fun _ _ => true), exampleTree_accepts, by
-    have ht : treeBad (fun _ : Shard 2 => true) exampleTree = true := by
-      simp only [exampleTree.public_eqs, treeBad.public_eqs, Bool.or_self]
-    show (qsum 2 fun _ => if treeBad (fun _ : Shard 2 => true) exampleTree then 1 else 0) = 2
-    rw [ht]
-    show (qsum 2 fun _ => 1) = 2
-    rw [qsum_const]⟩
-
-#verify_inhabited binary_merge_sound inhabited_tree
-#verify_inhabited depth_sixteen inhabited_tree
-#verify_inhabited selected_leaf inhabited_tree
-#verify_inhabited schedule_floor inhabited_tree
-#tooth_pair binary_merge_sound vs tooth_overlap
-#tooth_pair additive_shard_bound vs tooth_overlap
-#verify_inhabited quorum_aggregation_reduction inhabited_reduction
-#verify_inhabited merged_quorum_reduction inhabited_reduction
-#verify_inhabited additive_shard_bound inhabited_shard_bound
 -- `composed_advantage_bound` / `inhabited_union` is certified in `ComposedQsAgAndMergeSecurity`, which owns both.
 #tooth_pair composed_advantage_bound vs tooth_omit_outer
-#tooth_pair quorum_advantage_from_extraction vs tooth_omit_outer
+
 
 end Qsag.Composed
 end
