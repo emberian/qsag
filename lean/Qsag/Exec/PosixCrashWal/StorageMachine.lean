@@ -647,3 +647,655 @@ theorem same_pid_independent_opens_contend_flock_ewouldblock
        alive on `ino` (so an independent `open` still gets `.ewouldblock`), and
     3. Closing `dupFd` (the **last** open reference to that `OpenDescriptionId`) **releases**
        `flockTable.owner ino = none`! -/
+theorem dup_and_fork_shared_description_shares_flock_until_last_close :
+    let filePath : DirName := ⟨[0x6b, 0x65, 0x79]⟩
+    let parentPid : Pid := 100
+    let childPid : Pid := 200
+    ∃ s1 fd₁ ino s2 s3 dupFd s5 s6 s7 s8,
+      posixCreateExclNoFollow PosixFsState.empty parentPid filePath = .ok (s1, fd₁, ino) ∧
+      posixFlockExNb s1 parentPid fd₁ = .ok s2 ∧
+      posixDup s2 parentPid fd₁ = .ok (s3, dupFd) ∧
+      let s4 := posixForkFds s3 parentPid childPid
+      FdTable.lookupDescId s4.kernel.openFds parentPid fd₁ = some 1 ∧
+      FdTable.lookupDescId s4.kernel.openFds parentPid dupFd = some 1 ∧
+      FdTable.lookupDescId s4.kernel.openFds childPid fd₁ = some 1 ∧
+      (posixFlockExNb s4 parentPid dupFd).isOk = true ∧
+      (posixFlockExNb s4 childPid fd₁).isOk = true ∧
+      posixCloseFd s4 parentPid fd₁ = .ok s5 ∧
+      posixCloseFd s5 childPid fd₁ = .ok s6 ∧
+      posixCloseFd s6 childPid dupFd = .ok s7 ∧
+      s7.kernel.flockTable.owner ino = some 1 ∧
+      posixCloseFd s7 parentPid dupFd = .ok s8 ∧
+      s8.kernel.flockTable.owner ino = none := by
+  exact ⟨_, _, _, _, _, _, _, _, _, _,
+    rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-! ## 3. Crash Hoare Logic (`KernelPanicCrash`, `PowerLossCrash`, `CrashStep`, `CrashHoareSpec`) -/
+
+/-- Directory persistence resolution on `PowerLossCrash` when directory updates were not yet synced. -/
+inductive DirCrashOutcome where
+  | revertToNand     -- Unsynced volatile directory updates evaporate; NAND dentries survive
+  | flushPendingDir  -- Background metadata writeback reached NAND before power died (`ext4` reorder!)
+  deriving Repr, DecidableEq
+
+/-- **OS Kernel Panic (`KernelPanicCrash`)**:
+    Wipes all Tier-(a) `KernelVolatileState` (`openFds`, `flockTable`, `InodePageCache`, unsynced
+    kernel `dirInode`), while Tier-(b) `DriveWriteCache` drains cleanly into Tier-(c) `NandBlocks`
+    because drive controller power was never interrupted. -/
+@[expose] def KernelPanicCrash (st : PosixFsState) : PosixFsState :=
+  let drainedFiles :=
+    mapAssocValues
+      (fun ino nandBytes => (assocLookup st.driveCache.cachedFiles ino).getD nandBytes)
+      st.nand.fileBlocks
+  let drainedDir := st.driveCache.cachedDirEntries.getD st.nand.dirNandEntries
+  { kernel := { openFds := {}
+                flockTable := {}
+                pageCache := {}
+                dirInode := { unsyncedEntries := drainedDir } }
+    driveCache := {}
+    nand := { st.nand with
+                dirNandEntries := drainedDir
+                fileBlocks := drainedFiles }
+    nextFd := 3 }
+
+/-- **Hardware Power Loss (`PowerLossCrash`)**:
+    Wipes both Tier-(a) `KernelVolatileState` and Tier-(b) `DriveWriteCache`; any inode with an
+    uncommitted write in `InodePageCache` or `DriveWriteCache` undergoes `512B`/`4KiB` sector
+    torn-write resolution (`tearFn ino`), while synced inodes (`pendingVolatileWrite = none`)
+    remain untouched on `NandBlocks`. -/
+@[expose] def PowerLossCrash (dirPick : DirCrashOutcome) (tearFn : InodeId → SectorTearMask)
+    (st : PosixFsState) : PosixFsState :=
+  let crashedFiles :=
+    mapAssocValues
+      (fun ino nandBytes =>
+        resolveInodePowerLoss (tearFn ino) nandBytes (pendingVolatileWrite st ino))
+      st.nand.fileBlocks
+  let pendingDir :=
+    match st.driveCache.cachedDirEntries with
+    | some cached => cached
+    | none => st.kernel.dirInode.unsyncedEntries
+  let crashedDir :=
+    match dirPick with
+    | .revertToNand => st.nand.dirNandEntries
+    | .flushPendingDir => pendingDir
+  { kernel := { openFds := {}
+                flockTable := {}
+                pageCache := {}
+                dirInode := { unsyncedEntries := crashedDir } }
+    driveCache := {}
+    nand := { st.nand with
+                dirNandEntries := crashedDir
+                fileBlocks := crashedFiles }
+    nextFd := 3 }
+
+/-- Single crash transition relation unifying `KernelPanicCrash` and `PowerLossCrash`. -/
+inductive CrashStep : PosixFsState → PosixFsState → Prop where
+  | kernelPanic (st : PosixFsState) :
+      CrashStep st (KernelPanicCrash st)
+  | powerLoss (dirPick : DirCrashOutcome) (tearFn : InodeId → SectorTearMask) (st : PosixFsState) :
+      CrashStep st (PowerLossCrash dirPick tearFn st)
+
+/-- Process restart closes descriptors and drops advisory locks, but is not a storage barrier:
+    the kernel page cache and every storage tier retain their exact previous contents. -/
+def ProcessRestart (st : PosixFsState) : PosixFsState :=
+  { st with kernel := { st.kernel with openFds := {}, flockTable := {} } }
+
+theorem processRestart_preserves_dirty_pages (st : PosixFsState) :
+    (ProcessRestart st).kernel.pageCache = st.kernel.pageCache ∧
+    (ProcessRestart st).driveCache = st.driveCache ∧
+    (ProcessRestart st).nand = st.nand := ⟨rfl, rfl, rfl⟩
+
+theorem processRestart_dirty_page_remains_readable (st : PosixFsState) (ino : InodeId)
+    (bytes : List UInt8) (hDirty : assocLookup st.kernel.pageCache.dirtyFiles ino = some bytes) :
+    readInodeHierarchy (ProcessRestart st) ino = some bytes ∧
+      assocLookup (ProcessRestart st).nand.fileBlocks ino = assocLookup st.nand.fileBlocks ino := by
+  have hPending : pendingVolatileWrite (ProcessRestart st) ino = some bytes := by
+    simp [pendingVolatileWrite, ProcessRestart, hDirty]
+  exact ⟨by simp [readInodeHierarchy, hPending], rfl⟩
+
+/-- Restart alone supplies no durable-release event: a dirty page survives for subsequent reads,
+    while NAND is unchanged until an explicit successful media sync. -/
+theorem processRestart_is_not_fsync (st : PosixFsState) (ino : InodeId) (bytes : List UInt8)
+    (hDirty : assocLookup st.kernel.pageCache.dirtyFiles ino = some bytes) :
+    (ProcessRestart st).kernel.flockTable.locks = [] ∧
+      assocLookup (ProcessRestart st).kernel.pageCache.dirtyFiles ino = some bytes ∧
+      assocLookup (ProcessRestart st).nand.fileBlocks ino = assocLookup st.nand.fileBlocks ino := by
+  exact ⟨rfl, hDirty, rfl⟩
+
+/-- **Synced Inode Crash Immunity (`syncedInode_immune_to_crashStep`)**:
+    Any inode `ino` with zero uncommitted writes in `InodePageCache` and `DriveWriteCache`
+    preserves its exact `NandBlocks` payload across **every** `CrashStep` (for all `512B`/`4KiB`
+    `SectorTearMask`s and all `DirCrashOutcome`s). -/
+theorem syncedInode_immune_to_crashStep {st crashed : PosixFsState} {ino : InodeId}
+    (hPageClean : assocLookup st.kernel.pageCache.dirtyFiles ino = none)
+    (hDriveClean : assocLookup st.driveCache.cachedFiles ino = none)
+    (hCrash : CrashStep st crashed) :
+    assocLookup crashed.nand.fileBlocks ino = assocLookup st.nand.fileBlocks ino ∧
+    readInodeHierarchy crashed ino = assocLookup st.nand.fileBlocks ino := by
+  have hPend : pendingVolatileWrite st ino = none := by
+    unfold pendingVolatileWrite
+    rw [hPageClean, hDriveClean]
+  cases hCrash with
+  | kernelPanic _ =>
+    dsimp only [KernelPanicCrash, readInodeHierarchy, pendingVolatileWrite]
+    simp only [assocLookup_nil, assocLookup_mapAssocValues, hDriveClean, Option.getD_none]
+    exact ⟨option_map_id_ext (fun _ => rfl) _, option_map_id_ext (fun _ => rfl) _⟩
+  | powerLoss dirPick tearFn _ =>
+    dsimp only [PowerLossCrash, readInodeHierarchy, pendingVolatileWrite]
+    simp only [assocLookup_nil, assocLookup_mapAssocValues]
+    have hFn : ∀ nb : List UInt8,
+        resolveInodePowerLoss (tearFn ino) nb (pendingVolatileWrite st ino) = nb := by
+      intro nb
+      rw [hPend]
+      rfl
+    exact ⟨option_map_id_ext hFn _, option_map_id_ext hFn _⟩
+
+/-- **Synced Directory Crash Immunity (`syncedDir_immune_to_crashStep`)**:
+    When `dirInode.unsyncedEntries = nand.dirNandEntries` and `driveCache.cachedDirEntries = none`,
+    every `CrashStep` preserves `dirNandEntries` and reloads `unsyncedEntries` identically. -/
+theorem syncedDir_immune_to_crashStep {st crashed : PosixFsState}
+    (hDirSynced : st.kernel.dirInode.unsyncedEntries = st.nand.dirNandEntries)
+    (hDriveDirClean : st.driveCache.cachedDirEntries = none)
+    (hCrash : CrashStep st crashed) :
+    crashed.nand.dirNandEntries = st.nand.dirNandEntries ∧
+    crashed.kernel.dirInode.unsyncedEntries = st.nand.dirNandEntries := by
+  cases hCrash with
+  | kernelPanic _ =>
+    simp [KernelPanicCrash, hDriveDirClean]
+  | powerLoss dirPick tearFn _ =>
+    cases dirPick <;> simp [PowerLossCrash, hDriveDirClean, hDirSynced]
+
+/-- **Post-Crash Idempotence (`crashStep_idempotent`)**:
+    Immediately after any `CrashStep s₀ s₁`, all volatile caches are empty and synced with NAND,
+    so any second crash `CrashStep s₁ s₂` during recovery leaves `s₂ = s₁`! -/
+theorem crashStep_idempotent {s₀ s₁ s₂ : PosixFsState}
+    (h1 : CrashStep s₀ s₁) (h2 : CrashStep s₁ s₂) : s₂ = s₁ := by
+  have hClean :
+      s₁.kernel.openFds = {} ∧
+      s₁.kernel.flockTable = {} ∧
+      s₁.kernel.pageCache = {} ∧
+      s₁.driveCache = {} ∧
+      s₁.kernel.dirInode.unsyncedEntries = s₁.nand.dirNandEntries ∧
+      s₁.nextFd = 3 := by
+    cases h1 <;> simp [KernelPanicCrash, PowerLossCrash]
+  rcases hClean with ⟨hFds, hFlk, hPg, hDrv, hDir, hNextFd⟩
+  cases h2 with
+  | kernelPanic _ =>
+    have hMap :
+        mapAssocValues (fun ino nb => (assocLookup s₁.driveCache.cachedFiles ino).getD nb)
+          s₁.nand.fileBlocks = s₁.nand.fileBlocks := by
+      apply mapAssocValues_id
+      intro ino nb
+      rw [hDrv]
+      rfl
+    cases s₁ with
+    | mk k d n nf =>
+      cases k with
+      | mk o fl p di =>
+        cases di with
+        | mk ue =>
+          cases n with
+          | mk dne fb ni =>
+            dsimp only at hFds hFlk hPg hDrv hDir hNextFd hMap
+            subst hFds hFlk hPg hDrv hDir hNextFd
+            unfold KernelPanicCrash
+            dsimp only
+            rw [hMap]
+            rfl
+  | powerLoss dirPick tearFn _ =>
+    have hMap :
+        mapAssocValues
+          (fun ino nb => resolveInodePowerLoss (tearFn ino) nb (pendingVolatileWrite s₁ ino))
+          s₁.nand.fileBlocks = s₁.nand.fileBlocks := by
+      apply mapAssocValues_id
+      intro ino nb
+      have hPend : pendingVolatileWrite s₁ ino = none := by
+        unfold pendingVolatileWrite
+        rw [hPg, hDrv]
+        rfl
+      rw [hPend]
+      rfl
+    cases s₁ with
+    | mk k d n nf =>
+      cases k with
+      | mk o fl p di =>
+        cases di with
+        | mk ue =>
+          cases n with
+          | mk dne fb ni =>
+            dsimp only at hFds hFlk hPg hDrv hDir hNextFd hMap
+            subst hFds hFlk hPg hDrv hDir hNextFd
+            unfold PowerLossCrash
+            dsimp only
+            rw [hMap]
+            cases dirPick <;> rfl
+
+/-- **Crash Hoare Logic Specification (`CrashHoareSpec`)**:
+    Certifies that an operation with intermediate step trace `intermediates` satisfies:
+    1. `normal_post`: successful execution establishes `Post`,
+    2. `crash_safe`: crashing from **any** pre/intermediate/post state in `intermediates st`
+       establishes `CrashInv`, and
+    3. `crash_idempotent`: `CrashInv` is preserved across arbitrary repeated crashes during recovery! -/
+structure CrashHoareSpec {α : Type}
+    (Pre : PosixFsState → Prop)
+    (intermediates : PosixFsState → List PosixFsState)
+    (run : PosixFsState → PosixFsState × Except PosixErr α)
+    (Post : PosixFsState → α → Prop)
+    (CrashInv : PosixFsState → Prop) : Prop where
+  normal_post : ∀ st st' out, Pre st → run st = (st', .ok out) → Post st' out
+  crash_safe : ∀ st mid crashed,
+    Pre st → mid ∈ intermediates st → CrashStep mid crashed → CrashInv crashed
+  crash_idempotent : ∀ s₁ s₂, CrashInv s₁ → CrashStep s₁ s₂ → CrashInv s₂
+
+#export_eqns KernelPanicCrash PowerLossCrash posixCreateExclNoFollow posixPwriteAll posixSyncAllMedia posixSyncParentDir posixUnlinkIfPresent posixRename
+
+#export_eqns posixCloseFd posixOpenExistingNoFollow resolveDentryNoFollow posixFlockExNb posixFstatDescAndInode posixPreadAll
+
+
+#export_eqns descHasAnyRef posixUnlink posixCreateSymlink
+
+/-- Externally visible Round-1 network message consuming threshold MPC nonce, prep cursor, & RNG seed. -/
+structure Round1NetworkPacket where
+  txId                  : List UInt8
+  msgContext            : List UInt8
+  policySpendCharged    : Nat
+  leafOrEpoch           : Nat
+  baggyCodewordDigest   : List UInt8
+  rngSeedGen            : Nat
+  mpcPrepCursor         : Nat
+  mpcNonceSlot          : Nat
+  deriving Repr, DecidableEq
+
+/-- Helper reading a durable 64-bit counter file via `O_NOFOLLOW` + `pread` + `decodeU64BeNat`. -/
+def readDurableU64Counter (st : PosixFsState) (pid : Pid) (path : DirName) : Option Nat :=
+  match posixOpenExistingNoFollow st pid path false with
+  | .error _ => none
+  | .ok (st1, fd) =>
+    match posixPreadAll st1 pid fd with
+    | .error _ => none
+    | .ok raw => decodeU64BeNat raw
+
+/-- **Mutation Witness (`tooth_split_subordinate_wals_crash_between_commits_causes_resource_desync`)**:
+    Demonstrates why storing subordinate ceremony authorities (`beltPath` for `BeltLatch`/`Frontier`
+    and `noncePath` for the threshold MPC Round-1 nonce cursor) in **separate** WAL files instead of
+    a single unified `CeremonyJournalRecord` is unsound under crash faults:
+    when `PowerLossCrash` strikes after `beltPath` commits watermark `1` (and Round-1 packet `pkt`
+    using `(leafOrEpoch = 0, mpcNonceSlot = 0)` is emitted) but **before** `noncePath` commits `1`,
+    post-crash recovery observes `belt = some 1` alongside `nonce = some 0` (`¬ (pkt.mpcNonceSlot < 0)`),
+    desynchronizing the two authorities and allowing Round-1 MPC nonce `0` reuse! -/
+theorem tooth_split_subordinate_wals_crash_between_commits_causes_resource_desync :
+    let beltPath : DirName := ⟨[0x62]⟩
+    let noncePath : DirName := ⟨[0x6e]⟩
+    let beltTmp : DirName := walTmpPath beltPath
+    let b0 := encodeU64BeNat 0
+    let b1 := encodeU64BeNat 1
+    let pkt : Round1NetworkPacket :=
+      { txId := List.replicate 32 0xAA
+        msgContext := [0x01]
+        policySpendCharged := 10
+        leafOrEpoch := 0
+        baggyCodewordDigest := List.replicate 32 0xBB
+        rngSeedGen := 0
+        mpcPrepCursor := 0
+        mpcNonceSlot := 0 }
+    ∃ s1 s2 s3 s4 s5 s6 s7 s8 sInit s9 s10 s11 s12 s13 sBeltCommitted,
+      posixCreateExclNoFollow PosixFsState.empty 1 beltPath = .ok (s1, 3, 1) ∧
+      posixPwriteAll s1 1 3 b0 = .ok s2 ∧
+      posixSyncAllMedia s2 1 3 false = (s3, .ok ()) ∧
+      posixCloseFd s3 1 3 = .ok s4 ∧
+      posixCreateExclNoFollow s4 1 noncePath = .ok (s5, 4, 2) ∧
+      posixPwriteAll s5 1 4 b0 = .ok s6 ∧
+      posixSyncAllMedia s6 1 4 false = (s7, .ok ()) ∧
+      posixCloseFd s7 1 4 = .ok s8 ∧
+      posixSyncParentDir s8 false = (sInit, .ok ()) ∧
+      readDurableU64Counter sInit 2 beltPath = some 0 ∧
+      readDurableU64Counter sInit 2 noncePath = some 0 ∧
+      -- Mutated split-WAL Round-1 commit: `beltPath` commits `1`, then `PowerLossCrash` strikes
+      -- before `noncePath` commits `1`!
+      posixCreateExclNoFollow sInit 1 beltTmp = .ok (s9, 5, 3) ∧
+      posixPwriteAll s9 1 5 b1 = .ok s10 ∧
+      posixSyncAllMedia s10 1 5 false = (s11, .ok ()) ∧
+      posixCloseFd s11 1 5 = .ok s12 ∧
+      posixRename s12 beltTmp beltPath = .ok s13 ∧
+      posixSyncParentDir s13 false = (sBeltCommitted, .ok ()) ∧
+      let sCrashed := PowerLossCrash .revertToNand (fun _ => SectorTearMask.dropAllVolatile) sBeltCommitted
+      readDurableU64Counter sCrashed 2 beltPath = some 1 ∧
+      readDurableU64Counter sCrashed 2 noncePath = some 0 ∧
+      pkt.leafOrEpoch < 1 ∧
+      ¬ (pkt.mpcNonceSlot < 0) := by
+  have h0Lt64 : 0 < 2 ^ 64 := Nat.pow_pos (by decide : 0 < 2)
+  have h1Lt64 : 1 < 2 ^ 64 :=
+    Nat.lt_trans (lt_two_pow_32_of_le_8192 (by decide : 1 ≤ 8192))
+      two_pow_32_lt_two_pow_64
+  have hDec0 : decodeU64BeNat (encodeU64BeNat 0) = some 0 := decodeU64BeNat_encodeU64BeNat h0Lt64
+  have hDec1 : decodeU64BeNat (encodeU64BeNat 1) = some 1 := decodeU64BeNat_encodeU64BeNat h1Lt64
+  refine ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, _,
+    rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+    ?_, ?_,
+    rfl, rfl, rfl, rfl, rfl, rfl,
+    ?_, ?_, by decide, by decide⟩
+  · exact hDec0
+  · exact hDec0
+  · exact hDec1
+  · exact hDec0
+
+/-- Concrete base filename `"vault.wal"` (`[0x76, 0x61, 0x75, 0x6c, 0x74, 0x2e, 0x77, 0x61, 0x6c]`). -/
+def concreteBasePath : DirName :=
+  ⟨[0x76, 0x61, 0x75, 0x6c, 0x74, 0x2e, 0x77, 0x61, 0x6c]⟩
+
+/-- Helper reading raw file bytes at `path` via `O_NOFOLLOW` + `pread`. -/
+def readRawFileNoFollow (st : PosixFsState) (pid : Pid) (path : DirName) :
+    Except PosixErr (List UInt8) :=
+  match posixOpenExistingNoFollow st pid path false with
+  | .error e => .error e
+  | .ok (st1, fd) => posixPreadAll st1 pid fd
+
+set_option maxRecDepth 4096 in
+/-- **#tooth 1 (`tooth_rename_without_tmp_sync_exposes_torn_or_garbage_file`)**:
+    Models the `ext4` `data=writeback` / delayed-allocation reorder hazard:
+    if a mutated `replaceAtomic` writes `newBytes` (`512` bytes of `0xBB` + `[0xCC]`) to `.tmp`
+    and calls `posixRename(.tmp, concreteBasePath)` **without** `posixSyncAllMedia(.tmp)` first,
+    then on `PowerLossCrash .flushPendingDir`:
+    1. Under `SectorTearMask.dropAllVolatile`, `concreteBasePath` recovers as **0-length `[]`**
+       (neither `oldBytes` nor `newBytes`!), and
+    2. Under a 512B partial sector flush `{ geometry := .bytes512, sectorChoices := [.writeNewSector, .keepOldSector] }`,
+       `concreteBasePath` recovers as a **512-byte torn half-write** `List.replicate 512 0xBB`
+       (strictly neither `oldBytes` nor `newBytes`)! -/
+theorem tooth_rename_without_tmp_sync_exposes_torn_or_garbage_file :
+    let oldBytes : List UInt8 := [0xAA, 0xAA, 0xAA, 0xAA]
+    let newBytes : List UInt8 := List.replicate 512 0xBB ++ [0xCC]
+    let tmpPath : DirName := walTmpPath concreteBasePath
+    let halfTear : SectorTearMask :=
+      { geometry := .bytes512, sectorChoices := [.writeNewSector, .keepOldSector] }
+    ∃ s1 s2 s3 s4 sOld s5 s6 s7 sBuggyRenamed,
+      posixCreateExclNoFollow PosixFsState.empty 1 concreteBasePath = .ok (s1, 3, 1) ∧
+      posixPwriteAll s1 1 3 oldBytes = .ok s2 ∧
+      posixSyncAllMedia s2 1 3 false = (s3, .ok ()) ∧
+      posixCloseFd s3 1 3 = .ok s4 ∧
+      posixSyncParentDir s4 false = (sOld, .ok ()) ∧
+      -- Mutated update: write `.tmp` and `rename` WITHOUT `posixSyncAllMedia(.tmp)`!
+      posixCreateExclNoFollow sOld 1 tmpPath = .ok (s5, 4, 2) ∧
+      posixPwriteAll s5 1 4 newBytes = .ok s6 ∧
+      posixCloseFd s6 1 4 = .ok s7 ∧
+      posixRename s7 tmpPath concreteBasePath = .ok sBuggyRenamed ∧
+      let sCrashZero :=
+        PowerLossCrash .flushPendingDir (fun _ => SectorTearMask.dropAllVolatile) sBuggyRenamed
+      let sCrashTorn :=
+        PowerLossCrash .flushPendingDir (fun _ => halfTear) sBuggyRenamed
+      readRawFileNoFollow sCrashZero 2 concreteBasePath = .ok [] ∧
+      ([] : List UInt8) ≠ oldBytes ∧
+      ([] : List UInt8) ≠ newBytes ∧
+      readRawFileNoFollow sCrashTorn 2 concreteBasePath = .ok (List.replicate 512 0xBB) ∧
+      List.replicate 512 (0xBB : UInt8) ≠ oldBytes ∧
+      List.replicate 512 (0xBB : UInt8) ≠ newBytes := by
+  refine ⟨_, _, _, _, _, _, _, _, _,
+    rfl, rfl, rfl, rfl, rfl,
+    rfl, rfl, rfl, rfl,
+    rfl, by decide, by decide, rfl, by decide, ?_⟩
+  intro hEq
+  have hLen := congrArg List.length hEq
+  simp at hLen
+
+/-- **#tooth 2 (`tooth_darwin_fsync_without_fullfsync_loses_committed_epoch_on_power_loss`)**:
+    Models NVMe / SSD volatile write-back caches (`DriveWriteCache`) where plain POSIX `fsync(2)`
+    without `F_FULLFSYNC` / `REQ_FUA` (`posixFsyncVolatileCacheOnly` + `posixFsyncDirVolatileOnly`)
+    drains across `KernelPanicCrash` (passing naive reboot tests at epoch `1`!), yet **loses the
+    committed epoch `1` back to epoch `0`** when `PowerLossCrash` wipes `DriveWriteCache`! -/
+theorem tooth_darwin_fsync_without_fullfsync_loses_committed_epoch_on_power_loss :
+    let tmpPath : DirName := walTmpPath concreteBasePath
+    let b0 := encodeU64BeNat 0
+    let b1 := encodeU64BeNat 1
+    ∃ s1 s2 s3 s4 sEpoch0 s5 s6 s7 s8 s9,
+      posixCreateExclNoFollow PosixFsState.empty 1 concreteBasePath = .ok (s1, 3, 1) ∧
+      posixPwriteAll s1 1 3 b0 = .ok s2 ∧
+      posixSyncAllMedia s2 1 3 false = (s3, .ok ()) ∧
+      posixCloseFd s3 1 3 = .ok s4 ∧
+      posixSyncParentDir s4 false = (sEpoch0, .ok ()) ∧
+      -- Mutated commit of epoch `1`: plain `fsync` into `DriveWriteCache` WITHOUT `F_FULLFSYNC`!
+      posixCreateExclNoFollow sEpoch0 1 tmpPath = .ok (s5, 4, 2) ∧
+      posixPwriteAll s5 1 4 b1 = .ok s6 ∧
+      posixFsyncVolatileCacheOnly s6 1 4 = .ok s7 ∧
+      posixCloseFd s7 1 4 = .ok s8 ∧
+      posixRename s8 tmpPath concreteBasePath = .ok s9 ∧
+      let sPlainFsync := posixFsyncDirVolatileOnly s9
+      -- Survives OS kernel panic (masking the bug in reboot-only tests):
+      readDurableU64Counter (KernelPanicCrash sPlainFsync) 2 concreteBasePath = some 1 ∧
+      -- Evaporates back to epoch `0` on real hardware power loss:
+      readDurableU64Counter
+        (PowerLossCrash .revertToNand (fun _ => SectorTearMask.dropAllVolatile) sPlainFsync)
+        2 concreteBasePath = some 0 := by
+  have h0Lt64 : 0 < 2 ^ 64 := Nat.pow_pos (by decide : 0 < 2)
+  have h1Lt64 : 1 < 2 ^ 64 :=
+    Nat.lt_trans (lt_two_pow_32_of_le_8192 (by decide : 1 ≤ 8192))
+      two_pow_32_lt_two_pow_64
+  refine ⟨_, _, _, _, _, _, _, _, _, _,
+    rfl, rfl, rfl, rfl, rfl,
+    rfl, rfl, rfl, rfl, rfl,
+    decodeU64BeNat_encodeU64BeNat h1Lt64,
+    decodeU64BeNat_encodeU64BeNat h0Lt64⟩
+
+/-- **#tooth 4 (`tooth_unlink_and_failed_mustCreate_splits_flock_without_lockGenesisId`)**:
+    Mechanizes the exact two-step POSIX `.lock` unlink + recreate split-brain race:
+    1. Process `1` creates `.lock` (`ino₁ = 1`) and acquires `posixFlockExNb` (`owner 1 = some 1`),
+    2. An external actor (`pid = 99`) `unlink`s `.lock` and creates a new `.lock` (`ino₂ = 2`),
+    3. Process `2` attempts `posixCreateExclNoFollow` (which fails with `.error .eexist`!) and
+       falls back to `posixOpenExistingNoFollow` + `posixFlockExNb` **without** `lockGenesisId`:
+       **both** Process `1` (`ino₁ = 1`) and Process `2` (`ino₂ = 2`, `1 ≠ 2`) simultaneously hold
+       live `LOCK_EX` `flock`s! -/
+theorem tooth_unlink_and_failed_mustCreate_splits_flock_without_lockGenesisId :
+    let lockPath := walLockPath concreteBasePath
+    ∃ s1 s2 s3 s4 s5 s6 s7,
+      -- Process 1 opens & locks `ino₁ = 1`:
+      posixCreateExclNoFollow PosixFsState.empty 1 lockPath = .ok (s1, 3, 1) ∧
+      posixFlockExNb s1 1 3 = .ok s2 ∧
+      -- External actor unlinks `lockPath` and recreates a fresh inode `ino₂ = 2`:
+      posixUnlink s2 lockPath = .ok s3 ∧
+      posixCreateExclNoFollow s3 99 lockPath = .ok (s4, 4, 2) ∧
+      posixCloseFd s4 99 4 = .ok s5 ∧
+      -- Process 2 tries `O_CREAT|O_EXCL` (gets `.eexist`), falls back to `open` + `flock` without `lockGenesisId`:
+      posixCreateExclNoFollow s5 2 lockPath = .error .eexist ∧
+      posixOpenExistingNoFollow s5 2 lockPath true = .ok (s6, 5) ∧
+      posixFlockExNb s6 2 5 = .ok s7 ∧
+      -- Split-brain: Process 1 and Process 2 BOTH hold active `LOCK_EX` locks on distinct inodes `1 ≠ 2`!
+      posixFstatDescAndInode s7 1 3 = .ok (1, 1) ∧
+      posixFstatDescAndInode s7 2 5 = .ok (3, 2) ∧
+      s7.kernel.flockTable.owner 1 = some 1 ∧
+      s7.kernel.flockTable.owner 2 = some 3 ∧
+      (1 : InodeId) ≠ 2 := by
+  exact ⟨_, _, _, _, _, _, _,
+    rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, by decide⟩
+
+/-- Helper simulating a **buggy non-sticky** `fsync` kernel that clears `stickyFsyncErr := false`
+    on `descId` after reporting an initial `EIO` (`fsyncgate` vulnerability!). -/
+def clearStickyFsyncErrOnDesc (st : PosixFsState) (descId : OpenDescriptionId) : PosixFsState :=
+  match assocLookup st.kernel.openFds.descriptions descId with
+  | none => st
+  | some d =>
+    let descs' := assocInsert descId { d with stickyFsyncErr := false } st.kernel.openFds.descriptions
+    { st with kernel := { st.kernel with
+                            openFds := { st.kernel.openFds with descriptions := descs' } } }
+
+/-- **#tooth 6 (`tooth_retry_after_fsync_eio_without_sticky_poison_violates_durability`)**:
+    Mechanizes the `CuttleFS` / `fsyncgate` (`errseq_t`) hazard:
+    1. Process `1` commits `oldBytes = [0x10]` to NAND, then writes `newBytes = [0x20]` (`≠ oldBytes`)
+       into `InodePageCache`,
+    2. `posixSyncAllMedia ... true` fails with `.error .eio`, evicting the failed dirty page buffer
+       back to stale NAND (`[0x10]`) and latching `stickyFsyncErr := true`,
+    3. Under **hardened sticky poisoning**, retrying `posixSyncAllMedia ... false` returns
+       `.error .epoisoned` (preventing silent data loss!), whereas
+    4. Under **mutated non-sticky error clearing** (`clearStickyFsyncErrOnDesc`), retrying
+       `posixSyncAllMedia ... false` **falsely returns `.ok ()`** while NAND and `readInodeHierarchy`
+       still hold stale `oldBytes = [0x10]` (`≠ newBytes`)! -/
+theorem tooth_retry_after_fsync_eio_without_sticky_poison_violates_durability :
+    let oldBytes : List UInt8 := [0x10]
+    let newBytes : List UInt8 := [0x20]
+    ∃ s1 s2 sClean sDirty sAfterEio sFalseOk,
+      posixCreateExclNoFollow PosixFsState.empty 1 concreteBasePath = .ok (s1, 3, 1) ∧
+      posixPwriteAll s1 1 3 oldBytes = .ok s2 ∧
+      posixSyncAllMedia s2 1 3 false = (sClean, .ok ()) ∧
+      posixPwriteAll sClean 1 3 newBytes = .ok sDirty ∧
+      posixSyncAllMedia sDirty 1 3 true = (sAfterEio, .error .eio) ∧
+      -- Hardened sticky handle refuses retry with `.error .epoisoned`:
+      posixSyncAllMedia sAfterEio 1 3 false = (sAfterEio, .error .epoisoned) ∧
+      posixPreadAll sAfterEio 1 3 = .error .epoisoned ∧
+      -- Mutated non-sticky handle falsely succeeds on retry while losing `newBytes`!
+      posixSyncAllMedia (clearStickyFsyncErrOnDesc sAfterEio 1) 1 3 false = (sFalseOk, .ok ()) ∧
+      assocLookup sFalseOk.nand.fileBlocks 1 = some oldBytes ∧
+      readInodeHierarchy sFalseOk 1 = some oldBytes ∧
+      oldBytes ≠ newBytes := by
+  exact ⟨_, _, _, _, _, _,
+    rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, by decide⟩
+
+/-! ## 7. Per-Inode Crash Outcomes, Media Damage, Whole-Device Rollback & the External Anchor -/
+
+/-- **Every crash outcome of one inode (`crashStep_inode_outcome`)**: after any `CrashStep`, the
+    NAND bytes of an inode whose settled contents were `old` are one of
+    1. `old` (nothing pending, or the pending write was dropped);
+    2. the drive-cache copy (a kernel panic drains the drive cache; dirty page-cache data is lost);
+    3. a sector mix of `old` and the pending write under some tear mask (power loss: any sector
+       may keep the old bytes, take the new bytes, or hold garbage).
+    An inode with no pending write is in case 1 (`syncedInode_immune_to_crashStep`). -/
+theorem crashStep_inode_outcome {st crashed : PosixFsState} {ino : InodeId} {old : List UInt8}
+    (hNand : assocLookup st.nand.fileBlocks ino = some old) (hCrash : CrashStep st crashed) :
+    assocLookup crashed.nand.fileBlocks ino = some old ∨
+    (∃ dc, assocLookup st.driveCache.cachedFiles ino = some dc ∧
+      assocLookup crashed.nand.fileBlocks ino = some dc) ∨
+    (∃ (pending : List UInt8) (mask : SectorTearMask), pendingVolatileWrite st ino = some pending ∧
+      assocLookup crashed.nand.fileBlocks ino =
+        some (mixSectors mask.geometry.byteWidth mask.sectorChoices old pending)) := by
+  cases hCrash with
+  | kernelPanic _ =>
+    dsimp only [KernelPanicCrash]
+    rw [assocLookup_mapAssocValues, hNand]
+    cases hDc : assocLookup st.driveCache.cachedFiles ino with
+    | none => exact Or.inl rfl
+    | some dc => exact Or.inr (Or.inl ⟨dc, rfl, rfl⟩)
+  | powerLoss dirPick tearFn _ =>
+    dsimp only [PowerLossCrash]
+    rw [assocLookup_mapAssocValues, hNand]
+    cases hP : pendingVolatileWrite st ino with
+    | none => exact Or.inl rfl
+    | some pending => exact Or.inr (Or.inr ⟨pending, tearFn ino, rfl, rfl⟩)
+
+/-- Offline media fault on one inode: its settled NAND bytes are replaced by ARBITRARY bytes
+    (bit-rot, a failed block, or tampering with the powered-off device). Not a `CrashStep`: it
+    can hit an inode that has nothing pending. -/
+def MediaDamageInode (st : PosixFsState) (ino : InodeId) (garbage : List UInt8) : PosixFsState :=
+  { st with nand := { st.nand with fileBlocks := assocInsert ino garbage st.nand.fileBlocks } }
+
+theorem mediaDamageInode_lookup (st : PosixFsState) (ino q : InodeId) (garbage : List UInt8) :
+    assocLookup (MediaDamageInode st ino garbage).nand.fileBlocks q =
+      if q = ino then some garbage else assocLookup st.nand.fileBlocks q := by
+  unfold MediaDamageInode
+  exact assocLookup_insert ino garbage st.nand.fileBlocks q
+
+/-- File sync persists the bytes, but the unsynced directory disappears after power loss. -/
+theorem unsyncedGenesis_file_operations (sealBytes recordBytes : List UInt8) :
+    ∃ s1 s2 s3 s4 s5 s6 s7 s8 sNoDirSync,
+      posixCreateExclNoFollow PosixFsState.empty 1 (walLockPath concreteBasePath) = .ok (s1, 3, 1) ∧
+      posixFlockExNb s1 1 3 = .ok s2 ∧
+      posixPwriteAll s2 1 3 sealBytes = .ok s3 ∧
+      posixSyncAllMedia s3 1 3 false = (s4, .ok ()) ∧
+      posixCreateExclNoFollow s4 1 concreteBasePath = .ok (s5, 4, 2) ∧
+      posixPwriteAll s5 1 4 recordBytes = .ok s6 ∧
+      posixSyncAllMedia s6 1 4 false = (s7, .ok ()) ∧
+      posixCloseFd s7 1 4 = .ok s8 ∧
+      posixCloseFd s8 1 3 = .ok sNoDirSync ∧
+      (∃ openedLock locked openedRecord,
+        posixOpenExistingNoFollow sNoDirSync 2 (walLockPath concreteBasePath) true = .ok (openedLock, 5) ∧
+        posixFlockExNb openedLock 2 5 = .ok locked ∧
+        posixFstatDescAndInode locked 2 5 = .ok (3, 1) ∧
+        posixPreadAll locked 2 5 = .ok sealBytes ∧
+        posixOpenExistingNoFollow locked 2 concreteBasePath false = .ok (openedRecord, 6) ∧
+        posixPreadAll openedRecord 2 6 = .ok recordBytes) ∧
+      let crashed := PowerLossCrash .revertToNand (fun _ => SectorTearMask.dropAllVolatile) sNoDirSync
+      assocLookup crashed.kernel.dirInode.unsyncedEntries concreteBasePath = none ∧
+      posixOpenExistingNoFollow crashed 2 (walLockPath concreteBasePath) true = .error .enoent :=
+  ⟨_, _, _, _, _, _, _, _, _, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+    ⟨_, _, _, rfl, rfl, rfl, rfl, rfl, rfl⟩, rfl, rfl⟩
+
+namespace RustDurability
+
+/-- Independent unsynced metadata operations are not a whole-directory snapshot. Each
+writeback chooses one operation, preserving its order relative to other selected operations.
+A filesystem-specific contract must additionally constrain dependency ordering and barriers. -/
+inductive MetadataOp where
+  | put (name : DirName) (inode : InodeId)
+  | remove (name : DirName)
+  deriving Repr, DecidableEq
+
+def applyMetadataOp (entries : List (DirName × EntryTarget)) : MetadataOp → List (DirName × EntryTarget)
+  | .put name inode => assocInsert name (.regular inode) entries
+  | .remove name => assocErase name entries
+
+def persistMetadata (entries : List (DirName × EntryTarget)) : List (Bool × MetadataOp) →
+    List (DirName × EntryTarget)
+  | [] => entries
+  | (persist, op) :: rest =>
+    persistMetadata (if persist then applyMetadataOp entries op else entries) rest
+
+/-- Explicit counterexample to treating `DirCrashOutcome` as unrestricted POSIX semantics. -/
+theorem independent_metadata_writeback_not_whole_snapshot :
+    let a : MetadataOp := .put ⟨[1]⟩ 1
+    let b : MetadataOp := .put ⟨[2]⟩ 2
+    persistMetadata [] [(true, a), (false, b)] ≠ [] ∧
+    persistMetadata [] [(true, a), (false, b)] ≠ persistMetadata [] [(true, a), (true, b)] := by
+  decide
+
+end RustDurability
+
+/-- Finite `SectorTearMask` lookup schedule used in concrete/decidable trace events. -/
+def evalFiniteTearSchedule (defaultTear : SectorTearMask)
+    (overrides : List (InodeId × SectorTearMask)) (ino : InodeId) : SectorTearMask :=
+  (assocLookup overrides ino).getD defaultTear
+
+/-- System crash striking in the middle of a reservation: either crash kind, with the
+    power-loss directory outcome and per-inode sector tears chosen by the environment. -/
+inductive MidOpCrash where
+  | kernelPanic
+  | powerLoss (dirPick : DirCrashOutcome) (defaultTear : SectorTearMask)
+      (perInodeTears : List (InodeId × SectorTearMask))
+  deriving Repr, DecidableEq
+
+def MidOpCrash.apply : MidOpCrash → PosixFsState → PosixFsState
+  | .kernelPanic, st => KernelPanicCrash st
+  | .powerLoss dirPick defaultTear overrides, st =>
+    PowerLossCrash dirPick (evalFiniteTearSchedule defaultTear overrides) st
+
+theorem MidOpCrash.apply_crashStep (c : MidOpCrash) (st : PosixFsState) :
+    CrashStep st (c.apply st) := by
+  cases c with
+  | kernelPanic => exact CrashStep.kernelPanic st
+  | powerLoss dirPick defaultTear overrides => exact CrashStep.powerLoss dirPick _ st
+
+theorem posixFlockExNb_preserves_storage {sA sB : PosixFsState} {p : Pid} {fd : FdId}
+    (hFlk : posixFlockExNb sA p fd = .ok sB) :
+    sB.kernel.dirInode = sA.kernel.dirInode ∧
+    sB.kernel.pageCache = sA.kernel.pageCache ∧
+    sB.driveCache = sA.driveCache ∧
+    sB.nand = sA.nand := by
+  rw [posixFlockExNb.public_eq_1] at hFlk
+  cases hRes : resolveOpenFd sA.kernel.openFds p fd with
+  | none => rw [hRes] at hFlk; cases hFlk
+  | some dPair =>
+    rcases dPair with ⟨descId, d⟩
+    rw [hRes] at hFlk
+    dsimp only at hFlk
+    cases hOw : sA.kernel.flockTable.owner d.inode with
+    | none =>
+      rw [hOw] at hFlk
+      injection hFlk with hEq
+      rw [← hEq]
+      exact ⟨rfl, rfl, rfl, rfl⟩
+    | some hld =>
+      rw [hOw] at hFlk
+      dsimp only at hFlk
+      by_cases hh : (hld == descId) = true
+      · simp only [hh, ↓reduceIte] at hFlk
+        injection hFlk with hEq
+        rw [← hEq]
+        exact ⟨rfl, rfl, rfl, rfl⟩
+      · simp [hh] at hFlk
+
+end Qsag
+end
