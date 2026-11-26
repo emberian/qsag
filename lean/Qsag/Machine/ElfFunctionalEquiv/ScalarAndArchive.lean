@@ -873,3 +873,879 @@ theorem stepArm64_orrImm (rd rn : Nat) (imm : UInt64) :
 
 end ExtraArmStepLemmas
 
+theorem bv_ofU64_eq_ofNat {w : UInt64} {n : Nat} (h : w.toNat = n) (hn : n < 2 ^ 64) :
+    w.toBitVec = BitVec.ofNat 64 n := by
+  apply BitVec.eq_of_toNat_eq
+  rw [UInt64.toNat_toBitVec, h, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hn]
+
+theorem mod_goldilocks_lt_u64 (n : Nat) : n % GOLDILOCKS_P < 2 ^ 64 := by
+  have hp : GOLDILOCKS_P < 2 ^ 64 := by decide
+  exact Nat.lt_trans (Nat.mod_lt n (by decide)) hp
+
+/-! ### §3.1 `qsag_asm_goldilocks_add_ct_x86_64` (`N = 17`, `retPc = 50`) -/
+
+
+/-! ### §3.2 `qsag_asm_goldilocks_sub_ct_x86_64` (`N = 23`, `retPc = 74`) -/
+
+
+/-! ### §3.3 `qsag_asm_goldilocks_mul_ct_x86_64` (`N = 25`) & `qsag_asm_goldilocks_mul_ct_aarch64` (`N = 29`) -/
+
+
+/-! ### §3.4 `qsag_asm_goldilocks_pow7_ct_x86_64` (`N = 85`, `retPc = 265`) -/
+
+
+theorem goldPow7Mc_toNat (x : UInt64) :
+    (goldMulMc (goldMulMc (goldMulMc (goldMulMc x x) x) (goldMulMc (goldMulMc x x) x)) x).toNat =
+      (x.toNat ^ 7) % GOLDILOCKS_P := by
+  rw [goldMulMc_toNat, goldMulMc_toNat, goldMulMc_toNat, goldMulMc_toNat]
+  show ((((x.toNat * x.toNat % GOLDILOCKS_P) * x.toNat % GOLDILOCKS_P) *
+      ((x.toNat * x.toNat % GOLDILOCKS_P) * x.toNat % GOLDILOCKS_P) % GOLDILOCKS_P) * x.toNat) %
+      GOLDILOCKS_P = (x.toNat ^ 7) % GOLDILOCKS_P
+  simp only [Nat.mul_mod_mod, Nat.mod_mul_mod]
+  have hPow : x.toNat ^ 7 =
+      ((x.toNat * x.toNat) * x.toNat) * ((x.toNat * x.toNat) * x.toNat) * x.toNat := by
+    simp [Nat.pow_succ, Nat.pow_zero, Nat.mul_assoc]
+  rw [hPow]
+
+
+/-! ### §3.5 `qsag_asm_goldilocks_dot2_adx_x86_64` (`N = 44`, `retPc = 153`) -/
+
+
+def goldDot2Mc (a0 b0 a1 b1 : UInt64) : UInt64 :=
+  let p0 := a0.toNat * b0.toNat
+  let p1 := a1.toNat * b1.toNat
+  let lo0 := UInt64.ofNat (p0 % 0x10000000000000000)
+  let hi0 := UInt64.ofNat (p0 / 0x10000000000000000)
+  let lo1 := UInt64.ofNat (p1 % 0x10000000000000000)
+  let hi1 := UInt64.ofNat (p1 / 0x10000000000000000)
+  let sumLo := lo0.toNat + lo1.toNat
+  let r8 := UInt64.ofNat (sumLo % 0x10000000000000000)
+  let cf0 := decide (sumLo ≥ 0x10000000000000000)
+  let sumHi := hi0.toNat + hi1.toNat + (if cf0 then 1 else 0)
+  let r9 := UInt64.ofNat (sumHi % 0x10000000000000000)
+  let cf1 := decide (sumHi ≥ 0x10000000000000000)
+  let r11 : UInt64 := if cf1 then 18446744065119617025 else 0
+  goldAddMc (mulRed r8 r9) r11
+
+theorem u64_toNat_zero : (0 : UInt64).toNat = 0 := rfl
+
+theorem u64_ofNat_zero_mod : UInt64.ofNat (0 % 0x10000000000000000) = 0 := rfl
+
+theorem u64_zero_lt_264 : decide (0 ≥ 0x10000000000000000) = false := rfl
+
+theorem u64_ofNat_b_mod (c : Bool) :
+    UInt64.ofNat ((if c then 1 else 0) % 0x10000000000000000) = if c then 1 else 0 := by
+  cases c <;> decide
+
+theorem u64_b_lt_264 (c : Bool) :
+    decide ((if c then 1 else 0) ≥ 0x10000000000000000) = false := by
+  cases c <;> decide
+
+theorem u64_eps2_and_mask (c : Bool) :
+    (18446744065119617025 : UInt64) &&& ((0 : UInt64) - (if c then 1 else 0)) =
+      if c then 18446744065119617025 else 0 := by
+  cases c <;> decide
+
+
+theorem goldDot2Mc_toNat (a0 b0 a1 b1 : UInt64) :
+    (goldDot2Mc a0 b0 a1 b1).toNat =
+      (a0.toNat * b0.toNat + a1.toNat * b1.toNat) % GOLDILOCKS_P := by
+  have ha0 := a0.toNat_lt; have hb0 := b0.toNat_lt
+  have ha1 := a1.toNat_lt; have hb1 := b1.toNat_lt
+  have hp0 : a0.toNat * b0.toNat < 18446744073709551616 * 18446744073709551616 :=
+    Nat.mul_lt_mul'' ha0 hb0
+  have hp1 : a1.toNat * b1.toNat < 18446744073709551616 * 18446744073709551616 :=
+    Nat.mul_lt_mul'' ha1 hb1
+  unfold goldDot2Mc
+  dsimp only
+  rw [goldAddMc_toNat]
+  generalize a0.toNat * b0.toNat = p0 at hp0 ⊢
+  generalize a1.toNat * b1.toNat = p1 at hp1 ⊢
+  have h64 : (2 : Nat) ^ 64 = 18446744073709551616 := rfl
+  have hlo0 : (UInt64.ofNat (p0 % 18446744073709551616)).toNat = p0 % 18446744073709551616 := by
+    rw [UInt64.toNat_ofNat', h64, Nat.mod_mod]
+  have hhi0 : (UInt64.ofNat (p0 / 18446744073709551616)).toNat = p0 / 18446744073709551616 := by
+    rw [UInt64.toNat_ofNat', h64, Nat.mod_eq_of_lt (by omega)]
+  have hlo1 : (UInt64.ofNat (p1 % 18446744073709551616)).toNat = p1 % 18446744073709551616 := by
+    rw [UInt64.toNat_ofNat', h64, Nat.mod_mod]
+  have hhi1 : (UInt64.ofNat (p1 / 18446744073709551616)).toNat = p1 / 18446744073709551616 := by
+    rw [UInt64.toNat_ofNat', h64, Nat.mod_eq_of_lt (by omega)]
+  rw [hlo0, hlo1, hhi0, hhi1]
+  let sumLo := p0 % 18446744073709551616 + p1 % 18446744073709551616
+  let cf0 := decide (sumLo ≥ 18446744073709551616)
+  let sumHi := p0 / 18446744073709551616 + p1 / 18446744073709551616 + (if cf0 then 1 else 0)
+  let cf1 := decide (sumHi ≥ 18446744073709551616)
+  have hr8 : (UInt64.ofNat (sumLo % 18446744073709551616)).toNat = sumLo % 18446744073709551616 := by
+    rw [UInt64.toNat_ofNat', h64, Nat.mod_mod]
+  have hr9 : (UInt64.ofNat (sumHi % 18446744073709551616)).toNat = sumHi % 18446744073709551616 := by
+    rw [UInt64.toNat_ofNat', h64, Nat.mod_mod]
+  have hRed := mulRed_mod (UInt64.ofNat (sumLo % 18446744073709551616))
+    (UInt64.ofNat (sumHi % 18446744073709551616))
+  rw [hr8, hr9] at hRed
+  change ((mulRed (UInt64.ofNat (sumLo % 18446744073709551616))
+            (UInt64.ofNat (sumHi % 18446744073709551616))).toNat +
+          (if cf1 then (18446744065119617025 : UInt64) else 0).toNat) % 18446744069414584321 =
+        (p0 + p1) % 18446744069414584321
+  rw [← Nat.mod_add_mod, hRed, Nat.mod_add_mod]
+  show (sumLo % 18446744073709551616 + sumHi % 18446744073709551616 * 18446744073709551616 +
+      (if cf1 then (18446744065119617025 : UInt64) else 0).toNat) % 18446744069414584321 =
+      (p0 + p1) % 18446744069414584321
+  have hLoSplit : sumLo = sumLo % 18446744073709551616 +
+      (if cf0 then 1 else 0) * 18446744073709551616 := by
+    if hc0 : sumLo ≥ 18446744073709551616 then
+      have hc0t : cf0 = true := decide_eq_true hc0
+      rw [hc0t]; simp; omega
+    else
+      have hc0f : cf0 = false := decide_eq_false hc0
+      rw [hc0f]; simp; omega
+  have hHiSplit : sumHi = sumHi % 18446744073709551616 +
+      (if cf1 then 1 else 0) * 18446744073709551616 := by
+    if hc1 : sumHi ≥ 18446744073709551616 then
+      have hc1t : cf1 = true := decide_eq_true hc1
+      rw [hc1t]; simp; omega
+    else
+      have hc1f : cf1 = false := decide_eq_false hc1
+      rw [hc1f]; simp; omega
+  have hSumMid : p0 + p1 = sumLo % 18446744073709551616 + sumHi * 18446744073709551616 := by
+    dsimp only [sumLo, sumHi] at hLoSplit ⊢
+    calc p0 + p1
+      _ = (p0 % 18446744073709551616 + p1 % 18446744073709551616) +
+          (p0 / 18446744073709551616 + p1 / 18446744073709551616) * 18446744073709551616 := by
+        rw [Nat.add_mul]; omega
+      _ = (sumLo % 18446744073709551616 + (if cf0 then 1 else 0) * 18446744073709551616) +
+          (p0 / 18446744073709551616 + p1 / 18446744073709551616) * 18446744073709551616 := by
+        rw [← hLoSplit]
+      _ = sumLo % 18446744073709551616 +
+          (p0 / 18446744073709551616 + p1 / 18446744073709551616 + (if cf0 then 1 else 0)) *
+            18446744073709551616 := by
+        rw [Nat.add_mul, Nat.add_mul]; omega
+  if hc1 : sumHi ≥ 18446744073709551616 then
+    have hc1t : cf1 = true := decide_eq_true hc1
+    rw [hc1t] at hHiSplit ⊢
+    have hC : (if true = true then (18446744065119617025 : UInt64) else 0).toNat = 18446744065119617025 := rfl
+    rw [hC]
+    conv => rhs; rw [hSumMid, hHiSplit]
+    have hSplit1 : (if true = true then 1 else 0) * 18446744073709551616 = 18446744073709551616 := rfl
+    rw [hSplit1, Nat.add_mul, ← Nat.add_assoc]
+    have hB2 : 18446744073709551616 * 18446744073709551616 =
+        18446744065119617025 + 18446744078004518911 * 18446744069414584321 := rfl
+    rw [hB2, ← Nat.add_assoc, Nat.add_mul_mod_self_right]
+  else
+    have hc1f : cf1 = false := decide_eq_false hc1
+    rw [hc1f] at hHiSplit ⊢
+    have h0 : (if false = true then (18446744065119617025 : UInt64) else 0).toNat = 0 := rfl
+    have hSplit0 : (if false = true then 1 else 0) * 18446744073709551616 = 0 := rfl
+    rw [h0, Nat.add_zero]
+    conv => rhs; rw [hSumMid, hHiSplit]
+    rw [hSplit0, Nat.add_zero]
+
+
+/-! ### §3.6 `qsag_asm_ct_eq_32_x86_64` (`N = 20`) & `qsag_asm_ct_eq_32_aarch64` (`N = 22`) -/
+
+
+/-! ### §3.7 `qsag_asm_ct_eq_32_aarch64` (`N = 22`, `retPc = 84`) -/
+
+theorem ctEq32Arm_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (hi : Bank16 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ExecReachesArm64 ctEq32ArmProg 21
+      ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        v, cf, zf, dit, false, m⟩
+      ⟨84, ⟨⟨((ctEq32WordArm m r0 r1 ||| (0 - ctEq32WordArm m r0 r1)) >>> UInt64.ofNat 63) ^^^ 1,
+          r1, 0, 0, 0, 0, 0, 0, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        v, cf, zf, dit, false, m⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 21
+    apply StepsArm64.cons rfl rfl
+    · simp only [stepArm64_ldp, stepArm64_eorRR, stepArm64_orrRR, stepArm64_subRR, stepArm64_lsr64,
+        stepArm64_eorImm, stepArm64_movz, u64_shl_zero_zero, uint64_evalSub_eq,
+        armGet_31, armGet_0, armGet_1, armGet_2, armGet_3, armGet_4, armGet_5, armGet_6, armGet_7,
+        armSet_0, armSet_2, armSet_3, armSet_4, armSet_5, armSet_6, armSet_7]
+      rfl
+  rw [ctEq32WordArm.public_eq_1]
+  exact StepsArm64.zero _
+
+
+/-! ## §4. Cross-ISA `ELF64` Scalar Constant-Time Kernels (`ct_select_u64`, `ct_eq_u64`, `aarch64` `goldilocks_add_ct` & `sub_ct`) -/
+
+/-! ### §4.1 `ct_select_u64` (`x86_64` `N = 4` & `aarch64` `N = 3`) -/
+
+/-- ASCII bytes of `"ct_select_u64"`. -/
+def ctSelectSymBytes : List UInt8 :=
+  [0x63, 0x74, 0x5f, 0x73, 0x65, 0x6c, 0x65, 0x63, 0x74, 0x5f, 0x75, 0x36, 0x34]
+
+/-- Compiled `x86_64` `.text` bytes for `ct_select_u64(cond: rdi, a: rsi, b: rdx) -> rax`:
+    `and rdi, rdi; mov rax, rdx; cmovnz rax, rsi; ret`. -/
+def ctSelectX86Bytes : List UInt8 :=
+  [0x48, 0x21, 0xFF, 0x48, 0x89, 0xD0, 0x48, 0x0F, 0x45, 0xC6, 0xC3]
+
+def ctSelectX86Elf : Bytes :=
+  Bytes.ofNat 491 0x18000000000000000800000001000000030000000000000030000000000000007b000000000000000000000000000000000000000200000019000000000000000000000000000000010000000000000000000000000000000f000000000000006c000000000000000000000000000000000000000300000011000000000000000000000000000000100000000000000000000000000000000b000000000000006100000000000000000000000000000006000000010000000b0000000000000000000000000000000100000000000000000000000000000021000000000000004000000000000000000000000000000000000000030000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b00000000000000000002001200000001000000000000000000000000000000000000000000000000003436755f7463656c65735f746300c3c6450f48d08948ff2148006261746d79732e006261747274732e00747865742e0062617472747368732e000001000500400000000000400000000000000000000000ab0000000000000000000000000000000000000001003e0001000000000000000000010102464c457f
+
+def ctSelectX86Prog : List (DecodedInstr X86Instr) := [
+  ⟨0, 3, .aluRegReg .andOp true 7 7⟩,
+  ⟨3, 3, .movRegReg true 0 2⟩,
+  ⟨6, 4, .cmovcc 5 true 0 6⟩,
+  ⟨10, 1, .ret⟩]
+
+/-- Compiled `AArch64` `.text` bytes for `ct_select_u64(cond: x0, a: x1, b: x2) -> x0`:
+    `cmp x0, #0; csel x0, x1, x2, ne; ret`. -/
+def ctSelectArmBytes : List UInt8 :=
+  wordsToBytesLE [0xF100001F, 0x9A821020, 0xD65F03C0]
+
+def ctSelectArmElf : Bytes :=
+  Bytes.ofNat 492 0x18000000000000000800000001000000030000000000000030000000000000007c000000000000000000000000000000000000000200000019000000000000000000000000000000010000000000000000000000000000000f000000000000006d000000000000000000000000000000000000000300000011000000000000000000000000000000100000000000000000000000000000000c000000000000006100000000000000000000000000000006000000010000000b0000000000000000000000000000000100000000000000000000000000000021000000000000004000000000000000000000000000000000000000030000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c00000000000000000002001200000001000000000000000000000000000000000000000000000000003436755f7463656c65735f746300d65f03c09a821020f100001f006261746d79732e006261747274732e00747865742e0062617472747368732e000001000500400000000000400000000000000000000000ac000000000000000000000000000000000000000100b70001000000000000000000010102464c457f
+
+def ctSelectArmProg : List (DecodedInstr Arm64Instr) := [
+  ⟨0, 4, .aluImm .subs true 31 0 0⟩,
+  ⟨4, 4, .csel 1 false true 0 1 2⟩,
+  ⟨8, 4, .ret⟩]
+
+private theorem ctSelectX86_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    ExecReachesX86 ctSelectX86Prog 3
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        y, cf, o, zf, dy, false, m⟩
+      ⟨10, ⟨if !(r7 == 0) then r6 else r2, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        y, false, false, r7 == 0, dy, false, m⟩ := by
+  cases h7 : (r7 == 0)
+  · apply StepsX86.toExecReaches
+    iterate 3
+      apply StepsX86.cons rfl rfl
+      · simp only [stepX86_andRR64, stepX86_movRR, stepX86_cmovnz64, UInt64.and_self,
+          maskGprWidth_true, b16get_2, b16get_6, b16get_7, b16set_0, b16set_7, h7]
+        rfl
+    exact StepsX86.zero _
+  · apply StepsX86.toExecReaches
+    iterate 3
+      apply StepsX86.cons rfl rfl
+      · simp only [stepX86_andRR64, stepX86_movRR, stepX86_cmovnz64, UInt64.and_self,
+          maskGprWidth_true, b16get_2, b16get_6, b16get_7, b16set_0, b16set_7, h7]
+        rfl
+    exact StepsX86.zero _
+
+theorem elf_ct_select_u64_x86_64_functional_and_ct :
+    ∃ slice : ElfFuncSlice,
+      extractElfFuncBytes ctSelectX86Elf "ct_select_u64" = some slice ∧
+      ElfSliceOk ctSelectX86Elf slice ∧
+      checkElfFuncThreeWayNI ctSelectX86Elf "ct_select_u64"
+        (mkContract "ct_select_u64" [4]) = true ∧
+      ElfSliceThreeWayNISafe slice (mkContract "ct_select_u64" [4]) ∧
+      slice.code = ctSelectX86Bytes ∧
+      decodeX86Slice slice.code = some ctSelectX86Prog ∧
+      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
+        (∃ st3 tr3, execDecodedX86 slice.code 3 st = some (st3, tr3) ∧ st3.halted = false) ∧
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedX86 slice.code (4 + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = (readMem64 st'.toX86State.mem (st.toX86State.gpr.get 4)).toNat ∧ trace.length = 4 ∧
+          st'.gpr.get 0 = (if st.gpr.get 7 != 0#64 then st.gpr.get 6 else st.gpr.get 2) ∧
+          X86CalleeSavedPreserved st st' ∧
+          st'.mem = st.mem := by
+  have hNI : checkElfFuncThreeWayNI ctSelectX86Elf "ct_select_u64"
+      (mkContract "ct_select_u64" [4]) = true := by decide +kernel
+  obtain ⟨slice, hExt, hOk, hSafe⟩ := checkElfFuncThreeWayNI_sound hNI
+  have hCode : slice.code = ctSelectX86Bytes := by
+    have hC : (extractElfFuncBytes ctSelectX86Elf "ct_select_u64").map ElfFuncSlice.code =
+        some ctSelectX86Bytes := by decide +kernel
+    rw [hExt] at hC
+    exact Option.some.inj hC
+  have hDec : decodeX86Slice slice.code = some ctSelectX86Prog := by
+    rw [hCode]; decide +kernel
+  refine ⟨slice, hExt, hOk, hNI, hSafe, hCode, hDec, ?_⟩
+  intro st hpc hh
+  rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    y, cf, o, zf, dy, hlt, mem⟩
+  dsimp only at hpc hh; subst hpc hh
+  let st0 : X86BvState := ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, mem⟩
+  obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl
+    (ctSelectX86_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
+      (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
+      (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
+      (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
+      (UInt64.ofBitVec r15) y cf o zf dy (fun a => mem a.toBitVec))
+    rfl rfl
+  refine ⟨hPre, fun extra => ?_⟩
+  obtain ⟨tr, hExec, hL⟩ := hPost extra
+  refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_⟩
+  · change (if !(UInt64.ofBitVec r7 == 0) then UInt64.ofBitVec r6 else UInt64.ofBitVec r2).toBitVec =
+      (if r7 != 0#64 then r6 else r2)
+    have hBeq : (UInt64.ofBitVec r7 == 0) = (r7 == 0#64) := by
+      cases h : (r7 == 0#64)
+      · have hne : r7 ≠ 0#64 := fun heq => by rw [heq] at h; cases h
+        exact beq_false_of_ne (fun hu => hne (by simpa using congrArg UInt64.toBitVec hu))
+      · have heq : r7 = 0#64 := beq_iff_eq.mp h
+        subst heq; rfl
+    rw [hBeq]
+    unfold bne
+    cases (r7 == 0#64)
+    · simp only [Bool.not_false, ite_true, UInt64.toBitVec_ofBitVec]
+    · simp only [Bool.not_true, Bool.false_eq_true, ite_false, UInt64.toBitVec_ofBitVec]
+  · exact x86_callee_saved_of_roundtrip
+  · exact mem_roundtrip mem
+
+private theorem u64_subs_zero_eq (x : UInt64) :
+    UInt64.ofNat ((x.toNat + 0x10000000000000000 - (0 : UInt64).toNat) % 0x10000000000000000) = x := by
+  apply u64_eq_of_toNat
+  have hx := x.toNat_lt
+  have h0 : (0 : UInt64).toNat = 0 := rfl
+  have h64 : (2 : Nat) ^ 64 = 18446744073709551616 := rfl
+  rw [UInt64.toNat_ofNat', h0, h64]
+  show (x.toNat + 18446744073709551616 - 0) % 18446744073709551616 % 18446744073709551616 = x.toNat
+  omega
+
+private theorem ctSelectArm_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (hi : Bank16 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ExecReachesArm64 ctSelectArmProg 2
+      ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        v, cf, zf, dit, false, m⟩
+      ⟨8, ⟨⟨if !(r0 == 0) then r1 else r2, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        v, decide (r0.toNat ≥ (0 : UInt64).toNat), r0 == 0, dit, false, m⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 2
+    apply StepsArm64.cons rfl rfl
+    · simp only [stepArm64_subsImm, stepArm64_cselNe, u64_subs_zero_eq,
+        armGet_0, armGet_1, armGet_2, armSet_31, armSet_0]
+      rfl
+  exact StepsArm64.zero _
+
+theorem elf_ct_select_u64_aarch64_functional_and_ct :
+    ∃ slice : ElfFuncSlice,
+      extractElfFuncBytes ctSelectArmElf "ct_select_u64" = some slice ∧
+      ElfSliceOk ctSelectArmElf slice ∧
+      checkElfFuncThreeWayNI ctSelectArmElf "ct_select_u64"
+        (mkContract "ct_select_u64" []) = true ∧
+      ElfSliceThreeWayNISafe slice (mkContract "ct_select_u64" []) ∧
+      slice.code = ctSelectArmBytes ∧
+      decodeArm64Slice slice.code = some ctSelectArmProg ∧
+      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
+        (∃ st2 tr2, execDecodedArm64 slice.code 2 st = some (st2, tr2) ∧ st2.halted = false) ∧
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedArm64 slice.code (3 + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = 8 ∧ trace.length = 3 ∧
+          st'.gpr.get 0 = (if st.gpr.get 0 != 0#64 then st.gpr.get 1 else st.gpr.get 2) ∧
+          Arm64CalleeSavedPreserved st st' ∧
+          st'.mem = st.mem := by
+  have hNI : checkElfFuncThreeWayNI ctSelectArmElf "ct_select_u64"
+      (mkContract "ct_select_u64" []) = true := by decide +kernel
+  obtain ⟨slice, hExt, hOk, hSafe⟩ := checkElfFuncThreeWayNI_sound hNI
+  have hCode : slice.code = ctSelectArmBytes := by
+    have hC : (extractElfFuncBytes ctSelectArmElf "ct_select_u64").map ElfFuncSlice.code =
+        some ctSelectArmBytes := by decide +kernel
+    rw [hExt] at hC
+    exact Option.some.inj hC
+  have hDec : decodeArm64Slice slice.code = some ctSelectArmProg := by
+    rw [hCode]; decide +kernel
+  refine ⟨slice, hExt, hOk, hNI, hSafe, hCode, hDec, ?_⟩
+  intro st hpc hh
+  rcases st with ⟨pc, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+    v, cf, zf, dit, hlt, mem⟩
+  dsimp only at hpc hh; subst hpc hh
+  let st0 : Arm64BvState := ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩, v, cf, zf, dit, false, mem⟩
+  obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl
+    (ctSelectArm_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
+      (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
+      (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
+      (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
+      (UInt64.ofBitVec r15) (bank16ToU64 hi) v cf zf dit (fun a => mem a.toBitVec))
+    rfl rfl
+  refine ⟨hPre, fun extra => ?_⟩
+  obtain ⟨tr, hExec, hL⟩ := hPost extra
+  refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_⟩
+  · change (if !(UInt64.ofBitVec r0 == 0) then UInt64.ofBitVec r1 else UInt64.ofBitVec r2).toBitVec =
+      (if r0 != 0#64 then r1 else r2)
+    have hBeq : (UInt64.ofBitVec r0 == 0) = (r0 == 0#64) := by
+      cases h : (r0 == 0#64)
+      · have hne : r0 ≠ 0#64 := fun heq => by rw [heq] at h; cases h
+        exact beq_false_of_ne (fun hu => hne (by simpa using congrArg UInt64.toBitVec hu))
+      · have heq : r0 = 0#64 := beq_iff_eq.mp h
+        subst heq; rfl
+    rw [hBeq]
+    unfold bne
+    cases (r0 == 0#64)
+    · simp only [Bool.not_false, ite_true, UInt64.toBitVec_ofBitVec]
+    · simp only [Bool.not_true, Bool.false_eq_true, ite_false, UInt64.toBitVec_ofBitVec]
+  · exact arm64_callee_saved_of_hi_vec
+  · exact mem_roundtrip mem
+
+/-! ### §4.2 `ct_eq_u64` (`x86_64` `N = 9` & `aarch64` `N = 8`) -/
+
+def ctEqU64SymBytes : List UInt8 :=
+  [0x63, 0x74, 0x5f, 0x65, 0x71, 0x5f, 0x75, 0x36, 0x34]
+
+def ctEqU64X86Bytes : List UInt8 :=
+  [0x48, 0x89, 0xF8, 0x48, 0x31, 0xF0, 0x48, 0x89, 0xC1, 0x48, 0xF7, 0xD9,
+   0x48, 0x09, 0xC8, 0x48, 0xC1, 0xE8, 0x3F, 0x83, 0xF0, 0x01, 0x31, 0xC9, 0xC3]
+
+def ctEqU64X86Elf : Bytes :=
+  Bytes.ofNat 501 0x180000000000000008000000010000000300000000000000300000000000000085000000000000000000000000000000000000000200000019000000000000000000000000000000010000000000000000000000000000000b000000000000007a0000000000000000000000000000000000000003000000110000000000000000000000000000001000000000000000000000000000000019000000000000006100000000000000000000000000000006000000010000000b0000000000000000000000000000000100000000000000000000000000000021000000000000004000000000000000000000000000000000000000030000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001900000000000000000002001200000001000000000000000000000000000000000000000000000000003436755f71655f746300c3c93101f0833fe8c148c80948d9f748c18948f03148f88948006261746d79732e006261747274732e00747865742e0062617472747368732e000001000500400000000000400000000000000000000000b50000000000000000000000000000000000000001003e0001000000000000000000010102464c457f
+
+def ctEqU64X86Prog : List (DecodedInstr X86Instr) := [
+  ⟨0, 3, .movRegReg true 0 7⟩,
+  ⟨3, 3, .aluRegReg .xorOp true 0 6⟩,
+  ⟨6, 3, .movRegReg true 1 0⟩,
+  ⟨9, 3, .negReg true 1⟩,
+  ⟨12, 3, .aluRegReg .orOp true 0 1⟩,
+  ⟨15, 4, .shiftImm .shr true 0 63⟩,
+  ⟨19, 3, .aluImm .xorOp false 0 1⟩,
+  ⟨22, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨24, 1, .ret⟩]
+
+def ctEqU64ArmBytes : List UInt8 :=
+  wordsToBytesLE [0xCA010002, 0xCB0203E3, 0xAA030042, 0xD37FFC40,
+                  0xD2400000, 0xD2800002, 0xD2800003, 0xD65F03C0]
+
+def ctEqU64ArmElf : Bytes :=
+  Bytes.ofNat 508 0x18000000000000000800000001000000030000000000000030000000000000008c000000000000000000000000000000000000000200000019000000000000000000000000000000010000000000000000000000000000000b00000000000000810000000000000000000000000000000000000003000000110000000000000000000000000000001000000000000000000000000000000020000000000000006100000000000000000000000000000006000000010000000b0000000000000000000000000000000100000000000000000000000000000021000000000000004000000000000000000000000000000000000000030000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000000000000000002001200000001000000000000000000000000000000000000000000000000003436755f71655f746300d65f03c0d2800003d2800002d2400000d37ffc40aa030042cb0203e3ca010002006261746d79732e006261747274732e00747865742e0062617472747368732e000001000500400000000000400000000000000000000000bc000000000000000000000000000000000000000100b70001000000000000000000010102464c457f
+
+def ctEqU64ArmProg : List (DecodedInstr Arm64Instr) := [
+  ⟨0, 4, .aluReg .eor true 2 0 1 0 0⟩,
+  ⟨4, 4, .aluReg .sub true 3 31 2 0 0⟩,
+  ⟨8, 4, .aluReg .orr true 2 2 3 0 0⟩,
+  ⟨12, 4, .ubfm true 0 2 63 63⟩,
+  ⟨16, 4, .aluImm .eor true 0 0 1⟩,
+  ⟨20, 4, .movWide false true 2 0 0⟩,
+  ⟨24, 4, .movWide false true 3 0 0⟩,
+  ⟨28, 4, .ret⟩]
+
+private theorem ctEqU64X86_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    ExecReachesX86 ctEqU64X86Prog 8
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        y, cf, o, zf, dy, false, m⟩
+      ⟨24, ⟨maskGprWidth false ((((r7 ^^^ r6) ||| (0 - (r7 ^^^ r6))) >>> UInt64.ofNat 63) ^^^ 1),
+          0, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        y, false, false, true, dy, false, m⟩ := by
+  apply StepsX86.toExecReaches
+  iterate 8
+    apply StepsX86.cons rfl rfl
+    · simp only [stepX86_movRR, stepX86_neg, stepX86_orRR, stepX86_shr64,
+        stepX86_xorImm, stepX86_xorRR, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
+        b16get_0, b16get_1, b16get_6, b16get_7, b16set_0, b16set_1]
+      rfl
+  exact StepsX86.zero _
+
+theorem elf_ct_eq_u64_x86_64_functional_and_ct :
+    ∃ slice : ElfFuncSlice,
+      extractElfFuncBytes ctEqU64X86Elf "ct_eq_u64" = some slice ∧
+      ElfSliceOk ctEqU64X86Elf slice ∧
+      checkElfFuncThreeWayNI ctEqU64X86Elf "ct_eq_u64"
+        (mkContract "ct_eq_u64" [4] [] [1]) = true ∧
+      ElfSliceThreeWayNISafe slice (mkContract "ct_eq_u64" [4] [] [1]) ∧
+      slice.code = ctEqU64X86Bytes ∧
+      decodeX86Slice slice.code = some ctEqU64X86Prog ∧
+      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
+        (∃ st8 tr8, execDecodedX86 slice.code 8 st = some (st8, tr8) ∧ st8.halted = false) ∧
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedX86 slice.code (9 + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = (readMem64 st'.toX86State.mem (st.toX86State.gpr.get 4)).toNat ∧ trace.length = 9 ∧
+          st'.gpr.get 0 = (if st.gpr.get 7 = st.gpr.get 6 then 1#64 else 0#64) ∧
+          X86CalleeSavedPreserved st st' ∧
+          st'.mem = st.mem ∧
+          st'.gpr.get 1 = 0#64 := by
+  have hNI : checkElfFuncThreeWayNI ctEqU64X86Elf "ct_eq_u64"
+      (mkContract "ct_eq_u64" [4] [] [1]) = true := by decide +kernel
+  obtain ⟨slice, hExt, hOk, hSafe⟩ := checkElfFuncThreeWayNI_sound hNI
+  have hCode : slice.code = ctEqU64X86Bytes := by
+    have hC : (extractElfFuncBytes ctEqU64X86Elf "ct_eq_u64").map ElfFuncSlice.code =
+        some ctEqU64X86Bytes := by decide +kernel
+    rw [hExt] at hC; exact Option.some.inj hC
+  have hDec : decodeX86Slice slice.code = some ctEqU64X86Prog := by rw [hCode]; decide +kernel
+  refine ⟨slice, hExt, hOk, hNI, hSafe, hCode, hDec, ?_⟩
+  intro st hpc hh
+  rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    y, cf, o, zf, dy, hlt, mem⟩
+  dsimp only at hpc hh; subst hpc hh
+  let st0 : X86BvState := ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, mem⟩
+  obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl
+    (ctEqU64X86_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
+      (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
+      (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
+      (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
+      (UInt64.ofBitVec r15) y cf o zf dy (fun a => mem a.toBitVec))
+    rfl rfl
+  refine ⟨hPre, fun extra => ?_⟩
+  obtain ⟨tr, hExec, hL⟩ := hPost extra
+  refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, rfl⟩
+  · change (maskGprWidth false
+        ((((UInt64.ofBitVec r7 ^^^ UInt64.ofBitVec r6) |||
+            (0 - (UInt64.ofBitVec r7 ^^^ UInt64.ofBitVec r6))) >>>
+            UInt64.ofNat 63) ^^^ 1)).toBitVec =
+      (if r7 = r6 then 1#64 else 0#64)
+    rw [zeroTest64_masked]
+    have hiff : UInt64.ofBitVec r7 ^^^ UInt64.ofBitVec r6 = 0 ↔ r7 = r6 := by
+      rw [UInt64.xor_eq_zero_iff]
+      exact ⟨fun h => by simpa using congrArg UInt64.toBitVec h, fun h => by rw [h]⟩
+    if hx : UInt64.ofBitVec r7 ^^^ UInt64.ofBitVec r6 = 0 then
+      rw [ite_eq_left hx, ite_eq_left (hiff.mp hx)]; rfl
+    else
+      rw [ite_eq_right hx, ite_eq_right (fun h => hx (hiff.mpr h))]; rfl
+  · exact x86_callee_saved_of_roundtrip
+  · exact mem_roundtrip mem
+
+private theorem ctEqU64Arm_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (hi : Bank16 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ExecReachesArm64 ctEqU64ArmProg 7
+      ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        v, cf, zf, dit, false, m⟩
+      ⟨28, ⟨⟨(((r0 ^^^ r1) ||| (0 - (r0 ^^^ r1))) >>> UInt64.ofNat 63) ^^^ 1,
+          r1, 0, 0, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        v, cf, zf, dit, false, m⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 7
+    apply StepsArm64.cons rfl rfl
+    · simp only [stepArm64_eorRR, stepArm64_subRR, stepArm64_orrRR, stepArm64_lsr64,
+        stepArm64_eorImm, stepArm64_movz, u64_shl_zero_zero, uint64_evalSub_eq,
+        armGet_31, armGet_0, armGet_1, armGet_2, armGet_3,
+        armSet_0, armSet_2, armSet_3]
+      rfl
+  exact StepsArm64.zero _
+
+theorem elf_ct_eq_u64_aarch64_functional_and_ct :
+    ∃ slice : ElfFuncSlice,
+      extractElfFuncBytes ctEqU64ArmElf "ct_eq_u64" = some slice ∧
+      ElfSliceOk ctEqU64ArmElf slice ∧
+      checkElfFuncThreeWayNI ctEqU64ArmElf "ct_eq_u64"
+        (mkContract "ct_eq_u64" [] [] [2, 3]) = true ∧
+      ElfSliceThreeWayNISafe slice (mkContract "ct_eq_u64" [] [] [2, 3]) ∧
+      slice.code = ctEqU64ArmBytes ∧
+      decodeArm64Slice slice.code = some ctEqU64ArmProg ∧
+      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
+        (∃ st7 tr7, execDecodedArm64 slice.code 7 st = some (st7, tr7) ∧ st7.halted = false) ∧
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedArm64 slice.code (8 + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = 28 ∧ trace.length = 8 ∧
+          st'.gpr.get 0 = (if st.gpr.get 0 = st.gpr.get 1 then 1#64 else 0#64) ∧
+          Arm64CalleeSavedPreserved st st' ∧
+          st'.mem = st.mem ∧
+          st'.gpr.get 2 = 0#64 ∧ st'.gpr.get 3 = 0#64 := by
+  have hNI : checkElfFuncThreeWayNI ctEqU64ArmElf "ct_eq_u64"
+      (mkContract "ct_eq_u64" [] [] [2, 3]) = true := by decide +kernel
+  obtain ⟨slice, hExt, hOk, hSafe⟩ := checkElfFuncThreeWayNI_sound hNI
+  have hCode : slice.code = ctEqU64ArmBytes := by
+    have hC : (extractElfFuncBytes ctEqU64ArmElf "ct_eq_u64").map ElfFuncSlice.code =
+        some ctEqU64ArmBytes := by decide +kernel
+    rw [hExt] at hC; exact Option.some.inj hC
+  have hDec : decodeArm64Slice slice.code = some ctEqU64ArmProg := by rw [hCode]; decide +kernel
+  refine ⟨slice, hExt, hOk, hNI, hSafe, hCode, hDec, ?_⟩
+  intro st hpc hh
+  rcases st with ⟨pc, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+    v, cf, zf, dit, hlt, mem⟩
+  dsimp only at hpc hh; subst hpc hh
+  let st0 : Arm64BvState := ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩, v, cf, zf, dit, false, mem⟩
+  obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl
+    (ctEqU64Arm_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
+      (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
+      (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
+      (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
+      (UInt64.ofBitVec r15) (bank16ToU64 hi) v cf zf dit (fun a => mem a.toBitVec))
+    rfl rfl
+  refine ⟨hPre, fun extra => ?_⟩
+  obtain ⟨tr, hExec, hL⟩ := hPost extra
+  refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, rfl, rfl⟩
+  · change ((((UInt64.ofBitVec r0 ^^^ UInt64.ofBitVec r1) |||
+        (0 - (UInt64.ofBitVec r0 ^^^ UInt64.ofBitVec r1))) >>>
+        UInt64.ofNat 63) ^^^ 1).toBitVec =
+      (if r0 = r1 then 1#64 else 0#64)
+    rw [zeroTest64]
+    have hiff : UInt64.ofBitVec r0 ^^^ UInt64.ofBitVec r1 = 0 ↔ r0 = r1 := by
+      rw [UInt64.xor_eq_zero_iff]
+      exact ⟨fun h => by simpa using congrArg UInt64.toBitVec h, fun h => by rw [h]⟩
+    if hx : UInt64.ofBitVec r0 ^^^ UInt64.ofBitVec r1 = 0 then
+      rw [ite_eq_left hx, ite_eq_left (hiff.mp hx)]; rfl
+    else
+      rw [ite_eq_right hx, ite_eq_right (fun h => hx (hiff.mpr h))]; rfl
+  · exact arm64_callee_saved_of_hi_vec
+  · exact mem_roundtrip mem
+
+/-! ### §4.3 `aarch64` `goldilocks_add_ct` (`N = 20`) & `goldilocks_sub_ct` (`N = 24`) -/
+
+def goldAddArmSymBytes : List UInt8 :=
+  [0x67, 0x6f, 0x6c, 0x64, 0x69, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0x5f, 0x61, 0x64, 0x64, 0x5f, 0x63, 0x74]
+
+def goldAddArmBytes : List UInt8 :=
+  wordsToBytesLE [0x12800006, 0xAB010002, 0x9A1F03E7, 0xCB0703E7, 0x8A0600E7,
+                  0xAB070042, 0x9A1F03E7, 0xCB0703E7, 0x8A0600E7, 0x8B070042,
+                  0xAB060048, 0x9A1F03E7, 0xCB0703E7, 0x8A0600E7, 0x8B070040,
+                  0xD2800002, 0xD2800006, 0xD2800007, 0xD2800008, 0xD65F03C0]
+
+def goldAddArmElf : Bytes :=
+  Bytes.ofNat 564 0x1800000000000000080000000100000003000000000000003000000000000000c4000000000000000000000000000000000000000200000019000000000000000000000000000000010000000000000000000000000000001300000000000000b10000000000000000000000000000000000000003000000110000000000000000000000000000001000000000000000000000000000000050000000000000006100000000000000000000000000000006000000010000000b00000000000000000000000000000001000000000000000000000000000000210000000000000040000000000000000000000000000000000000000300000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000050000000000000000000020012000000010000000000000000000000000000000000000000000000000074635f6464615f736b636f6c69646c6f6700d65f03c0d2800008d2800007d2800006d28000028b0700408a0600e7cb0703e79a1f03e7ab0600488b0700428a0600e7cb0703e79a1f03e7ab0700428a0600e7cb0703e79a1f03e7ab01000212800006006261746d79732e006261747274732e00747865742e0062617472747368732e000001000500400000000000400000000000000000000000f4000000000000000000000000000000000000000100b70001000000000000000000010102464c457f
+
+def goldAddArmProg : List (DecodedInstr Arm64Instr) := [
+  ⟨0, 4, .movWide true false 6 0 0⟩,
+  ⟨4, 4, .aluReg .adds true 2 0 1 0 0⟩,
+  ⟨8, 4, .aluReg .adc true 7 31 31 0 0⟩,
+  ⟨12, 4, .aluReg .sub true 7 31 7 0 0⟩,
+  ⟨16, 4, .aluReg .andOp true 7 7 6 0 0⟩,
+  ⟨20, 4, .aluReg .adds true 2 2 7 0 0⟩,
+  ⟨24, 4, .aluReg .adc true 7 31 31 0 0⟩,
+  ⟨28, 4, .aluReg .sub true 7 31 7 0 0⟩,
+  ⟨32, 4, .aluReg .andOp true 7 7 6 0 0⟩,
+  ⟨36, 4, .aluReg .add true 2 2 7 0 0⟩,
+  ⟨40, 4, .aluReg .adds true 8 2 6 0 0⟩,
+  ⟨44, 4, .aluReg .adc true 7 31 31 0 0⟩,
+  ⟨48, 4, .aluReg .sub true 7 31 7 0 0⟩,
+  ⟨52, 4, .aluReg .andOp true 7 7 6 0 0⟩,
+  ⟨56, 4, .aluReg .add true 0 2 7 0 0⟩,
+  ⟨60, 4, .movWide false true 2 0 0⟩,
+  ⟨64, 4, .movWide false true 6 0 0⟩,
+  ⟨68, 4, .movWide false true 7 0 0⟩,
+  ⟨72, 4, .movWide false true 8 0 0⟩,
+  ⟨76, 4, .ret⟩]
+
+private def goldAddArmMc (a b : UInt64) : UInt64 :=
+  armCanon (foldCarry (foldCarry (a + b) (decide (a.toNat + b.toNat ≥ 0x10000000000000000))).1
+    (foldCarry (a + b) (decide (a.toNat + b.toNat ≥ 0x10000000000000000))).2).1
+
+private theorem goldAddArmMc_toNat (a b : UInt64) :
+    (goldAddArmMc a b).toNat = (a.toNat + b.toNat) % GOLDILOCKS_P := by
+  have h := goldAddMc_toNat a b
+  unfold goldAddMc at h
+  rw [goldCanon_toNat] at h
+  unfold goldAddArmMc
+  rw [armCanon_toNat]
+  exact h
+
+private theorem goldAddArm_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (hi : Bank16 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ∃ s2, ExecReachesArm64 goldAddArmProg 19
+        ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+          v, cf, zf, dit, false, m⟩ s2 ∧
+      ∃ cf' zf',
+        s2 = ⟨76, ⟨⟨goldAddArmMc r0 r1, r1, 0, r3, r4, r5, 0, 0, 0, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+          v, cf', zf', dit, false, m⟩ := by
+  suffices hS : ∃ s2, StepsArm64 goldAddArmProg 19
+        ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+          v, cf, zf, dit, false, m⟩ s2 ∧
+      ∃ cf' zf',
+        s2 = ⟨76, ⟨⟨goldAddArmMc r0 r1, r1, 0, r3, r4, r5, 0, 0, 0, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+          v, cf', zf', dit, false, m⟩ by
+    rcases hS with ⟨s2, hs, hp⟩
+    exact ⟨s2, hs.toExecReaches, hp⟩
+  iterate 19
+    apply StepsArm64_step_ex rfl rfl
+    · simp only [stepArm64_movn32, stepArm64_addsRR, stepArm64_adcRR, stepArm64_subRR,
+        stepArm64_andRR, stepArm64_addRR, stepArm64_movz,
+        u64_shl_zero_zero, uint64_evalAdd_eq, uint64_evalSub_eq,
+        armAdcZero, u64_neg_cond, movn32_zero, condAll_and_eps,
+        armGet_31, armGet_0, armGet_1, armGet_2, armGet_6, armGet_7,
+        armSet_0, armSet_2, armSet_6, armSet_7, armSet_8]
+      rfl
+  exact ⟨_, StepsArm64.zero _, _, _, rfl⟩
+
+theorem elf_goldilocks_add_ct_aarch64_functional_and_ct :
+    ∃ slice : ElfFuncSlice,
+      extractElfFuncBytes goldAddArmElf "goldilocks_add_ct" = some slice ∧
+      ElfSliceOk goldAddArmElf slice ∧
+      checkElfFuncThreeWayNI goldAddArmElf "goldilocks_add_ct"
+        (mkContract "goldilocks_add_ct" [] [] [2, 6, 7, 8]) = true ∧
+      ElfSliceThreeWayNISafe slice (mkContract "goldilocks_add_ct" [] [] [2, 6, 7, 8]) ∧
+      slice.code = goldAddArmBytes ∧
+      decodeArm64Slice slice.code = some goldAddArmProg ∧
+      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
+        (∃ st19 tr19, execDecodedArm64 slice.code 19 st = some (st19, tr19) ∧ st19.halted = false) ∧
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedArm64 slice.code (20 + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = 76 ∧ trace.length = 20 ∧
+          st'.gpr.get 0 =
+            BitVec.ofNat 64 (((st.gpr.get 0).toNat + (st.gpr.get 1).toNat) % GOLDILOCKS_P) ∧
+          Arm64CalleeSavedPreserved st st' ∧
+          st'.mem = st.mem ∧
+          st'.gpr.get 2 = 0#64 ∧ st'.gpr.get 6 = 0#64 ∧
+          st'.gpr.get 7 = 0#64 ∧ st'.gpr.get 8 = 0#64 := by
+  have hNI : checkElfFuncThreeWayNI goldAddArmElf "goldilocks_add_ct"
+      (mkContract "goldilocks_add_ct" [] [] [2, 6, 7, 8]) = true := by decide +kernel
+  obtain ⟨slice, hExt, hOk, hSafe⟩ := checkElfFuncThreeWayNI_sound hNI
+  have hCode : slice.code = goldAddArmBytes := by
+    have hC : (extractElfFuncBytes goldAddArmElf "goldilocks_add_ct").map ElfFuncSlice.code =
+        some goldAddArmBytes := by decide +kernel
+    rw [hExt] at hC; exact Option.some.inj hC
+  have hDec : decodeArm64Slice slice.code = some goldAddArmProg := by rw [hCode]; decide +kernel
+  refine ⟨slice, hExt, hOk, hNI, hSafe, hCode, hDec, ?_⟩
+  intro st hpc hh
+  rcases st with ⟨pc, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+    v, cf, zf, dit, hlt, mem⟩
+  dsimp only at hpc hh; subst hpc hh
+  let st0 : Arm64BvState := ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩, v, cf, zf, dit, false, mem⟩
+  obtain ⟨_, h19, cfa, zfa, rfl⟩ :=
+    goldAddArm_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
+      (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
+      (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
+      (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
+      (UInt64.ofBitVec r15) (bank16ToU64 hi) v cf zf dit (fun a => mem a.toBitVec)
+  obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl h19 rfl rfl
+  refine ⟨hPre, fun extra => ?_⟩
+  obtain ⟨tr, hExec, hL⟩ := hPost extra
+  refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, rfl, rfl, rfl, rfl⟩
+  · dsimp
+    apply bv_ofU64_eq_ofNat _ (mod_goldilocks_lt_u64 _)
+    rw [goldAddArmMc_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec]
+  · exact arm64_callee_saved_of_hi_vec
+  · exact mem_roundtrip mem
+
+def goldSubArmSymBytes : List UInt8 :=
+  [0x67, 0x6f, 0x6c, 0x64, 0x69, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0x5f, 0x73, 0x75, 0x62, 0x5f, 0x63, 0x74]
+
+def goldSubArmBytes : List UInt8 :=
+  wordsToBytesLE [0x12800006, 0xAB060008, 0x9A1F03E7, 0xCB0703E7, 0x8A0600E7, 0x8B070002,
+                  0xAB060028, 0x9A1F03E7, 0xCB0703E7, 0x8A0600E7, 0x8B070023,
+                  0xEB030042, 0xDA1F03E7, 0xD3607CC4, 0xB2400084, 0x8A0400E7, 0x8B070040,
+                  0xD2800002, 0xD2800003, 0xD2800004, 0xD2800006, 0xD2800007, 0xD2800008,
+                  0xD65F03C0]
+
+def goldSubArmElf : Bytes :=
+  Bytes.ofNat 580 0x1800000000000000080000000100000003000000000000003000000000000000d4000000000000000000000000000000000000000200000019000000000000000000000000000000010000000000000000000000000000001300000000000000c10000000000000000000000000000000000000003000000110000000000000000000000000000001000000000000000000000000000000060000000000000006100000000000000000000000000000006000000010000000b00000000000000000000000000000001000000000000000000000000000000210000000000000040000000000000000000000000000000000000000300000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000060000000000000000000020012000000010000000000000000000000000000000000000000000000000074635f6275735f736b636f6c69646c6f6700d65f03c0d2800008d2800007d2800006d2800004d2800003d28000028b0700408a0400e7b2400084d3607cc4da1f03e7eb0300428b0700238a0600e7cb0703e79a1f03e7ab0600288b0700028a0600e7cb0703e79a1f03e7ab06000812800006006261746d79732e006261747274732e00747865742e0062617472747368732e00000100050040000000000040000000000000000000000104000000000000000000000000000000000000000100b70001000000000000000000010102464c457f
+
+def goldSubArmProg : List (DecodedInstr Arm64Instr) := [
+  ⟨0, 4, .movWide true false 6 0 0⟩,
+  ⟨4, 4, .aluReg .adds true 8 0 6 0 0⟩,
+  ⟨8, 4, .aluReg .adc true 7 31 31 0 0⟩,
+  ⟨12, 4, .aluReg .sub true 7 31 7 0 0⟩,
+  ⟨16, 4, .aluReg .andOp true 7 7 6 0 0⟩,
+  ⟨20, 4, .aluReg .add true 2 0 7 0 0⟩,
+  ⟨24, 4, .aluReg .adds true 8 1 6 0 0⟩,
+  ⟨28, 4, .aluReg .adc true 7 31 31 0 0⟩,
+  ⟨32, 4, .aluReg .sub true 7 31 7 0 0⟩,
+  ⟨36, 4, .aluReg .andOp true 7 7 6 0 0⟩,
+  ⟨40, 4, .aluReg .add true 3 1 7 0 0⟩,
+  ⟨44, 4, .aluReg .subs true 2 2 3 0 0⟩,
+  ⟨48, 4, .aluReg .sbc true 7 31 31 0 0⟩,
+  ⟨52, 4, .ubfm true 4 6 32 31⟩,
+  ⟨56, 4, .aluImm .orr true 4 4 1⟩,
+  ⟨60, 4, .aluReg .andOp true 7 7 4 0 0⟩,
+  ⟨64, 4, .aluReg .add true 0 2 7 0 0⟩,
+  ⟨68, 4, .movWide false true 2 0 0⟩,
+  ⟨72, 4, .movWide false true 3 0 0⟩,
+  ⟨76, 4, .movWide false true 4 0 0⟩,
+  ⟨80, 4, .movWide false true 6 0 0⟩,
+  ⟨84, 4, .movWide false true 7 0 0⟩,
+  ⟨88, 4, .movWide false true 8 0 0⟩,
+  ⟨92, 4, .ret⟩]
+
+private def goldSubArmMc (a b : UInt64) : UInt64 :=
+  (armCanon a - armCanon b) +
+    (if decide ((armCanon a).toNat ≥ (armCanon b).toNat) then 0 else 18446744069414584321)
+
+private theorem u64_eps_lsl32_orr1 :
+    ((0xFFFFFFFF : UInt64) <<< UInt64.ofNat (64 - 32)) ||| 1 = 18446744069414584321 := by
+  decide
+
+private theorem condNone_and_p (c : Bool) :
+    (if c then (0 : UInt64) else 0xFFFFFFFFFFFFFFFF) &&& 18446744069414584321 =
+      if c then 0 else 18446744069414584321 := by
+  cases c <;> decide
+
+private theorem goldSubArmMc_toNat (a b : UInt64) :
+    (goldSubArmMc a b).toNat =
+      (a.toNat + GOLDILOCKS_P - b.toNat % GOLDILOCKS_P) % GOLDILOCKS_P := by
+  have hx := armCanon_toNat a
+  have hy := armCanon_toNat b
+  have h64 : (2 : Nat) ^ 64 = 18446744073709551616 := rfl
+  have hP : (18446744069414584321 : UInt64).toNat = 18446744069414584321 := rfl
+  have h0 : (0 : UInt64).toNat = 0 := rfl
+  unfold goldSubArmMc
+  have hx' : (armCanon a).toNat = a.toNat % 18446744069414584321 := hx
+  have hy' : (armCanon b).toNat = b.toNat % 18446744069414584321 := hy
+  show _ = (a.toNat + 18446744069414584321 - b.toNat % 18446744069414584321) % 18446744069414584321
+  if h : (armCanon a).toNat ≥ (armCanon b).toNat then
+    rw [decide_eq_true h, ite_eq_left rfl, UInt64.toNat_add, UInt64.toNat_sub, h0, h64]
+    omega
+  else
+    rw [decide_eq_false h, ite_eq_right (by decide), UInt64.toNat_add, UInt64.toNat_sub, hP, h64]
+    omega
+
+private theorem goldSubArm_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (hi : Bank16 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ∃ s2, ExecReachesArm64 goldSubArmProg 23
+        ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+          v, cf, zf, dit, false, m⟩ s2 ∧
+      ∃ cf' zf',
+        s2 = ⟨92, ⟨⟨goldSubArmMc r0 r1, r1, 0, 0, 0, r5, 0, 0, 0, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+          v, cf', zf', dit, false, m⟩ := by
+  suffices hS : ∃ s2, StepsArm64 goldSubArmProg 23
+        ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+          v, cf, zf, dit, false, m⟩ s2 ∧
+      ∃ cf' zf',
+        s2 = ⟨92, ⟨⟨goldSubArmMc r0 r1, r1, 0, 0, 0, r5, 0, 0, 0, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+          v, cf', zf', dit, false, m⟩ by
+    rcases hS with ⟨s2, hs, hp⟩
+    exact ⟨s2, hs.toExecReaches, hp⟩
+  iterate 23
+    apply StepsArm64_step_ex rfl rfl
+    · simp only [stepArm64_movn32, stepArm64_addsRR, stepArm64_adcRR, stepArm64_subRR,
+        stepArm64_andRR, stepArm64_addRR, stepArm64_subsRR, stepArm64_sbcRR,
+        stepArm64_lsl32, stepArm64_orrImm, stepArm64_movz,
+        u64_shl_zero_zero, uint64_evalAdd_eq, uint64_evalSub_eq,
+        armAdcZero, armSbcZero, u64_neg_cond, movn32_zero, condAll_and_eps,
+        u64_eps_lsl32_orr1, condNone_and_p,
+        armGet_31, armGet_0, armGet_1, armGet_2, armGet_3, armGet_4, armGet_6, armGet_7,
+        armSet_0, armSet_2, armSet_3, armSet_4, armSet_6, armSet_7, armSet_8]
+      rfl
+  exact ⟨_, StepsArm64.zero _, _, _, rfl⟩
+
+theorem elf_goldilocks_sub_ct_aarch64_functional_and_ct :
+    ∃ slice : ElfFuncSlice,
+      extractElfFuncBytes goldSubArmElf "goldilocks_sub_ct" = some slice ∧
+      ElfSliceOk goldSubArmElf slice ∧
+      checkElfFuncThreeWayNI goldSubArmElf "goldilocks_sub_ct"
+        (mkContract "goldilocks_sub_ct" [] [] [2, 3, 4, 6, 7, 8]) = true ∧
+      ElfSliceThreeWayNISafe slice (mkContract "goldilocks_sub_ct" [] [] [2, 3, 4, 6, 7, 8]) ∧
+      slice.code = goldSubArmBytes ∧
+      decodeArm64Slice slice.code = some goldSubArmProg ∧
+      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
+        (∃ st23 tr23, execDecodedArm64 slice.code 23 st = some (st23, tr23) ∧ st23.halted = false) ∧
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedArm64 slice.code (24 + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = 92 ∧ trace.length = 24 ∧
+          st'.gpr.get 0 =
+            BitVec.ofNat 64 (((st.gpr.get 0).toNat + GOLDILOCKS_P -
+              (st.gpr.get 1).toNat % GOLDILOCKS_P) % GOLDILOCKS_P) ∧
+          Arm64CalleeSavedPreserved st st' ∧
+          st'.mem = st.mem ∧
+          st'.gpr.get 2 = 0#64 ∧ st'.gpr.get 3 = 0#64 ∧ st'.gpr.get 4 = 0#64 ∧
+          st'.gpr.get 6 = 0#64 ∧ st'.gpr.get 7 = 0#64 ∧ st'.gpr.get 8 = 0#64 := by
+  have hNI : checkElfFuncThreeWayNI goldSubArmElf "goldilocks_sub_ct"
+      (mkContract "goldilocks_sub_ct" [] [] [2, 3, 4, 6, 7, 8]) = true := by decide +kernel
+  obtain ⟨slice, hExt, hOk, hSafe⟩ := checkElfFuncThreeWayNI_sound hNI
+  have hCode : slice.code = goldSubArmBytes := by
+    have hC : (extractElfFuncBytes goldSubArmElf "goldilocks_sub_ct").map ElfFuncSlice.code =
+        some goldSubArmBytes := by decide +kernel
+    rw [hExt] at hC; exact Option.some.inj hC
+  have hDec : decodeArm64Slice slice.code = some goldSubArmProg := by rw [hCode]; decide +kernel
+  refine ⟨slice, hExt, hOk, hNI, hSafe, hCode, hDec, ?_⟩
+  intro st hpc hh
+  rcases st with ⟨pc, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+    v, cf, zf, dit, hlt, mem⟩
+  dsimp only at hpc hh; subst hpc hh
+  let st0 : Arm64BvState := ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩, v, cf, zf, dit, false, mem⟩
+  obtain ⟨_, h23, cfa, zfa, rfl⟩ :=
+    goldSubArm_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
+      (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
+      (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
+      (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
+      (UInt64.ofBitVec r15) (bank16ToU64 hi) v cf zf dit (fun a => mem a.toBitVec)
+  obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl h23 rfl rfl
+  refine ⟨hPre, fun extra => ?_⟩
+  obtain ⟨tr, hExec, hL⟩ := hPost extra
+  refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  · dsimp
+    apply bv_ofU64_eq_ofNat _ (mod_goldilocks_lt_u64 _)
+    rw [goldSubArmMc_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec]
+  · exact arm64_callee_saved_of_hi_vec
+  · exact mem_roundtrip mem
+
+#export_eqns ExecReachesX86
+
+theorem current_aarch64_rlib_distinct_names :
+    allDistinctStrings ((extractAllRlibFuncs currentAarch64RlibArchiveBytes).map ElfFuncSlice.name) = true := by
+  rw [currentAarch64_symbol_names_exact]
+  decide +kernel
+
+theorem current_x86_rlib_distinct_names :
+    allDistinctStrings ((extractAllRlibFuncs currentX86RlibArchiveBytes).map ElfFuncSlice.name) = true := by
+  rw [currentX86_symbol_names_exact]
+  decide +kernel
+
+#export_eqns Arm64CalleeSavedPreserved goldDot2Mc
+
+end Qsag
+end
