@@ -115,31 +115,6 @@ structure WhirAffineWitness where
       affineFallingFactorial w.n w.queries
   )
 
-/-- Mirror of `pcs.rs::stage_geometry`: `(log₂ blowup, step_vars)` of every WHIR stage. -/
-@[expose] def hemStageGeometry (nv : Nat) : List (Nat × Nat) :=
-  if nv ≤ 6 then
-    let es := if nv ≤ 3 then 1 else 2
-    [(4, nv - es)]
-  else if nv ≤ 11 then
-    let es := if nv ≤ 8 then 3 else 4
-    let rem := nv - es
-    let s0 := (rem + 1) / 2
-    [(2, s0), (4, rem - s0)]
-  else if nv ≤ 16 then
-    let es := if nv ≤ 13 then 4 else if nv ≤ 15 then 5 else 6
-    let rem := nv - es
-    let s0 := Nat.min 4 (rem - 4)
-    let s1 := (rem - s0) / 2
-    [(2, s0), (4, s1), (6, rem - s0 - s1)]
-  else if nv ≤ 20 then [(2, 5), (4, 3), (6, 4)]
-  else if nv = 21 then [(2, 6), (4, 3), (6, 4)]
-  else if nv = 22 then [(2, 6), (4, 4), (6, 4)]
-  else if nv ≤ 24 then [(2, 6), (4, 4), (6, 3), (8, 3)]
-  else if nv = 25 then [(2, 6), (4, 4), (6, 4), (8, 3)]
-  else if nv = 26 then [(2, 6), (4, 5), (6, 4), (8, 3)]
-  else if nv = 27 then [(2, 6), (4, 5), (6, 4), (8, 4)]
-  else if nv = 28 then [(2, 6), (4, 6), (6, 4), (8, 4)]
-  else []
 
 /-- Mirror of the `early_stop_vars` field produced by `pcs.rs::stage_geometry`. -/
 @[expose] def hemEarlyStopVars (nv : Nat) : Nat :=
@@ -147,102 +122,6 @@ structure WhirAffineWitness where
   else if nv ≤ 15 then 5 else if nv ≤ 16 then 6 else if nv ≤ 20 then nv - 12
   else if nv = 23 then 7 else 8
 
-/-- Mirror of `WhirSecurityRegime::minimum_queries` for the two unconditional Johnson regimes:
-    `BciksJohnsonQrom128` uses `⌈512 / log₂ B⌉ + 2`, `BciksJohnsonClassical128` uses
-    `⌈256 / log₂ B⌉ + 1`. -/
-@[expose] def hemJohnsonMinQueries (isQrom : Bool) (logBlowup : Nat) : Nat :=
-  if isQrom then natCeilDiv 512 logBlowup + 2 else natCeilDiv 256 logBlowup + 1
-
-/-- Resolved per-stage geometry: `n = blowup * 2^rem` coset fibers and folded degree bound
-    `d = 2^rem + 2`, where `rem` counts the variables left AFTER this stage's `stepVars` folds
-    (exactly the `n`, `d` computed inside `affine_schedule.rs`). -/
-structure HemStageGeom where
-  stageIdx : Nat
-  logBlowup : Nat
-  stepVars : Nat
-  n : Nat
-  d : Nat
-  deriving Repr, DecidableEq
-
-@[expose] def hemStageGeomsAux : Nat → Nat → List (Nat × Nat) → List HemStageGeom
-  | _, _, [] => []
-  | idx, rem, (lb, sv) :: rest =>
-    { stageIdx := idx, logBlowup := lb, stepVars := sv,
-      n := 2 ^ lb * 2 ^ (rem - sv), d := 2 ^ (rem - sv) + 2 } ::
-      hemStageGeomsAux (idx + 1) (rem - sv) rest
-
-@[expose] def hemStageGeoms (nv : Nat) : List HemStageGeom :=
-  hemStageGeomsAux 0 nv (hemStageGeometry nv)
-
-/-- Mirror of `WhirSchedule::validate` on the canonical geometry: at most `4` stages, blowups in
-    `{4, 16, 64, 256}`, every stage folds `1..6` variables and strictly fewer than remain, and
-    `early_stop_vars + ∑ step_vars = num_vars` with `1 ≤ early_stop_vars ≤ 8`. -/
-@[expose] def hemStageGeometryValid (nv : Nat) : Bool :=
-  let g := hemStageGeometry nv
-  decide (1 ≤ g.length ∧ g.length ≤ 4) &&
-  g.all (fun p => (p.1 == 2 || p.1 == 4 || p.1 == 6 || p.1 == 8) &&
-    decide (1 ≤ p.2 ∧ p.2 ≤ 6)) &&
-  decide (hemEarlyStopVars nv + (g.map (·.2)).sum = nv) &&
-  decide (1 ≤ hemEarlyStopVars nv ∧ hemEarlyStopVars nv ≤ 8)
-
-/-- Explicit `25..=28` stage geometries of `pcs.rs::stage_geometry`, and rejection above
-    `MAX_PCS_NUM_VARS = 28`. -/
-theorem hemStageGeometry_nv25_to_28 :
-    hemStageGeometry 25 = [(2, 6), (4, 4), (6, 4), (8, 3)] ∧
-    hemStageGeometry 26 = [(2, 6), (4, 5), (6, 4), (8, 3)] ∧
-    hemStageGeometry 27 = [(2, 6), (4, 5), (6, 4), (8, 4)] ∧
-    hemStageGeometry 28 = [(2, 6), (4, 6), (6, 4), (8, 4)] ∧
-    ∀ nv : Nat, 29 ≤ nv → hemStageGeometry nv = [] := by
-  refine ⟨by decide, by decide, by decide, by decide, fun nv h29 => ?_⟩
-  unfold hemStageGeometry
-  have h6 : ¬ nv ≤ 6 := by omega
-  have h11 : ¬ nv ≤ 11 := by omega
-  have h16 : ¬ nv ≤ 16 := by omega
-  have h20 : ¬ nv ≤ 20 := by omega
-  have h21 : ¬ nv = 21 := by omega
-  have h22 : ¬ nv = 22 := by omega
-  have h24 : ¬ nv ≤ 24 := by omega
-  have h25 : ¬ nv = 25 := by omega
-  have h26 : ¬ nv = 26 := by omega
-  have h27 : ¬ nv = 27 := by omega
-  have h28 : ¬ nv = 28 := by omega
-  simp only [h6, h11, h16, h20, h21, h22, h24, h25, h26, h27, h28, ↓reduceIte]
-
-/-- Folding-sum conservation `early_stop_vars + ∑ step_vars = nv` across every supported
-    `nv ∈ 2..=28` (`MAX_PCS_NUM_VARS = 28`). -/
-theorem hemStageGeometry_folding_sum_nv2_to_28 (nv : Nat) (h2 : 2 ≤ nv) (h28 : nv ≤ 28) :
-    hemEarlyStopVars nv + ((hemStageGeometry nv).map (·.2)).sum = nv := by
-  have hAll : ((List.range 27).all fun i =>
-      decide (hemEarlyStopVars (i + 2) + ((hemStageGeometry (i + 2)).map (·.2)).sum = i + 2)) =
-      true := by
-    decide +kernel
-  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
-  have hEq : nv - 2 + 2 = nv := by omega
-  rw [hEq] at h1
-  exact of_decide_eq_true h1
-
-/-- Stage-validity certificate across every supported `nv ∈ 2..=28`: `hemStageGeometryValid`
-    holds, every stage domain `blowup · 2^remaining` is at most `2^31`, and every stage folds
-    strictly fewer variables than remain (`d = 2^rem + 2 ≥ 4`). -/
-theorem hemStageGeometryValid_nv2_to_28 (nv : Nat) (h2 : 2 ≤ nv) (h28 : nv ≤ 28) :
-    hemStageGeometryValid nv = true ∧
-    ∀ g ∈ hemStageGeoms nv, g.n * 2 ^ g.stepVars ≤ 2 ^ 31 ∧ 4 ≤ g.d := by
-  have hAll : ((List.range 27).all fun i =>
-      hemStageGeometryValid (i + 2) &&
-      (hemStageGeoms (i + 2)).all (fun g => decide (g.n * 2 ^ g.stepVars ≤ 2 ^ 31 ∧ 4 ≤ g.d))) =
-      true := by
-    decide +kernel
-  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
-  have hEq : nv - 2 + 2 = nv := by omega
-  rw [hEq, Bool.and_eq_true] at h1
-  exact ⟨h1.1, fun g hg => of_decide_eq_true (List.all_eq_true.mp h1.2 g hg)⟩
-
-/-- Above `MAX_PCS_NUM_VARS = 28`, `hemStageGeometryValid` rejects (`hemStageGeometry nv = []`). -/
-theorem hemStageGeometryValid_false_of_ge_29 (nv : Nat) (h29 : 29 ≤ nv) :
-    hemStageGeometryValid nv = false := by
-  unfold hemStageGeometryValid
-  rw [hemStageGeometry_nv25_to_28.2.2.2.2 nv h29]
-  rfl
 
 end Qsag
 end
