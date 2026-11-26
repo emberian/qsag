@@ -829,3 +829,953 @@ set_option linter.unusedSimpArgs false
 
 /-! Full two-sponge theta/rho/pi kernel. -/
 
+def keccakThetaRhoProg : List (DecodedInstr Arm64Instr) := [
+  ⟨0, 4, .ldrQ 0 1 0⟩,
+  ⟨4, 4, .ldrQ 5 1 80⟩,
+  ⟨8, 4, .ldrQ 6 1 160⟩,
+  ⟨12, 4, .veor3_16b 0 0 5 6⟩,
+  ⟨16, 4, .ldrQ 5 1 240⟩,
+  ⟨20, 4, .ldrQ 6 1 320⟩,
+  ⟨24, 4, .veor3_16b 0 0 5 6⟩,
+  ⟨28, 4, .ldrQ 1 1 16⟩,
+  ⟨32, 4, .ldrQ 5 1 96⟩,
+  ⟨36, 4, .ldrQ 6 1 176⟩,
+  ⟨40, 4, .veor3_16b 1 1 5 6⟩,
+  ⟨44, 4, .ldrQ 5 1 256⟩,
+  ⟨48, 4, .ldrQ 6 1 336⟩,
+  ⟨52, 4, .veor3_16b 1 1 5 6⟩,
+  ⟨56, 4, .ldrQ 2 1 32⟩,
+  ⟨60, 4, .ldrQ 5 1 112⟩,
+  ⟨64, 4, .ldrQ 6 1 192⟩,
+  ⟨68, 4, .veor3_16b 2 2 5 6⟩,
+  ⟨72, 4, .ldrQ 5 1 272⟩,
+  ⟨76, 4, .ldrQ 6 1 352⟩,
+  ⟨80, 4, .veor3_16b 2 2 5 6⟩,
+  ⟨84, 4, .ldrQ 3 1 48⟩,
+  ⟨88, 4, .ldrQ 5 1 128⟩,
+  ⟨92, 4, .ldrQ 6 1 208⟩,
+  ⟨96, 4, .veor3_16b 3 3 5 6⟩,
+  ⟨100, 4, .ldrQ 5 1 288⟩,
+  ⟨104, 4, .ldrQ 6 1 368⟩,
+  ⟨108, 4, .veor3_16b 3 3 5 6⟩,
+  ⟨112, 4, .ldrQ 4 1 64⟩,
+  ⟨116, 4, .ldrQ 5 1 144⟩,
+  ⟨120, 4, .ldrQ 6 1 224⟩,
+  ⟨124, 4, .veor3_16b 4 4 5 6⟩,
+  ⟨128, 4, .ldrQ 5 1 304⟩,
+  ⟨132, 4, .ldrQ 6 1 384⟩,
+  ⟨136, 4, .veor3_16b 4 4 5 6⟩,
+  ⟨140, 4, .vrax1_2d 16 4 1⟩,
+  ⟨144, 4, .vrax1_2d 17 0 2⟩,
+  ⟨148, 4, .vrax1_2d 18 1 3⟩,
+  ⟨152, 4, .vrax1_2d 19 2 4⟩,
+  ⟨156, 4, .vrax1_2d 20 3 0⟩,
+  ⟨160, 4, .ldrQ 0 1 0⟩,
+  ⟨164, 4, .vxar_2d 0 0 16 0⟩,
+  ⟨168, 4, .strQ 0 0 0⟩,
+  ⟨172, 4, .ldrQ 0 1 16⟩,
+  ⟨176, 4, .vxar_2d 0 0 17 63⟩,
+  ⟨180, 4, .strQ 0 0 160⟩,
+  ⟨184, 4, .ldrQ 0 1 32⟩,
+  ⟨188, 4, .vxar_2d 0 0 18 2⟩,
+  ⟨192, 4, .strQ 0 0 320⟩,
+  ⟨196, 4, .ldrQ 0 1 48⟩,
+  ⟨200, 4, .vxar_2d 0 0 19 36⟩,
+  ⟨204, 4, .strQ 0 0 80⟩,
+  ⟨208, 4, .ldrQ 0 1 64⟩,
+  ⟨212, 4, .vxar_2d 0 0 20 37⟩,
+  ⟨216, 4, .strQ 0 0 240⟩,
+  ⟨220, 4, .ldrQ 0 1 80⟩,
+  ⟨224, 4, .vxar_2d 0 0 16 28⟩,
+  ⟨228, 4, .strQ 0 0 256⟩,
+  ⟨232, 4, .ldrQ 0 1 96⟩,
+  ⟨236, 4, .vxar_2d 0 0 17 20⟩,
+  ⟨240, 4, .strQ 0 0 16⟩,
+  ⟨244, 4, .ldrQ 0 1 112⟩,
+  ⟨248, 4, .vxar_2d 0 0 18 58⟩,
+  ⟨252, 4, .strQ 0 0 176⟩,
+  ⟨256, 4, .ldrQ 0 1 128⟩,
+  ⟨260, 4, .vxar_2d 0 0 19 9⟩,
+  ⟨264, 4, .strQ 0 0 336⟩,
+  ⟨268, 4, .ldrQ 0 1 144⟩,
+  ⟨272, 4, .vxar_2d 0 0 20 44⟩,
+  ⟨276, 4, .strQ 0 0 96⟩,
+  ⟨280, 4, .ldrQ 0 1 160⟩,
+  ⟨284, 4, .vxar_2d 0 0 16 61⟩,
+  ⟨288, 4, .strQ 0 0 112⟩,
+  ⟨292, 4, .ldrQ 0 1 176⟩,
+  ⟨296, 4, .vxar_2d 0 0 17 54⟩,
+  ⟨300, 4, .strQ 0 0 272⟩,
+  ⟨304, 4, .ldrQ 0 1 192⟩,
+  ⟨308, 4, .vxar_2d 0 0 18 21⟩,
+  ⟨312, 4, .strQ 0 0 32⟩,
+  ⟨316, 4, .ldrQ 0 1 208⟩,
+  ⟨320, 4, .vxar_2d 0 0 19 39⟩,
+  ⟨324, 4, .strQ 0 0 192⟩,
+  ⟨328, 4, .ldrQ 0 1 224⟩,
+  ⟨332, 4, .vxar_2d 0 0 20 25⟩,
+  ⟨336, 4, .strQ 0 0 352⟩,
+  ⟨340, 4, .ldrQ 0 1 240⟩,
+  ⟨344, 4, .vxar_2d 0 0 16 23⟩,
+  ⟨348, 4, .strQ 0 0 368⟩,
+  ⟨352, 4, .ldrQ 0 1 256⟩,
+  ⟨356, 4, .vxar_2d 0 0 17 19⟩,
+  ⟨360, 4, .strQ 0 0 128⟩,
+  ⟨364, 4, .ldrQ 0 1 272⟩,
+  ⟨368, 4, .vxar_2d 0 0 18 49⟩,
+  ⟨372, 4, .strQ 0 0 288⟩,
+  ⟨376, 4, .ldrQ 0 1 288⟩,
+  ⟨380, 4, .vxar_2d 0 0 19 43⟩,
+  ⟨384, 4, .strQ 0 0 48⟩,
+  ⟨388, 4, .ldrQ 0 1 304⟩,
+  ⟨392, 4, .vxar_2d 0 0 20 56⟩,
+  ⟨396, 4, .strQ 0 0 208⟩,
+  ⟨400, 4, .ldrQ 0 1 320⟩,
+  ⟨404, 4, .vxar_2d 0 0 16 46⟩,
+  ⟨408, 4, .strQ 0 0 224⟩,
+  ⟨412, 4, .ldrQ 0 1 336⟩,
+  ⟨416, 4, .vxar_2d 0 0 17 62⟩,
+  ⟨420, 4, .strQ 0 0 384⟩,
+  ⟨424, 4, .ldrQ 0 1 352⟩,
+  ⟨428, 4, .vxar_2d 0 0 18 3⟩,
+  ⟨432, 4, .strQ 0 0 144⟩,
+  ⟨436, 4, .ldrQ 0 1 368⟩,
+  ⟨440, 4, .vxar_2d 0 0 19 8⟩,
+  ⟨444, 4, .strQ 0 0 304⟩,
+  ⟨448, 4, .ldrQ 0 1 384⟩,
+  ⟨452, 4, .vxar_2d 0 0 20 50⟩,
+  ⟨456, 4, .strQ 0 0 64⟩,
+  ⟨460, 4, .veor16b 0 0 0⟩,
+  ⟨464, 4, .veor16b 1 1 1⟩,
+  ⟨468, 4, .veor16b 2 2 2⟩,
+  ⟨472, 4, .veor16b 3 3 3⟩,
+  ⟨476, 4, .veor16b 4 4 4⟩,
+  ⟨480, 4, .veor16b 5 5 5⟩,
+  ⟨484, 4, .veor16b 6 6 6⟩,
+  ⟨488, 4, .veor16b 16 16 16⟩,
+  ⟨492, 4, .veor16b 17 17 17⟩,
+  ⟨496, 4, .veor16b 18 18 18⟩,
+  ⟨500, 4, .veor16b 19 19 19⟩,
+  ⟨504, 4, .veor16b 20 20 20⟩,
+  ⟨508, 4, .ret⟩]
+
+def keccakThetaRhoName : List UInt8 := [113, 115, 97, 103, 95, 97, 115, 109, 95, 107, 101, 99, 99, 97, 107, 95, 116, 104, 101, 116, 97, 95, 114, 104, 111, 95, 115, 104, 97, 51, 95, 110, 101, 111, 110]
+
+theorem keccakThetaRho_decode :
+    (findSliceByNameBytes currentAarch64ExtractedSlices keccakThetaRhoName).bind
+      (fun s => decodeArm64Slice s.code) = some keccakThetaRhoProg := by decide +kernel
+
+/-- Bytewise disjoint input and output regions, including modular addresses. -/
+def keccakThetaRhoDisjoint (outPtr inPtr : UInt64) : Prop :=
+  ∀ i j : Nat, i < 400 → j < 400 →
+    inPtr + UInt64.ofNat i ≠ outPtr + UInt64.ofNat j
+
+theorem keccakThetaRho_readWrite (outPtr inPtr : UInt64)
+    (hd : keccakThetaRhoDisjoint outPtr inPtr)
+    (m : UInt64 → UInt8) (v : Vec128) (i j : Nat) (hi : i ≤ 384) (hj : j ≤ 384) :
+    readMem128 (writeMem128 m (outPtr + UInt64.ofNat j) v) (inPtr + UInt64.ofNat i) =
+      readMem128 m (inPtr + UInt64.ofNat i) := by
+  unfold readMem128
+  congr 1
+  · apply readMem64_writeMem128_disjoint
+    intro a b ha hb he
+    rw [u64_add_ofNat_assoc inPtr i a (by omega),
+      u64_add_ofNat_assoc outPtr j b (by omega)] at he
+    exact hd (i+a) (j+b) (by omega) (by omega) he
+  · apply readMem64_writeMem128_disjoint
+    intro a b ha hb he
+    change ((inPtr + UInt64.ofNat i) + UInt64.ofNat 8) + UInt64.ofNat a = _ at he
+    rw [u64_add_ofNat_assoc inPtr i 8 (by omega),
+      u64_add_ofNat_assoc inPtr (i+8) a (by omega),
+      u64_add_ofNat_assoc outPtr j b (by omega)] at he
+    exact hd (i+8+a) (j+b) (by omega) (by omega) he
+
+def keccakThetaRhoLoad (m : UInt64 → UInt8) (p : UInt64) (block : Nat) : KState :=
+  ⟨(if block == 0 then (readMem128 m (p + 0)).w0 else (readMem128 m (p + 0)).w1),
+   (if block == 0 then (readMem128 m (p + 16)).w0 else (readMem128 m (p + 16)).w1),
+   (if block == 0 then (readMem128 m (p + 32)).w0 else (readMem128 m (p + 32)).w1),
+   (if block == 0 then (readMem128 m (p + 48)).w0 else (readMem128 m (p + 48)).w1),
+   (if block == 0 then (readMem128 m (p + 64)).w0 else (readMem128 m (p + 64)).w1),
+   (if block == 0 then (readMem128 m (p + 80)).w0 else (readMem128 m (p + 80)).w1),
+   (if block == 0 then (readMem128 m (p + 96)).w0 else (readMem128 m (p + 96)).w1),
+   (if block == 0 then (readMem128 m (p + 112)).w0 else (readMem128 m (p + 112)).w1),
+   (if block == 0 then (readMem128 m (p + 128)).w0 else (readMem128 m (p + 128)).w1),
+   (if block == 0 then (readMem128 m (p + 144)).w0 else (readMem128 m (p + 144)).w1),
+   (if block == 0 then (readMem128 m (p + 160)).w0 else (readMem128 m (p + 160)).w1),
+   (if block == 0 then (readMem128 m (p + 176)).w0 else (readMem128 m (p + 176)).w1),
+   (if block == 0 then (readMem128 m (p + 192)).w0 else (readMem128 m (p + 192)).w1),
+   (if block == 0 then (readMem128 m (p + 208)).w0 else (readMem128 m (p + 208)).w1),
+   (if block == 0 then (readMem128 m (p + 224)).w0 else (readMem128 m (p + 224)).w1),
+   (if block == 0 then (readMem128 m (p + 240)).w0 else (readMem128 m (p + 240)).w1),
+   (if block == 0 then (readMem128 m (p + 256)).w0 else (readMem128 m (p + 256)).w1),
+   (if block == 0 then (readMem128 m (p + 272)).w0 else (readMem128 m (p + 272)).w1),
+   (if block == 0 then (readMem128 m (p + 288)).w0 else (readMem128 m (p + 288)).w1),
+   (if block == 0 then (readMem128 m (p + 304)).w0 else (readMem128 m (p + 304)).w1),
+   (if block == 0 then (readMem128 m (p + 320)).w0 else (readMem128 m (p + 320)).w1),
+   (if block == 0 then (readMem128 m (p + 336)).w0 else (readMem128 m (p + 336)).w1),
+   (if block == 0 then (readMem128 m (p + 352)).w0 else (readMem128 m (p + 352)).w1),
+   (if block == 0 then (readMem128 m (p + 368)).w0 else (readMem128 m (p + 368)).w1),
+   (if block == 0 then (readMem128 m (p + 384)).w0 else (readMem128 m (p + 384)).w1)⟩
+
+def keccakThetaRhoOut (m : UInt64 → UInt8) (outPtr inPtr : UInt64) : UInt64 → UInt8 :=
+  let k0 := rhoPiS (thetaS (keccakThetaRhoLoad m inPtr 0))
+  let k1 := rhoPiS (thetaS (keccakThetaRhoLoad m inPtr 1))
+  let m1 := writeMem128 m (outPtr + 0) ⟨k0.a0, k1.a0⟩
+  let m2 := writeMem128 m1 (outPtr + 160) ⟨k0.a10, k1.a10⟩
+  let m3 := writeMem128 m2 (outPtr + 320) ⟨k0.a20, k1.a20⟩
+  let m4 := writeMem128 m3 (outPtr + 80) ⟨k0.a5, k1.a5⟩
+  let m5 := writeMem128 m4 (outPtr + 240) ⟨k0.a15, k1.a15⟩
+  let m6 := writeMem128 m5 (outPtr + 256) ⟨k0.a16, k1.a16⟩
+  let m7 := writeMem128 m6 (outPtr + 16) ⟨k0.a1, k1.a1⟩
+  let m8 := writeMem128 m7 (outPtr + 176) ⟨k0.a11, k1.a11⟩
+  let m9 := writeMem128 m8 (outPtr + 336) ⟨k0.a21, k1.a21⟩
+  let m10 := writeMem128 m9 (outPtr + 96) ⟨k0.a6, k1.a6⟩
+  let m11 := writeMem128 m10 (outPtr + 112) ⟨k0.a7, k1.a7⟩
+  let m12 := writeMem128 m11 (outPtr + 272) ⟨k0.a17, k1.a17⟩
+  let m13 := writeMem128 m12 (outPtr + 32) ⟨k0.a2, k1.a2⟩
+  let m14 := writeMem128 m13 (outPtr + 192) ⟨k0.a12, k1.a12⟩
+  let m15 := writeMem128 m14 (outPtr + 352) ⟨k0.a22, k1.a22⟩
+  let m16 := writeMem128 m15 (outPtr + 368) ⟨k0.a23, k1.a23⟩
+  let m17 := writeMem128 m16 (outPtr + 128) ⟨k0.a8, k1.a8⟩
+  let m18 := writeMem128 m17 (outPtr + 288) ⟨k0.a18, k1.a18⟩
+  let m19 := writeMem128 m18 (outPtr + 48) ⟨k0.a3, k1.a3⟩
+  let m20 := writeMem128 m19 (outPtr + 208) ⟨k0.a13, k1.a13⟩
+  let m21 := writeMem128 m20 (outPtr + 224) ⟨k0.a14, k1.a14⟩
+  let m22 := writeMem128 m21 (outPtr + 384) ⟨k0.a24, k1.a24⟩
+  let m23 := writeMem128 m22 (outPtr + 144) ⟨k0.a9, k1.a9⟩
+  let m24 := writeMem128 m23 (outPtr + 304) ⟨k0.a19, k1.a19⟩
+  let m25 := writeMem128 m24 (outPtr + 64) ⟨k0.a4, k1.a4⟩
+  m25
+
+theorem keccakThetaRho_or_comm (a b : UInt64) : a ||| b = b ||| a := by
+  apply UInt64.eq_of_toBitVec_eq
+  simp only [UInt64.toBitVec_or, BitVec.or_comm]
+
+
+def keccakThetaRhoPerm (i : Nat) : Nat := i / 5 + 5 * ((2 * (i % 5) + 3 * (i / 5)) % 5)
+
+def keccakThetaRhoRor : Nat → Nat
+  | 0 => 0
+  | 1 => 63
+  | 2 => 2
+  | 3 => 36
+  | 4 => 37
+  | 5 => 28
+  | 6 => 20
+  | 7 => 58
+  | 8 => 9
+  | 9 => 44
+  | 10 => 61
+  | 11 => 54
+  | 12 => 21
+  | 13 => 39
+  | 14 => 25
+  | 15 => 23
+  | 16 => 19
+  | 17 => 49
+  | 18 => 43
+  | 19 => 56
+  | 20 => 46
+  | 21 => 62
+  | 22 => 3
+  | 23 => 8
+  | 24 => 50
+  | _ => 0
+
+def keccakThetaRhoGet (k : KState) : Nat → UInt64
+  | 0 => k.a0
+  | 1 => k.a1
+  | 2 => k.a2
+  | 3 => k.a3
+  | 4 => k.a4
+  | 5 => k.a5
+  | 6 => k.a6
+  | 7 => k.a7
+  | 8 => k.a8
+  | 9 => k.a9
+  | 10 => k.a10
+  | 11 => k.a11
+  | 12 => k.a12
+  | 13 => k.a13
+  | 14 => k.a14
+  | 15 => k.a15
+  | 16 => k.a16
+  | 17 => k.a17
+  | 18 => k.a18
+  | 19 => k.a19
+  | 20 => k.a20
+  | 21 => k.a21
+  | 22 => k.a22
+  | 23 => k.a23
+  | _ => k.a24
+
+def keccakThetaRhoVec (m : UInt64 → UInt8) (p : UInt64) (i : Nat) : Vec128 :=
+  ⟨keccakThetaRhoGet (rhoPiS (thetaS (keccakThetaRhoLoad m p 0))) (keccakThetaRhoPerm i),
+   keccakThetaRhoGet (rhoPiS (thetaS (keccakThetaRhoLoad m p 1))) (keccakThetaRhoPerm i)⟩
+
+def keccakThetaRhoD (m : UInt64 → UInt8) (p : UInt64) (x : Nat) : Vec128 :=
+  let c00 := (readMem128 m (p + 0)).w0 ^^^ (readMem128 m (p + 80)).w0 ^^^ (readMem128 m (p + 160)).w0 ^^^ (readMem128 m (p + 240)).w0 ^^^ (readMem128 m (p + 320)).w0
+  let c01 := (readMem128 m (p + 0)).w1 ^^^ (readMem128 m (p + 80)).w1 ^^^ (readMem128 m (p + 160)).w1 ^^^ (readMem128 m (p + 240)).w1 ^^^ (readMem128 m (p + 320)).w1
+  let c10 := (readMem128 m (p + 16)).w0 ^^^ (readMem128 m (p + 96)).w0 ^^^ (readMem128 m (p + 176)).w0 ^^^ (readMem128 m (p + 256)).w0 ^^^ (readMem128 m (p + 336)).w0
+  let c11 := (readMem128 m (p + 16)).w1 ^^^ (readMem128 m (p + 96)).w1 ^^^ (readMem128 m (p + 176)).w1 ^^^ (readMem128 m (p + 256)).w1 ^^^ (readMem128 m (p + 336)).w1
+  let c20 := (readMem128 m (p + 32)).w0 ^^^ (readMem128 m (p + 112)).w0 ^^^ (readMem128 m (p + 192)).w0 ^^^ (readMem128 m (p + 272)).w0 ^^^ (readMem128 m (p + 352)).w0
+  let c21 := (readMem128 m (p + 32)).w1 ^^^ (readMem128 m (p + 112)).w1 ^^^ (readMem128 m (p + 192)).w1 ^^^ (readMem128 m (p + 272)).w1 ^^^ (readMem128 m (p + 352)).w1
+  let c30 := (readMem128 m (p + 48)).w0 ^^^ (readMem128 m (p + 128)).w0 ^^^ (readMem128 m (p + 208)).w0 ^^^ (readMem128 m (p + 288)).w0 ^^^ (readMem128 m (p + 368)).w0
+  let c31 := (readMem128 m (p + 48)).w1 ^^^ (readMem128 m (p + 128)).w1 ^^^ (readMem128 m (p + 208)).w1 ^^^ (readMem128 m (p + 288)).w1 ^^^ (readMem128 m (p + 368)).w1
+  let c40 := (readMem128 m (p + 64)).w0 ^^^ (readMem128 m (p + 144)).w0 ^^^ (readMem128 m (p + 224)).w0 ^^^ (readMem128 m (p + 304)).w0 ^^^ (readMem128 m (p + 384)).w0
+  let c41 := (readMem128 m (p + 64)).w1 ^^^ (readMem128 m (p + 144)).w1 ^^^ (readMem128 m (p + 224)).w1 ^^^ (readMem128 m (p + 304)).w1 ^^^ (readMem128 m (p + 384)).w1
+  match x with
+  | 0 => ⟨c40 ^^^ rotlK c10 1 63, c41 ^^^ rotlK c11 1 63⟩
+  | 1 => ⟨c00 ^^^ rotlK c20 1 63, c01 ^^^ rotlK c21 1 63⟩
+  | 2 => ⟨c10 ^^^ rotlK c30 1 63, c11 ^^^ rotlK c31 1 63⟩
+  | 3 => ⟨c20 ^^^ rotlK c40 1 63, c21 ^^^ rotlK c41 1 63⟩
+  | 4 => ⟨c30 ^^^ rotlK c00 1 63, c31 ^^^ rotlK c01 1 63⟩
+  | _ => Vec128.zero
+
+def keccakThetaRhoXar (a b : Vec128) (imm : Nat) : Vec128 :=
+  let r (x : UInt64) := if imm % 64 == 0 then x
+    else (x >>> UInt64.ofNat (imm % 64)) ||| (x <<< UInt64.ofNat (64 - imm % 64))
+  ⟨r (a.w0 ^^^ b.w0), r (a.w1 ^^^ b.w1)⟩
+
+def keccakThetaRhoPrefix (m : UInt64 → UInt8) (outPtr inPtr : UInt64) : Nat → (UInt64 → UInt8)
+  | 0 => m
+  | n+1 => writeMem128 (keccakThetaRhoPrefix m outPtr inPtr n)
+      (outPtr + UInt64.ofNat (16 * keccakThetaRhoPerm n)) (keccakThetaRhoVec m inPtr n)
+
+theorem keccakThetaRhoPerm_bound (i : Nat) (hi : i < 25) :
+    16 * keccakThetaRhoPerm i ≤ 384 := by
+  unfold keccakThetaRhoPerm
+  have hm := Nat.mod_lt (2 * (i % 5) + 3 * (i / 5)) (by decide : 0 < 5)
+  omega
+
+theorem keccakThetaRhoPrefix_read (m : UInt64 → UInt8) (outPtr inPtr : UInt64)
+    (hd : keccakThetaRhoDisjoint outPtr inPtr) (n : Nat) (hn : n ≤ 25)
+    (i : Nat) (hi : i ≤ 384) :
+    readMem128 (keccakThetaRhoPrefix m outPtr inPtr n) (inPtr + UInt64.ofNat i) =
+      readMem128 m (inPtr + UInt64.ofNat i) := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [keccakThetaRhoPrefix, keccakThetaRho_readWrite outPtr inPtr hd _ _ i
+      (16 * keccakThetaRhoPerm n) hi (keccakThetaRhoPerm_bound n (by omega))]
+    exact ih (by omega)
+
+theorem keccakThetaRhoPrefix_full (m : UInt64 → UInt8) (outPtr inPtr : UInt64) :
+    keccakThetaRhoPrefix m outPtr inPtr 25 = keccakThetaRhoOut m outPtr inPtr := by rfl
+
+set_option linter.unusedSimpArgs false in
+set_option maxHeartbeats 800000 in
+theorem keccakThetaRho_math (m : UInt64 → UInt8) (p : UInt64) (n : Nat) (hn : n < 25) :
+    keccakThetaRhoXar (readMem128 m (p + UInt64.ofNat (16 * n)))
+      (keccakThetaRhoD m p (n % 5)) (keccakThetaRhoRor n) = keccakThetaRhoVec m p n := by
+  match n, hn with
+  | 0, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 1, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 2, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 3, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 4, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 5, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 6, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 7, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 8, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 9, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 10, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 11, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 12, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 13, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 14, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 15, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 16, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 17, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 18, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 19, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 20, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 21, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 22, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 23, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | 24, _ =>
+    simp [keccakThetaRhoXar, keccakThetaRhoD, keccakThetaRhoRor, keccakThetaRhoVec,
+      keccakThetaRhoPerm, keccakThetaRhoGet, keccakThetaRhoLoad, thetaS, rhoPiS, rotlK,
+      keccakThetaRho_or_comm]
+  | n+25, hn => omega
+
+def keccakThetaRhoInv (s t : Arm64State) (n : Nat) : Prop :=
+  t.pc = 160 + 12*n ∧ t.gpr = s.gpr ∧ t.halted = false ∧
+  (∀ x : Nat, x < 5 → t.vec.get (16+x) = keccakThetaRhoD s.mem (s.gpr.get 1) x) ∧
+  t.mem = keccakThetaRhoPrefix s.mem (s.gpr.get 0) (s.gpr.get 1) n
+
+set_option linter.unusedSimpArgs false in
+set_option maxHeartbeats 1000000 in
+theorem keccakThetaRho_parity (s : Arm64State) (hp : s.pc = 0) (hh : s.halted = false) :
+    ∃ t, StepsArm64 keccakThetaRhoProg 40 s t ∧ keccakThetaRhoInv s t 0 := by
+  rcases s with ⟨pc, ⟨⟨r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15⟩, hi⟩,
+    ⟨⟨v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15⟩,
+      ⟨v16,v17,v18,v19,v20,v21,v22,v23,v24,v25,v26,v27,v28,v29,v30,v31⟩⟩,
+    cf,zf,dit,hlt,mem⟩
+  dsimp only at hp hh
+  subst pc hlt
+  iterate 40
+    apply StepsArm64_step_ex rfl rfl
+    · conv =>
+        lhs
+        simp [stepArm64, getArmGpr, Bank32.get, Bank32.set, Bank16.get, Bank16.set]
+      all_goals rfl
+  refine ⟨_, StepsArm64.zero _, rfl, rfl, rfl, ?_, rfl⟩
+  intro x hx
+  match x, hx with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ =>
+    simp [keccakThetaRhoD, rotlK, Bank32.get, Bank16.get]
+  | x+5, hx => omega
+
+theorem keccakThetaRho_fetch (n : Nat) (hn : n < 25) :
+    findInstrAtPc (160+12*n) keccakThetaRhoProg =
+      some ⟨160+12*n, 4, .ldrQ 0 1 (UInt64.ofNat (16*n))⟩ ∧
+    findInstrAtPc (160+12*n+4) keccakThetaRhoProg =
+      some ⟨160+12*n+4, 4, .vxar_2d 0 0 (16+n%5) (keccakThetaRhoRor n)⟩ ∧
+    findInstrAtPc (160+12*n+8) keccakThetaRhoProg =
+      some ⟨160+12*n+8, 4, .strQ 0 0 (UInt64.ofNat (16*keccakThetaRhoPerm n))⟩ := by
+  have hall : ∀ n : Fin 25,
+    findInstrAtPc (160+12*n.val) keccakThetaRhoProg =
+      some ⟨160+12*n.val, 4, .ldrQ 0 1 (UInt64.ofNat (16*n.val))⟩ ∧
+    findInstrAtPc (160+12*n.val+4) keccakThetaRhoProg =
+      some ⟨160+12*n.val+4, 4, .vxar_2d 0 0 (16+n.val%5) (keccakThetaRhoRor n.val)⟩ ∧
+    findInstrAtPc (160+12*n.val+8) keccakThetaRhoProg =
+      some ⟨160+12*n.val+8, 4, .strQ 0 0 (UInt64.ofNat (16*keccakThetaRhoPerm n.val))⟩ := by decide +kernel
+  exact hall ⟨n, hn⟩
+
+set_option linter.unusedSimpArgs false in
+set_option maxHeartbeats 800000 in
+theorem keccakThetaRho_block (s t : Arm64State) (n : Nat) (hn : n < 25)
+    (hd : keccakThetaRhoDisjoint (s.gpr.get 0) (s.gpr.get 1))
+    (h : keccakThetaRhoInv s t n) :
+    ∃ u, StepsArm64 keccakThetaRhoProg 3 t u ∧ keccakThetaRhoInv s u (n+1) := by
+  rcases t with ⟨pc,gpr,vec,cf,zf,dit,hlt,mem⟩
+  rcases h with ⟨hp,hg,hh,hv,hm⟩
+  dsimp only at hp hg hh hv hm
+  subst pc gpr hlt mem
+  have hmod : n % 5 < 5 := Nat.mod_lt n (by decide)
+  have hvn := hv (n%5) hmod
+  have hmath := keccakThetaRho_math s.mem (s.gpr.get 1) n hn
+  dsimp only [keccakThetaRhoXar] at hmath
+  have hf := keccakThetaRho_fetch n hn
+  have hget1 : ∀ st : Arm64State, getArmGpr st 1 = st.gpr.get 1 := fun _ => rfl
+  have hget0 : ∀ st : Arm64State, getArmGpr st 0 = st.gpr.get 0 := fun _ => rfl
+  apply StepsArm64_step_ex rfl hf.1
+  · conv =>
+      lhs
+      simp only [stepArm64, hget1]
+      rw [keccakThetaRhoPrefix_read s.mem (s.gpr.get 0) (s.gpr.get 1) hd n (by omega)
+        (16*n) (by omega)]
+    all_goals rfl
+  apply StepsArm64_step_ex rfl hf.2.1
+  · conv =>
+      lhs
+      simp (disch := omega) only [stepArm64, Bank32.get_set_eq, Bank32.get_set_ne, hvn]
+      rw [hmath]
+    all_goals rfl
+  apply StepsArm64_step_ex rfl (by simpa only [Nat.add_assoc] using hf.2.2)
+  · conv =>
+      lhs
+      simp only [stepArm64, hget0, Bank32.get_set_eq]
+    all_goals rfl
+  refine ⟨_, StepsArm64.zero _, ?_, rfl, rfl, ?_, rfl⟩
+  · dsimp only
+    omega
+  · intro x hx
+    dsimp only
+    simp (disch := omega) only [Bank32.get_set_ne]
+    exact hv x hx
+
+set_option linter.unusedSimpArgs false in
+set_option maxHeartbeats 400000 in
+theorem keccakThetaRho_wipe (s : Arm64State) (hp : s.pc = 460) (hh : s.halted = false) :
+    ∃ t, StepsArm64 keccakThetaRhoProg 13 s t ∧ t.halted = true ∧ t.mem = s.mem := by
+  rcases s with ⟨pc,gpr,⟨⟨v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15⟩,
+    ⟨v16,v17,v18,v19,v20,v21,v22,v23,v24,v25,v26,v27,v28,v29,v30,v31⟩⟩,cf,zf,dit,hlt,mem⟩
+  dsimp only at hp hh
+  subst pc hlt
+  iterate 13
+    apply StepsArm64_step_ex rfl rfl
+    · conv =>
+        lhs
+        simp [stepArm64, Bank32.get, Bank32.set, Bank16.get, Bank16.set]
+      all_goals rfl
+  exact ⟨_, StepsArm64.zero _, rfl, rfl⟩
+
+theorem keccakThetaRho_steps_trans {m n : Nat} {s t u : Arm64State}
+    (h : StepsArm64 keccakThetaRhoProg m s t)
+    (h' : StepsArm64 keccakThetaRhoProg n t u) :
+    StepsArm64 keccakThetaRhoProg (m+n) s u := by
+  induction h with
+  | zero => simpa only [Nat.zero_add] using h'
+  | cons hh hf hs h ih =>
+    simpa only [Nat.add_right_comm] using StepsArm64.cons hh hf hs (ih h')
+
+theorem keccakThetaRho_blocks (s t : Arm64State)
+    (hd : keccakThetaRhoDisjoint (s.gpr.get 0) (s.gpr.get 1))
+    (n : Nat) (hn : n ≤ 25) (h : keccakThetaRhoInv s t 0) :
+    ∃ u, StepsArm64 keccakThetaRhoProg (3*n) t u ∧ keccakThetaRhoInv s u n := by
+  induction n with
+  | zero => exact ⟨t, StepsArm64.zero _, h⟩
+  | succ n ih =>
+    obtain ⟨u, hu, hi⟩ := ih (by omega)
+    obtain ⟨v, hv, hi'⟩ := keccakThetaRho_block s u n (by omega) hd hi
+    refine ⟨v, ?_, hi'⟩
+    simpa only [Nat.mul_add, Nat.mul_one] using keccakThetaRho_steps_trans hu hv
+
+theorem keccakThetaRho_steps (s : Arm64State)
+    (hp : s.pc = 0) (hh : s.halted = false)
+    (hd : keccakThetaRhoDisjoint (s.gpr.get 0) (s.gpr.get 1)) :
+    ∃ t, StepsArm64 keccakThetaRhoProg 128 s t ∧ t.halted = true ∧
+      t.mem = keccakThetaRhoOut s.mem (s.gpr.get 0) (s.gpr.get 1) := by
+  obtain ⟨s40, h40, hi⟩ := keccakThetaRho_parity s hp hh
+  obtain ⟨s115, h75, hi'⟩ := keccakThetaRho_blocks s s40 hd 25 (by decide) hi
+  obtain ⟨s128, h13, hh', hm⟩ := keccakThetaRho_wipe s115 hi'.1 hi'.2.2.1
+  refine ⟨s128, keccakThetaRho_steps_trans (keccakThetaRho_steps_trans h40 h75) h13, hh', ?_⟩
+  rw [hm, hi'.2.2.2.2, keccakThetaRhoPrefix_full]
+
+/-- Complete ABI preconditions: entry PC, live machine, disjoint 400-byte buffers. -/
+def keccakThetaRhoInitial (s : Arm64State) : Prop :=
+  s.pc = 0 ∧ s.halted = false ∧ keccakThetaRhoDisjoint (s.gpr.get 0) (s.gpr.get 1)
+
+/-- Fresh decoded machine code computes theta, rho and pi on both full Keccak states.
+`keccakThetaRhoOut` writes all 25 lanes of each state and preserves every other byte. -/
+theorem keccakThetaRho_current_functional (s : Arm64State) (h : keccakThetaRhoInitial s) :
+    ∃ slice prog,
+      findSliceByNameBytes currentAarch64ExtractedSlices keccakThetaRhoName = some slice ∧
+      decodeArm64Slice slice.code = some prog ∧
+      ∀ extra : Nat,
+        (runArm64 prog (128 + extra) s).1.halted = true ∧
+        (runArm64 prog (128 + extra) s).1.mem =
+          keccakThetaRhoOut s.mem (s.gpr.get 0) (s.gpr.get 1) := by
+  have hd := keccakThetaRho_decode
+  cases hf : findSliceByNameBytes currentAarch64ExtractedSlices keccakThetaRhoName with
+  | none => rw [hf] at hd; contradiction
+  | some slice =>
+    rw [hf] at hd
+    refine ⟨slice, keccakThetaRhoProg, rfl, hd, ?_⟩
+    obtain ⟨t, ht, hh, hm⟩ := keccakThetaRho_steps s h.1 h.2.1 h.2.2
+    intro extra
+    have he := (ht.toExecReaches.run extra).1
+    rw [runArm64_halted_fst keccakThetaRhoProg extra t hh] at he
+    rw [he]
+    exact ⟨hh, hm⟩
+
+theorem keccakThetaRho_inhabited : ∃ s : Arm64State, keccakThetaRhoInitial s := by
+  refine ⟨⟨0, Bank32.ofFn (fun i => if i == 1 then 1024 else 0),
+    Bank32.const Vec128.zero, false, false, false, false, fun _ => 0⟩, rfl, rfl, ?_⟩
+  change keccakThetaRhoDisjoint 0 1024
+  intro i j hi hj he
+  have hn := congrArg UInt64.toNat he
+  simp only [UInt64.toNat_add, UInt64.toNat_ofNat, UInt64.toNat_ofNat'] at hn
+  omega
+
+/-- A wrong implementation omitting theta cannot satisfy the full-state specification. -/
+theorem keccakThetaRho_tooth :
+    rhoPiS (thetaS { zeroKState with a1 := 1 }) ≠
+      rhoPiS { zeroKState with a1 := 1 } := by
+  simp only [zeroKState_eq]; kstate_ne
+
+#tooth_pair keccakThetaRho_current_functional vs keccakThetaRho_tooth
+#verify_inhabited keccakThetaRho_current_functional keccakThetaRho_inhabited
+
+end KeccakThetaRhoFreshVerification
+
+section Keccak4xFreshVerification
+set_option linter.unusedSimpArgs false
+def keccak4xName : List UInt8 := [113, 115, 97, 103, 95, 97, 115, 109, 95, 107, 101, 99, 99, 97, 107, 95, 102, 49, 54, 48, 48, 95, 97, 118, 120, 50, 95, 52, 120]
+
+@[expose] def keccak4xProg : List (DecodedInstr X86Instr) := [
+  ⟨0, 1, .pushReg 5⟩,
+  ⟨1, 3, .movRegReg true 5 4⟩,
+  ⟨4, 4, .aluImm .andOp true 4 18446744073709551584⟩,
+  ⟨8, 7, .aluImm .sub true 4 832⟩,
+  ⟨15, 5, .movImm false 1 24⟩,
+  ⟨20, 4, .vload true 0 (.baseDisp 7 0)⟩,
+  ⟨24, 8, .vpxorLoad256 0 0 (.baseDisp 7 160)⟩,
+  ⟨32, 8, .vpxorLoad256 0 0 (.baseDisp 7 320)⟩,
+  ⟨40, 8, .vpxorLoad256 0 0 (.baseDisp 7 480)⟩,
+  ⟨48, 8, .vpxorLoad256 0 0 (.baseDisp 7 640)⟩,
+  ⟨56, 5, .vload true 1 (.baseDisp 7 32)⟩,
+  ⟨61, 8, .vpxorLoad256 1 1 (.baseDisp 7 192)⟩,
+  ⟨69, 8, .vpxorLoad256 1 1 (.baseDisp 7 352)⟩,
+  ⟨77, 8, .vpxorLoad256 1 1 (.baseDisp 7 512)⟩,
+  ⟨85, 8, .vpxorLoad256 1 1 (.baseDisp 7 672)⟩,
+  ⟨93, 5, .vload true 2 (.baseDisp 7 64)⟩,
+  ⟨98, 8, .vpxorLoad256 2 2 (.baseDisp 7 224)⟩,
+  ⟨106, 8, .vpxorLoad256 2 2 (.baseDisp 7 384)⟩,
+  ⟨114, 8, .vpxorLoad256 2 2 (.baseDisp 7 544)⟩,
+  ⟨122, 8, .vpxorLoad256 2 2 (.baseDisp 7 704)⟩,
+  ⟨130, 5, .vload true 3 (.baseDisp 7 96)⟩,
+  ⟨135, 8, .vpxorLoad256 3 3 (.baseDisp 7 256)⟩,
+  ⟨143, 8, .vpxorLoad256 3 3 (.baseDisp 7 416)⟩,
+  ⟨151, 8, .vpxorLoad256 3 3 (.baseDisp 7 576)⟩,
+  ⟨159, 8, .vpxorLoad256 3 3 (.baseDisp 7 736)⟩,
+  ⟨167, 8, .vload true 4 (.baseDisp 7 128)⟩,
+  ⟨175, 8, .vpxorLoad256 4 4 (.baseDisp 7 288)⟩,
+  ⟨183, 8, .vpxorLoad256 4 4 (.baseDisp 7 448)⟩,
+  ⟨191, 8, .vpxorLoad256 4 4 (.baseDisp 7 608)⟩,
+  ⟨199, 8, .vpxorLoad256 4 4 (.baseDisp 7 768)⟩,
+  ⟨207, 5, .vshiftImm .vpsllq true 10 1 1⟩,
+  ⟨212, 5, .vshiftImm .vpsrlq true 11 1 63⟩,
+  ⟨217, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨222, 4, .vbinOp .vpxor true 5 10 4⟩,
+  ⟨226, 5, .vshiftImm .vpsllq true 10 2 1⟩,
+  ⟨231, 5, .vshiftImm .vpsrlq true 11 2 63⟩,
+  ⟨236, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨241, 4, .vbinOp .vpxor true 6 10 0⟩,
+  ⟨245, 5, .vshiftImm .vpsllq true 10 3 1⟩,
+  ⟨250, 5, .vshiftImm .vpsrlq true 11 3 63⟩,
+  ⟨255, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨260, 4, .vbinOp .vpxor true 7 10 1⟩,
+  ⟨264, 5, .vshiftImm .vpsllq true 10 4 1⟩,
+  ⟨269, 5, .vshiftImm .vpsrlq true 11 4 63⟩,
+  ⟨274, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨279, 4, .vbinOp .vpxor true 8 10 2⟩,
+  ⟨283, 5, .vshiftImm .vpsllq true 10 0 1⟩,
+  ⟨288, 5, .vshiftImm .vpsrlq true 11 0 63⟩,
+  ⟨293, 5, .vbinOp .vpor true 10 10 11⟩,
+  ⟨298, 4, .vbinOp .vpxor true 9 10 3⟩,
+  ⟨302, 4, .vpxorLoad256 0 5 (.baseDisp 7 0)⟩,
+  ⟨306, 5, .vstore true 0 (.baseDisp 4 0)⟩,
+  ⟨311, 5, .vpxorLoad256 0 6 (.baseDisp 7 32)⟩,
+  ⟨316, 5, .vshiftImm .vpsllq true 1 0 1⟩,
+  ⟨321, 5, .vshiftImm .vpsrlq true 2 0 63⟩,
+  ⟨326, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨330, 9, .vstore true 0 (.baseDisp 4 320)⟩,
+  ⟨339, 5, .vpxorLoad256 0 7 (.baseDisp 7 64)⟩,
+  ⟨344, 5, .vshiftImm .vpsllq true 1 0 62⟩,
+  ⟨349, 5, .vshiftImm .vpsrlq true 2 0 2⟩,
+  ⟨354, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨358, 9, .vstore true 0 (.baseDisp 4 640)⟩,
+  ⟨367, 5, .vpxorLoad256 0 8 (.baseDisp 7 96)⟩,
+  ⟨372, 5, .vshiftImm .vpsllq true 1 0 28⟩,
+  ⟨377, 5, .vshiftImm .vpsrlq true 2 0 36⟩,
+  ⟨382, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨386, 9, .vstore true 0 (.baseDisp 4 160)⟩,
+  ⟨395, 8, .vpxorLoad256 0 9 (.baseDisp 7 128)⟩,
+  ⟨403, 5, .vshiftImm .vpsllq true 1 0 27⟩,
+  ⟨408, 5, .vshiftImm .vpsrlq true 2 0 37⟩,
+  ⟨413, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨417, 9, .vstore true 0 (.baseDisp 4 480)⟩,
+  ⟨426, 8, .vpxorLoad256 0 5 (.baseDisp 7 160)⟩,
+  ⟨434, 5, .vshiftImm .vpsllq true 1 0 36⟩,
+  ⟨439, 5, .vshiftImm .vpsrlq true 2 0 28⟩,
+  ⟨444, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨448, 9, .vstore true 0 (.baseDisp 4 512)⟩,
+  ⟨457, 8, .vpxorLoad256 0 6 (.baseDisp 7 192)⟩,
+  ⟨465, 5, .vshiftImm .vpsllq true 1 0 44⟩,
+  ⟨470, 5, .vshiftImm .vpsrlq true 2 0 20⟩,
+  ⟨475, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨479, 6, .vstore true 0 (.baseDisp 4 32)⟩,
+  ⟨485, 8, .vpxorLoad256 0 7 (.baseDisp 7 224)⟩,
+  ⟨493, 5, .vshiftImm .vpsllq true 1 0 6⟩,
+  ⟨498, 5, .vshiftImm .vpsrlq true 2 0 58⟩,
+  ⟨503, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨507, 9, .vstore true 0 (.baseDisp 4 352)⟩,
+  ⟨516, 8, .vpxorLoad256 0 8 (.baseDisp 7 256)⟩,
+  ⟨524, 5, .vshiftImm .vpsllq true 1 0 55⟩,
+  ⟨529, 5, .vshiftImm .vpsrlq true 2 0 9⟩,
+  ⟨534, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨538, 9, .vstore true 0 (.baseDisp 4 672)⟩,
+  ⟨547, 8, .vpxorLoad256 0 9 (.baseDisp 7 288)⟩,
+  ⟨555, 5, .vshiftImm .vpsllq true 1 0 20⟩,
+  ⟨560, 5, .vshiftImm .vpsrlq true 2 0 44⟩,
+  ⟨565, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨569, 9, .vstore true 0 (.baseDisp 4 192)⟩,
+  ⟨578, 8, .vpxorLoad256 0 5 (.baseDisp 7 320)⟩,
+  ⟨586, 5, .vshiftImm .vpsllq true 1 0 3⟩,
+  ⟨591, 5, .vshiftImm .vpsrlq true 2 0 61⟩,
+  ⟨596, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨600, 9, .vstore true 0 (.baseDisp 4 224)⟩,
+  ⟨609, 8, .vpxorLoad256 0 6 (.baseDisp 7 352)⟩,
+  ⟨617, 5, .vshiftImm .vpsllq true 1 0 10⟩,
+  ⟨622, 5, .vshiftImm .vpsrlq true 2 0 54⟩,
+  ⟨627, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨631, 9, .vstore true 0 (.baseDisp 4 544)⟩,
+  ⟨640, 8, .vpxorLoad256 0 7 (.baseDisp 7 384)⟩,
+  ⟨648, 5, .vshiftImm .vpsllq true 1 0 43⟩,
+  ⟨653, 5, .vshiftImm .vpsrlq true 2 0 21⟩,
+  ⟨658, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨662, 6, .vstore true 0 (.baseDisp 4 64)⟩,
+  ⟨668, 8, .vpxorLoad256 0 8 (.baseDisp 7 416)⟩,
+  ⟨676, 5, .vshiftImm .vpsllq true 1 0 25⟩,
+  ⟨681, 5, .vshiftImm .vpsrlq true 2 0 39⟩,
+  ⟨686, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨690, 9, .vstore true 0 (.baseDisp 4 384)⟩,
+  ⟨699, 8, .vpxorLoad256 0 9 (.baseDisp 7 448)⟩,
+  ⟨707, 5, .vshiftImm .vpsllq true 1 0 39⟩,
+  ⟨712, 5, .vshiftImm .vpsrlq true 2 0 25⟩,
+  ⟨717, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨721, 9, .vstore true 0 (.baseDisp 4 704)⟩,
+  ⟨730, 8, .vpxorLoad256 0 5 (.baseDisp 7 480)⟩,
+  ⟨738, 5, .vshiftImm .vpsllq true 1 0 41⟩,
+  ⟨743, 5, .vshiftImm .vpsrlq true 2 0 23⟩,
+  ⟨748, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨752, 9, .vstore true 0 (.baseDisp 4 736)⟩,
+  ⟨761, 8, .vpxorLoad256 0 6 (.baseDisp 7 512)⟩,
+  ⟨769, 5, .vshiftImm .vpsllq true 1 0 45⟩,
+  ⟨774, 5, .vshiftImm .vpsrlq true 2 0 19⟩,
+  ⟨779, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨783, 9, .vstore true 0 (.baseDisp 4 256)⟩,
+  ⟨792, 8, .vpxorLoad256 0 7 (.baseDisp 7 544)⟩,
+  ⟨800, 5, .vshiftImm .vpsllq true 1 0 15⟩,
+  ⟨805, 5, .vshiftImm .vpsrlq true 2 0 49⟩,
+  ⟨810, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨814, 9, .vstore true 0 (.baseDisp 4 576)⟩,
+  ⟨823, 8, .vpxorLoad256 0 8 (.baseDisp 7 576)⟩,
+  ⟨831, 5, .vshiftImm .vpsllq true 1 0 21⟩,
+  ⟨836, 5, .vshiftImm .vpsrlq true 2 0 43⟩,
+  ⟨841, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨845, 6, .vstore true 0 (.baseDisp 4 96)⟩,
+  ⟨851, 8, .vpxorLoad256 0 9 (.baseDisp 7 608)⟩,
+  ⟨859, 5, .vshiftImm .vpsllq true 1 0 8⟩,
+  ⟨864, 5, .vshiftImm .vpsrlq true 2 0 56⟩,
+  ⟨869, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨873, 9, .vstore true 0 (.baseDisp 4 416)⟩,
+  ⟨882, 8, .vpxorLoad256 0 5 (.baseDisp 7 640)⟩,
+  ⟨890, 5, .vshiftImm .vpsllq true 1 0 18⟩,
+  ⟨895, 5, .vshiftImm .vpsrlq true 2 0 46⟩,
+  ⟨900, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨904, 9, .vstore true 0 (.baseDisp 4 448)⟩,
+  ⟨913, 8, .vpxorLoad256 0 6 (.baseDisp 7 672)⟩,
+  ⟨921, 5, .vshiftImm .vpsllq true 1 0 2⟩,
+  ⟨926, 5, .vshiftImm .vpsrlq true 2 0 62⟩,
+  ⟨931, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨935, 9, .vstore true 0 (.baseDisp 4 768)⟩,
+  ⟨944, 8, .vpxorLoad256 0 7 (.baseDisp 7 704)⟩,
+  ⟨952, 5, .vshiftImm .vpsllq true 1 0 61⟩,
+  ⟨957, 5, .vshiftImm .vpsrlq true 2 0 3⟩,
+  ⟨962, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨966, 9, .vstore true 0 (.baseDisp 4 288)⟩,
+  ⟨975, 8, .vpxorLoad256 0 8 (.baseDisp 7 736)⟩,
+  ⟨983, 5, .vshiftImm .vpsllq true 1 0 56⟩,
+  ⟨988, 5, .vshiftImm .vpsrlq true 2 0 8⟩,
+  ⟨993, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨997, 9, .vstore true 0 (.baseDisp 4 608)⟩,
+  ⟨1006, 8, .vpxorLoad256 0 9 (.baseDisp 7 768)⟩,
+  ⟨1014, 5, .vshiftImm .vpsllq true 1 0 14⟩,
+  ⟨1019, 5, .vshiftImm .vpsrlq true 2 0 50⟩,
+  ⟨1024, 4, .vbinOp .vpor true 0 1 2⟩,
+  ⟨1028, 9, .vstore true 0 (.baseDisp 4 128)⟩,
+  ⟨1037, 5, .vload true 0 (.baseDisp 4 0)⟩,
+  ⟨1042, 6, .vload true 1 (.baseDisp 4 32)⟩,
+  ⟨1048, 6, .vload true 2 (.baseDisp 4 64)⟩,
+  ⟨1054, 6, .vload true 3 (.baseDisp 4 96)⟩,
+  ⟨1060, 9, .vload true 4 (.baseDisp 4 128)⟩,
+  ⟨1069, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1073, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1077, 5, .vpbroadcastLoad64 10 (.baseDisp 6 0)⟩,
+  ⟨1082, 4, .vbinOp .vpxor true 5 10 5⟩,
+  ⟨1086, 4, .vstore true 5 (.baseDisp 7 0)⟩,
+  ⟨1090, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1094, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1098, 5, .vstore true 6 (.baseDisp 7 32)⟩,
+  ⟨1103, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1107, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1111, 5, .vstore true 7 (.baseDisp 7 64)⟩,
+  ⟨1116, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1120, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1124, 5, .vstore true 8 (.baseDisp 7 96)⟩,
+  ⟨1129, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1133, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1137, 8, .vstore true 9 (.baseDisp 7 128)⟩,
+  ⟨1145, 9, .vload true 0 (.baseDisp 4 160)⟩,
+  ⟨1154, 9, .vload true 1 (.baseDisp 4 192)⟩,
+  ⟨1163, 9, .vload true 2 (.baseDisp 4 224)⟩,
+  ⟨1172, 9, .vload true 3 (.baseDisp 4 256)⟩,
+  ⟨1181, 9, .vload true 4 (.baseDisp 4 288)⟩,
+  ⟨1190, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1194, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1198, 8, .vstore true 5 (.baseDisp 7 160)⟩,
+  ⟨1206, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1210, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1214, 8, .vstore true 6 (.baseDisp 7 192)⟩,
+  ⟨1222, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1226, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1230, 8, .vstore true 7 (.baseDisp 7 224)⟩,
+  ⟨1238, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1242, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1246, 8, .vstore true 8 (.baseDisp 7 256)⟩,
+  ⟨1254, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1258, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1262, 8, .vstore true 9 (.baseDisp 7 288)⟩,
+  ⟨1270, 9, .vload true 0 (.baseDisp 4 320)⟩,
+  ⟨1279, 9, .vload true 1 (.baseDisp 4 352)⟩,
+  ⟨1288, 9, .vload true 2 (.baseDisp 4 384)⟩,
+  ⟨1297, 9, .vload true 3 (.baseDisp 4 416)⟩,
+  ⟨1306, 9, .vload true 4 (.baseDisp 4 448)⟩,
+  ⟨1315, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1319, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1323, 8, .vstore true 5 (.baseDisp 7 320)⟩,
+  ⟨1331, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1335, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1339, 8, .vstore true 6 (.baseDisp 7 352)⟩,
+  ⟨1347, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1351, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1355, 8, .vstore true 7 (.baseDisp 7 384)⟩,
+  ⟨1363, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1367, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1371, 8, .vstore true 8 (.baseDisp 7 416)⟩,
+  ⟨1379, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1383, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1387, 8, .vstore true 9 (.baseDisp 7 448)⟩,
+  ⟨1395, 9, .vload true 0 (.baseDisp 4 480)⟩,
+  ⟨1404, 9, .vload true 1 (.baseDisp 4 512)⟩,
+  ⟨1413, 9, .vload true 2 (.baseDisp 4 544)⟩,
+  ⟨1422, 9, .vload true 3 (.baseDisp 4 576)⟩,
+  ⟨1431, 9, .vload true 4 (.baseDisp 4 608)⟩,
+  ⟨1440, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1444, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1448, 8, .vstore true 5 (.baseDisp 7 480)⟩,
+  ⟨1456, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1460, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1464, 8, .vstore true 6 (.baseDisp 7 512)⟩,
+  ⟨1472, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1476, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1480, 8, .vstore true 7 (.baseDisp 7 544)⟩,
+  ⟨1488, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1492, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1496, 8, .vstore true 8 (.baseDisp 7 576)⟩,
+  ⟨1504, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1508, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1512, 8, .vstore true 9 (.baseDisp 7 608)⟩,
+  ⟨1520, 9, .vload true 0 (.baseDisp 4 640)⟩,
+  ⟨1529, 9, .vload true 1 (.baseDisp 4 672)⟩,
+  ⟨1538, 9, .vload true 2 (.baseDisp 4 704)⟩,
+  ⟨1547, 9, .vload true 3 (.baseDisp 4 736)⟩,
+  ⟨1556, 9, .vload true 4 (.baseDisp 4 768)⟩,
+  ⟨1565, 4, .vbinOp .vpandn true 5 1 2⟩,
+  ⟨1569, 4, .vbinOp .vpxor true 5 0 5⟩,
+  ⟨1573, 8, .vstore true 5 (.baseDisp 7 640)⟩,
+  ⟨1581, 4, .vbinOp .vpandn true 6 2 3⟩,
+  ⟨1585, 4, .vbinOp .vpxor true 6 1 6⟩,
+  ⟨1589, 8, .vstore true 6 (.baseDisp 7 672)⟩,
+  ⟨1597, 4, .vbinOp .vpandn true 7 3 4⟩,
+  ⟨1601, 4, .vbinOp .vpxor true 7 2 7⟩,
+  ⟨1605, 8, .vstore true 7 (.baseDisp 7 704)⟩,
+  ⟨1613, 4, .vbinOp .vpandn true 8 4 0⟩,
+  ⟨1617, 4, .vbinOp .vpxor true 8 8 3⟩,
+  ⟨1621, 8, .vstore true 8 (.baseDisp 7 736)⟩,
+  ⟨1629, 4, .vbinOp .vpandn true 9 0 1⟩,
+  ⟨1633, 4, .vbinOp .vpxor true 9 9 4⟩,
+  ⟨1637, 8, .vstore true 9 (.baseDisp 7 768)⟩,
+  ⟨1645, 4, .aluImm .add true 6 8⟩,
+  ⟨1649, 2, .incDec false false 1⟩,
+  ⟨1651, 6, .jcc 5 20⟩,
+  ⟨1657, 4, .vbinOp .vpxor true 0 0 0⟩,
+  ⟨1661, 5, .movImm false 1 25⟩,
+  ⟨1666, 3, .movRegReg true 0 4⟩,
+  ⟨1669, 4, .vstore true 0 (.baseDisp 0 0)⟩,
+  ⟨1673, 4, .aluImm .add true 0 32⟩,
+  ⟨1677, 2, .incDec false false 1⟩,
+  ⟨1679, 2, .jcc 5 1669⟩,
+  ⟨1681, 4, .vbinOp .vpxor true 1 1 1⟩,
+  ⟨1685, 4, .vbinOp .vpxor true 2 2 2⟩,
+  ⟨1689, 4, .vbinOp .vpxor true 3 3 3⟩,
+  ⟨1693, 4, .vbinOp .vpxor true 4 4 4⟩,
+  ⟨1697, 4, .vbinOp .vpxor true 5 5 5⟩,
+  ⟨1701, 4, .vbinOp .vpxor true 6 6 6⟩,
+  ⟨1705, 4, .vbinOp .vpxor true 7 7 7⟩,
+  ⟨1709, 5, .vbinOp .vpxor true 8 8 8⟩,
+  ⟨1714, 5, .vbinOp .vpxor true 9 9 9⟩,
+  ⟨1719, 5, .vbinOp .vpxor true 10 10 10⟩,
+  ⟨1724, 5, .vbinOp .vpxor true 11 11 11⟩,
+  ⟨1729, 3, .vzeroall⟩,
+  ⟨1732, 3, .vzeroupper⟩,
+  ⟨1735, 3, .movRegReg true 4 5⟩,
+  ⟨1738, 1, .popReg 5⟩,
+  ⟨1739, 2, .aluRegReg .xorOp false 7 7⟩,
+  ⟨1741, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨1743, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨1745, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨1747, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨1750, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨1753, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨1756, 3, .aluRegReg .xorOp false 11 11⟩,
+  ⟨1759, 2, .aluRegReg .xorOp false 0 0⟩,
+  ⟨1761, 1, .ret⟩
+]
+
+theorem keccak4x_decoded :
+    (findSliceByNameBytes currentX86ExtractedSlices keccak4xName).bind
+      (fun sl => decodeX86Stream sl.code) = some keccak4xProg := by decide +kernel
+
+theorem keccak4x_instruction_count : keccak4xProg.length = 309 := by rfl
+
+end Keccak4xFreshVerification
+
+end Qsag
+end
