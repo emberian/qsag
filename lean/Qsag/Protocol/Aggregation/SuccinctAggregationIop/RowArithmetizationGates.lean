@@ -689,3 +689,692 @@ theorem unaryWotsChainResiduals_allZero_iff
             rfl⟩, rfl⟩, (muxDigest4Residuals_allZero_iff hb1 _ _ _).mpr rfl⟩, rfl⟩, rfl⟩,
             (muxDigest4Residuals_allZero_iff hb2 _ _ _).mpr rfl⟩
 
+/-! ### 2-Block Merkle, 2-Rate Sponge, `H_msg`, and Full `K`-Signer Trace Arithmetization -/
+
+/-- Witness for a single 2-block `merkleNodeHash` level (`MerkleLeft` + `MerkleRight` in `trace.rs:132-139`). -/
+structure MerkleLevelWitness where
+  dirBit     : Goldilocks
+  sibling    : Digest4
+  leftChild  : Digest4
+  rightChild : Digest4
+  parent     : Digest4
+  perm0      : Poseidon2PermWitness
+  perm1      : Poseidon2PermWitness
+  deriving DecidableEq, Repr
+
+private def merkleNodeMeta0 (layer level nodeIdx : Nat) : Goldilocks :=
+  Goldilocks.ofNat ((layer % 65536) * (2 ^ 48) + (level % 65536) * (2 ^ 32) + (nodeIdx % (2 ^ 32)))
+
+private def merkleNodeTreeLo (treeIdx : Nat) : Goldilocks :=
+  Goldilocks.ofNat (treeIdx % (2 ^ 32))
+
+private def merkleNodeTreeHi (treeIdx : Nat) : Goldilocks :=
+  Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32))
+
+def merkleNodeState0 (domainTag : Goldilocks) (pkSeed : Digest4)
+    (layer treeIdx level nodeIdx : Nat) (left : Digest4) : Poseidon2State12 :=
+  ⟨pkSeed,
+   left,
+   ⟨domainTag, merkleNodeMeta0 layer level nodeIdx, merkleNodeTreeLo treeIdx, merkleNodeTreeHi treeIdx⟩⟩
+
+def merkleNodeState1 (st0 : Poseidon2State12) (right : Digest4) : Poseidon2State12 :=
+  ⟨lane4Add st0.b0 right,
+   ⟨Goldilocks.add st0.b1.x0 Goldilocks.one,
+    Goldilocks.add st0.b1.x1 poseidon2IvTag,
+    st0.b1.x2,
+    st0.b1.x3⟩,
+   st0.b2⟩
+
+private theorem merkleNodeHash_eq_states (domainTag : Goldilocks) (pkSeed : Digest4)
+    (layer treeIdx level nodeIdx : Nat) (left right : Digest4) :
+    merkleNodeHash domainTag pkSeed layer treeIdx level nodeIdx left right =
+      (poseidon2Perm12 (merkleNodeState1
+        (poseidon2Perm12 (merkleNodeState0 domainTag pkSeed layer treeIdx level nodeIdx left))
+        right)).b0 := by
+  simp only [merkleNodeHash.public_eqs]
+  unfold merkleNodeState0 merkleNodeState1 merkleNodeMeta0 merkleNodeTreeLo merkleNodeTreeHi
+  rfl
+
+attribute [local irreducible] merkleNodeMeta0 merkleNodeTreeLo merkleNodeTreeHi merkleNodeState0 merkleNodeState1
+
+@[expose] def honestMerkleLevelWitness (domainTag : Goldilocks) (pkSeed : Digest4)
+    (layer treeIdx : Nat) (addr : Nat → Nat → Nat) (level idx : Nat) (cur sib : Digest4) : MerkleLevelWitness :=
+  let parentIdx := idx / 2
+  let bit := if idx % 2 == 0 then Goldilocks.zero else Goldilocks.one
+  let leftC := if idx % 2 == 0 then cur else sib
+  let rightC := if idx % 2 == 0 then sib else cur
+  let p0 := honestPoseidon2PermWitness (merkleNodeState0 domainTag pkSeed layer treeIdx level (addr level parentIdx) leftC)
+  let p1 := honestPoseidon2PermWitness (merkleNodeState1 p0.output rightC)
+  { dirBit := bit, sibling := sib, leftChild := leftC, rightChild := rightC,
+    parent := p1.output.b0, perm0 := p0, perm1 := p1 }
+
+def merkleLevelResiduals (domainTag : Goldilocks) (pkSeed : Digest4)
+    (layer treeIdx : Nat) (addr : Nat → Nat → Nat) (level idx : Nat) (cur : Digest4) (w : MerkleLevelWitness) : List Goldilocks :=
+  let parentIdx := idx / 2
+  let expectedBit := if idx % 2 == 0 then Goldilocks.zero else Goldilocks.one
+  [boolBitResidual w.dirBit, Goldilocks.sub w.dirBit expectedBit] ++
+  muxDigest4Residuals w.dirBit w.sibling cur w.leftChild ++
+  muxDigest4Residuals w.dirBit cur w.sibling w.rightChild ++
+  (state12Sub w.perm0.input (merkleNodeState0 domainTag pkSeed layer treeIdx level (addr level parentIdx) w.leftChild)).toList ++
+  poseidon2PermResiduals w.perm0 ++
+  (state12Sub w.perm1.input (merkleNodeState1 w.perm0.output w.rightChild)).toList ++
+  poseidon2PermResiduals w.perm1 ++
+  (lane4Sub w.parent w.perm1.output.b0).toList
+
+theorem lane4Sub_toList_allZero_iff (a b : Digest4) :
+    allZeroGoldilocks (lane4Sub a b).toList = true ↔ a = b := by
+  rcases a with ⟨a0, a1, a2, a3⟩
+  rcases b with ⟨b0, b1, b2, b3⟩
+  unfold allZeroGoldilocks
+  simp only [lane4Sub_eq, Lane4.toList_eq]
+  simp [gold_sub_eq_zero_iff, Lane4.mk.injEq]
+
+theorem honestMerkleLevelWitness_parent (domainTag : Goldilocks) (pkSeed : Digest4)
+    (layer treeIdx : Nat) (addr : Nat → Nat → Nat) (level idx : Nat) (cur sib : Digest4) :
+    (honestMerkleLevelWitness domainTag pkSeed layer treeIdx addr level idx cur sib).parent =
+      (if idx % 2 == 0 then
+         merkleNodeHash domainTag pkSeed layer treeIdx level (addr level (idx / 2)) cur sib
+       else
+         merkleNodeHash domainTag pkSeed layer treeIdx level (addr level (idx / 2)) sib cur) := by
+  have hPermOut : ∀ st : Poseidon2State12, (honestPoseidon2PermWitness st).output = poseidon2Perm12 st :=
+    fun st => by unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
+  unfold honestMerkleLevelWitness
+  dsimp only
+  rw [hPermOut, hPermOut]
+  cases hEven : (idx % 2 == 0) <;>
+    simp only [Bool.false_eq_true, ↓reduceIte] <;>
+    exact (merkleNodeHash_eq_states domainTag pkSeed layer treeIdx level (addr level (idx / 2)) _ _).symm
+
+theorem merkleLevelResiduals_allZero_iff (domainTag : Goldilocks) (pkSeed : Digest4)
+    (layer treeIdx : Nat) (addr : Nat → Nat → Nat) (level idx : Nat) (cur : Digest4) (w : MerkleLevelWitness) :
+    allZeroGoldilocks (merkleLevelResiduals domainTag pkSeed layer treeIdx addr level idx cur w) = true ↔
+      w = honestMerkleLevelWitness domainTag pkSeed layer treeIdx addr level idx cur w.sibling := by
+  unfold merkleLevelResiduals
+  have hPair : ∀ (r0 r1 : Goldilocks),
+      allZeroGoldilocks [r0, r1] = ((r0 == Goldilocks.zero) && (r1 == Goldilocks.zero)) := by
+    intros; simp [allZeroGoldilocks]
+  simp only [allZeroGoldilocks_append, hPair, Bool.and_eq_true, beq_iff_eq,
+    boolBitResidual_eq_zero_iff, gold_sub_eq_zero_iff,
+    state12Sub_toList_allZero_iff, poseidon2PermResiduals_allZero_iff,
+    lane4Sub_toList_allZero_iff]
+  constructor
+  · rintro ⟨⟨⟨⟨⟨⟨⟨⟨hb, hBitEq0⟩, hMuxL⟩, hMuxR⟩, hIn0⟩, hP0⟩, hIn1⟩, hP1⟩, hPar⟩
+    have hBitEq : w.dirBit = (if idx % 2 == 0 then Goldilocks.zero else Goldilocks.one) := by
+      rw [hBitEq0]
+      rcases Nat.mod_two_eq_zero_or_one idx with h | h <;> rw [h] <;> rfl
+    have eL := (muxDigest4Residuals_allZero_iff hb w.sibling cur w.leftChild).mp hMuxL
+    have eR := (muxDigest4Residuals_allZero_iff hb cur w.sibling w.rightChild).mp hMuxR
+    have hDirCond :
+        (w.dirBit == Goldilocks.one) = !(idx % 2 == 0) := by
+      rw [hBitEq]
+      cases (idx % 2 == 0) <;> decide
+    have eL' : w.leftChild = (if idx % 2 == 0 then cur else w.sibling) := by
+      rw [eL, hDirCond]
+      cases (idx % 2 == 0) <;> rfl
+    have eR' : w.rightChild = (if idx % 2 == 0 then w.sibling else cur) := by
+      rw [eR, hDirCond]
+      cases (idx % 2 == 0) <;> rfl
+    rw [hIn0, eL'] at hP0
+    rw [hIn1, hP0, eR'] at hP1
+    rw [hP1] at hPar
+    rcases w with ⟨db, sib, lc, rc, par, p0, p1⟩
+    dsimp only at hBitEq eL' eR' hP0 hP1 hPar
+    subst hBitEq eL' eR' hP0 hP1 hPar
+    rfl
+  · intro hW
+    obtain ⟨sv, hsv⟩ : ∃ sv, sv = w.sibling := ⟨_, rfl⟩
+    rw [← hsv] at hW
+    subst hW
+    clear hsv
+    let hw := honestMerkleLevelWitness domainTag pkSeed layer treeIdx addr level idx cur sv
+    have hb : hw.dirBit = Goldilocks.zero ∨ hw.dirBit = Goldilocks.one := by
+      dsimp only [hw, honestMerkleLevelWitness]
+      cases (idx % 2 == 0)
+      · exact .inr rfl
+      · exact .inl rfl
+    have hMux : ∀ (b : Bool) (x y : Digest4),
+        (if b = true then x else y) =
+          if ((if b = true then Goldilocks.zero else Goldilocks.one) == Goldilocks.one) = true then y else x := by
+      intro b x y
+      cases b <;> rfl
+    have hMuxL : allZeroGoldilocks (muxDigest4Residuals hw.dirBit hw.sibling cur hw.leftChild) = true := by
+      rw [muxDigest4Residuals_allZero_iff hb]
+      exact hMux (idx % 2 == 0) cur sv
+    have hMuxR : allZeroGoldilocks (muxDigest4Residuals hw.dirBit cur hw.sibling hw.rightChild) = true := by
+      rw [muxDigest4Residuals_allZero_iff hb]
+      exact hMux (idx % 2 == 0) sv cur
+    have hBitEq : hw.dirBit = (if idx % 2 = 0 then Goldilocks.zero else Goldilocks.one) := by
+      dsimp only [hw, honestMerkleLevelWitness]
+      rcases Nat.mod_two_eq_zero_or_one idx with h | h <;> rw [h] <;> rfl
+    exact ⟨⟨⟨⟨⟨⟨⟨⟨hb, hBitEq⟩, hMuxL⟩, hMuxR⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩
+
+/-- Polymorphic Merkle path witness builder & residual verifier (`< 5ms` elaboration). -/
+@[expose] def buildMerklePathWitnessPoly {D LW : Type}
+    (mkLvl : Nat → Nat → D → D → LW)
+    (parentOf : LW → D) :
+    List D → Nat → Nat → D → List LW
+  | [], _, _, _ => []
+  | sib :: sibs, lvl, idx, cur =>
+    let w := mkLvl lvl idx cur sib
+    w :: buildMerklePathWitnessPoly mkLvl parentOf sibs (lvl + 1) (idx / 2) (parentOf w)
+
+private def merklePathResidualsPoly {D LW RES : Type}
+    (lvlRes : Nat → Nat → D → LW → List RES)
+    (parentOf : LW → D) :
+    List LW → Nat → Nat → D → (D × List RES)
+  | [], _, _, cur => (cur, [])
+  | w :: ws, lvl, idx, cur =>
+    let r0 := lvlRes lvl idx cur w
+    let (finalRt, restRes) := merklePathResidualsPoly lvlRes parentOf ws (lvl + 1) (idx / 2) (parentOf w)
+    (finalRt, r0 ++ restRes)
+
+private theorem merklePathResidualsPoly_allZero_iff {D LW RES : Type}
+    (mkLvl : Nat → Nat → D → D → LW)
+    (lvlRes : Nat → Nat → D → LW → List RES)
+    (sibOf : LW → D)
+    (parentOf : LW → D)
+    (nodeHash : Nat → Nat → D → D → D)
+    (zeroPred : List RES → Bool)
+    (hNil : zeroPred [] = true)
+    (hAppend : ∀ a b, zeroPred (a ++ b) = (zeroPred a && zeroPred b))
+    (hLvlIff : ∀ lvl idx cur w, zeroPred (lvlRes lvl idx cur w) = true ↔ w = mkLvl lvl idx cur (sibOf w))
+    (hSibMk : ∀ lvl idx cur sib, sibOf (mkLvl lvl idx cur sib) = sib)
+    (hParMk : ∀ lvl idx cur sib,
+      parentOf (mkLvl lvl idx cur sib) =
+        (if idx % 2 == 0 then nodeHash lvl (idx / 2) cur sib else nodeHash lvl (idx / 2) sib cur)) :
+    ∀ (ws : List LW) (lvl idx : Nat) (cur : D),
+      (zeroPred (merklePathResidualsPoly lvlRes parentOf ws lvl idx cur).2 = true ↔
+        ws = buildMerklePathWitnessPoly mkLvl parentOf (ws.map sibOf) lvl idx cur) ∧
+      (ws = buildMerklePathWitnessPoly mkLvl parentOf (ws.map sibOf) lvl idx cur →
+        (merklePathResidualsPoly lvlRes parentOf ws lvl idx cur).1 =
+          merkleWalkPoly nodeHash (ws.map sibOf) lvl idx cur)
+  | [], _, _, _ => by
+    exact ⟨⟨fun _ => rfl, fun _ => hNil⟩, fun _ => rfl⟩
+  | w :: ws, lvl, idx, cur => by
+    dsimp only [merklePathResidualsPoly, buildMerklePathWitnessPoly, merkleWalkPoly, List.map_cons]
+    have ih := merklePathResidualsPoly_allZero_iff mkLvl lvlRes sibOf parentOf nodeHash
+      zeroPred hNil hAppend hLvlIff hSibMk hParMk ws (lvl + 1) (idx / 2) (parentOf w)
+    rw [hAppend, Bool.and_eq_true, hLvlIff]
+    refine ⟨?_, ?_⟩
+    · constructor
+      · rintro ⟨hw, hRest⟩
+        exact List.cons_eq_cons.mpr ⟨hw, hw ▸ ih.1.mp hRest⟩
+      · intro hCons
+        obtain ⟨hw, hTail⟩ := List.cons.inj hCons
+        exact ⟨hw, ih.1.mpr (hw ▸ hTail)⟩
+    · intro hCons
+      obtain ⟨hw, hTail⟩ := List.cons.inj hCons
+      have hTailRt := ih.2 (hw ▸ hTail)
+      rw [hTailRt]
+      have hParEq : parentOf w =
+          (if idx % 2 == 0 then nodeHash lvl (idx / 2) cur (sibOf w)
+           else nodeHash lvl (idx / 2) (sibOf w) cur) := by
+        conv => lhs; rw [hw]
+        exact hParMk lvl idx cur (sibOf w)
+      rw [hParEq]
+      rfl
+
+@[expose] def honestMerklePathWitness (domainTag : Goldilocks) (pkSeed : Digest4)
+    (layer treeIdx : Nat) (addr : Nat → Nat → Nat) (startLvl idx : Nat) (cur : Digest4) (sibs : List Digest4) :
+    List MerkleLevelWitness :=
+  buildMerklePathWitnessPoly
+    (honestMerkleLevelWitness domainTag pkSeed layer treeIdx addr)
+    MerkleLevelWitness.parent
+    sibs startLvl idx cur
+
+def merklePathResiduals (domainTag : Goldilocks) (pkSeed : Digest4)
+    (layer treeIdx : Nat) (addr : Nat → Nat → Nat) (startLvl idx : Nat) (cur : Digest4) (ws : List MerkleLevelWitness) :
+    (Digest4 × List Goldilocks) :=
+  merklePathResidualsPoly
+    (merkleLevelResiduals domainTag pkSeed layer treeIdx addr)
+    MerkleLevelWitness.parent
+    ws startLvl idx cur
+
+theorem merklePathResiduals_allZero_iff (domainTag : Goldilocks) (pkSeed : Digest4)
+    (layer treeIdx : Nat) (addr : Nat → Nat → Nat) (startLvl idx : Nat) (cur : Digest4) (ws : List MerkleLevelWitness) :
+    (allZeroGoldilocks (merklePathResiduals domainTag pkSeed layer treeIdx addr startLvl idx cur ws).2 = true ↔
+      ws = honestMerklePathWitness domainTag pkSeed layer treeIdx addr startLvl idx cur
+             (ws.map MerkleLevelWitness.sibling)) ∧
+    (ws = honestMerklePathWitness domainTag pkSeed layer treeIdx addr startLvl idx cur
+            (ws.map MerkleLevelWitness.sibling) →
+      (merklePathResiduals domainTag pkSeed layer treeIdx addr startLvl idx cur ws).1 =
+        merkleWalkRoot domainTag pkSeed layer treeIdx addr startLvl idx cur
+          (ws.map MerkleLevelWitness.sibling)) :=
+  merklePathResidualsPoly_allZero_iff
+    (honestMerkleLevelWitness domainTag pkSeed layer treeIdx addr)
+    (merkleLevelResiduals domainTag pkSeed layer treeIdx addr)
+    MerkleLevelWitness.sibling
+    MerkleLevelWitness.parent
+    (merkleAddrNodeHash domainTag pkSeed layer treeIdx addr)
+    allZeroGoldilocks rfl allZeroGoldilocks_append
+    (merkleLevelResiduals_allZero_iff domainTag pkSeed layer treeIdx addr)
+    (fun _ _ _ _ => rfl)
+    (honestMerkleLevelWitness_parent domainTag pkSeed layer treeIdx addr)
+    ws startLvl idx cur
+
+/-- Polymorphic 2-rate-block sponge absorption witness (`compressWotsEndpointsSponge` & `compressForsRootsSponge`). -/
+private def buildAbsorbPermsPoly {D S PW : Type}
+    (mkPerm : S → PW) (outOf : PW → S)
+    (in1 : S → D → S) (in2 : S → D → D → S) :
+    List D → S → Option D → List PW
+  | [], _, none => []
+  | [], st, some e0 => [mkPerm (in1 st e0)]
+  | e :: rest, st, none => buildAbsorbPermsPoly mkPerm outOf in1 in2 rest st (some e)
+  | e1 :: rest, st, some e0 =>
+    let pw := mkPerm (in2 st e0 e1)
+    pw :: buildAbsorbPermsPoly mkPerm outOf in1 in2 rest (outOf pw) none
+
+private def absorbPermsResidualsPoly {D S PW RES : Type}
+    (permRes : S → PW → List RES) (outOf : PW → S) (badRes : List RES)
+    (in1 : S → D → S) (in2 : S → D → D → S) :
+    List D → List PW → S → Option D → (S × List RES)
+  | [], [], st, none => (st, [])
+  | [], [pw], st, some e0 => (outOf pw, permRes (in1 st e0) pw)
+  | e :: rest, pws, st, none => absorbPermsResidualsPoly permRes outOf badRes in1 in2 rest pws st (some e)
+  | e1 :: rest, pw :: pws, st, some e0 =>
+    let r0 := permRes (in2 st e0 e1) pw
+    let (finalSt, restRes) := absorbPermsResidualsPoly permRes outOf badRes in1 in2 rest pws (outOf pw) none
+    (finalSt, r0 ++ restRes)
+  | [], _ :: _, st, none => (st, badRes)
+  | [], [], st, some _ => (st, badRes)
+  | [], _ :: _ :: _, st, some _ => (st, badRes)
+  | _ :: _, [], st, some _ => (st, badRes)
+
+private theorem absorbPermsResidualsPoly_allZero_iff {D S PW RES : Type}
+    (mkPerm : S → PW) (permRes : S → PW → List RES) (outOf : PW → S) (badRes : List RES)
+    (permFn : S → S) (in1 : S → D → S) (in2 : S → D → D → S)
+    (zeroPred : List RES → Bool)
+    (hNil : zeroPred [] = true) (hBad : zeroPred badRes = false)
+    (hAppend : ∀ a b, zeroPred (a ++ b) = (zeroPred a && zeroPred b))
+    (hPermIff : ∀ expIn pw, zeroPred (permRes expIn pw) = true ↔ pw = mkPerm expIn)
+    (hOutMk : ∀ s, outOf (mkPerm s) = permFn s) :
+    ∀ (xs : List D) (pws : List PW) (st : S) (pend : Option D),
+      (zeroPred (absorbPermsResidualsPoly permRes outOf badRes in1 in2 xs pws st pend).2 = true ↔
+        pws = buildAbsorbPermsPoly mkPerm outOf in1 in2 xs st pend) ∧
+      (pws = buildAbsorbPermsPoly mkPerm outOf in1 in2 xs st pend →
+        (absorbPermsResidualsPoly permRes outOf badRes in1 in2 xs pws st pend).1 =
+          absorbPairsPoly (fun s e0 => permFn (in1 s e0)) (fun s e0 e1 => permFn (in2 s e0 e1)) xs st pend)
+  | [], [], _, none => by
+    dsimp only [absorbPermsResidualsPoly, buildAbsorbPermsPoly, absorbPairsPoly]
+    exact ⟨by simp [hNil], fun _ => rfl⟩
+  | [], _ :: pws, _, none => by
+    cases pws <;>
+      exact ⟨⟨fun h => absurd (hBad.symm.trans h) Bool.false_ne_true, fun h => by cases h⟩,
+        fun h => by cases h⟩
+  | [], [], _, some _ => by
+    dsimp only [absorbPermsResidualsPoly, buildAbsorbPermsPoly]
+    exact ⟨by simp [hBad], fun h => by cases h⟩
+  | [], [pw], st, some e0 => by
+    dsimp only [absorbPermsResidualsPoly, buildAbsorbPermsPoly, absorbPairsPoly]
+    rw [hPermIff]
+    exact ⟨by simp, fun h => by obtain rfl := List.cons.inj h |>.1; exact hOutMk _⟩
+  | [], _ :: _ :: _, _, some _ => by
+    dsimp only [absorbPermsResidualsPoly, buildAbsorbPermsPoly]
+    exact ⟨by simp [hBad], fun h => by injection h with _ hTl; cases hTl⟩
+  | e :: rest, pws, st, none => by
+    dsimp only [absorbPermsResidualsPoly, buildAbsorbPermsPoly, absorbPairsPoly]
+    exact absorbPermsResidualsPoly_allZero_iff mkPerm permRes outOf badRes permFn in1 in2
+      zeroPred hNil hBad hAppend hPermIff hOutMk rest pws st (some e)
+  | _ :: _, [], _, some _ => by
+    dsimp only [absorbPermsResidualsPoly, buildAbsorbPermsPoly]
+    exact ⟨by simp [hBad], fun h => by cases h⟩
+  | e1 :: rest, pw :: pws, st, some e0 => by
+    dsimp only [absorbPermsResidualsPoly, buildAbsorbPermsPoly, absorbPairsPoly]
+    have ih := absorbPermsResidualsPoly_allZero_iff mkPerm permRes outOf badRes permFn in1 in2
+      zeroPred hNil hBad hAppend hPermIff hOutMk rest pws (outOf pw) none
+    rw [hAppend, Bool.and_eq_true, hPermIff]
+    refine ⟨?_, ?_⟩
+    · constructor
+      · rintro ⟨hpw, hRest⟩
+        exact List.cons_eq_cons.mpr ⟨hpw, hpw ▸ ih.1.mp hRest⟩
+      · intro hCons
+        obtain ⟨hpw, hTail⟩ := List.cons.inj hCons
+        exact ⟨hpw, ih.1.mpr (hpw ▸ hTail)⟩
+    · intro hCons
+      obtain ⟨hpw, hTail⟩ := List.cons.inj hCons
+      rw [ih.2 (hpw ▸ hTail)]
+      subst hpw
+      rw [hOutMk]
+
+/-- Sponge absorption witness (`initPerm` + `pairPerms` + `finalPerm` + `outDigest`). -/
+structure SpongeAbsorbWitness where
+  initPerm  : Poseidon2PermWitness
+  pairPerms : List Poseidon2PermWitness
+  finalPerm : Poseidon2PermWitness
+  outDigest : Digest4
+  deriving DecidableEq, Repr
+
+def spongeIn1 (s : Poseidon2State12) (e0 : Digest4) : Poseidon2State12 :=
+  ⟨lane4Add s.b0 e0, s.b1, s.b2⟩
+
+def spongeIn2 (s : Poseidon2State12) (e0 e1 : Digest4) : Poseidon2State12 :=
+  ⟨lane4Add s.b0 e0, lane4Add s.b1 e1, s.b2⟩
+
+def spongePadOne (s : Poseidon2State12) : Poseidon2State12 :=
+  ⟨⟨Goldilocks.add s.b0.x0 Goldilocks.one, s.b0.x1, s.b0.x2, s.b0.x3⟩, s.b1, s.b2⟩
+
+def wotsPkInitState (pkSeed : Digest4) (layer treeIdx kpIdx len : Nat) : Poseidon2State12 :=
+  let layerKp := Goldilocks.ofNat ((layer % (2 ^ 32)) * (2 ^ 32) + (kpIdx % (2 ^ 32)))
+  ⟨pkSeed,
+   ⟨layerKp,
+    Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+    Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32)),
+    Goldilocks.ofNat len⟩,
+   ⟨domainWotsPk, Goldilocks.zero, Goldilocks.zero, poseidon2IvTag⟩⟩
+
+def forsRootsInitState (geom : AggSigGeometry) (pkSeed : Digest4) (leafGlobalIdx : Nat) :
+    Poseidon2State12 :=
+  ⟨pkSeed,
+   ⟨Goldilocks.ofNat (forsKpIdx geom leafGlobalIdx),
+    Goldilocks.ofNat (forsHyperTreeIdx geom leafGlobalIdx % (2 ^ 32)),
+    Goldilocks.ofNat ((forsHyperTreeIdx geom leafGlobalIdx / (2 ^ 32)) % (2 ^ 32)),
+    Goldilocks.ofNat geom.forsTrees⟩,
+   ⟨domainForsRoots, Goldilocks.zero, Goldilocks.zero, poseidon2IvTag⟩⟩
+
+private theorem compressWotsEndpointsSponge_eq_states (pkSeed : Digest4)
+    (layer treeIdx kpIdx : Nat) (endpoints : List Digest4) :
+    compressWotsEndpointsSponge pkSeed layer treeIdx kpIdx endpoints =
+      (poseidon2Perm12 (spongePadOne
+        (absorbPairsPoly (fun s e0 => poseidon2Perm12 (spongeIn1 s e0))
+                         (fun s e0 e1 => poseidon2Perm12 (spongeIn2 s e0 e1))
+                         endpoints
+                         (poseidon2Perm12 (wotsPkInitState pkSeed layer treeIdx kpIdx endpoints.length))
+                         none))).b0 := by
+  simp only [compressWotsEndpointsSponge.public_eqs, absorbDigest4Pairs.public_eqs]
+  unfold wotsPkInitState spongePadOne spongeIn1 spongeIn2
+  rfl
+
+private theorem compressForsRootsSponge_eq_states (geom : AggSigGeometry) (pkSeed : Digest4)
+    (leafGlobalIdx : Nat) (roots : List Digest4) :
+    compressForsRootsSponge geom pkSeed leafGlobalIdx roots =
+      (poseidon2Perm12 (spongePadOne
+        (absorbPairsPoly (fun s e0 => poseidon2Perm12 (spongeIn1 s e0))
+                         (fun s e0 e1 => poseidon2Perm12 (spongeIn2 s e0 e1))
+                         roots
+                         (poseidon2Perm12 (forsRootsInitState geom pkSeed leafGlobalIdx))
+                         none))).b0 := by
+  simp only [compressForsRootsSponge.public_eqs, absorbDigest4Pairs.public_eqs]
+  unfold forsRootsInitState spongePadOne spongeIn1 spongeIn2
+  rfl
+
+attribute [local irreducible] spongeIn1 spongeIn2 spongePadOne wotsPkInitState forsRootsInitState
+
+def permWithInputResiduals (expIn : Poseidon2State12) (pw : Poseidon2PermWitness) : List Goldilocks :=
+  (state12Sub pw.input expIn).toList ++ poseidon2PermResiduals pw
+
+theorem permWithInputResiduals_allZero_iff (expIn : Poseidon2State12) (pw : Poseidon2PermWitness) :
+    allZeroGoldilocks (permWithInputResiduals expIn pw) = true ↔ pw = honestPoseidon2PermWitness expIn := by
+  unfold permWithInputResiduals
+  rw [allZeroGoldilocks_append, Bool.and_eq_true, state12Sub_toList_allZero_iff,
+      poseidon2PermResiduals_allZero_iff]
+  constructor
+  · rintro ⟨hIn, hHon⟩; rwa [hIn] at hHon
+  · rintro rfl; exact ⟨rfl, rfl⟩
+
+def honestSpongeAbsorbWitness (initSt : Poseidon2State12) (blocks : List Digest4) : SpongeAbsorbWitness :=
+  let pInit := honestPoseidon2PermWitness initSt
+  let pPairs := buildAbsorbPermsPoly honestPoseidon2PermWitness Poseidon2PermWitness.output
+    spongeIn1 spongeIn2 blocks pInit.output none
+  let stAbs := absorbPairsPoly (fun s e0 => poseidon2Perm12 (spongeIn1 s e0))
+    (fun s e0 e1 => poseidon2Perm12 (spongeIn2 s e0 e1)) blocks pInit.output none
+  let pFin := honestPoseidon2PermWitness (spongePadOne stAbs)
+  { initPerm := pInit, pairPerms := pPairs, finalPerm := pFin, outDigest := pFin.output.b0 }
+
+def spongeAbsorbResiduals (initSt : Poseidon2State12) (blocks : List Digest4)
+    (w : SpongeAbsorbWitness) : List Goldilocks :=
+  let rInit := permWithInputResiduals initSt w.initPerm
+  let (stAbs, rPairs) := absorbPermsResidualsPoly permWithInputResiduals Poseidon2PermWitness.output
+    [Goldilocks.one] spongeIn1 spongeIn2 blocks w.pairPerms w.initPerm.output none
+  let rFin := permWithInputResiduals (spongePadOne stAbs) w.finalPerm
+  rInit ++ rPairs ++ rFin ++ (lane4Sub w.outDigest w.finalPerm.output.b0).toList
+
+theorem spongeAbsorbResiduals_allZero_iff (initSt : Poseidon2State12) (blocks : List Digest4)
+    (w : SpongeAbsorbWitness) :
+    (allZeroGoldilocks (spongeAbsorbResiduals initSt blocks w) = true ↔
+      w = honestSpongeAbsorbWitness initSt blocks) ∧
+    (w = honestSpongeAbsorbWitness initSt blocks →
+      w.outDigest = (poseidon2Perm12 (spongePadOne
+        (absorbPairsPoly (fun s e0 => poseidon2Perm12 (spongeIn1 s e0))
+                         (fun s e0 e1 => poseidon2Perm12 (spongeIn2 s e0 e1))
+                         blocks (poseidon2Perm12 initSt) none))).b0) := by
+  have hPermOut : ∀ st : Poseidon2State12, (honestPoseidon2PermWitness st).output = poseidon2Perm12 st :=
+    fun st => by unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
+  unfold spongeAbsorbResiduals honestSpongeAbsorbWitness
+  dsimp only
+  have hAbs := absorbPermsResidualsPoly_allZero_iff honestPoseidon2PermWitness permWithInputResiduals
+    Poseidon2PermWitness.output [Goldilocks.one] poseidon2Perm12 spongeIn1 spongeIn2
+    allZeroGoldilocks rfl (by decide) allZeroGoldilocks_append permWithInputResiduals_allZero_iff hPermOut
+    blocks w.pairPerms w.initPerm.output none
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, permWithInputResiduals_allZero_iff,
+    lane4Sub_toList_allZero_iff]
+  refine ⟨?_, ?_⟩
+  · constructor
+    · rintro ⟨⟨⟨hInit, hPairs⟩, hFin⟩, hOut⟩
+      have ePairs := hAbs.1.mp hPairs
+      have stEq := hAbs.2 ePairs
+      rw [hInit] at ePairs stEq hFin
+      rw [stEq] at hFin
+      rw [hFin] at hOut
+      rcases w with ⟨pi, pp, pf, od⟩
+      dsimp only at hInit ePairs hFin hOut
+      subst hInit ePairs hFin hOut
+      rfl
+    · intro hW
+      rcases w with ⟨pi, pp, pf, od⟩
+      injection hW with hInit ePairs hFin hOut
+      subst hInit ePairs
+      rw [hAbs.2 rfl]
+      subst hFin hOut
+      exact ⟨⟨⟨rfl, hAbs.1.mpr rfl⟩, rfl⟩, rfl⟩
+  · intro hW
+    rw [hW]
+    dsimp only
+    rw [hPermOut, hPermOut]
+
+theorem wotsPkSpongeResiduals_allZero_iff (pkSeed : Digest4) (layer treeIdx kpIdx : Nat)
+    (endpoints : List Digest4) (w : SpongeAbsorbWitness) :
+    (allZeroGoldilocks (spongeAbsorbResiduals (wotsPkInitState pkSeed layer treeIdx kpIdx endpoints.length)
+       endpoints w) = true ↔
+      w = honestSpongeAbsorbWitness (wotsPkInitState pkSeed layer treeIdx kpIdx endpoints.length) endpoints) ∧
+    (w = honestSpongeAbsorbWitness (wotsPkInitState pkSeed layer treeIdx kpIdx endpoints.length) endpoints →
+      w.outDigest = compressWotsEndpointsSponge pkSeed layer treeIdx kpIdx endpoints) := by
+  have hBase := spongeAbsorbResiduals_allZero_iff
+    (wotsPkInitState pkSeed layer treeIdx kpIdx endpoints.length) endpoints w
+  exact ⟨hBase.1, fun hW => (hBase.2 hW).trans
+    (compressWotsEndpointsSponge_eq_states pkSeed layer treeIdx kpIdx endpoints).symm⟩
+
+theorem forsRootsSpongeResiduals_allZero_iff (geom : AggSigGeometry) (pkSeed : Digest4) (leafGlobalIdx : Nat)
+    (roots : List Digest4) (w : SpongeAbsorbWitness) :
+    (allZeroGoldilocks (spongeAbsorbResiduals (forsRootsInitState geom pkSeed leafGlobalIdx)
+       roots w) = true ↔
+      w = honestSpongeAbsorbWitness (forsRootsInitState geom pkSeed leafGlobalIdx) roots) ∧
+    (w = honestSpongeAbsorbWitness (forsRootsInitState geom pkSeed leafGlobalIdx) roots →
+      w.outDigest = compressForsRootsSponge geom pkSeed leafGlobalIdx roots) := by
+  have hBase := spongeAbsorbResiduals_allZero_iff
+    (forsRootsInitState geom pkSeed leafGlobalIdx) roots w
+  exact ⟨hBase.1, fun hW => (hBase.2 hW).trans
+    (compressForsRootsSponge_eq_states geom pkSeed leafGlobalIdx roots).symm⟩
+
+/-- 3-block stateful `H_msg` trace witness (`computeHmsgStateful`, `sig.rs:396`). -/
+structure HmsgStatefulTraceWitness where
+  perm0  : Poseidon2PermWitness
+  perm1  : Poseidon2PermWitness
+  perm2  : Poseidon2PermWitness
+  outMsg : Digest5
+  deriving DecidableEq, Repr
+
+def hmsgStatefulIn0 (pk : AggValidatorPk) (mu : Digest5) (kpIdx tswCtr : Nat) : Poseidon2State12 :=
+  let kpCtr := Goldilocks.ofNat ((kpIdx % (2 ^ 32)) * (2 ^ 32) + (tswCtr % (2 ^ 32)))
+  ⟨pk.pkSeed, pk.pkRoot, ⟨domainHMsgStateful, kpCtr, mu.limb4, poseidon2IvTag⟩⟩
+
+def hmsgStatefulIn1 (st0 : Poseidon2State12) (rRand : Digest4) (mu : Digest5) : Poseidon2State12 :=
+  let muLow : Digest4 := ⟨mu.limb0, mu.limb1, mu.limb2, mu.limb3⟩
+  ⟨lane4Add st0.b0 rRand, lane4Add st0.b1 muLow, st0.b2⟩
+
+def state12OutDigest5 (st : Poseidon2State12) : Digest5 :=
+  { limb0 := st.b0.x0, limb1 := st.b0.x1, limb2 := st.b0.x2, limb3 := st.b0.x3, limb4 := st.b1.x0 }
+
+theorem computeHmsgStateful_eq_states (pk : AggValidatorPk) (rRand : Digest4)
+    (mu : Digest5) (kpIdx tswCtr : Nat) :
+    computeHmsgStateful pk rRand mu kpIdx tswCtr =
+      state12OutDigest5 (poseidon2Perm12 (spongePadOne
+        (poseidon2Perm12 (hmsgStatefulIn1
+          (poseidon2Perm12 (hmsgStatefulIn0 pk mu kpIdx tswCtr)) rRand mu)))) := by
+  simp only [computeHmsgStateful.public_eqs]
+  unfold hmsgStatefulIn0 hmsgStatefulIn1 spongePadOne state12OutDigest5
+  rfl
+
+/-- 2-block deterministic tree `H_msg` trace witness (`computeHmsgDetTree`, `sig.rs:433`). -/
+structure HmsgDetTreeTraceWitness where
+  perm0  : Poseidon2PermWitness
+  perm1  : Poseidon2PermWitness
+  outMsg : Digest5
+  deriving DecidableEq, Repr
+
+private def hmsgDetTreeIn0 (pk : AggValidatorPk) (layer treeIdx kpIdx : Nat) : Poseidon2State12 :=
+  let layerKp := Goldilocks.ofNat ((layer % (2 ^ 32)) * (2 ^ 32) + (kpIdx % (2 ^ 32)))
+  ⟨pk.pkSeed, pk.pkRoot,
+   ⟨domainHMsgDetTree, layerKp,
+    Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+    Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32))⟩⟩
+
+private def hmsgDetTreeIn1 (st0 : Poseidon2State12) (tswCtr : Nat) (childRt : Digest4) : Poseidon2State12 :=
+  ⟨lane4Add st0.b0 childRt,
+   ⟨Goldilocks.add st0.b1.x0 (Goldilocks.ofNat (tswCtr % (2 ^ 32))),
+    Goldilocks.add st0.b1.x1 Goldilocks.one,
+    st0.b1.x2,
+    st0.b1.x3⟩,
+   st0.b2⟩
+
+private theorem computeHmsgDetTree_eq_states (pk : AggValidatorPk)
+    (layer treeIdx kpIdx tswCtr : Nat) (childRt : Digest4) :
+    computeHmsgDetTree pk layer treeIdx kpIdx tswCtr childRt =
+      state12OutDigest5 (poseidon2Perm12 (hmsgDetTreeIn1
+        (poseidon2Perm12 (hmsgDetTreeIn0 pk layer treeIdx kpIdx)) tswCtr childRt)) := by
+  simp only [computeHmsgDetTree.public_eqs]
+  unfold hmsgDetTreeIn0 hmsgDetTreeIn1 state12OutDigest5
+  rfl
+
+attribute [local irreducible] hmsgStatefulIn0 hmsgStatefulIn1 hmsgDetTreeIn0 hmsgDetTreeIn1 state12OutDigest5
+
+private def digest5SubResiduals (a b : Digest5) : List Goldilocks :=
+  [Goldilocks.sub a.limb0 b.limb0,
+   Goldilocks.sub a.limb1 b.limb1,
+   Goldilocks.sub a.limb2 b.limb2,
+   Goldilocks.sub a.limb3 b.limb3,
+   Goldilocks.sub a.limb4 b.limb4]
+
+private theorem digest5SubResiduals_allZero_iff (a b : Digest5) :
+    allZeroGoldilocks (digest5SubResiduals a b) = true ↔ a = b := by
+  rcases a with ⟨a0, a1, a2, a3, a4⟩
+  rcases b with ⟨b0, b1, b2, b3, b4⟩
+  unfold digest5SubResiduals allZeroGoldilocks
+  simp [gold_sub_eq_zero_iff, Digest5.mk.injEq]
+
+def honestHmsgStatefulTraceWitness (pk : AggValidatorPk) (rRand : Digest4)
+    (mu : Digest5) (kpIdx tswCtr : Nat) : HmsgStatefulTraceWitness :=
+  let p0 := honestPoseidon2PermWitness (hmsgStatefulIn0 pk mu kpIdx tswCtr)
+  let p1 := honestPoseidon2PermWitness (hmsgStatefulIn1 p0.output rRand mu)
+  let p2 := honestPoseidon2PermWitness (spongePadOne p1.output)
+  { perm0 := p0, perm1 := p1, perm2 := p2, outMsg := state12OutDigest5 p2.output }
+
+def hmsgStatefulResiduals (pk : AggValidatorPk) (rRand : Digest4)
+    (mu : Digest5) (kpIdx tswCtr : Nat) (w : HmsgStatefulTraceWitness) : List Goldilocks :=
+  permWithInputResiduals (hmsgStatefulIn0 pk mu kpIdx tswCtr) w.perm0 ++
+  permWithInputResiduals (hmsgStatefulIn1 w.perm0.output rRand mu) w.perm1 ++
+  permWithInputResiduals (spongePadOne w.perm1.output) w.perm2 ++
+  digest5SubResiduals w.outMsg (state12OutDigest5 w.perm2.output)
+
+theorem hmsgStatefulResiduals_allZero_iff (pk : AggValidatorPk) (rRand : Digest4)
+    (mu : Digest5) (kpIdx tswCtr : Nat) (w : HmsgStatefulTraceWitness) :
+    (allZeroGoldilocks (hmsgStatefulResiduals pk rRand mu kpIdx tswCtr w) = true ↔
+      w = honestHmsgStatefulTraceWitness pk rRand mu kpIdx tswCtr) ∧
+    (w = honestHmsgStatefulTraceWitness pk rRand mu kpIdx tswCtr →
+      w.outMsg = computeHmsgStateful pk rRand mu kpIdx tswCtr) := by
+  have hPermOut : ∀ st : Poseidon2State12, (honestPoseidon2PermWitness st).output = poseidon2Perm12 st :=
+    fun st => by unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
+  unfold hmsgStatefulResiduals honestHmsgStatefulTraceWitness
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, permWithInputResiduals_allZero_iff,
+    digest5SubResiduals_allZero_iff]
+  refine ⟨?_, ?_⟩
+  · constructor
+    · rintro ⟨⟨⟨h0, h1⟩, h2⟩, hOut⟩
+      rw [h0] at h1
+      rw [h1] at h2
+      rw [h2] at hOut
+      rcases w with ⟨p0, p1, p2, om⟩
+      dsimp only at h0 h1 h2 hOut
+      subst h0 h1 h2 hOut
+      rfl
+    · rintro rfl
+      exact ⟨⟨⟨rfl, rfl⟩, rfl⟩, rfl⟩
+  · intro hW
+    rw [hW]
+    dsimp only
+    rw [hPermOut, hPermOut, hPermOut, computeHmsgStateful_eq_states]
+
+def honestHmsgDetTreeTraceWitness (pk : AggValidatorPk)
+    (layer treeIdx kpIdx tswCtr : Nat) (childRt : Digest4) : HmsgDetTreeTraceWitness :=
+  let p0 := honestPoseidon2PermWitness (hmsgDetTreeIn0 pk layer treeIdx kpIdx)
+  let p1 := honestPoseidon2PermWitness (hmsgDetTreeIn1 p0.output tswCtr childRt)
+  { perm0 := p0, perm1 := p1, outMsg := state12OutDigest5 p1.output }
+
+def hmsgDetTreeResiduals (pk : AggValidatorPk)
+    (layer treeIdx kpIdx tswCtr : Nat) (childRt : Digest4) (w : HmsgDetTreeTraceWitness) : List Goldilocks :=
+  permWithInputResiduals (hmsgDetTreeIn0 pk layer treeIdx kpIdx) w.perm0 ++
+  permWithInputResiduals (hmsgDetTreeIn1 w.perm0.output tswCtr childRt) w.perm1 ++
+  digest5SubResiduals w.outMsg (state12OutDigest5 w.perm1.output)
+
+theorem hmsgDetTreeResiduals_allZero_iff (pk : AggValidatorPk)
+    (layer treeIdx kpIdx tswCtr : Nat) (childRt : Digest4) (w : HmsgDetTreeTraceWitness) :
+    (allZeroGoldilocks (hmsgDetTreeResiduals pk layer treeIdx kpIdx tswCtr childRt w) = true ↔
+      w = honestHmsgDetTreeTraceWitness pk layer treeIdx kpIdx tswCtr childRt) ∧
+    (w = honestHmsgDetTreeTraceWitness pk layer treeIdx kpIdx tswCtr childRt →
+      w.outMsg = computeHmsgDetTree pk layer treeIdx kpIdx tswCtr childRt) := by
+  have hPermOut : ∀ st : Poseidon2State12, (honestPoseidon2PermWitness st).output = poseidon2Perm12 st :=
+    fun st => by unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
+  unfold hmsgDetTreeResiduals honestHmsgDetTreeTraceWitness
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, permWithInputResiduals_allZero_iff,
+    digest5SubResiduals_allZero_iff]
+  refine ⟨?_, ?_⟩
+  · constructor
+    · rintro ⟨⟨h0, h1⟩, hOut⟩
+      rw [h0] at h1
+      rw [h1] at hOut
+      rcases w with ⟨p0, p1, om⟩
+      dsimp only at h0 h1 hOut
+      subst h0 h1 hOut
+      rfl
+    · rintro rfl
+      exact ⟨⟨rfl, rfl⟩, rfl⟩
+  · intro hW
+    rw [hW]
+    dsimp only
+    rw [hPermOut, hPermOut, computeHmsgDetTree_eq_states]
+
+end Qsag
+
+end
+
+public section
+
+namespace Qsag
+
+theorem evalGoldilocksBase4_nil : evalGoldilocksBase4 [] = Goldilocks.zero := by rfl
+theorem evalGoldilocksBase4_cons (d : Goldilocks) (ds : List Goldilocks) :
+    evalGoldilocksBase4 (d :: ds) = Goldilocks.add d
+      (Goldilocks.mul (Goldilocks.ofNat 4) (evalGoldilocksBase4 ds)) := by rfl
+end Qsag
+
+end
+
+public section
+
+namespace Qsag
+
+#export_eqns honestLimb63DecompWitness
+#export_eqns limb63DecompResiduals
+#export_eqns hmsgStatefulIn0 hmsgStatefulIn1 state12OutDigest5 spongePadOne
+
+end Qsag
+end
