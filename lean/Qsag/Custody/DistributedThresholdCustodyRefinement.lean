@@ -967,7 +967,7 @@ theorem execute_ready_fresh_releases (dep : Deployment F C PK D Sig) (hWf : dep.
     (hReady : quorumReady dep st.buffer approvers i = true)
     (hP : st.ledger.poisoned = false)
     (hF : findReleasedEpoch st.ledger.releasedHistory i.epoch = none)
-    (hEp : st.ledger.nextFreshEpoch ≤ i.epoch) (hSess : i.sessionId ∉ st.ledger.usedSessions)
+    (hEp : (st.ledger.nextFreshEpoch ≤ i.epoch ∧ i.epoch ≤ st.ledger.nextFreshEpoch + st.ledger.quorum.maxWindow)) (hSess : i.sessionId ∉ st.ledger.usedSessions)
     (hCap : st.ledger.spent + i.spend ≤ dep.quorum.spendCap) :
     (step dep st (.execute dep.deploymentId approvers i false)).map Prod.snd =
       some (.custody (.released
@@ -2390,13 +2390,17 @@ structure AuthDeployment.WellFormed (dep : AuthDeployment F C PK D Sig) : Prop w
   parse_stateBytes : ∀ (l : Nat) (L : List CustodyIntent),
     dep.parseState (dep.stateBytes l L) = some (l, L)
 
-/-- An acknowledgement on the wire. -/
-structure AuthAck (F : Type) where
+/-- Public receipt for a custodian approval. -/
+structure AuthAck where
   sender : Nat
   deploymentId : Nat
   intent : CustodyIntent
-  share : F
   mac : Digest256
+
+/-- The coordinator receives the share over an ideal private channel. The environment
+    observes the receipt on an honest approval and may inject its own messages. -/
+structure PrivateApproval (F : Type) extends AuthAck where
+  share : F
 
 /-- One custodian. `coupons` is volatile; `disk` is adversarially writable; `anchor` is not. -/
 structure AuthParty (F : Type) where
@@ -2409,10 +2413,10 @@ structure AuthParty (F : Type) where
   disk : List UInt8
   anchor : Digest256
 
-/-- Custodians, wire, corruption set and the coordinator's ledger. -/
+/-- Custodians, private coordinator inbox, corruption set and ledger. -/
 structure AuthState (F PK D Sig : Type) (n : Nat) where
   parties : Fin n → AuthParty F
-  wire : List (AuthAck F)
+  privateInbox : List (PrivateApproval F)
   corrupt : List Nat
   ledger : CustodyLedger PK D Sig
 
@@ -2420,8 +2424,8 @@ structure AuthState (F PK D Sig : Type) (n : Nat) where
     wire; the constructor records whether the named sender is corrupted at that moment. -/
 inductive AuthTurn (F : Type) (n : Nat) where
   | approve (p : Fin n) (deploymentId : Nat) (intent : CustodyIntent)
-  | inject (m : AuthAck F)
-  | deliver (m : AuthAck F)
+  | inject (m : PrivateApproval F)
+  | deliver (m : PrivateApproval F)
   | corrupt (p : Fin n)
   | crash (p : Fin n)
   | tamperDisk (p : Fin n) (raw : List UInt8)
@@ -2431,7 +2435,7 @@ inductive AuthTurn (F : Type) (n : Nat) where
 
 /-- Outputs. -/
 inductive AuthEvent (F Sig : Type) where
-  | approved (ack : AuthAck F)
+  | approved (ack : AuthAck)
   | injected
   | delivered
   | corrupted (share : F) (latched : List CustodyIntent)
@@ -2453,18 +2457,18 @@ def AuthDeployment.ackMac (dep : AuthDeployment F C PK D Sig) (p d : Nat)
     (dep.msgTag d i) (UInt8.ofNat p)
 
 /-- The coordinator's check on a wire message: an enrolled sender and a correct tag. -/
-def AuthDeployment.ackValid (dep : AuthDeployment F C PK D Sig) (m : AuthAck F) : Bool :=
+def AuthDeployment.ackValid (dep : AuthDeployment F C PK D Sig) (m : PrivateApproval F) : Bool :=
   decide (m.sender < dep.core.quorum.numParties) &&
     decide (m.mac = dep.ackMac m.sender m.deploymentId m.intent)
 
 /-- The approval an acknowledgement carries. -/
-def AuthAck.toApproval (m : AuthAck F) : Approval F :=
+def PrivateApproval.toApproval (m : PrivateApproval F) : Approval F :=
   { sender := m.sender, deploymentId := m.deploymentId, intent := m.intent, share := m.share }
 
 /-- The approvals the coordinator reads off the wire: those with a valid tag. -/
-def AuthDeployment.verified (dep : AuthDeployment F C PK D Sig) (wire : List (AuthAck F)) :
+def AuthDeployment.verified (dep : AuthDeployment F C PK D Sig) (wire : List (PrivateApproval F)) :
     List (Approval F) :=
-  (wire.filter dep.ackValid).map AuthAck.toApproval
+  (wire.filter dep.ackValid).map PrivateApproval.toApproval
 
 /-- The WAL record MAC of custodian `p`. -/
 def AuthDeployment.sealTag (dep : AuthDeployment F C PK D Sig) (p : Nat)
@@ -2513,8 +2517,18 @@ def AuthDeployment.approveParty (dep : AuthDeployment F C PK D Sig) (p : Nat) (i
 
 /-- The acknowledgement custodian `p` sends for `(d, i)`. -/
 def AuthDeployment.approveAck (dep : AuthDeployment F C PK D Sig) (p d : Nat) (i : CustodyIntent)
-    (P : AuthParty F) : AuthAck F :=
+    (P : AuthParty F) : PrivateApproval F :=
   { sender := p, deploymentId := d, intent := i, share := P.share, mac := dep.ackMac p d i }
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+/-- A change to the private share leaves the emitted public receipt identical. -/
+theorem AuthDeployment.approval_receipt_share_independent
+    (dep : AuthDeployment F C PK D Sig) (p d : Nat) (i : CustodyIntent) (P : AuthParty F)
+    (share : F) :
+    (dep.approveAck p d i { P with share := share }).toAuthAck =
+      (dep.approveAck p d i P).toAuthAck := by
+  unfold AuthDeployment.approveAck
+  rfl
 
 /-- The custodian after a crash: coupons gone; latch, log and ticket read back from the disk
     record, or the custodian poisoned when the record is refused. -/
@@ -2545,7 +2559,7 @@ def AuthState.init (dep : AuthDeployment F C PK D Sig) :
       disk := sealBeltWalRecord dep.hash (dep.walKey p.val) (dep.lockSeal p.val) genesisTicket
         (dep.stateBytes 0 [])
       anchor := dep.sealTag p.val genesisTicket (dep.stateBytes 0 []) }
-  wire := []
+  privateInbox := []
   corrupt := []
   ledger := (IdealCustodyState.init dep.core.deploymentId dep.core.pk dep.core.quorum).ledger
 
@@ -2563,16 +2577,16 @@ def authStep (dep : AuthDeployment F C PK D Sig)
         i.sessionId ∉ (st.parties p).coupons ∧ (st.parties p).poisoned = false then
       some ({ st with
               parties := setParty st.parties p (dep.approveParty p.val i (st.parties p))
-              wire := dep.approveAck p.val d i (st.parties p) :: st.wire },
-            .approved (dep.approveAck p.val d i (st.parties p)))
+              privateInbox := dep.approveAck p.val d i (st.parties p) :: st.privateInbox },
+            .approved (dep.approveAck p.val d i (st.parties p)).toAuthAck)
     else none
   | .inject m =>
     if m.sender ∈ st.corrupt then
-      some ({ st with wire := m :: st.wire }, .injected)
+      some ({ st with privateInbox := m :: st.privateInbox }, .injected)
     else none
   | .deliver m =>
     if m.sender ∉ st.corrupt then
-      some ({ st with wire := m :: st.wire }, .delivered)
+      some ({ st with privateInbox := m :: st.privateInbox }, .delivered)
     else none
   | .corrupt p =>
     if p.val ∉ st.corrupt ∧ st.corrupt.length + 1 < dep.core.quorum.threshold then
@@ -2591,11 +2605,11 @@ def authStep (dep : AuthDeployment F C PK D Sig)
                 disk := raw, anchor := (st.parties p).anchor } },
           .tampered)
   | .dropMsg idx =>
-    some ({ st with wire := st.wire.take idx ++ st.wire.drop (idx + 1) }, .dropped)
+    some ({ st with privateInbox := st.privateInbox.take idx ++ st.privateInbox.drop (idx + 1) }, .dropped)
   | .execute d approvers i ab =>
     (custodyLedgerSign dep.core.digests
-        (dep.core.signWith (quorumKey dep.core (dep.verified st.wire) approvers i)) st.ledger
-        (if quorumReady dep.core (dep.verified st.wire) approvers i then approvers.length else 0)
+        (dep.core.signWith (quorumKey dep.core (dep.verified st.privateInbox) approvers i)) st.ledger
+        (if quorumReady dep.core (dep.verified st.privateInbox) approvers i then approvers.length else 0)
         d i ab).map
       (fun r => ({ st with ledger := r.1 }, AuthEvent.custody r.2))
 
@@ -2676,7 +2690,7 @@ def viewNodes (dep : AuthDeployment F C PK D Sig)
 def AuthDeployment.view (dep : AuthDeployment F C PK D Sig)
     (st : AuthState F PK D Sig dep.core.quorum.numParties) : State F PK D Sig where
   nodes := viewNodes dep st.parties
-  buffer := dep.verified st.wire
+  buffer := dep.verified st.privateInbox
   corrupt := st.corrupt
   ledger := st.ledger
 
@@ -2742,21 +2756,21 @@ private theorem setNode_same (nodes : Nat → Custodian F) (p : Nat) :
   · exact setNode_ne _ _ _ _ hqp
 
 omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
-private theorem verified_cons_valid (dep : AuthDeployment F C PK D Sig) (m : AuthAck F)
-    (wire : List (AuthAck F)) (h : dep.ackValid m = true) :
+private theorem verified_cons_valid (dep : AuthDeployment F C PK D Sig) (m : PrivateApproval F)
+    (wire : List (PrivateApproval F)) (h : dep.ackValid m = true) :
     dep.verified (m :: wire) = m.toApproval :: dep.verified wire := by
   unfold AuthDeployment.verified
   rw [List.filter_cons_of_pos h, List.map_cons]
 
 omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
-private theorem verified_cons_invalid (dep : AuthDeployment F C PK D Sig) (m : AuthAck F)
-    (wire : List (AuthAck F)) (h : ¬ dep.ackValid m = true) :
+private theorem verified_cons_invalid (dep : AuthDeployment F C PK D Sig) (m : PrivateApproval F)
+    (wire : List (PrivateApproval F)) (h : ¬ dep.ackValid m = true) :
     dep.verified (m :: wire) = dep.verified wire := by
   unfold AuthDeployment.verified
   rw [List.filter_cons_of_neg h]
 
 omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
-private theorem verified_subset (dep : AuthDeployment F C PK D Sig) {w' w : List (AuthAck F)}
+private theorem verified_subset (dep : AuthDeployment F C PK D Sig) {w' w : List (PrivateApproval F)}
     (hSub : ∀ m, m ∈ w' → m ∈ w) {a : Approval F} (ha : a ∈ dep.verified w') :
     a ∈ dep.verified w := by
   unfold AuthDeployment.verified at ha ⊢
@@ -2890,7 +2904,7 @@ omit [DecidableEq F] [DecidableEq C] [DecidableEq D] in
     backed by a permit recorded through its sender's own port. -/
 private theorem deliver_backed (dep : AuthDeployment F C PK D Sig)
     {c : AuthState F PK D Sig dep.core.quorum.numParties} {a : IdealCustodyState PK D Sig}
-    (hRel : AuthRel dep c a) (m : AuthAck F) (hNotCor : m.sender ∉ c.corrupt)
+    (hRel : AuthRel dep c a) (m : PrivateApproval F) (hNotCor : m.sender ∉ c.corrupt)
     (hV : authViolation dep c (.deliver m) = false) (hValid : dep.ackValid m = true)
     (hDep : m.deploymentId = dep.core.deploymentId) :
     CustodyApproval.mk m.sender m.deploymentId m.intent ∈ a.honestApprovals := by
@@ -2959,7 +2973,7 @@ private theorem auth_sim_visible (dep : AuthDeployment F C PK D Sig) (hWf : dep.
           some (dep.view
             { c with
               parties := setParty c.parties p (dep.approveParty p.val i (c.parties p))
-              wire := dep.approveAck p.val d i (c.parties p) :: c.wire }, Event.approved) := by
+              privateInbox := dep.approveAck p.val d i (c.parties p) :: c.privateInbox }, Event.approved) := by
         unfold step
         dsimp only
         rw [dc_if_pos hg]
@@ -2967,7 +2981,7 @@ private theorem auth_sim_visible (dep : AuthDeployment F C PK D Sig) (hWf : dep.
         · show setNode (dep.view c).nodes p.val _ = viewNodes dep (setParty c.parties p _)
           rw [viewNodes_setParty, hNode]
           rfl
-        · show _ :: (dep.view c).buffer = dep.verified (_ :: c.wire)
+        · show _ :: (dep.view c).buffer = dep.verified (_ :: c.privateInbox)
           rw [verified_cons_valid dep _ _ hAckValid, hNode]
           rfl
       obtain ⟨a', hA, hRel'⟩ := step_sim_visible dep.core hWf.core hRel.rel hD rfl
@@ -2991,13 +3005,13 @@ private theorem auth_sim_visible (dep : AuthDeployment F C PK D Sig) (hWf : dep.
       · rw [dc_if_pos hCor] at hStep
         cases hStep
         have hD : step dep.core (dep.view c) (.inject m.toApproval) =
-            some (dep.view { c with wire := m :: c.wire }, Event.injected) := by
+            some (dep.view { c with privateInbox := m :: c.privateInbox }, Event.injected) := by
           unfold step
           dsimp only
           have hCor' : m.toApproval.sender ∈ (dep.view c).corrupt := hCor
           rw [dc_if_pos hCor']
           refine congrArg (fun s => some (s, Event.injected)) (state_ext rfl ?_ rfl rfl)
-          show _ :: (dep.view c).buffer = dep.verified (m :: c.wire)
+          show _ :: (dep.view c).buffer = dep.verified (m :: c.privateInbox)
           rw [verified_cons_valid dep _ _ hc.2]
           rfl
         have hVisD : visIn dep.core (.inject m.toApproval) =
@@ -3051,8 +3065,8 @@ private theorem auth_sim_visible (dep : AuthDeployment F C PK D Sig) (hWf : dep.
     unfold authStep at hStep
     dsimp only at hStep
     cases hS : custodyLedgerSign dep.core.digests
-        (dep.core.signWith (quorumKey dep.core (dep.verified c.wire) approvers i)) c.ledger
-        (if quorumReady dep.core (dep.verified c.wire) approvers i then approvers.length else 0)
+        (dep.core.signWith (quorumKey dep.core (dep.verified c.privateInbox) approvers i)) c.ledger
+        (if quorumReady dep.core (dep.verified c.privateInbox) approvers i then approvers.length else 0)
         d i ab with
     | none => rw [hS] at hStep; cases hStep
     | some r =>
@@ -3061,8 +3075,8 @@ private theorem auth_sim_visible (dep : AuthDeployment F C PK D Sig) (hWf : dep.
       have hD : step dep.core (dep.view c) (.execute d approvers i ab) =
           some (dep.view { c with ledger := r.1 }, Event.custody r.2) := by
         show ((custodyLedgerSign dep.core.digests
-            (dep.core.signWith (quorumKey dep.core (dep.verified c.wire) approvers i)) c.ledger
-            (if quorumReady dep.core (dep.verified c.wire) approvers i then approvers.length
+            (dep.core.signWith (quorumKey dep.core (dep.verified c.privateInbox) approvers i)) c.ledger
+            (if quorumReady dep.core (dep.verified c.privateInbox) approvers i then approvers.length
               else 0) d i ab).map
             (fun r => ({ dep.view c with ledger := r.1 }, r.2))).map
             (fun r => (r.1, Event.custody r.2)) = _
@@ -3098,13 +3112,13 @@ private theorem auth_sim_internal (dep : AuthDeployment F C PK D Sig)
         by_cases hValid : dep.ackValid m = true
         · have hDepNe : ¬ m.deploymentId = dep.core.deploymentId := fun h => hc ⟨h, hValid⟩
           have hD : step dep.core (dep.view c) (.inject m.toApproval) =
-              some (dep.view { c with wire := m :: c.wire }, Event.injected) := by
+              some (dep.view { c with privateInbox := m :: c.privateInbox }, Event.injected) := by
             unfold step
             dsimp only
             have hCor' : m.toApproval.sender ∈ (dep.view c).corrupt := hCor
             rw [dc_if_pos hCor']
             refine congrArg (fun s => some (s, Event.injected)) (state_ext rfl ?_ rfl rfl)
-            show _ :: (dep.view c).buffer = dep.verified (m :: c.wire)
+            show _ :: (dep.view c).buffer = dep.verified (m :: c.privateInbox)
             rw [verified_cons_valid dep _ _ hValid]
             rfl
           have hVisD : visIn dep.core (.inject m.toApproval) = none := by
@@ -3117,8 +3131,8 @@ private theorem auth_sim_internal (dep : AuthDeployment F C PK D Sig)
             { rel := step_sim_internal dep.core hRel.rel hD hVisD
               safe := hRel.safe
               wal := hRel.wal }
-        · have hView : dep.view { c with wire := m :: c.wire } = dep.view c :=
-            state_ext rfl (verified_cons_invalid dep m c.wire hValid) rfl rfl
+        · have hView : dep.view { c with privateInbox := m :: c.privateInbox } = dep.view c :=
+            state_ext rfl (verified_cons_invalid dep m c.privateInbox hValid) rfl rfl
           exact
             { rel := hView ▸ hRel.rel
               safe := hRel.safe
@@ -3133,7 +3147,7 @@ private theorem auth_sim_internal (dep : AuthDeployment F C PK D Sig)
       cases hStep
       by_cases hValid : dep.ackValid m = true
       · refine
-          { rel := rel_of_buffer dep.core hRel.rel (dep.verified (m :: c.wire)) ?_
+          { rel := rel_of_buffer dep.core hRel.rel (dep.verified (m :: c.privateInbox)) ?_
             safe := hRel.safe
             wal := hRel.wal }
         intro m' hm' hm'D
@@ -3142,8 +3156,8 @@ private theorem auth_sim_internal (dep : AuthDeployment F C PK D Sig)
         · subst hEq
           exact .inl (deliver_backed dep hRel m hNotCor hViol hValid hm'D)
         · exact hRel.rel.buffered m' hOld hm'D
-      · have hView : dep.view { c with wire := m :: c.wire } = dep.view c :=
-          state_ext rfl (verified_cons_invalid dep m c.wire hValid) rfl rfl
+      · have hView : dep.view { c with privateInbox := m :: c.privateInbox } = dep.view c :=
+          state_ext rfl (verified_cons_invalid dep m c.privateInbox hValid) rfl rfl
         exact
           { rel := hView ▸ hRel.rel
             safe := hRel.safe
@@ -3238,7 +3252,7 @@ private theorem auth_sim_internal (dep : AuthDeployment F C PK D Sig)
     cases hStep
     refine
       { rel := rel_of_buffer dep.core hRel.rel
-          (dep.verified (c.wire.take idx ++ c.wire.drop (idx + 1))) ?_
+          (dep.verified (c.privateInbox.take idx ++ c.privateInbox.drop (idx + 1))) ?_
         safe := hRel.safe
         wal := hRel.wal }
     intro m' hm' hm'D
@@ -3297,7 +3311,7 @@ def authCustody_refines_ideal (dep : AuthDeployment F C PK D Sig) (hWf : dep.Wel
     enrolled, uncorrupted custodian, and its preimage differs from the preimage of every
     acknowledgement that custodian has sent. -/
 def AckMacForgery (dep : AuthDeployment F C PK D Sig)
-    (st : AuthState F PK D Sig dep.core.quorum.numParties) (m : AuthAck F) : Prop :=
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) (m : PrivateApproval F) : Prop :=
   m.sender < dep.core.quorum.numParties ∧ m.sender ∉ st.corrupt ∧
     m.mac = dep.ackMac m.sender m.deploymentId m.intent ∧
     ∀ i : CustodyIntent, i ∈ st.latchedOf m.sender →
@@ -3312,7 +3326,7 @@ def MsgTagCollision (dep : AuthDeployment F C PK D Sig) : Prop :=
 omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
 /-- **A `deliver` violation is a tag forgery or a message-tag collision.** -/
 theorem deliver_violation_classified (dep : AuthDeployment F C PK D Sig)
-    (st : AuthState F PK D Sig dep.core.quorum.numParties) (m : AuthAck F)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) (m : PrivateApproval F)
     (hV : authViolation dep st (.deliver m) = true) :
     AckMacForgery dep st m ∨ MsgTagCollision dep := by
   have hV' : (dep.ackValid m && decide (m.deploymentId = dep.core.deploymentId) &&
@@ -3425,7 +3439,7 @@ theorem authCustody_ideal_or_forgery (dep : AuthDeployment F C PK D Sig) (hWf : 
     (hAdmits : (authMachine dep).AdmitsTrace tr) :
     (idealCustodyMachine dep.core.digests dep.core.idealOracle dep.core.deploymentId dep.core.pk
         dep.core.quorum).AdmitsTrace (projectTrace (authVisIn dep) authVisOut tr) ∨
-    (∃ (st : AuthState F PK D Sig dep.core.quorum.numParties) (m : AuthAck F),
+    (∃ (st : AuthState F PK D Sig dep.core.quorum.numParties) (m : PrivateApproval F),
       (authGuardedMachine dep).Reachable st ∧ AckMacForgery dep st m) ∨
     MsgTagCollision dep ∨ Nonempty (HashCollision256 dep.hash) := by
   obtain ⟨s₀, sF, hInit, hTr⟩ := hAdmits
@@ -3646,10 +3660,10 @@ theorem authRun_unsafe_release_violation (dep : AuthDeployment F C PK D Sig)
 theorem authExecute_ready_fresh_releases (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed)
     {st : AuthState F PK D Sig dep.core.quorum.numParties}
     (hReach : (authGuardedMachine dep).Reachable st) (approvers : List Nat) (i : CustodyIntent)
-    (hReady : quorumReady dep.core (dep.verified st.wire) approvers i = true)
+    (hReady : quorumReady dep.core (dep.verified st.privateInbox) approvers i = true)
     (hP : st.ledger.poisoned = false)
     (hF : findReleasedEpoch st.ledger.releasedHistory i.epoch = none)
-    (hEp : st.ledger.nextFreshEpoch ≤ i.epoch) (hSess : i.sessionId ∉ st.ledger.usedSessions)
+    (hEp : (st.ledger.nextFreshEpoch ≤ i.epoch ∧ i.epoch ≤ st.ledger.nextFreshEpoch + st.ledger.quorum.maxWindow)) (hSess : i.sessionId ∉ st.ledger.usedSessions)
     (hCap : st.ledger.spent + i.spend ≤ dep.core.quorum.spendCap) :
     (authStep dep st (.execute dep.core.deploymentId approvers i false)).map
         (fun r => authVisOut r.2) =
@@ -3660,22 +3674,22 @@ theorem authExecute_ready_fresh_releases (dep : AuthDeployment F C PK D Sig) (hW
   have hD := execute_ready_fresh_releases dep.core hWf.core (st := dep.view st) hRel'.rel.inv
     approvers i hReady hP hF hEp hSess hCap
   have hD' : (((custodyLedgerSign dep.core.digests
-        (dep.core.signWith (quorumKey dep.core (dep.verified st.wire) approvers i)) st.ledger
-        (if quorumReady dep.core (dep.verified st.wire) approvers i then approvers.length else 0)
+        (dep.core.signWith (quorumKey dep.core (dep.verified st.privateInbox) approvers i)) st.ledger
+        (if quorumReady dep.core (dep.verified st.privateInbox) approvers i then approvers.length else 0)
         dep.core.deploymentId i false).map
         (fun r => (({ dep.view st with ledger := r.1 } : State F PK D Sig), r.2))).map
         (fun r => (r.1, Event.custody (F := F) r.2))).map Prod.snd =
       some (Event.custody (.released (dep.core.signWith dep.core.secret
         (dep.core.digests.digest dep.core.deploymentId i)))) := hD
   show ((custodyLedgerSign dep.core.digests
-      (dep.core.signWith (quorumKey dep.core (dep.verified st.wire) approvers i)) st.ledger
-      (if quorumReady dep.core (dep.verified st.wire) approvers i then approvers.length else 0)
+      (dep.core.signWith (quorumKey dep.core (dep.verified st.privateInbox) approvers i)) st.ledger
+      (if quorumReady dep.core (dep.verified st.privateInbox) approvers i then approvers.length else 0)
       dep.core.deploymentId i false).map
       (fun r => (({ st with ledger := r.1 } : AuthState F PK D Sig dep.core.quorum.numParties),
         AuthEvent.custody (F := F) r.2))).map (fun r => authVisOut r.2) = _
   cases hS : custodyLedgerSign dep.core.digests
-      (dep.core.signWith (quorumKey dep.core (dep.verified st.wire) approvers i)) st.ledger
-      (if quorumReady dep.core (dep.verified st.wire) approvers i then approvers.length else 0)
+      (dep.core.signWith (quorumKey dep.core (dep.verified st.privateInbox) approvers i)) st.ledger
+      (if quorumReady dep.core (dep.verified st.privateInbox) approvers i then approvers.length else 0)
       dep.core.deploymentId i false with
   | none => rw [hS] at hD'; cases hD'
   | some r =>
@@ -4683,7 +4697,7 @@ theorem mkBase4WotsCShareDep_wellFormed (h : Nat) (H : Bytes → BitVec 256)
     and `verify pk msg sigBytes = true`! -/
 theorem mkBase4WotsCShareDep_fresh_epoch_releases (h : Nat) (H : Bytes → BitVec 256)
     (sk : Base4WotsCMasterSk) (depId spendCap : Nat) (i : CustodyIntent)
-    (hEp : i.epoch < 2 ^ h) (hSpend : i.spend ≤ spendCap) :
+    (hEp : i.epoch < 2 ^ h) (hWindow : i.epoch ≤ 64) (hSpend : i.spend ≤ spendCap) :
     let dep := mkBase4WotsCShareDep h H sk depId spendCap
     let s0 := ShareState.init dep
     ∃ (s1 s2 s3 : ShareState Base4CustodianShare Base4ShareContrib Base4WotsCPk MultiEpochDigest Bytes)
@@ -4797,7 +4811,7 @@ theorem mkBase4WotsCShareDep_fresh_epoch_releases (h : Nat) (H : Bytes → BitVe
     exact hSigEq
   have hLed := custodyLedgerSign_fresh_release (S := dep.digests) (oracleSign := fun _ => sigBytes)
     (L := s2.ledger) (n := 2) (dep := depId) (i := i)
-    rfl rfl rfl (Nat.zero_le _) List.not_mem_nil (by decide : 2 ≤ 2)
+    rfl rfl rfl ⟨Nat.zero_le _, hWindow⟩ List.not_mem_nil (by decide : 2 ≤ 2)
     (by change 0 + i.spend ≤ spendCap; omega)
   let s3 := { s2 with ledger := (custodyLedgerSign dep.digests (fun _ => sigBytes)
     s2.ledger 2 depId i false).getD (s2.ledger, .abortedQuarantined) |>.1 }
@@ -4889,10 +4903,10 @@ theorem mkBase4WotsCShareDep_trueContrib_out (h : Nat) (H : Bytes → BitVec 256
 theorem inhabited_mkBase4WotsCShareDep_fresh_epoch_releases :
     ∃ (h : Nat) (H : Bytes → BitVec 256) (sk : Base4WotsCMasterSk)
       (depId spendCap : Nat) (i : CustodyIntent),
-      i.epoch < 2 ^ h ∧ i.spend ≤ spendCap ∧
+      i.epoch < 2 ^ h ∧ i.epoch ≤ 64 ∧ i.spend ≤ spendCap ∧
       (mkBase4WotsCShareDep h H sk depId spendCap).WellFormed :=
   ⟨3, fun _ => 0#256, ⟨1#256, 2#256, 3#256⟩, 7, 100, ⟨1, 0, 5, 25, [0x42]⟩,
-    by decide, by decide, mkBase4WotsCShareDep_wellFormed 3 (fun _ => 0#256) _ 7 100⟩
+    by decide, by decide, by decide, mkBase4WotsCShareDep_wellFormed 3 (fun _ => 0#256) _ 7 100⟩
 
 end MultiEpochBase4WotsCMerkleBody
 

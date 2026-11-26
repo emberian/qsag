@@ -3122,9 +3122,7 @@ structure ReleasedQuorumLeaf (n : Nat) where
   record : BeltLatchRecord
   deriving DecidableEq
 
-/-- Multi-turn distributed `QuorumJorts` network state (`CommitteePartitionedJorts` / `BftShamirJorts`)
-    tracking per-`(custodian, committeeIdx)` durable `BeltLatchNodeState` slots, honest persisted logs,
-    `quorumEchoMacTag` echoes, and released global-tree leaf records. -/
+
 structure QuorumJortsNetworkState (n : Nat) where
   slots : Fin n → Nat → BeltLatchNodeState
   slotBoundLogs : Fin n → Nat → List BeltLatchRecord

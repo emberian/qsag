@@ -1349,10 +1349,10 @@ theorem multi_epoch_base4_wotsC_releases_epochs_5_and_7 :
         (encodeMultiEpochDigest (7, multiEpochIntent7)) sig7 = true) := by
   obtain ⟨_, _, s3, sig5, _, _, _, hVer5, hTr5⟩ :=
     mkBase4WotsCShareDep_fresh_epoch_releases 3 spongeCommit256 sampleBase4MasterSk 7 100
-      multiEpochIntent5 (by decide) (by decide)
+      multiEpochIntent5 (by decide) (by decide) (by decide)
   obtain ⟨_, _, s3', sig7, _, _, _, hVer7, hTr7⟩ :=
     mkBase4WotsCShareDep_fresh_epoch_releases 3 cshakeCommit256 sampleBase4MasterSk 7 100
-      multiEpochIntent7 (by decide) (by decide)
+      multiEpochIntent7 (by decide) (by decide) (by decide)
   exact ⟨⟨s3, sig5, hTr5, hVer5⟩, ⟨s3', sig7, hTr7, hVer7⟩⟩
 
 theorem multiEpoch_dataRefines_or_collision_audited

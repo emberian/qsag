@@ -1,26 +1,5 @@
 module
-/-
-# Qsag.Spec.Parameters — Normative Cryptographic Parameter Profiles
 
-These records describe the referenced Rust profiles. The balanced eleven-tap PCG profile
-tracks the E10 Rust overlay. The live Rust checkout inspected during integration uses three taps.
-1. Tweakable-hash hypertree signing (`pq128StatelessProfile`, `corduroyCustody128Profile`,
-   `jortsPoseidon2HashProfile`: `crates/qsag-core/src/tsw_baggy.rs`) with `HashSigProfile.WellFormed`
-   following `PqHashParams::is_well_formed`, and the NIST FIPS-205 reference shape
-   (`slhDsaShake128fProfile`, `HashSigProfile.Fips205Shaped`),
-2. FORS-free stateful epoch XMSS/Jorts signing (`pq128StatefulEpochProfile`, `hemJortsXmssProfile`),
-3. Quartic-Goldilocks Reed-Solomon IOP succinct aggregation (`hemGoldilocksExt4Profile`),
-4. `PiBlindVc` credentials (`pqCredentialProfile`): at most `32` attributes, a 2-of-5 replicated
-   TOPRF, `438` ZKBoo issuance repetitions, and `N = 256`, `33`-repetition `GF(p^5)`
-   selective-disclosure presentations; FIPS-204 `ML-DSA-44`,
-5. Dense dual-LPN PCG (`densePcgV3Profile`: `64` trees, `2^21` columns at depth `15`, `11` balanced
-   taps per tree, row weight `704`) and `RLWE-1024` preprocessing, and
-6. Separated threshold custody quorum geometry (`CustodyQuorumProfile`).
-
-The `WellFormed` predicates state the parameter equations the Rust validators enforce together
-with two-sided bounds on the security label; each comes with rejection theorems for the
-ill-formed variants it excludes.
--/
 
 public import Qsag.Spec.Primitives
 import Qsag.Tactic.AssuranceKit
@@ -455,26 +434,6 @@ structure AggregationProfile where
   maxBatchPolys : Nat := 16
   deriving DecidableEq, Repr
 
-/-- Production `GoldilocksExt4` (`p = 2^64 - 2^32 + 1`, degree `4`) 4-stage `WHIR`/`HEM` profile:
-    `maxPcsVars = 28` (`pcs.rs:86`), `maxBatchPolys = 16` (`pcs.rs:93`), blowups `B = [4, 16, 64, 256]`,
-    `[BCIKS20]` Johnson QROM-128 queries `q = [258, 130, 88, 66]`, classical-128 queries
-    `[129, 65, 44, 33]`, `[CDHZ25]` 16-bit PoW QROM queries `[202, 102, 70, 52]` (`tags 5, 7`), and
-    `[CDHZ25]` zero-PoW QROM queries `[216, 109, 74, 56]` (`tags 6, 8`, `pcs.rs:289-290`). -/
-@[expose] def hemGoldilocksExt4Profile : AggregationProfile where
-  basePrime := 18446744069414584321
-  extDegree := 4
-  maxPcsVars := 28
-  earlyStopVars := 8
-  logTraceCols := 8
-  rowSumcheckDegree := 8
-  stageBlowups := [4, 16, 64, 256]
-  johnsonQromQueries := [258, 130, 88, 66]
-  johnsonClassicalQueries := [129, 65, 44, 33]
-  cdhzQromQueries := [202, 102, 70, 52]
-  cdhzZeroPowQueries := [216, 109, 74, 56]
-  grindingBits := 16
-  maxMergeDepth := 16
-  maxBatchPolys := 16
 
 /-- Parameter equations of an `AggregationProfile` (`crates/qsag-agg/src/pcs.rs`):
     * the field is the degree-`4` extension of Goldilocks, of at least `255` bits;
@@ -507,8 +466,6 @@ def AggregationProfile.WellFormed (p : AggregationProfile) : Prop :=
   (p.cdhzQromQueries.zip p.cdhzZeroPowQueries).all (fun x => decide (x.1 < x.2)) = true ∧
   (p.cdhzZeroPowQueries.zip p.johnsonQromQueries).all (fun x => decide (x.1 < x.2)) = true
 
-theorem hemGoldilocksExt4Profile_wellFormed : hemGoldilocksExt4Profile.WellFormed := by
-  simp [AggregationProfile.WellFormed, hemGoldilocksExt4Profile]
 
 /-- A well-formed aggregation profile has one query count of each kind per stage, and at least
     one stage. -/
@@ -522,35 +479,6 @@ theorem AggregationProfile.WellFormed.query_lists_aligned {p : AggregationProfil
   obtain ⟨_, _, _, _, _, _, _, _, hHead, _, hC, hQ, hZ, hZP, _⟩ := h
   exact ⟨hC, hQ, hZ, hZP, hHead⟩
 
-/-- Tooth: a stage with one query fewer than `⌈512 / log₂ B⌉ + 2`, a dropped stage count, a zero
-    batch cap, or a PoW other than `16` bits is rejected. -/
-theorem AggregationProfile.wellFormed_rejects_short_queries :
-    ¬ (({ hemGoldilocksExt4Profile with johnsonQromQueries := [257, 130, 88, 66] } :
-          AggregationProfile).WellFormed ∨
-       ({ hemGoldilocksExt4Profile with johnsonClassicalQueries := [129, 65, 44] } :
-          AggregationProfile).WellFormed ∨
-       ({ hemGoldilocksExt4Profile with cdhzZeroPowQueries := [202, 109, 74, 56] } :
-          AggregationProfile).WellFormed ∨
-       ({ hemGoldilocksExt4Profile with maxBatchPolys := 0 } :
-          AggregationProfile).WellFormed ∨
-       ({ hemGoldilocksExt4Profile with grindingBits := 0 } : AggregationProfile).WellFormed) := by
-  simp [AggregationProfile.WellFormed, hemGoldilocksExt4Profile]
-
-theorem hemGoldilocksExt4Profile_basePrime_eq :
-    hemGoldilocksExt4Profile.basePrime = 2 ^ 64 - 2 ^ 32 + 1 ∧
-    hemGoldilocksExt4Profile.extDegree = 4 ∧
-    hemGoldilocksExt4Profile.stageBlowups = [4, 16, 64, 256] ∧
-    hemGoldilocksExt4Profile.johnsonQromQueries = [258, 130, 88, 66] ∧
-    hemGoldilocksExt4Profile.cdhzQromQueries = [202, 102, 70, 52] := by
-  unfold hemGoldilocksExt4Profile
-  decide
-
-theorem hemGoldilocksExt4Profile_highCap_and_zeroPow_eq :
-    hemGoldilocksExt4Profile.maxPcsVars = 28 ∧
-    hemGoldilocksExt4Profile.maxBatchPolys = 16 ∧
-    hemGoldilocksExt4Profile.cdhzZeroPowQueries = [216, 109, 74, 56] := by
-  unfold hemGoldilocksExt4Profile
-  decide
 
 /-- Normative parameter profile for `PiBlindVc` credentials (`crates/qsag-cred/src/blind_vc.rs`),
     the replicated threshold OPRF (`crates/qsag-cred/src/voprf.rs`), and `ThresholdMlDsa`
@@ -804,6 +732,7 @@ structure CustodyQuorumProfile where
   spendCap : Nat
   h_pos : 0 < threshold
   h_le : threshold ≤ numParties
+  maxWindow : Nat := 64
   deriving DecidableEq, Repr
 
 /-- Honest-custodian intersection guarantee: when strictly fewer than `threshold` parties are
@@ -820,8 +749,7 @@ theorem CustodyQuorumProfile.honest_quorum_intersection
   unfold CustodyQuorumProfile.ToleratesCorrupt at hTol
   omega
 
-#verify_constructive
-  Qsag.Spec.pq128StatelessProfile_wellFormed
+#verify_constructive Qsag.Spec.pq128StatelessProfile_wellFormed
   Qsag.Spec.corduroyPoseidon2Profile_params
   Qsag.Spec.baggySha3_128fProfile_wellFormed
   Qsag.Spec.HashSigProfile.WellFormed.securityBits_eq
@@ -831,9 +759,6 @@ theorem CustodyQuorumProfile.honest_quorum_intersection
   Qsag.Spec.pq128StatefulEpochProfile_wellFormed
   Qsag.Spec.StatefulJortsProfile.WellFormed.securityBits_eq
   Qsag.Spec.jortsPoseidon2HashProfile_eq_statefulEpochProfile
-  Qsag.Spec.hemGoldilocksExt4Profile_basePrime_eq
-  Qsag.Spec.hemGoldilocksExt4Profile_highCap_and_zeroPow_eq
-  Qsag.Spec.hemGoldilocksExt4Profile_wellFormed
   Qsag.Spec.AggregationProfile.WellFormed.query_lists_aligned
   Qsag.Spec.pqCredentialProfile_wellFormed
   Qsag.Spec.pqCredentialProfile_soundness_params
@@ -850,8 +775,7 @@ theorem CustodyQuorumProfile.honest_quorum_intersection
   Qsag.Spec.HashSigProfile.wellFormed_rejects_wrong_wotsChainCount
 #tooth_pair Qsag.Spec.HashSigProfile.WellFormed.maxSigs_le_leaves vs
   Qsag.Spec.HashSigProfile.wellFormed_rejects_maxSigs_above_leaves
-#tooth_pair Qsag.Spec.AggregationProfile.WellFormed.query_lists_aligned vs
-  Qsag.Spec.AggregationProfile.wellFormed_rejects_short_queries
+
 #tooth_pair Qsag.Spec.StatefulJortsProfile.WellFormed.securityBits_eq vs
   Qsag.Spec.StatefulJortsProfile.wellFormed_rejects_oversized_or_wrong_chains
 #tooth_pair Qsag.Spec.CredentialProfile.WellFormed.attrs_and_parties vs

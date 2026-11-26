@@ -251,7 +251,6 @@ theorem certRun_snoc (inps : List (CertCustodyInput Cert)) (inp : CertCustodyInp
 
 end Step
 
-
 /-! ## 2. The adaptive certificate world -/
 
 section World
@@ -1406,7 +1405,7 @@ private theorem pooled_sign_unsafe {Cert : Type} (L : CustodyCertLayer Cert)
       (p := fun p => certVoted L c.pool p dep₀ toothTarget) (a := 0) (l := []) hv)
   have hStep := custodyLedgerSign_fresh_release (S := S) (oracleSign := oracleSign)
     (L := c.ledger) (n := 1) (dep := dep₀) (i := toothTarget)
-    (by rw [hL]; rfl) (by rw [hL]; rfl) (by rw [hL]; rfl) (by rw [hL]; exact Nat.zero_le _)
+    (by rw [hL]; rfl) (by rw [hL]; rfl) (by rw [hL]; rfl) (by rw [hL]; exact ⟨Nat.zero_le _, Nat.zero_le _⟩)
     (by rw [hL]; intro h; cases h) (by rw [hL]; exact Nat.le_refl 1)
     (by rw [hL]; show 0 + 40 ≤ 100; decide)
   rw [certRunStep_of_some L S oracleSign dep₀ pk₀ toothQuorum
@@ -1733,9 +1732,8 @@ theorem keyIndependent_product {R : Type} (n k : Nat)
     congrArg (fun c => (sample c).1) (otherPartyCoin n k r i w v hi hw)⟩
 
 /-- One-entry function table. Inputs outside the zero-byte domain return the sentinel. -/
-def singletonTable (value : Spec.Bytes) : Spec.Bytes → Spec.Bytes
-  | [] => value
-  | _ :: _ => []
+def singletonTable (value input : Spec.Bytes) : Spec.Bytes :=
+  if input.isEmpty then value else []
 
 private theorem singletonTable_eta {k l : Nat} {x : Spec.Bytes × (Spec.Bytes → Spec.Bytes)}
     (hx : PrfSampleOk k 0 l x) : singletonTable (x.2 []) = x.2 := by
@@ -1816,7 +1814,8 @@ private theorem guessForger_ret {k : Nat}
 abbrev jointSampler := MacBlind.prgPrfSampler (MacBlind.bytesSampler 1) (MacBlind.bytesSampler 1)
 abbrev jointCard := 256 ^ 1 * 256 ^ 1
 abbrev jointProfile (k : Nat) : CustodyQuorumProfile :=
-  ⟨k + 1, 1, 100, Nat.one_pos, Nat.succ_le_succ (Nat.zero_le _)⟩
+  { numParties := k + 1, threshold := 1, spendCap := 100,
+    h_pos := Nat.one_pos, h_le := Nat.succ_le_succ (Nat.zero_le _) }
 abbrev jointAdv : Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Unit) Unit :=
   submitAll ⟨0, 0, toothTarget⟩ [[0]] (signTarget 0)
 

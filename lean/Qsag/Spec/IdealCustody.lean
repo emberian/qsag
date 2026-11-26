@@ -162,7 +162,7 @@ structure CustodyLedger (PK D Sig : Type) where
     | some r =>
       if S.digest L.deploymentId i = r.digest then some (L, .replayedFromWal r.sig) else none
     | none =>
-      if L.nextFreshEpoch ≤ i.epoch ∧ i.sessionId ∉ L.usedSessions ∧
+      if (L.nextFreshEpoch ≤ i.epoch ∧ i.epoch ≤ L.nextFreshEpoch + L.quorum.maxWindow) ∧ i.sessionId ∉ L.usedSessions ∧
           L.quorum.threshold ≤ approvalCount ∧ L.spent + i.spend ≤ L.quorum.spendCap then
         if abortBeforeRelease = true then
           some ({ L.authorize i with poisoned := true }, .abortedQuarantined)
@@ -424,7 +424,7 @@ theorem custodyLedgerSign_inv
     ((∃ r, findReleasedEpoch L.releasedHistory i.epoch = some r ∧
         S.digest L.deploymentId i = r.digest ∧ L' = L ∧ out = .replayedFromWal r.sig) ∨
      (findReleasedEpoch L.releasedHistory i.epoch = none ∧
-      L.nextFreshEpoch ≤ i.epoch ∧ i.sessionId ∉ L.usedSessions ∧
+      (L.nextFreshEpoch ≤ i.epoch ∧ i.epoch ≤ L.nextFreshEpoch + L.quorum.maxWindow) ∧ i.sessionId ∉ L.usedSessions ∧
       L.quorum.threshold ≤ n ∧ L.spent + i.spend ≤ L.quorum.spendCap ∧
       ((ab = true ∧ L' = { L.authorize i with poisoned := true } ∧ out = .abortedQuarantined) ∨
        (ab = false ∧
@@ -450,7 +450,7 @@ theorem custodyLedgerSign_inv
     | none =>
       rw [hf] at h
       dsimp only at h
-      by_cases hq : L.nextFreshEpoch ≤ i.epoch ∧ i.sessionId ∉ L.usedSessions ∧
+      by_cases hq : (L.nextFreshEpoch ≤ i.epoch ∧ i.epoch ≤ L.nextFreshEpoch + L.quorum.maxWindow) ∧ i.sessionId ∉ L.usedSessions ∧
           L.quorum.threshold ≤ n ∧ L.spent + i.spend ≤ L.quorum.spendCap
       · rw [custody_if_pos hq] at h
         cases ab with
@@ -491,7 +491,7 @@ theorem custodyLedgerSign_mono
   · unfold custodyLedgerSign
     rw [custody_if_pos (And.intro hP hD), hF]
     dsimp only
-    rw [custody_if_pos (show L.nextFreshEpoch ≤ i.epoch ∧ i.sessionId ∉ L.usedSessions ∧
+    rw [custody_if_pos (show (L.nextFreshEpoch ≤ i.epoch ∧ i.epoch ≤ L.nextFreshEpoch + L.quorum.maxWindow) ∧ i.sessionId ∉ L.usedSessions ∧
       L.quorum.threshold ≤ m ∧ L.spent + i.spend ≤ L.quorum.spendCap from
       ⟨hEp, hSess, Nat.le_trans hQ hnm, hCap⟩)]
     rcases hAb with ⟨hab, hL', hOut⟩ | ⟨hab, hL', hOut⟩
@@ -539,7 +539,7 @@ theorem custodyLedgerSign_fresh_release
     {L : CustodyLedger PK D Sig} {n dep : Nat} {i : CustodyIntent}
     (hP : L.poisoned = false) (hD : dep = L.deploymentId)
     (hF : findReleasedEpoch L.releasedHistory i.epoch = none)
-    (hEp : L.nextFreshEpoch ≤ i.epoch) (hSess : i.sessionId ∉ L.usedSessions)
+    (hEp : (L.nextFreshEpoch ≤ i.epoch ∧ i.epoch ≤ L.nextFreshEpoch + L.quorum.maxWindow)) (hSess : i.sessionId ∉ L.usedSessions)
     (hQ : L.quorum.threshold ≤ n) (hCap : L.spent + i.spend ≤ L.quorum.spendCap) :
     custodyLedgerSign S oracleSign L n dep i false =
       some ({ L.authorize i with
@@ -550,7 +550,7 @@ theorem custodyLedgerSign_fresh_release
   unfold custodyLedgerSign
   rw [custody_if_pos (And.intro hP hD), hF]
   dsimp only
-  rw [custody_if_pos (show L.nextFreshEpoch ≤ i.epoch ∧ i.sessionId ∉ L.usedSessions ∧
+  rw [custody_if_pos (show (L.nextFreshEpoch ≤ i.epoch ∧ i.epoch ≤ L.nextFreshEpoch + L.quorum.maxWindow) ∧ i.sessionId ∉ L.usedSessions ∧
     L.quorum.threshold ≤ n ∧ L.spent + i.spend ≤ L.quorum.spendCap from ⟨hEp, hSess, hQ, hCap⟩)]
   exact custody_if_neg Bool.false_ne_true _ _
 
@@ -844,7 +844,7 @@ theorem idealCustodyStep_preserves_safeInv
             exact ⟨p, hp, hm⟩
           · exact hInv.honestAuthorized j hTail
       have hOld : ∀ r ∈ st.ledger.releasedHistory, r.intent.epoch < i.epoch + 1 := fun r hr =>
-        Nat.lt_succ_of_le (Nat.le_trans (Nat.le_of_lt (hInv.walFresh r hr)) hEp)
+        Nat.lt_succ_of_le (Nat.le_trans (Nat.le_of_lt (hInv.walFresh r hr)) hEp.1)
       rcases hAb with ⟨_, hL', _⟩ | ⟨_, hL', _⟩
       · subst hL'
         subst hSt
@@ -884,7 +884,7 @@ theorem idealCustodyStep_preserves_safeInv
             obtain ⟨r, hr, he⟩ := List.mem_map.mp hm'
             have h1 : r.intent.epoch < st.ledger.nextFreshEpoch := hInv.walFresh r hr
             rw [he] at h1
-            exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le h1 hEp), hInv.walNodup⟩
+            exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le h1 hEp.1), hInv.walNodup⟩
           unpoisoned := fun _ => congrArg (List.cons i) (hInv.unpoisoned hUnp) }
 
 /-- The invariant holds along every valid trace, corruption steps and rejected inputs included. -/
@@ -1392,6 +1392,17 @@ theorem idealCustody_tooth_quorum_releases :
       (.sign 7 custodyToothIntent false)).map (fun r => (r.1.ledger.spent, r.2)) =
     some (40, .released (7, custodyToothIntent)) := by
   decide +kernel
+
+/-- The initial watermark admits its inclusive upper bound, even with the same quorum
+    approving a request one epoch beyond it. -/
+theorem idealCustody_fresh_epoch_window_boundary :
+    let accepted := fun epoch =>
+      let req := { custodyToothIntent with epoch := epoch }
+      (idealCustodyStep CustodyDigestScheme.transparent id
+        (custodyToothRun [.approve 0 7 req, .approve 1 7 req]) (.sign 7 req false)).isSome
+    accepted 64 = true ∧ accepted 65 = false := by decide +kernel
+
+#verify_constructive idealCustody_fresh_epoch_window_boundary
 
 /-- Audit counterexample `spend := 0`: the two custodians approved the intent spending `40`; the
     same payload, session and epoch with `spend := 0` has no permit and is refused. -/
