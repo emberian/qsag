@@ -30,7 +30,7 @@ What is proved and what is assumed about `WhirScheduleCert`:
   shift-query bound. The schedule has no fold, sumcheck or out-of-domain round, so those bounds
   are not exercised, and its `scheduleQromError` is above one.
 * Constructed (§5b): `flatHemSlicedCert`, an unconditional multi-stage (`2` stages, `6` rounds)
-  certificate for `flatHemSlicedSched` (`64 → 32 → 16` coset chain over `QuarticGoldilocks`,
+  certificate for `flatHemSlicedSched` (`64 → 32 → 16` coset chain over `QuinticGoldilocks`,
   challenge pool `q = 2^62`, Fiat–Shamir digest width `w = 256`) exercising fold/sumcheck,
   out-of-domain, and shift-query rounds using **strictly proved `[CWYZ26]` sliced MCA counts**
   (`sliced_singleStep_bridge_four_challenge_bound`, `WhirStage.decode_list_le`), accepting honest
@@ -589,10 +589,11 @@ def execWhirVerify {D : Type} [DecidableEq D] (env : WhirEnv F) (sched : WhirVer
 
 /-- The algebraic obligation: a Boolean round-by-round state function for the verifier whose
     per-round flip counts are within the schedule's round bounds. -/
-structure WhirScheduleCert (env : WhirEnv F) (sched : WhirVerifierSchedule) (w : Nat) where
+structure WhirScheduleCert (env : WhirEnv F) (sched : WhirVerifierSchedule) (w : Nat)
+    (bounds : List RatBound := sched.roundBounds) where
   cert : BoolRbrCert (whirOracleIop env sched w)
   covers : ∀ r : Fin sched.numRounds,
-    RatBound.le ⟨cert.bad r, 2 ^ w, Nat.two_pow_pos w⟩ (sched.roundBounds.getD r.1 RatBound.one)
+    RatBound.le ⟨cert.bad r, 2 ^ w, Nat.two_pow_pos w⟩ (bounds.getD r.1 RatBound.one)
 
 /-- **Closed QROM soundness of the executable WHIR verifier.** For a statement outside the
     language and any `Q`-query adversary producing messages and openings, the acceptance
@@ -835,65 +836,6 @@ end Verifier
 def deployedSlack : List (Nat × Nat × Nat) :=
   [(1, 400, 400), (1, 200, 400), (1, 125, 500), (1, 200, 1594)]
 
-/-- The deployed stages, read from the `unitaryZeroPow` witness rows and stage geometry of
-    `nv = 24` (`n`, `d`, `A`, fold count, query count, MCA profile numerator), with dual OOD
-    and degree-3 sumcheck rounds. -/
-def deployedStages : List WhirStage :=
-  ((hemOptimizedStageWitnesses .unitaryZeroPow 24).zip
-    ((hemStageGeoms 24).zip deployedSlack)).map (fun wg =>
-      { foldK := wg.1.sFolds
-        logDomain := Nat.log2 wg.1.n
-        logInvRate := wg.2.1.logBlowup
-        oodCount := 2
-        queryCount := wg.1.queries
-        degBound := wg.1.d
-        agree := wg.1.A
-        etaNum := wg.2.2.1
-        etaDen := wg.2.2.2.1
-        listSize := wg.2.2.2.2
-        sumcheckDeg := 3
-        mcaNum := whirAffineStageSimpleNum wg.1 })
-
-def deployedSched : WhirVerifierSchedule :=
-  ⟨24, goldilocksExt4Card, goldilocksExt4Card_pos, deployedStages⟩
-
-/-- The full concrete stage records, including the MCA profile inputs. -/
-theorem deployedStages_full_eq : deployedStages =
-  [ { foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2,
-      queryCount := 216, degBound := 262146, agree := 527170, etaNum := 1, etaDen := 400,
-      listSize := 400, sumcheckDeg := 3, mcaNum := 1644 },
-    { foldK := 4, logDomain := 18, logInvRate := 4, oodCount := 2,
-      queryCount := 109, degBound := 16386, agree := 66992, etaNum := 1, etaDen := 200,
-      listSize := 400, sumcheckDeg := 3, mcaNum := 824 },
-    { foldK := 3, logDomain := 17, logInvRate := 6, oodCount := 2,
-      queryCount := 74, degBound := 2050, agree := 17484, etaNum := 1, etaDen := 125,
-      listSize := 500, sumcheckDeg := 3, mcaNum := 489 },
-    { foldK := 3, logDomain := 16, logInvRate := 8, oodCount := 2,
-      queryCount := 56, degBound := 258, agree := 4482, etaNum := 1, etaDen := 200,
-      listSize := 1594, sumcheckDeg := 3, mcaNum := 792 } ] := by
-  simp only [deployedStages, hemOptimizedStageWitnesses_unitaryZeroPow_24,
-    hemStageGeoms_24_eq, deployedSlack, List.zip_cons_cons, List.zip_nil_left,
-    List.map_cons, List.map_nil, whirAffineStageSimpleNum_def]
-  rfl
-
-/-- The deployed stage parameters, spelled out. -/
-theorem deployedStages_eq :
-    deployedStages.map (fun s => (s.foldK, s.logDomain, s.logInvRate, s.queryCount,
-      s.degBound, s.agree, s.listSize)) =
-      [(6, 20, 2, 216, 262146, 527170, 400), (4, 18, 4, 109, 16386, 66992, 400),
-       (3, 17, 6, 74, 2050, 17484, 500), (3, 16, 8, 56, 258, 4482, 1594)] := by
-  rw [deployedStages_full_eq]
-  rfl
-
-/-- Every deployed stage satisfies the Johnson condition with its slack, and its list size is
-    the exact ceiling. -/
-theorem deployedSched_johnsonOk : deployedSched.johnsonOk = true := by
-  simp only [WhirVerifierSchedule.johnsonOk, deployedSched, deployedStages_full_eq]
-  decide +kernel
-
-theorem deployedSched_numRounds : deployedSched.numRounds = 24 := by
-  simp only [WhirVerifierSchedule.numRounds, deployedSched, deployedStages_full_eq]
-  decide +kernel
 
 private inductive RoundBoundsLe : List RatBound → List RatBound → Prop where
   | nil : RoundBoundsLe [] []
@@ -933,7 +875,6 @@ private theorem stageEnvelope_covers (q : Nat) (hq : 0 < q) (s : WhirStage)
     | succ n ih => exact .cons hf ih
   · exact .cons ho (.cons hs .nil)
 
-private def deployedEnvelope : List RatBound := deployedStages.flatMap stageEnvelope
 
 private theorem ood_le_of_binom (q : Nat) (hq : 0 < q) (s : WhirStage) (B bits : Nat)
     (hbin : binom2 s.listSize = B)
@@ -958,127 +899,6 @@ private theorem binom2_1594 : binom2 1594 = 1269621 := by
   exact Nat.div_eq_of_eq_mul_left (by decide : 0 < 2)
     (by decide : 1594 * (1594 - 1) = 1269621 * 2)
 
-set_option maxRecDepth 8192 in
-private theorem deployed_stage0_fold :
-    (({ foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2, queryCount := 216, degBound := 262146, agree := 527170, etaNum := 1, etaDen := 400, listSize := 400, sumcheckDeg := 3, mcaNum := 1644 } : WhirStage).foldBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 220) := by
-
-  change 2844 * 2 ^ 220 ≤ 115792089129476408817739443160502628952720274482139873392618675794070921543681
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage0_ood :
-    (({ foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2, queryCount := 216, degBound := 262146, agree := 527170, etaNum := 1, etaDen := 400, listSize := 400, sumcheckDeg := 3, mcaNum := 1644 } : WhirStage).oodBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 220) := by
-
-  apply ood_le_of_binom _ _ _ 79800 220 binom2_400
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage0_shift :
-    (({ foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2, queryCount := 216, degBound := 262146, agree := 527170, etaNum := 1, etaDen := 400, listSize := 400, sumcheckDeg := 3, mcaNum := 1644 } : WhirStage).shiftBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 214) := by
-
-  change (527176 ^ 216 * 115792089129476408817739443160502628952720274482139873392618675794070921543681 + 87200 * (1048576 ^ 216)) * 2 ^ 214 ≤ (1048576 ^ 216) * 115792089129476408817739443160502628952720274482139873392618675794070921543681
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage1_fold :
-    (({ foldK := 4, logDomain := 18, logInvRate := 4, oodCount := 2, queryCount := 109, degBound := 16386, agree := 66992, etaNum := 1, etaDen := 200, listSize := 400, sumcheckDeg := 3, mcaNum := 824 } : WhirStage).foldBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 220) := by
-
-  change 2024 * 2 ^ 220 ≤ 115792089129476408817739443160502628952720274482139873392618675794070921543681
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage1_ood :
-    (({ foldK := 4, logDomain := 18, logInvRate := 4, oodCount := 2, queryCount := 109, degBound := 16386, agree := 66992, etaNum := 1, etaDen := 200, listSize := 400, sumcheckDeg := 3, mcaNum := 824 } : WhirStage).oodBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 220) := by
-
-  apply ood_le_of_binom _ _ _ 79800 220 binom2_400
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage1_shift :
-    (({ foldK := 4, logDomain := 18, logInvRate := 4, oodCount := 2, queryCount := 109, degBound := 16386, agree := 66992, etaNum := 1, etaDen := 200, listSize := 400, sumcheckDeg := 3, mcaNum := 824 } : WhirStage).shiftBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 214) := by
-
-  change (66996 ^ 109 * 115792089129476408817739443160502628952720274482139873392618675794070921543681 + 44400 * (262144 ^ 109)) * 2 ^ 214 ≤ (262144 ^ 109) * 115792089129476408817739443160502628952720274482139873392618675794070921543681
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage2_fold :
-    (({ foldK := 3, logDomain := 17, logInvRate := 6, oodCount := 2, queryCount := 74, degBound := 2050, agree := 17484, etaNum := 1, etaDen := 125, listSize := 500, sumcheckDeg := 3, mcaNum := 489 } : WhirStage).foldBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 220) := by
-
-  change 1989 * 2 ^ 220 ≤ 115792089129476408817739443160502628952720274482139873392618675794070921543681
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage2_ood :
-    (({ foldK := 3, logDomain := 17, logInvRate := 6, oodCount := 2, queryCount := 74, degBound := 2050, agree := 17484, etaNum := 1, etaDen := 125, listSize := 500, sumcheckDeg := 3, mcaNum := 489 } : WhirStage).oodBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 220) := by
-
-  apply ood_le_of_binom _ _ _ 124750 220 binom2_500
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage2_shift :
-    (({ foldK := 3, logDomain := 17, logInvRate := 6, oodCount := 2, queryCount := 74, degBound := 2050, agree := 17484, etaNum := 1, etaDen := 125, listSize := 500, sumcheckDeg := 3, mcaNum := 489 } : WhirStage).shiftBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 214) := by
-
-  change (17487 ^ 74 * 115792089129476408817739443160502628952720274482139873392618675794070921543681 + 38000 * (131072 ^ 74)) * 2 ^ 214 ≤ (131072 ^ 74) * 115792089129476408817739443160502628952720274482139873392618675794070921543681
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage3_fold :
-    (({ foldK := 3, logDomain := 16, logInvRate := 8, oodCount := 2, queryCount := 56, degBound := 258, agree := 4482, etaNum := 1, etaDen := 200, listSize := 1594, sumcheckDeg := 3, mcaNum := 792 } : WhirStage).foldBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 220) := by
-
-  change 5574 * 2 ^ 220 ≤ 115792089129476408817739443160502628952720274482139873392618675794070921543681
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage3_ood :
-    (({ foldK := 3, logDomain := 16, logInvRate := 8, oodCount := 2, queryCount := 56, degBound := 258, agree := 4482, etaNum := 1, etaDen := 200, listSize := 1594, sumcheckDeg := 3, mcaNum := 792 } : WhirStage).oodBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 220) := by
-
-  apply ood_le_of_binom _ _ _ 1269621 220 binom2_1594
-  decide +kernel
-
-set_option maxRecDepth 8192 in
-private theorem deployed_stage3_shift :
-    (({ foldK := 3, logDomain := 16, logInvRate := 8, oodCount := 2, queryCount := 56, degBound := 258, agree := 4482, etaNum := 1, etaDen := 200, listSize := 1594, sumcheckDeg := 3, mcaNum := 792 } : WhirStage).shiftBound goldilocksExt4Card goldilocksExt4Card_pos).le
-      (RatBound.invPow2 214) := by
-
-  change (4485 ^ 56 * 115792089129476408817739443160502628952720274482139873392618675794070921543681 + 92452 * (65536 ^ 56)) * 2 ^ 214 ≤ (65536 ^ 56) * 115792089129476408817739443160502628952720274482139873392618675794070921543681
-  decide +kernel
-
-private theorem deployedEnvelope_covers :
-    RoundBoundsLe deployedSched.roundBounds deployedEnvelope := by
-  simp only [WhirVerifierSchedule.roundBounds, deployedSched, deployedEnvelope,
-    deployedStages_full_eq, stagesRoundBounds, List.flatMap_cons, List.flatMap_nil]
-  refine RoundBoundsLe.append ?_ (RoundBoundsLe.append ?_
-    (RoundBoundsLe.append ?_ (RoundBoundsLe.append ?_ .nil)))
-
-  · exact stageEnvelope_covers _ _ _ deployed_stage0_fold deployed_stage0_ood deployed_stage0_shift
-
-  · exact stageEnvelope_covers _ _ _ deployed_stage1_fold deployed_stage1_ood deployed_stage1_shift
-
-  · exact stageEnvelope_covers _ _ _ deployed_stage2_fold deployed_stage2_ood deployed_stage2_shift
-
-  · exact stageEnvelope_covers _ _ _ deployed_stage3_fold deployed_stage3_ood deployed_stage3_shift
-
-set_option maxRecDepth 8192 in
-/-- **`scheduleQromError deployedSched (2^40) ≤ 2^-128`**, list-size multipliers included.
-Each stage is bounded before summation, avoiding products of the unreduced query denominators. -/
-theorem deployedSched_error_at_2pow40 :
-    atLeastBits 128 (scheduleQromError deployedSched (2 ^ 40)) := by
-  apply atLeastBits_of_le (scaled_sum_mono (2 ^ 40) deployedEnvelope_covers)
-  simp only [deployedEnvelope, deployedStages_full_eq, List.flatMap_cons, List.flatMap_nil,
-    stageEnvelope, List.replicate_succ, List.replicate_zero, List.cons_append,
-    List.nil_append, List.map_cons, List.map_nil]
-  decide +kernel
 
 /-- Monotonicity in the query budget. -/
 theorem scheduleQromError_mono (sched : WhirVerifierSchedule) {Q Q' : Nat} (h : Q ≤ Q') :
@@ -1093,41 +913,6 @@ theorem scheduleQromError_mono (sched : WhirVerifierSchedule) {Q Q' : Nat} (h : 
     exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _
       (Nat.pow_le_pow_left (Nat.succ_le_succ (Nat.mul_le_mul_left 2 h)) 2))
 
-/-- **Deployed corollary.** With a certificate for `deployedSched` and `Q ≤ 2^40` oracle
-    queries, the acceptance probability of `execWhirVerify` on a false statement is at most
-    `2^-128` plus the collision-finder probability. -/
-theorem deployed_whir_exec_closed_qrom_128 {F D : Type} [CommRingOps F] [DecidableEq F]
-    [DecidableEq D] {cardX cardAnc Q w : Nat}
-    (env : WhirEnv F) (M : MerkleSetup D F)
-    (sc : WhirScheduleCert env deployedSched w)
-    (c : FsCodec (WhirMsg F) deployedSched.numRounds cardX)
-    (aux : Fin cardX → List (F × List D))
-    (x : WhirStmt F) (hx : ¬ whirInLang env deployedSched x)
-    (A : QuantumAdv cardX w cardAnc Q) (hQ : Q ≤ 2 ^ 40) :
-    RatBound.le
-      ⟨uniformOracleSum w cardX (fun H =>
-          QVec.queryMassOn (execFsAccept (whirOracleIop env deployedSched w) M c aux x H)
-            (runQuantumAdv A H)),
-        (2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
-        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
-          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
-      (RatBound.add (RatBound.invPow2 128)
-        ⟨uniformOracleSum w cardX (fun H =>
-            QVec.queryMassOn (execFsCollisionEvent (whirOracleIop env deployedSched w) M c aux x H)
-              (runQuantumAdv A H)),
-          (2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
-          Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
-            (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩) := by
-  have hMain := whir_exec_closed_qrom_soundness env deployedSched M sc c aux x hx A
-  have h128 : RatBound.le (scheduleQromError deployedSched (2 ^ 40)) (RatBound.invPow2 128) := by
-    have h := deployedSched_error_at_2pow40
-    show (scheduleQromError deployedSched (2 ^ 40)).num * 2 ^ 128 ≤
-      1 * (scheduleQromError deployedSched (2 ^ 40)).den
-    rw [Nat.one_mul]
-    exact h
-  exact RatBound.le_trans hMain
-    (RatBound.add_le_add (RatBound.le_trans (scheduleQromError_mono deployedSched hQ) h128)
-      (RatBound.le_refl _))
 
 /-! ## §5. A constructed certificate for a one-stage schedule with a sampled query
 
@@ -1433,7 +1218,7 @@ theorem sampledQuery_false_statement_accepted_once :
 /-! ## §5b. Unconditional Multi-Stage `[CWYZ26]` Sliced-MCA `WhirScheduleCert` (`flatHemSlicedCert`)
 
 Two-stage (`6`-round) WHIR verifier schedule `flatHemSlicedSched` (`64 → 32 → 16` coset chain
-`hemFoldDom64 → hemFoldDom32 → hemFoldDom16` over `QuarticGoldilocks`, challenge pool
+`hemFoldDom64 → hemFoldDom32 → hemFoldDom16` over `QuinticGoldilocks`, challenge pool
 `|flatHemPool| = 2^62`, Fiat–Shamir digest width `w = 256`) whose `WhirScheduleCert` is proved
 unconditionally using **only the proved `[CWYZ26]` sliced MCA counts**
 (`sliced_singleStep_bridge_four_challenge_bound`, `WhirStage.decode_list_le`), exercising fold,
@@ -1447,8 +1232,8 @@ def flatHemQ : Nat := 2 ^ 62
 
 theorem flatHemQ_pos : 0 < flatHemQ := Nat.two_pow_pos 62
 
-/-- Duplicate-free challenge pool of `2^62` base-field elements in `QuarticGoldilocks`. -/
-def flatHemPool : List QuarticGoldilocks :=
+/-- Proof-only enumeration of the challenge domain. Executable sampling uses indexed decoding. -/
+noncomputable def flatHemPool : List QuinticGoldilocks :=
   (List.range flatHemQ).map hemFoldQg
 
 theorem flatHemPool_length : flatHemPool.length = flatHemQ := by
@@ -1469,10 +1254,10 @@ private theorem nodup_append_disj {α : Type} :
 
 private theorem hemFoldQg_inj_lt {a b : Nat} (ha : a < flatHemQ) (hb : b < flatHemQ)
     (hEq : hemFoldQg a = hemFoldQg b) : a = b := by
-  have hv : ((hemFoldQg a).c0.c0).val = ((hemFoldQg b).c0.c0).val :=
-    congrArg (fun x => x.c0.c0.val) hEq
+  have hv : ((hemFoldQg a).c0).val = ((hemFoldQg b).c0).val :=
+    congrArg (fun x => x.c0.val) hEq
   unfold hemFoldQg at hv
-  dsimp only [Goldilocks.ofNat] at hv
+  simp only [QuinticGoldilocks.ofBase_c0, Goldilocks.ofNat] at hv
   have hp : flatHemQ < goldilocksPrime := by unfold flatHemQ goldilocksPrime; decide
   rw [Nat.mod_eq_of_lt (Nat.lt_trans ha hp), Nat.mod_eq_of_lt (Nat.lt_trans hb hp)] at hv
   exact hv
@@ -1629,18 +1414,18 @@ theorem flatHemSlicedSched_error_bits :
     decide +kernel
 
 /-- Halves-order evaluation point lookup on a `2n`-point antipodal domain `D_in`. -/
-def halfDomPt (D_in : List QuarticGoldilocks) (n p : Nat) : QuarticGoldilocks :=
+def halfDomPt (D_in : List QuinticGoldilocks) (n p : Nat) : QuinticGoldilocks :=
   if p < n then D_in.getD (2 * p) CommRingOps.zero
   else D_in.getD (2 * (p - n) + 1) CommRingOps.zero
 
 /-- Inverse halves-to-interleaved oracle adapter: maps halves-ordered `(pos, pos + n)` to
     adjacent antipodal pairs `(2 * pos, 2 * pos + 1)`. -/
-def interleaveOracle (n : Nat) (raw : Nat → QuarticGoldilocks) (idx : Nat) : QuarticGoldilocks :=
+def interleaveOracle (n : Nat) (raw : Nat → QuinticGoldilocks) (idx : Nat) : QuinticGoldilocks :=
   if idx % 2 = 0 then raw (idx / 2) else raw (idx / 2 + n)
 
 /-- Decode a 4-challenge quadruple `(φ, θ, α, β) ∈ flatHemPool⁴` from `c % q⁴`. -/
 def decodeQuad (c : Nat) :
-    QuarticGoldilocks × QuarticGoldilocks × QuarticGoldilocks × QuarticGoldilocks :=
+    QuinticGoldilocks × QuinticGoldilocks × QuinticGoldilocks × QuinticGoldilocks :=
   let q := flatHemQ
   let idx := c % (q * (q * (q * q)))
   let iβ := idx % q
@@ -1652,15 +1437,15 @@ def decodeQuad (c : Nat) :
   (hemFoldQg iφ, hemFoldQg iθ, hemFoldQg iα, hemFoldQg iβ)
 
 /-- Decode a 2-challenge OOD pair `(z₀, z₁) ∈ flatHemPool²` from `c % q²`. -/
-def decodeOod (c : Nat) : QuarticGoldilocks × QuarticGoldilocks :=
+def decodeOod (c : Nat) : QuinticGoldilocks × QuinticGoldilocks :=
   let q := flatHemQ
   let idx := c % (q * q)
   (hemFoldQg (idx / q), hemFoldQg (idx % q))
 
 /-- Local copy of the `[CWYZ26]` 5-wire dual-bridge claim update so kernel evaluation inside
     `ClosedWhirSchedule` unfolds directly. -/
-def flatHemBridgeClaim (claim w₀ w₁ w₂ c_F c_G φ θ α β : QuarticGoldilocks) :
-    QuarticGoldilocks :=
+def flatHemBridgeClaim (claim w₀ w₁ w₂ c_F c_G φ θ α β : QuinticGoldilocks) :
+    QuinticGoldilocks :=
   CommRingOps.add
     (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀)))
     (CommRingOps.add
@@ -1670,26 +1455,26 @@ def flatHemBridgeClaim (claim w₀ w₁ w₂ c_F c_G φ θ α β : QuarticGoldil
             (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀))))))
       (CommRingOps.mul β (CommRingOps.add c_F (CommRingOps.mul θ c_G))))
 
-theorem flatHemBridgeClaim_eq (claim w₀ w₁ w₂ c_F c_G φ θ α β : QuarticGoldilocks) :
+theorem flatHemBridgeClaim_eq (claim w₀ w₁ w₂ c_F c_G φ θ α β : QuinticGoldilocks) :
     flatHemBridgeClaim claim w₀ w₁ w₂ c_F c_G φ θ α β =
       hemBridgeFoldClaim claim w₀ w₁ w₂ c_F c_G φ θ α β :=
   (hemBridgeFoldClaim_def claim w₀ w₁ w₂ c_F c_G φ θ α β).symm
 
 /-- Local copy of `hemKernelFold` for direct kernel evaluation. -/
-def flatHemKernelFold (φ : QuarticGoldilocks) : List QuarticGoldilocks → List QuarticGoldilocks
+def flatHemKernelFold (φ : QuinticGoldilocks) : List QuinticGoldilocks → List QuinticGoldilocks
   | a :: b :: rest => CommRingOps.add a (CommRingOps.mul φ b) :: flatHemKernelFold φ rest
   | _ => [CommRingOps.zero]
 
-theorem flatHemKernelFold_eq (φ : QuarticGoldilocks) :
-    ∀ K : List QuarticGoldilocks, flatHemKernelFold φ K = hemKernelFold φ K
+theorem flatHemKernelFold_eq (φ : QuinticGoldilocks) :
+    ∀ K : List QuinticGoldilocks, flatHemKernelFold φ K = hemKernelFold φ K
   | a :: b :: rest => by
     rw [hemKernelFold.public_eqs.1, ← flatHemKernelFold_eq φ rest]; rfl
   | [] => (hemKernelFold.public_eqs.2 _ _ (by intro _ _ _ h; cases h)).symm
   | [_] => (hemKernelFold.public_eqs.2 _ _ (by intro _ _ _ h; cases h)).symm
 
 /-- Local copy of single-fiber `[CWYZ26]` coset folding on a halves-ordered `[v0, v1]` block. -/
-def flatHemFoldPoint (D_in D_out : List QuarticGoldilocks)
-    (θ α β : QuarticGoldilocks) (pos : Nat) (v0 v1 : QuarticGoldilocks) : QuarticGoldilocks :=
+def flatHemFoldPoint (D_in D_out : List QuinticGoldilocks)
+    (θ α β : QuinticGoldilocks) (pos : Nat) (v0 v1 : QuinticGoldilocks) : QuinticGoldilocks :=
   let two := CommRingOps.add CommRingOps.one CommRingOps.one
   let x := D_in.getD (2 * pos) CommRingOps.one
   let y := D_out.getD pos CommRingOps.zero
@@ -1698,8 +1483,8 @@ def flatHemFoldPoint (D_in D_out : List QuarticGoldilocks)
   let hComb := CommRingOps.add fE (CommRingOps.mul θ fO)
   CommRingOps.add fO (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β y)) hComb)
 
-theorem flatHemFoldPoint_eq_virtual (D_in D_out : List QuarticGoldilocks) (n : Nat)
-    (raw : Nat → QuarticGoldilocks) (θ α β : QuarticGoldilocks) (pos : Nat) :
+theorem flatHemFoldPoint_eq_virtual (D_in D_out : List QuinticGoldilocks) (n : Nat)
+    (raw : Nat → QuinticGoldilocks) (θ α β : QuinticGoldilocks) (pos : Nat) :
     flatHemFoldPoint D_in D_out θ α β pos (raw pos) (raw (pos + n)) =
       hemVirtualFoldOracle θ α β D_in D_out (interleaveOracle n raw) pos := by
   have hEven : interleaveOracle n raw (2 * pos) = raw pos := by
@@ -1716,27 +1501,27 @@ theorem flatHemFoldPoint_eq_virtual (D_in D_out : List QuarticGoldilocks) (n : N
   rfl
 
 /-- Initial length-10 evaluation-at-0 kernel `[1, 0, ..., 0]`. -/
-def flatHemInitKernel : List QuarticGoldilocks :=
+def flatHemInitKernel : List QuinticGoldilocks :=
   [CommRingOps.one, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero,
    CommRingOps.zero, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero]
 
 /-- Length-6 point-evaluation kernel `[1, x, x², x³, 0, 0]` for degree-`≤ 3` polynomials. -/
-def evalVec6 (x : QuarticGoldilocks) : List QuarticGoldilocks :=
+def evalVec6 (x : QuinticGoldilocks) : List QuinticGoldilocks :=
   let x2 := CommRingOps.mul x x
   let x3 := CommRingOps.mul x x2
   [CommRingOps.one, x, x2, x3, CommRingOps.zero, CommRingOps.zero]
 
-def vecAdd6 (u v : List QuarticGoldilocks) : List QuarticGoldilocks :=
+def vecAdd6 (u v : List QuinticGoldilocks) : List QuinticGoldilocks :=
   List.zipWith CommRingOps.add u v
 
-def vecScale6 (s : QuarticGoldilocks) (u : List QuarticGoldilocks) : List QuarticGoldilocks :=
+def vecScale6 (s : QuinticGoldilocks) (u : List QuinticGoldilocks) : List QuinticGoldilocks :=
   u.map (CommRingOps.mul s)
 
 /-- Fold evaluation points `pts` into a length-6 kernel `K` with powers of `γ` matching
     `combineClaim`. -/
-def combineKernel6 (K : List QuarticGoldilocks) (γ : QuarticGoldilocks)
-    (pts : List QuarticGoldilocks) : List QuarticGoldilocks :=
-  (pts.foldl (fun (acc : List QuarticGoldilocks × QuarticGoldilocks) pt =>
+def combineKernel6 (K : List QuinticGoldilocks) (γ : QuinticGoldilocks)
+    (pts : List QuinticGoldilocks) : List QuinticGoldilocks :=
+  (pts.foldl (fun (acc : List QuinticGoldilocks × QuinticGoldilocks) pt =>
     (vecAdd6 acc.1 (vecScale6 acc.2 (evalVec6 pt)), CommRingOps.mul acc.2 γ)) (K, γ)).1
 
 def flatHemChalPos (c j n : Nat) : Nat :=
@@ -1745,14 +1530,14 @@ def flatHemChalPos (c j n : Nat) : Nat :=
   let qIdx := cs / flatHemQ
   (qIdx / n ^ j) % n
 
-def flatHemChalField (c slot : Nat) : QuarticGoldilocks :=
+def flatHemChalField (c slot : Nat) : QuinticGoldilocks :=
   if slot = 0 then (decodeOod c).1
   else if slot = 1 then (decodeOod c).2
   else if slot = 36 then hemFoldQg ((c % (32 ^ 36 * flatHemQ)) % flatHemQ)
   else hemFoldQg ((c % (16 ^ 46 * flatHemQ)) % flatHemQ)
 
-def flatHemStepClaim (_stageIdx : Nat) (curClaim : QuarticGoldilocks)
-    (wires : List QuarticGoldilocks) (c : Nat) : Option QuarticGoldilocks :=
+def flatHemStepClaim (_stageIdx : Nat) (curClaim : QuinticGoldilocks)
+    (wires : List QuinticGoldilocks) (c : Nat) : Option QuinticGoldilocks :=
   if wires.length ≤ 5 then
     let q := decodeQuad c
     let w₀ := wires.getD 0 CommRingOps.zero
@@ -1763,8 +1548,8 @@ def flatHemStepClaim (_stageIdx : Nat) (curClaim : QuarticGoldilocks)
     some (flatHemBridgeClaim curClaim w₀ w₁ w₂ cF cG q.1 q.2.1 q.2.2.1 q.2.2.2)
   else none
 
-def flatHemRawFold (stageIdx : Nat) (folds : List (WhirPub QuarticGoldilocks × Nat))
-    (_j pos : Nat) (block : List QuarticGoldilocks) : QuarticGoldilocks :=
+def flatHemRawFold (stageIdx : Nat) (folds : List (WhirPub QuinticGoldilocks × Nat))
+    (_j pos : Nat) (block : List QuinticGoldilocks) : QuinticGoldilocks :=
   let c := match folds with | (_, c0) :: _ => c0 | [] => 0
   let q := decodeQuad c
   let v0 := block.getD 0 CommRingOps.zero
@@ -1774,8 +1559,8 @@ def flatHemRawFold (stageIdx : Nat) (folds : List (WhirPub QuarticGoldilocks × 
   else
     flatHemFoldPoint hemFoldDom32 hemFoldDom16 q.2.1 q.2.2.1 q.2.2.2 pos v0 v1
 
-def flatHemFinalClaimViews (views : List (StageView QuarticGoldilocks))
-    (_αs : List QuarticGoldilocks) : QuarticGoldilocks :=
+def flatHemFinalClaimViews (views : List (StageView QuinticGoldilocks))
+    (_αs : List QuinticGoldilocks) : QuinticGoldilocks :=
   match views with
   | [v0, v1] =>
     let c0 := match v0.folds with | (_, c) :: _ => c | [] => 0
@@ -1793,7 +1578,7 @@ def flatHemFinalClaimViews (views : List (StageView QuarticGoldilocks))
   | _ => CommRingOps.zero
 
 /-- **`WhirEnv` for the two-stage `[CWYZ26]` schedule `flatHemSlicedSched`.** -/
-def flatHemSlicedEnv : WhirEnv QuarticGoldilocks where
+def flatHemSlicedEnv : WhirEnv QuinticGoldilocks where
   chalField := flatHemChalField
   chalPos := flatHemChalPos
   domPt i p :=
@@ -1809,15 +1594,15 @@ def flatHemSlicedEnv : WhirEnv QuarticGoldilocks where
   finalClaimViews := some flatHemFinalClaimViews
 
 /-- Computable Boolean witness test via `gsDecodeList`. -/
-def hasValidWitness (d A : Nat) (D : List QuarticGoldilocks)
-    (O : Nat → QuarticGoldilocks) (kernel : List QuarticGoldilocks)
-    (claim : QuarticGoldilocks) : Bool :=
+def hasValidWitness (d A : Nat) (D : List QuinticGoldilocks)
+    (O : Nat → QuinticGoldilocks) (kernel : List QuinticGoldilocks)
+    (claim : QuinticGoldilocks) : Bool :=
   (gsDecodeList d A D (lookupDomOracle D O)).any (fun P =>
     decide (ringDot P.coeffs kernel = claim))
 
 /-- Unordered-pair OOD collision check across a candidate list `cands`. -/
-def oodCollidesAux : List (GsUniPoly QuarticGoldilocks) →
-    QuarticGoldilocks → QuarticGoldilocks → Bool
+def oodCollidesAux : List (GsUniPoly QuinticGoldilocks) →
+    QuinticGoldilocks → QuinticGoldilocks → Bool
   | [], _, _ => false
   | P :: rest, z₀, z₁ =>
     rest.any (fun Q =>
@@ -1842,12 +1627,12 @@ private theorem hemFoldDom32_len : hemFoldDom32.length = 32 := by
   rw [hemFoldDom64_len] at h
   omega
 
-private theorem hasValidWitness_true_iff (d A : Nat) (D : List QuarticGoldilocks)
+private theorem hasValidWitness_true_iff (d A : Nat) (D : List QuinticGoldilocks)
     (hD : D.Nodup) (hdA : d + 1 ≤ A)
-    (O : Nat → QuarticGoldilocks) (kernel : List QuarticGoldilocks)
-    (claim : QuarticGoldilocks) :
+    (O : Nat → QuinticGoldilocks) (kernel : List QuinticGoldilocks)
+    (claim : QuinticGoldilocks) :
     hasValidWitness d A D O kernel claim = true ↔
-      ∃ Q : List QuarticGoldilocks, polyWitnessValid D A d O kernel claim Q = true := by
+      ∃ Q : List QuinticGoldilocks, polyWitnessValid D A d O kernel claim Q = true := by
   unfold hasValidWitness
   constructor
   · intro h
@@ -1862,7 +1647,7 @@ private theorem hasValidWitness_true_iff (d A : Nat) (D : List QuarticGoldilocks
     rw [polyWitnessValid_def] at hQ
     simp only [Bool.and_eq_true, decide_eq_true_eq] at hQ
     rw [hemCosetAgreeCount_eq_filter_lookup D O Q hD] at hQ
-    let P : GsUniPoly QuarticGoldilocks := GsUniPoly.ofCoeffs Q
+    let P : GsUniPoly QuinticGoldilocks := GsUniPoly.ofCoeffs Q
     have hPVal : P.coeffs = trimPoly Q := rfl
     have hPLen : P.coeffs.length ≤ d + 1 := by
       rw [hPVal]; exact Nat.le_trans (trimPoly_length_le Q) hQ.1.1
@@ -1876,12 +1661,12 @@ private theorem hasValidWitness_true_iff (d A : Nat) (D : List QuarticGoldilocks
       rw [hPVal, ringDot_trimPoly_eq]; exact hQ.2
     exact List.any_eq_true.mpr ⟨P, hPMem, decide_eq_true hPDot⟩
 
-private theorem hasValidWitness_false_imp (d A : Nat) (D : List QuarticGoldilocks)
+private theorem hasValidWitness_false_imp (d A : Nat) (D : List QuinticGoldilocks)
     (hD : D.Nodup) (hdA : d + 1 ≤ A)
-    (O : Nat → QuarticGoldilocks) (kernel : List QuarticGoldilocks)
-    (claim : QuarticGoldilocks)
+    (O : Nat → QuinticGoldilocks) (kernel : List QuinticGoldilocks)
+    (claim : QuinticGoldilocks)
     (hFalse : hasValidWitness d A D O kernel claim = false) :
-    ∀ Q : List QuarticGoldilocks, polyWitnessValid D A d O kernel claim Q = false := by
+    ∀ Q : List QuinticGoldilocks, polyWitnessValid D A d O kernel claim Q = false := by
   intro Q
   cases hQ : polyWitnessValid D A d O kernel claim Q with
   | false => rfl
@@ -1996,7 +1781,7 @@ theorem filter_range_length_qsum (p : Nat → Bool) (n : Nat) :
     ((List.range n).filter p).length = qsum n (fun i => if p i.val then 1 else 0) :=
   filter_range_eq_qsum p n
 
-private theorem agreeCount_flatHem_eq (table P : List QuarticGoldilocks) :
+private theorem agreeCount_flatHem_eq (table P : List QuinticGoldilocks) :
     agreeCount flatHemSlicedEnv 64 table P =
       hemCosetAgreeCount hemFoldDom64
         (interleaveOracle 32 (fun p => table.getD p CommRingOps.zero)) P := by
@@ -2166,12 +1951,12 @@ private theorem binom2_mono {a b : Nat} (h : a ≤ b) : binom2 a ≤ binom2 b :=
   rw [binom2_eq, binom2_eq]
   exact Nat.div_le_div_right (Nat.mul_le_mul h (Nat.sub_le_sub_right h 1))
 
-private theorem gsUniPoly_agree_pool_le {d : Nat} {P Q : GsUniPoly QuarticGoldilocks}
+private theorem gsUniPoly_agree_pool_le {d : Nat} {P Q : GsUniPoly QuinticGoldilocks}
     (hNe : P ≠ Q) (hP : P.coeffs.length ≤ d + 1) (hQ : Q.coeffs.length ≤ d + 1) :
     qsum flatHemQ (fun u =>
       if RoundPoly.evalCoeffs P.coeffs (hemFoldQg u.1) =
           RoundPoly.evalCoeffs Q.coeffs (hemFoldQg u.1) then 1 else 0) ≤ d := by
-  let pred : QuarticGoldilocks → Bool :=
+  let pred : QuinticGoldilocks → Bool :=
     fun z => decide (RoundPoly.evalCoeffs P.coeffs z = RoundPoly.evalCoeffs Q.coeffs z)
   have hQsumEq :
       qsum flatHemQ (fun u =>
@@ -2193,7 +1978,7 @@ private theorem gsUniPoly_agree_pool_le {d : Nat} {P Q : GsUniPoly QuarticGoldil
   rw [P.trimmed, Q.trimmed] at hTrim
   exact hNe (UPoly.ext hTrim)
 
-private theorem ood_pair_collision_le {d : Nat} {P Q : GsUniPoly QuarticGoldilocks}
+private theorem ood_pair_collision_le {d : Nat} {P Q : GsUniPoly QuinticGoldilocks}
     (hNe : P ≠ Q) (hP : P.coeffs.length ≤ d + 1) (hQ : Q.coeffs.length ≤ d + 1) :
     qsum flatHemQ (fun u => qsum flatHemQ (fun v =>
       if (decide (RoundPoly.evalCoeffs P.coeffs (hemFoldQg u.1) =
@@ -2265,7 +2050,7 @@ theorem qsum_any_le_mul {α : Type} (B M : Nat) (pred : α → Fin M → Bool) :
     exact Nat.le_trans hSum (Nat.add_le_add hx hr)
 
 private theorem oodCollidesAux_count_le (d : Nat) :
-    ∀ (cands : List (GsUniPoly QuarticGoldilocks)),
+    ∀ (cands : List (GsUniPoly QuinticGoldilocks)),
       cands.Nodup →
       (∀ P ∈ cands, P.coeffs.length ≤ d + 1) →
       qsum (flatHemQ * flatHemQ) (fun c =>
@@ -2317,7 +2102,7 @@ private theorem oodCollidesAux_count_le (d : Nat) :
     exact Nat.le_trans hSum (Nat.add_le_add hHead hTail)
 
 private theorem oodCollidesAux_false_unique :
-    ∀ (cands : List (GsUniPoly QuarticGoldilocks)) (z₀ z₁ y₀ y₁ : QuarticGoldilocks),
+    ∀ (cands : List (GsUniPoly QuinticGoldilocks)) (z₀ z₁ y₀ y₁ : QuinticGoldilocks),
       oodCollidesAux cands z₀ z₁ = false →
       ∀ P₁ ∈ cands, ∀ P₂ ∈ cands,
         RoundPoly.evalCoeffs P₁.coeffs z₀ = y₀ →
@@ -2374,8 +2159,8 @@ theorem combineClaim_eq_eval {F : Type} [LawfulCommRing F] (claim γ : F) (vs : 
     combineClaim claim γ vs = RoundPoly.evalCoeffs (claim :: vs) γ := by
   exact combineClaim_foldl_eq γ vs claim γ
 
-private theorem ringDot_evalVec6 (P : List QuarticGoldilocks) (hP : P.length ≤ 4)
-    (x : QuarticGoldilocks) :
+private theorem ringDot_evalVec6 (P : List QuinticGoldilocks) (hP : P.length ≤ 4)
+    (x : QuinticGoldilocks) :
     ringDot P (evalVec6 x) = RoundPoly.evalCoeffs P x := by
   unfold evalVec6
   dsimp only
@@ -2396,7 +2181,7 @@ private theorem ringDot_evalVec6 (P : List QuarticGoldilocks) (hP : P.length ≤
   · simp only [List.length_cons] at hP; omega
 
 private theorem ringDot_vecAdd6 :
-    ∀ (P u v : List QuarticGoldilocks), u.length = v.length →
+    ∀ (P u v : List QuinticGoldilocks), u.length = v.length →
       ringDot P (vecAdd6 u v) = CommRingOps.add (ringDot P u) (ringDot P v)
   | [], _, _, _ => by
     rw [ringDot_nil_left, ringDot_nil_left, ringDot_nil_left, LawfulCommRing.add_zero]
@@ -2411,8 +2196,8 @@ private theorem ringDot_vecAdd6 :
         ringDot_vecAdd6 cs as bs (Nat.succ.inj h)]
     constructive_ring
 
-private theorem ringDot_vecScale6 (s : QuarticGoldilocks) :
-    ∀ (P u : List QuarticGoldilocks),
+private theorem ringDot_vecScale6 (s : QuinticGoldilocks) :
+    ∀ (P u : List QuinticGoldilocks),
       ringDot P (vecScale6 s u) = CommRingOps.mul s (ringDot P u)
   | [], _ => by rw [ringDot_nil_left, ringDot_nil_left, LawfulCommRing.mul_zero]
   | _ :: _, [] => by
@@ -2423,13 +2208,13 @@ private theorem ringDot_vecScale6 (s : QuarticGoldilocks) :
     rw [ringDot_cons_cons, ringDot_cons_cons, ringDot_vecScale6 s cs as]
     constructive_ring
 
-private theorem combineKernel6_foldl_spec (γ : QuarticGoldilocks)
-    (P : List QuarticGoldilocks) (hP : P.length ≤ 4) :
-    ∀ (pts : List QuarticGoldilocks) (acc : List QuarticGoldilocks) (wt : QuarticGoldilocks),
+private theorem combineKernel6_foldl_spec (γ : QuinticGoldilocks)
+    (P : List QuinticGoldilocks) (hP : P.length ≤ 4) :
+    ∀ (pts : List QuinticGoldilocks) (acc : List QuinticGoldilocks) (wt : QuinticGoldilocks),
       acc.length = 6 →
-      ((pts.foldl (fun (st : List QuarticGoldilocks × QuarticGoldilocks) pt =>
+      ((pts.foldl (fun (st : List QuinticGoldilocks × QuinticGoldilocks) pt =>
           (vecAdd6 st.1 (vecScale6 st.2 (evalVec6 pt)), CommRingOps.mul st.2 γ)) (acc, wt)).1).length = 6 ∧
-      ringDot P (pts.foldl (fun (st : List QuarticGoldilocks × QuarticGoldilocks) pt =>
+      ringDot P (pts.foldl (fun (st : List QuinticGoldilocks × QuinticGoldilocks) pt =>
           (vecAdd6 st.1 (vecScale6 st.2 (evalVec6 pt)), CommRingOps.mul st.2 γ)) (acc, wt)).1 =
         CommRingOps.add (ringDot P acc)
           (CommRingOps.mul wt (RoundPoly.evalCoeffs (pts.map (RoundPoly.evalCoeffs P)) γ))
@@ -2453,8 +2238,8 @@ private theorem combineKernel6_foldl_spec (γ : QuarticGoldilocks)
         ringDot_vecScale6 wt P (evalVec6 pt), ringDot_evalVec6 P hP pt]
     constructive_ring
 
-private theorem evalCoeffs_zipWith_sub (γ : QuarticGoldilocks) :
-    ∀ (us vs : List QuarticGoldilocks), us.length = vs.length →
+private theorem evalCoeffs_zipWith_sub (γ : QuinticGoldilocks) :
+    ∀ (us vs : List QuinticGoldilocks), us.length = vs.length →
       RoundPoly.evalCoeffs (List.zipWith CommRingOps.sub us vs) γ =
         CommRingOps.sub (RoundPoly.evalCoeffs us γ) (RoundPoly.evalCoeffs vs γ)
   | [], [], _ => by
@@ -2467,9 +2252,9 @@ private theorem evalCoeffs_zipWith_sub (γ : QuarticGoldilocks) :
       evalCoeffs_zipWith_sub γ us vs (Nat.succ.inj h)]
     constructive_ring
 
-private theorem combineKernel6_diff_eval (K : List QuarticGoldilocks) (hK : K.length = 6)
-    (P : List QuarticGoldilocks) (hP : P.length ≤ 4)
-    (cl γ : QuarticGoldilocks) (pts vs : List QuarticGoldilocks) (hLen : pts.length = vs.length) :
+private theorem combineKernel6_diff_eval (K : List QuinticGoldilocks) (hK : K.length = 6)
+    (P : List QuinticGoldilocks) (hP : P.length ≤ 4)
+    (cl γ : QuinticGoldilocks) (pts vs : List QuinticGoldilocks) (hLen : pts.length = vs.length) :
     CommRingOps.sub (ringDot P (combineKernel6 K γ pts)) (combineClaim cl γ vs) =
       RoundPoly.evalCoeffs
         (CommRingOps.sub (ringDot P K) cl ::
@@ -2562,12 +2347,12 @@ theorem qsum_good_digits_le (n t B : Nat) (hn : 0 < n) (good : Nat → Bool)
   simp only [allGoodDigits_eq_range n hn]
   exact qsum_allGoodDigits_le n B hn good hgood t
 
-private theorem poly_roots_in_flatHemPool_le {k : Nat} (Δ : List QuarticGoldilocks)
+private theorem poly_roots_in_flatHemPool_le {k : Nat} (Δ : List QuinticGoldilocks)
     (hLen : Δ.length ≤ k + 1) (hNz : ∃ c ∈ Δ, c ≠ CommRingOps.zero) :
     qsum flatHemQ (fun gIdx =>
       if RoundPoly.evalCoeffs Δ (hemFoldQg gIdx.1) = CommRingOps.zero then 1 else 0) ≤ k := by
-  letI : NoZeroDivisors QuarticGoldilocks := LawfulField.toNoZeroDivisors QuarticGoldilocks
-  let pred : QuarticGoldilocks → Bool :=
+  letI : NoZeroDivisors QuinticGoldilocks := LawfulField.toNoZeroDivisors QuinticGoldilocks
+  let pred : QuinticGoldilocks → Bool :=
     fun z => decide (RoundPoly.evalCoeffs Δ z = CommRingOps.zero)
   have hQsumEq :
       qsum flatHemQ (fun gIdx =>
@@ -2584,8 +2369,8 @@ private theorem poly_roots_in_flatHemPool_le {k : Nat} (Δ : List QuarticGoldilo
     (fun z hz => of_decide_eq_true (List.mem_filter.mp hz).2)
 
 /-- Boolean RBR state function for `flatHemSlicedSched` across prefix lengths `0 .. 6`. -/
-def flatHemState (x : WhirStmt QuarticGoldilocks) :
-    List (WhirMsg QuarticGoldilocks × Nat) → Bool
+def flatHemState (x : WhirStmt QuinticGoldilocks) :
+    List (WhirMsg QuinticGoldilocks × Nat) → Bool
   | [] =>
     let O0 := interleaveOracle 32 (fun p => x.table.getD p CommRingOps.zero)
     hasValidWitness 5 40 hemFoldDom64 O0 flatHemInitKernel x.claim
@@ -2664,12 +2449,12 @@ def flatHemBad : Fin flatHemSlicedSched.numRounds → Nat
   | ⟨5, _⟩ => 2 ^ 10 * (11 ^ 46 * flatHemQ)
   | ⟨n + 6, h⟩ => by have h' : n + 6 < 6 := h; omega
 
-private theorem flatHem_round0_flips (x : WhirStmt QuarticGoldilocks)
-    (hDoomed : flatHemState x [] = false) (m0 : WhirMsg QuarticGoldilocks) :
+private theorem flatHem_round0_flips (x : WhirStmt QuinticGoldilocks)
+    (hDoomed : flatHemState x [] = false) (m0 : WhirMsg QuinticGoldilocks) :
     qsum (2 ^ 256) (fun ch => if flatHemState x [(m0, ch.1)] = true then 1 else 0) ≤
       2 ^ 8 * slicedFourChallengeCount 32 2 20 12 1 3 flatHemQ := by
   let O0 := interleaveOracle 32 (fun p => x.table.getD p CommRingOps.zero)
-  have hInv : ∀ Q : List QuarticGoldilocks,
+  have hInv : ∀ Q : List QuinticGoldilocks,
       polyWitnessValid hemFoldDom64 (2 * 20) (2 * 2 + 1) O0 flatHemInitKernel x.claim Q = false :=
     hasValidWitness_false_imp 5 40 hemFoldDom64 antipodal_64_32.nodup_in (by decide)
       O0 flatHemInitKernel x.claim (by unfold flatHemState at hDoomed; exact hDoomed)
@@ -2718,8 +2503,8 @@ private theorem flatHem_round0_flips (x : WhirStmt QuarticGoldilocks)
       exact hNo ⟨P, hP⟩)
   rwa [hemFoldDom32_len, flatHemPool_length] at hBound
 
-private theorem flatHem_round1_flips (x : WhirStmt QuarticGoldilocks)
-    (m0 m1 : WhirMsg QuarticGoldilocks) (c0 : Nat)
+private theorem flatHem_round1_flips (x : WhirStmt QuinticGoldilocks)
+    (m0 m1 : WhirMsg QuinticGoldilocks) (c0 : Nat)
     (hDoomed : flatHemState x [(m0, c0)] = false) :
     qsum (2 ^ 256) (fun ch => if flatHemState x [(m0, c0), (m1, ch.1)] = true then 1 else 0) ≤
       2 ^ 132 * (binom2 33 * 3 ^ 2) := by
@@ -2751,8 +2536,8 @@ private theorem flatHem_round1_flips (x : WhirStmt QuarticGoldilocks)
   exact Nat.le_trans (oodCollidesAux_count_le 3 cands hCandsNd hCandsDeg)
     (Nat.mul_le_mul_right 9 (binom2_mono hCandsLen))
 
-private theorem flatHem_round2_flips (x : WhirStmt QuarticGoldilocks)
-    (m0 m1 m2 : WhirMsg QuarticGoldilocks) (c0 c1 : Nat)
+private theorem flatHem_round2_flips (x : WhirStmt QuinticGoldilocks)
+    (m0 m1 m2 : WhirMsg QuinticGoldilocks) (c0 c1 : Nat)
     (hDoomed : flatHemState x [(m0, c0), (m1, c1)] = false) :
     qsum (2 ^ 256) (fun ch =>
       if flatHemState x [(m0, c0), (m1, c1), (m2, ch.1)] = true then 1 else 0) ≤
@@ -2805,10 +2590,10 @@ private theorem flatHem_round2_flips (x : WhirStmt QuarticGoldilocks)
       fun P hP => ((mem_gsDecodeList_iff _ antipodal_64_32.nodup_out (by decide) P).mp hP).1
     let M := 32 ^ 36 * flatHemQ
     have hMPos : 0 < M := Nat.mul_pos (Nat.pow_pos (by decide)) flatHemQ_pos
-    let ptsOf (qIdx : Nat) : List QuarticGoldilocks :=
+    let ptsOf (qIdx : Nat) : List QuinticGoldilocks :=
       [ood0.1, ood0.2] ++ (List.range 36).map (fun j =>
         hemFoldDom32.getD ((qIdx / 32 ^ j) % 32) CommRingOps.zero)
-    let vsOf (qIdx : Nat) : List QuarticGoldilocks :=
+    let vsOf (qIdx : Nat) : List QuinticGoldilocks :=
       m2.answers ++ (List.range 36).map (fun j => V0 ((qIdx / 32 ^ j) % 32))
     have hPtsVsLen : ∀ qIdx : Nat, (ptsOf qIdx).length = (vsOf qIdx).length := by
       intro qIdx
@@ -2837,13 +2622,13 @@ private theorem flatHem_round2_flips (x : WhirStmt QuarticGoldilocks)
       (fun qIdx gIdx => if cands.any (fun P => decide (ringDot P.coeffs
         (combineKernel6 K0' (hemFoldQg gIdx) (ptsOf qIdx)) =
         combineClaim cl0' (hemFoldQg gIdx) (vsOf qIdx))) = true then 1 else 0)]
-    let deltaOf (P : GsUniPoly QuarticGoldilocks) (qIdx : Nat) : List QuarticGoldilocks :=
+    let deltaOf (P : GsUniPoly QuinticGoldilocks) (qIdx : Nat) : List QuinticGoldilocks :=
       CommRingOps.sub (ringDot P.coeffs K0') cl0' ::
         List.zipWith (fun x y => CommRingOps.sub (RoundPoly.evalCoeffs P.coeffs x) y)
           (ptsOf qIdx) (vsOf qIdx)
-    let allZero (xs : List QuarticGoldilocks) : Bool :=
+    let allZero (xs : List QuinticGoldilocks) : Bool :=
       xs.all (fun z => decide (z = CommRingOps.zero))
-    let matchOod (P : GsUniPoly QuarticGoldilocks) : Bool :=
+    let matchOod (P : GsUniPoly QuinticGoldilocks) : Bool :=
       decide (RoundPoly.evalCoeffs P.coeffs ood0.1 = m2.answers.getD 0 CommRingOps.zero) &&
       decide (RoundPoly.evalCoeffs P.coeffs ood0.2 = m2.answers.getD 1 CommRingOps.zero)
     let evA (qIdx : Nat) : Bool :=
@@ -3078,8 +2863,8 @@ private theorem flatHem_round2_flips (x : WhirStmt QuarticGoldilocks)
     rw [qsum_congr hZero, qsum_const, Nat.mul_zero]
     exact Nat.zero_le _
 
-private theorem flatHem_round3_flips (x : WhirStmt QuarticGoldilocks)
-    (m0 m1 m2 m3 : WhirMsg QuarticGoldilocks) (c0 c1 c2 : Nat)
+private theorem flatHem_round3_flips (x : WhirStmt QuinticGoldilocks)
+    (m0 m1 m2 m3 : WhirMsg QuinticGoldilocks) (c0 c1 c2 : Nat)
     (hDoomed : flatHemState x [(m0, c0), (m1, c1), (m2, c2)] = false) :
     qsum (2 ^ 256) (fun ch =>
       if flatHemState x [(m0, c0), (m1, c1), (m2, c2), (m3, ch.1)] = true then 1 else 0) ≤
@@ -3105,7 +2890,7 @@ private theorem flatHem_round3_flips (x : WhirStmt QuarticGoldilocks)
       unfold flatHemState at hDoomed
       rw [decide_eq_true hWF, Bool.true_and] at hDoomed
       exact hDoomed
-    have hInv : ∀ Q : List QuarticGoldilocks,
+    have hInv : ∀ Q : List QuinticGoldilocks,
         polyWitnessValid hemFoldDom32 (2 * 10) (2 * 1 + 1) O1 K1 cl1 Q = false :=
       hasValidWitness_false_imp 3 20 hemFoldDom32 antipodal_32_16.nodup_in (by decide)
         O1 K1 cl1 hD3
@@ -3171,9 +2956,9 @@ private theorem flatHem_round3_flips (x : WhirStmt QuarticGoldilocks)
     exact Nat.zero_le _
 
 private theorem flatHem_stage_folded_eq
-    (D_in D_out : List QuarticGoldilocks) (i t n : Nat)
-    (raw : Nat → QuarticGoldilocks) (cFold cAns : Nat) (pub : WhirPub QuarticGoldilocks)
-    (tailVals : List QuarticGoldilocks)
+    (D_in D_out : List QuinticGoldilocks) (i t n : Nat)
+    (raw : Nat → QuinticGoldilocks) (cFold cAns : Nat) (pub : WhirPub QuinticGoldilocks)
+    (tailVals : List QuinticGoldilocks)
     (hi : (i = 0 ∧ D_in = hemFoldDom64 ∧ D_out = hemFoldDom32) ∨
           (i = 1 ∧ D_in = hemFoldDom32 ∧ D_out = hemFoldDom16)) :
     let qs := (List.range t).flatMap (fun j =>
@@ -3254,7 +3039,7 @@ private theorem list_append_congr {α : Type} {a₁ a₂ b₁ b₂ : List α}
   rw [h1, h2]
 
 private theorem flatHemQueries_eq {F : Type} [CommRingOps F] [DecidableEq F]
-    (a0 a1 a2 a3 a4 a5 : WhirPub QuarticGoldilocks × Nat) :
+    (a0 a1 a2 a3 a4 a5 : WhirPub QuinticGoldilocks × Nat) :
     whirQueries flatHemSlicedEnv flatHemSlicedSched [a0, a1, a2, a3, a4, a5] =
       ((List.range 36).flatMap (fun j =>
         [(0, flatHemChalPos a2.2 j 32), (0, flatHemChalPos a2.2 j 32 + 32)])) ++
@@ -3275,8 +3060,8 @@ private theorem flatHemQueries_eq {F : Type} [CommRingOps F] [DecidableEq F]
   simp only [flatHemSlicedEnv, hR2, List.map_cons, List.map_nil,
     Nat.zero_mul, Nat.add_zero, Nat.one_mul, List.append_nil]
 
-private theorem flatHem_verify_extract_final (x : WhirStmt QuarticGoldilocks)
-    (m0 m1 m2 m3 m4 m5 : WhirMsg QuarticGoldilocks) (c0 c1 c2 c3 c4 c5 : Nat)
+private theorem flatHem_verify_extract_final (x : WhirStmt QuinticGoldilocks)
+    (m0 m1 m2 m3 m4 m5 : WhirMsg QuinticGoldilocks) (c0 c1 c2 c3 c4 c5 : Nat)
     (hVer : (whirOracleIop flatHemSlicedEnv flatHemSlicedSched 256).verify x
       [(m0, c0), (m1, c1), (m2, c2), (m3, c3), (m4, c4), (m5, c5)] = true) :
     let O0 := interleaveOracle 32 (fun p => x.table.getD p CommRingOps.zero)
@@ -3327,7 +3112,7 @@ private theorem flatHem_verify_extract_final (x : WhirStmt QuarticGoldilocks)
       ((List.range 46).flatMap (fun j =>
         [flatHemChalPos c5 j 16, flatHemChalPos c5 j 16 + 16])).map
           (fun p => m1.table.getD p CommRingOps.zero) := by
-    rw [flatHemQueries_eq (F := QuarticGoldilocks), List.map_append]
+    rw [flatHemQueries_eq (F := QuinticGoldilocks), List.map_append]
     dsimp only
     refine list_append_congr ?_ ?_
     · generalize List.range 36 = l0
@@ -3474,8 +3259,8 @@ private theorem flatHem_verify_extract_final (x : WhirStmt QuarticGoldilocks)
     rw [ite_false_eq _ _ hm0] at hVerd
     exact absurd hVerd Bool.false_ne_true
 
-private theorem flatHem_verify_mod_c5 (x : WhirStmt QuarticGoldilocks)
-    (m0 m1 m2 m3 m4 m5 : WhirMsg QuarticGoldilocks) (c0 c1 c2 c3 c4 c5 : Nat) :
+private theorem flatHem_verify_mod_c5 (x : WhirStmt QuinticGoldilocks)
+    (m0 m1 m2 m3 m4 m5 : WhirMsg QuinticGoldilocks) (c0 c1 c2 c3 c4 c5 : Nat) :
     (whirOracleIop flatHemSlicedEnv flatHemSlicedSched 256).verify x
       [(m0, c0), (m1, c1), (m2, c2), (m3, c3), (m4, c4), (m5, c5)] =
     (whirOracleIop flatHemSlicedEnv flatHemSlicedSched 256).verify x
@@ -3498,7 +3283,7 @@ private theorem flatHem_verify_mod_c5 (x : WhirStmt QuarticGoldilocks)
          (⟨m2.poly, m2.answers⟩, c2), (⟨m3.poly, m3.answers⟩, c3),
          (⟨m4.poly, m4.answers⟩, c4),
          (⟨m5.poly, m5.answers⟩, c5 % (16 ^ 46 * flatHemQ))] := by
-    rw [flatHemQueries_eq (F := QuarticGoldilocks), flatHemQueries_eq (F := QuarticGoldilocks)]
+    rw [flatHemQueries_eq (F := QuinticGoldilocks), flatHemQueries_eq (F := QuinticGoldilocks)]
     refine list_append_congr rfl ?_
     generalize List.range 46 = js
     induction js with
@@ -3529,7 +3314,7 @@ private theorem flatHem_verify_mod_c5 (x : WhirStmt QuarticGoldilocks)
     | some p1 =>
       dsimp only [List.isEmpty, flatHemFinalClaimViews]
       rw [ite_true_eq _ _ rfl, ite_true_eq _ _ rfl]
-      have hFoldCongr : ∀ vals1 : List QuarticGoldilocks,
+      have hFoldCongr : ∀ vals1 : List QuinticGoldilocks,
           (List.range 46).map (fun j =>
             flatHemRawFold 1 [(⟨m3.poly, m3.answers⟩, c3)] j (flatHemChalPos c5 j 16)
               ((vals1.drop (j * 2)).take 2)) =
@@ -3544,8 +3329,8 @@ private theorem flatHem_verify_mod_c5 (x : WhirStmt QuarticGoldilocks)
       congr 1
       exact list_all_congr _ _ (fun jv => by simp only [hPosMod jv.1]) _
 
-private theorem flatHem_round5_flips (x : WhirStmt QuarticGoldilocks)
-    (m0 m1 m2 m3 m4 m5 : WhirMsg QuarticGoldilocks) (c0 c1 c2 c3 c4 : Nat)
+private theorem flatHem_round5_flips (x : WhirStmt QuinticGoldilocks)
+    (m0 m1 m2 m3 m4 m5 : WhirMsg QuinticGoldilocks) (c0 c1 c2 c3 c4 : Nat)
     (hDoomed : flatHemState x [(m0, c0), (m1, c1), (m2, c2), (m3, c3), (m4, c4)] = false) :
     qsum (2 ^ 256) (fun ch =>
       if flatHemState x [(m0, c0), (m1, c1), (m2, c2), (m3, c3), (m4, c4), (m5, ch.1)] = true
@@ -3867,12 +3652,12 @@ theorem flatHemSlicedCert_fold0_bad_pos :
   rw [slicedFourChallengeCount_def, JohnsonBound.johnsonBound_eq, JohnsonBound.johnsonBound_eq]
   decide +kernel
 
-private theorem flatHemFoldPoint_const_beta0 (D_in D_out : List QuarticGoldilocks)
-    (θ α : QuarticGoldilocks) (pos : Nat) (v : QuarticGoldilocks) :
+private theorem flatHemFoldPoint_const_beta0 (D_in D_out : List QuinticGoldilocks)
+    (θ α : QuinticGoldilocks) (pos : Nat) (v : QuinticGoldilocks) :
     flatHemFoldPoint D_in D_out θ α CommRingOps.zero pos v v = CommRingOps.mul α v := by
   unfold flatHemFoldPoint
   dsimp only
-  let two : QuarticGoldilocks := CommRingOps.add CommRingOps.one CommRingOps.one
+  let two : QuinticGoldilocks := CommRingOps.add CommRingOps.one CommRingOps.one
   have hTwoNz : two ≠ CommRingOps.zero := antipodal_64_32.two_ne_zero
   have hSub : CommRingOps.sub v v = CommRingOps.zero := LawfulCommRing.sub_self v
   have hAdd : CommRingOps.add v v = CommRingOps.mul two v := by
@@ -3884,10 +3669,10 @@ private theorem flatHemFoldPoint_const_beta0 (D_in D_out : List QuarticGoldilock
   constructive_ring
 
 private theorem flatHem_stage_folded_const
-    (i t n : Nat) (v : QuarticGoldilocks) (tbl : List QuarticGoldilocks)
+    (i t n : Nat) (v : QuinticGoldilocks) (tbl : List QuinticGoldilocks)
     (hTbl : ∀ p < 2 * n, tbl.getD p CommRingOps.zero = v)
-    (cFold cAns : Nat) (pub : WhirPub QuarticGoldilocks)
-    (tailVals : List QuarticGoldilocks)
+    (cFold cAns : Nat) (pub : WhirPub QuinticGoldilocks)
+    (tailVals : List QuinticGoldilocks)
     (hnPos : 0 < n)
     (hBeta0 : (decodeQuad cFold).2.2.2 = CommRingOps.zero) :
     let qs := (List.range t).flatMap (fun j =>
@@ -3898,7 +3683,7 @@ private theorem flatHem_stage_folded_const
         ((vals.drop (j * 2)).take 2)) =
     List.replicate t (CommRingOps.mul (decodeQuad cFold).2.2.1 v) := by
   dsimp only
-  have hMapEq : ∀ (k : Nat) (f : Nat → QuarticGoldilocks) (val : QuarticGoldilocks),
+  have hMapEq : ∀ (k : Nat) (f : Nat → QuinticGoldilocks) (val : QuinticGoldilocks),
       (∀ j < k, f j = val) → (List.range k).map f = List.replicate k val := by
     intro k f val hf
     induction k with
@@ -3959,8 +3744,8 @@ private theorem flatHem_stage_folded_const
   · rw [ite_true_eq _ _ hi, flatHemFoldPoint_const_beta0]
   · rw [ite_false_eq _ _ hi, flatHemFoldPoint_const_beta0]
 
-private theorem evalCoeffs_le_one {p : List QuarticGoldilocks} (hp : p.length ≤ 1)
-    (x : QuarticGoldilocks) :
+private theorem evalCoeffs_le_one {p : List QuinticGoldilocks} (hp : p.length ≤ 1)
+    (x : QuinticGoldilocks) :
     RoundPoly.evalCoeffs p x = p.getD 0 CommRingOps.zero := by
   rcases p with _ | ⟨c, _ | _⟩
   · rfl
@@ -3970,10 +3755,10 @@ private theorem evalCoeffs_le_one {p : List QuarticGoldilocks} (hp : p.length �
   · simp only [List.length_cons] at hp; omega
 
 private theorem flatHem_verify_const_eval
-    (v0 v1 cl0 : QuarticGoldilocks) (tbl1 : List QuarticGoldilocks)
+    (v0 v1 cl0 : QuinticGoldilocks) (tbl1 : List QuinticGoldilocks)
     (htbl1 : ∀ p < 32, tbl1.getD p CommRingOps.zero = v1)
-    (p0 p3 p4 : List QuarticGoldilocks)
-    (y0 y1 z0 z1 : QuarticGoldilocks)
+    (p0 p3 p4 : List QuinticGoldilocks)
+    (y0 y1 z0 z1 : QuinticGoldilocks)
     (c0 c1 c2 c3 c4 c5 : Nat)
     (hp0 : p0.length ≤ 5) (hp3 : p3.length ≤ 5) (hp4 : p4.length ≤ 1)
     (hBeta0 : (decodeQuad c0).2.2.2 = CommRingOps.zero)
@@ -4015,7 +3800,7 @@ private theorem flatHem_verify_const_eval
       (⟨[], [], [y0, y1]⟩, c2),
       (⟨[], p3, []⟩, c3),
       (⟨[], p4, []⟩, c4),
-      (⟨[], [], [z0, z1]⟩, c5)] : List (WhirMsg QuarticGoldilocks × Nat)).length =
+      (⟨[], [], [z0, z1]⟩, c5)] : List (WhirMsg QuinticGoldilocks × Nat)).length =
       flatHemSlicedSched.numRounds) = true := decide_eq_true rfl
   rw [hLen6, Bool.true_and]
   dsimp only [whirOracleIop, List.map]
@@ -4032,7 +3817,7 @@ private theorem flatHem_verify_const_eval
       ((List.range 46).flatMap (fun j =>
         [flatHemChalPos c5 j 16, flatHemChalPos c5 j 16 + 16])).map
           (fun p => tbl1.getD p CommRingOps.zero) := by
-    rw [flatHemQueries_eq (F := QuarticGoldilocks), List.map_append]
+    rw [flatHemQueries_eq (F := QuinticGoldilocks), List.map_append]
     dsimp only
     refine list_append_congr ?_ ?_
     · generalize List.range 36 = l0
@@ -4104,7 +3889,7 @@ private theorem flatHem_verify_const_eval
   dsimp only at hFolded0
   rw [show 2 ^ 1 = 2 from rfl, hFolded0,
       List.length_append, hLen0, hLen1,
-      show decide (([y0, y1] : List QuarticGoldilocks).length = 2) = true from rfl,
+      show decide (([y0, y1] : List QuinticGoldilocks).length = 2) = true from rfl,
       show decide (36 * 2 ≤ 36 * 2 + 46 * 2) = true from rfl,
       Bool.true_and, Bool.true_and]
   dsimp only [List.isEmpty]
@@ -4144,7 +3929,7 @@ private theorem flatHem_verify_const_eval
       · dsimp only [List.isEmpty]; exact ringDot_nil_left _
       · dsimp only [List.isEmpty]
         rw [ite_false_eq _ _ Bool.false_ne_true]
-        have hGetC : ([c] : List QuarticGoldilocks).getD 0 CommRingOps.zero = c := rfl
+        have hGetC : ([c] : List QuinticGoldilocks).getD 0 CommRingOps.zero = c := rfl
         rw [hGetC, hPhi1Zero]
         let K0' := flatHemKernelFold (decodeQuad c0).1 flatHemInitKernel
         have hK0Eq : K0' = [CommRingOps.one, CommRingOps.zero, CommRingOps.zero,
@@ -4156,7 +3941,7 @@ private theorem flatHem_verify_const_eval
           (List.range 36).map (fun j =>
             hemFoldDom32.getD (flatHemChalPos c2 j 32) CommRingOps.zero)
         let K1 := combineKernel6 K0' (flatHemChalField c2 36) pts
-        have hcLe4 : ([c] : List QuarticGoldilocks).length ≤ 4 := show 1 ≤ 4 by decide
+        have hcLe4 : ([c] : List QuinticGoldilocks).length ≤ 4 := show 1 ≤ 4 by decide
         have hSpec := combineKernel6_foldl_spec (flatHemChalField c2 36) [c] hcLe4
           pts K0' (flatHemChalField c2 36) hK0Len
         have hK1Len : K1.length = 6 := hSpec.1
@@ -4173,8 +3958,8 @@ private theorem flatHem_verify_const_eval
         have hPtsMap : pts.map (RoundPoly.evalCoeffs [c]) = List.replicate 38 c := by
           have hPtsLen : pts.length = 38 := by
             dsimp only [pts]; rw [List.length_append, List.length_map, List.length_range]; rfl
-          have hcLe1 : ([c] : List QuarticGoldilocks).length ≤ 1 := Nat.le_refl 1
-          have hConstMap : ∀ (l : List QuarticGoldilocks),
+          have hcLe1 : ([c] : List QuinticGoldilocks).length ≤ 1 := Nat.le_refl 1
+          have hConstMap : ∀ (l : List QuinticGoldilocks),
               l.map (RoundPoly.evalCoeffs [c]) = List.replicate l.length c := by
             intro l; induction l with
             | nil => rfl
@@ -4184,7 +3969,7 @@ private theorem flatHem_verify_const_eval
               rfl
           rw [hConstMap pts, hPtsLen]
         rw [hFold0Dot]
-        have hK1Unf : K1 = (pts.foldl (fun (acc : List QuarticGoldilocks × QuarticGoldilocks) pt =>
+        have hK1Unf : K1 = (pts.foldl (fun (acc : List QuinticGoldilocks × QuinticGoldilocks) pt =>
             (vecAdd6 acc.1 (vecScale6 acc.2 (evalVec6 pt)),
              CommRingOps.mul acc.2 (flatHemChalField c2 36)))
             (K0', flatHemChalField c2 36)).1 := rfl
@@ -4206,7 +3991,7 @@ private theorem flatHem_verify_const_eval
   unfold stageFoldRunAux
   dsimp only [Option.map, List.isEmpty]
   rw [show 2 ^ 1 = 2 from rfl, hFolded1, hLen1,
-      show decide (([z0, z1] : List QuarticGoldilocks).length = 2) = true from rfl,
+      show decide (([z0, z1] : List QuinticGoldilocks).length = 2) = true from rfl,
       show decide (46 * 2 ≤ 46 * 2) = true from rfl,
       Bool.true_and, Bool.true_and, ite_true_eq _ _ rfl,
       decide_eq_true (Nat.le_trans hp4 (by decide : 1 ≤ 3)), Bool.true_and,
@@ -4227,12 +4012,12 @@ private theorem flatHem_verify_const_eval
            else if 1 + 1 = 1 then halfDomPt hemFoldDom32 16 (flatHemChalPos c5 jv.1 16)
            else hemFoldDom16.getD (flatHemChalPos c5 jv.1 16) CommRingOps.zero) = jv.2)) =
       decide (cFin = f1) := by
-    have hEvalF : (fun jv : Nat × QuarticGoldilocks =>
+    have hEvalF : (fun jv : Nat × QuinticGoldilocks =>
         decide (RoundPoly.evalCoeffs p4
           (if 1 + 1 = 0 then halfDomPt hemFoldDom64 32 (flatHemChalPos c5 jv.1 16)
            else if 1 + 1 = 1 then halfDomPt hemFoldDom32 16 (flatHemChalPos c5 jv.1 16)
            else hemFoldDom16.getD (flatHemChalPos c5 jv.1 16) CommRingOps.zero) = jv.2)) =
-      (fun jv : Nat × QuarticGoldilocks => decide (cFin = jv.2)) := by
+      (fun jv : Nat × QuinticGoldilocks => decide (cFin = jv.2)) := by
       funext jv; rw [evalCoeffs_le_one hp4]
     rw [hEvalF]
     have hTail : ∀ (xs : List Nat), decide (cFin = f1) = true →
@@ -4358,7 +4143,7 @@ theorem flatHemSliced_false_accepted_once :
        (⟨[], [], []⟩, flatHemQ * (flatHemQ * flatHemQ)),
        (⟨[], [], []⟩, 0),
        (⟨[], [], [CommRingOps.zero, CommRingOps.zero]⟩, 0)] = false := by
-  have hNilTbl : ∀ p < 32, ([] : List QuarticGoldilocks).getD p CommRingOps.zero = CommRingOps.zero :=
+  have hNilTbl : ∀ p < 32, ([] : List QuinticGoldilocks).getD p CommRingOps.zero = CommRingOps.zero :=
     fun _ _ => rfl
   refine ⟨?_, ?_⟩
   · rw [flatHem_verify_const_eval (hemFoldQg 1) CommRingOps.zero (hemFoldQg 2) [] hNilTbl
@@ -4382,28 +4167,6 @@ schedules, so they are proved here, where the definitions can be unfolded.
 /-- A stage with its Johnson list size replaced by `1`. -/
 def dropListSize (s : WhirStage) : WhirStage := { s with listSize := 1 }
 
-/-- The deployed schedule with the Johnson list-size multipliers omitted. -/
-def deployedNoList : WhirVerifierSchedule :=
-  ⟨24, goldilocksExt4Card, goldilocksExt4Card_pos, deployedStages.map dropListSize⟩
-
-/-- `#tooth` The list size is load-bearing in every deployed stage: no stage's fold-round bound
-    survives replacing its list size by `1`. (A statement about each stage's fold bound; the
-    comparison of the two whole-schedule sums is not proved here.) -/
-theorem tooth_omitting_list_size_lowers_every_fold_bound :
-    ¬ (∃ s ∈ deployedSched.stages,
-        RatBound.le (s.foldBound goldilocksExt4Card goldilocksExt4Card_pos)
-          ((dropListSize s).foldBound goldilocksExt4Card goldilocksExt4Card_pos)) := by
-  have hSt : deployedSched.stages = deployedStages := rfl
-  rw [hSt, deployedStages_full_eq]
-  unfold RatBound.le WhirStage.foldBound dropListSize
-  decide +kernel
-
-/-- `#tooth` The schedule without list sizes fails the Johnson check. -/
-theorem tooth_omitting_list_size_fails_johnson_check :
-    ¬ (deployedNoList.johnsonOk = true) := by
-  simp only [WhirVerifierSchedule.johnsonOk, deployedNoList, deployedStages_full_eq,
-    List.map_cons, List.map_nil, dropListSize]
-  decide +kernel
 
 /-- First deployed stage with agreement `n / 2`, any slack `e / E` and any list size `L`. -/
 def beyondRadiusStage (e E L : Nat) : WhirStage :=
@@ -4627,12 +4390,10 @@ theorem whirOracleIop_verify_oneStage_noFold_eq {F : Type} [CommRingOps F] [Deci
 #verify_constructive Qsag.ClosedWhir.stagesRoundBounds_length
 #verify_constructive Qsag.ClosedWhir.dfm_sum_le
 #verify_constructive Qsag.ClosedWhir.whir_exec_closed_qrom_soundness
-#verify_constructive Qsag.ClosedWhir.deployedStages_eq
-#verify_constructive Qsag.ClosedWhir.deployedSched_johnsonOk
-#verify_constructive Qsag.ClosedWhir.deployedSched_numRounds
-#verify_constructive Qsag.ClosedWhir.deployedSched_error_at_2pow40
+
+
 #verify_constructive Qsag.ClosedWhir.scheduleQromError_mono
-#verify_constructive Qsag.ClosedWhir.deployed_whir_exec_closed_qrom_128
+
 #verify_constructive Qsag.ClosedWhir.sampledQuerySched_shape
 #verify_constructive Qsag.ClosedWhir.sampledQuery_verify_iff
 #verify_constructive Qsag.ClosedWhir.sampledQuery_query_round_flips
@@ -4653,8 +4414,7 @@ theorem whirOracleIop_verify_oneStage_noFold_eq {F : Type} [CommRingOps F] [Deci
 #verify_constructive Qsag.ClosedWhir.flatHemSliced_false_not_inLang
 #verify_constructive Qsag.ClosedWhir.flatHemSliced_false_accepted_once
 
-#verify_constructive Qsag.ClosedWhir.tooth_omitting_list_size_lowers_every_fold_bound
-#verify_constructive Qsag.ClosedWhir.tooth_omitting_list_size_fails_johnson_check
+
 #verify_constructive Qsag.ClosedWhir.tooth_beyond_johnson_radius_invalidates_certificate
 #verify_constructive Qsag.ClosedWhir.tooth_empty_schedule_rejects
 
@@ -4662,12 +4422,8 @@ theorem whirOracleIop_verify_oneStage_noFold_eq {F : Type} [CommRingOps F] [Deci
   Qsag.ClosedWhir.sampledQuery_false_not_inLang
 #tooth_pair Qsag.ClosedWhir.flatHemSliced_honest_accepts vs
   Qsag.ClosedWhir.flatHemSliced_false_not_inLang
-#tooth_pair Qsag.ClosedWhir.deployedSched_error_at_2pow40 vs
-  Qsag.ClosedWhir.tooth_omitting_list_size_lowers_every_fold_bound
-#tooth_pair Qsag.ClosedWhir.deployedSched_johnsonOk vs
-  Qsag.ClosedWhir.tooth_omitting_list_size_fails_johnson_check
-#tooth_pair Qsag.ClosedWhir.deployedSched_johnsonOk vs
-  Qsag.ClosedWhir.tooth_beyond_johnson_radius_invalidates_certificate
+
+
 #tooth_pair Qsag.ClosedWhir.whir_exec_closed_qrom_soundness vs
   Qsag.ClosedWhir.tooth_empty_schedule_rejects
 

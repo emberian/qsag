@@ -5,10 +5,10 @@ public section
 namespace Qsag
 open CommRingOps RoundPoly UPoly Poly3
 /-- **The cascade certificate beyond unique decoding, without a residual hypothesis.**
-    At `QuarticGoldilocks`, for `d₀ + 2 ≤ B < A₀ + 1` with `|D|·(d₀ + 2) < B²`, the
+    At `QuinticGoldilocks`, for `d₀ + 2 ≤ B < A₀ + 1` with `|D|·(d₀ + 2) < B²`, the
     interpolation count (4.5), `Wx + Dy ≤ m·(A₀ + 1)`, `1 ≤ Dy < p` and the
     Guruswami–Sudan dimension count. -/
-theorem hemCwyz26JohnsonCert_sliced (S domPts : List QuarticGoldilocks)
+theorem hemCwyz26JohnsonCert_sliced (S domPts : List QuinticGoldilocks)
     (d₀ A₀ B m Wx Dy m_gs listG : Nat) (hDom : domPts.Nodup) (hS : S.Nodup)
     (hCount : domPts.length * triCount 1 m Dy m < triCount (d₀ + 1) Wx Dy (Dy + 1))
     (hWA : Wx + Dy ≤ m * (A₀ + 1))
@@ -25,7 +25,7 @@ theorem hemCwyz26JohnsonCert_sliced (S domPts : List QuarticGoldilocks)
   hemCwyz26JohnsonCert S domPts d₀ A₀ m Wx Dy _ m_gs listG hDom hS hdA hAgDom hCount hWA
     (nonExcludedDecompBound_sliced domPts S (d₀ + 1) (A₀ + 1) B m Wx Dy hDom hS hCount
       (Nat.succ_le_succ (Nat.zero_le _)) hDy hB hDen hAB
-      (fun k h1 h2 => QuarticGoldilocks.natCast_ne_zero k h1 (Nat.lt_of_le_of_lt h2 hDyP)))
+      (fun k h1 h2 => QuinticGoldilocks.natCast_ne_zero k h1 (Nat.lt_of_le_of_lt h2 hDyP)))
     hGsDim
 
 
