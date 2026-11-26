@@ -1324,3 +1324,1330 @@ private theorem corduroySignLayersAuxWith_spec (eng : CorduroyPermEngine) (cfg :
 /-- **Standalone `Corduroy` Signing Completeness (`corduroyVerify_corduroySign`)**:
     Every signature produced by `corduroySign cfg sk msg r` under a valid TSW counter schedule
     passes `corduroyVerify cfg (corduroyDerivePk cfg sk) msg (corduroySign cfg sk msg r) = true`. -/
+theorem corduroyVerifyWith_corduroySignWith
+    (eng : CorduroyPermEngine) (cfg : CorduroyParams) (sk : CorduroySecretKey) (msg : Lane4) (r : CorduroySignRand)
+    (hValid : CorduroyValidGrindWith eng cfg sk msg r) :
+    corduroyVerifyWith eng cfg (corduroyDerivePkWith eng cfg sk) msg (corduroySignWith eng cfg sk msg r) = true := by
+  rcases hValid with ⟨hWf, hCtrsLen, hLayers⟩
+  have hUnpack : cfg.wotsChains ≤ 128 ∧ 0 < cfg.numLayers := by
+    unfold CorduroyParams.wellFormed at hWf
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+    exact ⟨hWf.1.1.1.1.1.1.1.1.1.1.2, hWf.1.1.1.1.1.1.1.2⟩
+  rcases hUnpack with ⟨hChainsLe, hLayersPos⟩
+  let pk := corduroyDerivePkWith eng cfg sk
+  let rRand := corduroyPrfMsgWith eng sk r.optRand msg
+  obtain ⟨hLeafLt, hForsIdxLen, hForsIdxBounds⟩ := corduroyHashMsgWith_bounds eng cfg rRand pk msg
+  let leafGlobalIdx := (corduroyHashMsgWith eng cfg rRand pk msg).1
+  let forsIndices := (corduroyHashMsgWith eng cfg rRand pk msg).2.1
+  obtain ⟨hForsOpsLen, hForsVer⟩ := corduroyVerifyForsTreesWith_honest eng cfg sk leafGlobalIdx forsIndices 0 hForsIdxBounds
+  have hRecFors : corduroyRecoverForsPkWith eng cfg pk.pkSeed leafGlobalIdx forsIndices
+      (corduroyBuildForsOpeningsWith eng cfg sk leafGlobalIdx 0 forsIndices) =
+      some (corduroyHonestForsPkWith eng cfg sk leafGlobalIdx) := by
+    unfold corduroyRecoverForsPkWith
+    have hSeed : pk.pkSeed = sk.pkSeed := rfl
+    rw [hSeed, hForsOpsLen, hForsIdxLen]
+    simp only [beq_self_eq_true, Bool.and_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+      hForsVer, Option.some.injEq]
+    unfold corduroyHonestForsPkWith
+    congr 1
+    rw [hForsIdxLen]
+    apply List.map_congr_left
+    intro t _; rw [Nat.zero_add]
+  have hAdapter :
+      ∀ (j : Nat) (hj : j < r.layerCtrs.length),
+        let L := 0 + j
+        let curRem := leafGlobalIdx / (2 ^ (j * cfg.subtreeHeight))
+        let kpL := curRem % (2 ^ cfg.subtreeHeight)
+        let trL := curRem / (2 ^ cfg.subtreeHeight)
+        let childRt := if j = 0 then corduroyHonestForsPkWith eng cfg sk leafGlobalIdx
+                       else corduroyHonestSubtreeRootWith eng cfg sk (L - 1) curRem
+        (r.layerCtrs[j]'hj) < 2 ^ 56 ∧
+        natListSum (corduroyExtractDigits cfg.wotsChains
+          (corduroyLayerHmsgWith eng pk L trL kpL (r.layerCtrs[j]'hj) childRt)) = cfg.targetSum := by
+    intro j hj
+    dsimp only [pk, rRand, leafGlobalIdx]
+    simpa only [Nat.zero_add] using hLayers j hj
+  obtain ⟨hSigLen, hHypVer⟩ := corduroySignLayersAuxWith_spec eng cfg sk pk rfl hChainsLe
+    r.layerCtrs 0 leafGlobalIdx (corduroyHonestForsPkWith eng cfg sk leafGlobalIdx) hAdapter
+  unfold corduroyVerifyWith corduroySignWith
+  dsimp only [pk, rRand, leafGlobalIdx, forsIndices]
+  rw [hSigLen, hCtrsLen, hWf]
+  simp only [beq_self_eq_true, Bool.and_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+  rw [hRecFors]
+  dsimp only
+  rw [hHypVer (by omega)]
+  dsimp only
+  rw [beq_iff_eq, Nat.zero_add, hCtrsLen]
+  have hTopTree : leafGlobalIdx / (2 ^ (cfg.numLayers * cfg.subtreeHeight)) = 0 :=
+    Nat.div_eq_of_lt hLeafLt
+  rw [hTopTree]
+  rfl
+
+theorem corduroyVerify_corduroySign
+    (cfg : CorduroyParams) (sk : CorduroySecretKey) (msg : Lane4) (r : CorduroySignRand)
+    (hValid : CorduroyValidGrind cfg sk msg r) :
+    corduroyVerify cfg (corduroyDerivePk cfg sk) msg (corduroySign cfg sk msg r) = true :=
+  corduroyVerifyWith_corduroySignWith corduroyPoseidon2Engine cfg sk msg r hValid
+
+theorem getD_map_range {α : Type} (f : Nat → α) (d : α) (n u : Nat) (hu : u < n) :
+    ((List.range n).map f).getD u d = f u := by
+  rw [List.getD_eq_getElem?_getD, List.getElem?_map, List.getElem?_range hu]
+  rfl
+
+/-! ## §2. Constructive `Corduroy` Multi-Target EUF-CMA Witness Extractor (`corduroy_euf_cma_extract`) -/
+
+/-- Constructively locate the first coordinate `idx` where two equal-length lists differ (`0 Classical.choice`). -/
+def findListDiffCoord {α : Type} [DecidableEq α] (xs ys : List α)
+    (hLen : xs.length = ys.length) (hNe : xs ≠ ys) :
+    { idx : Nat // ∃ (h1 : idx < xs.length) (h2 : idx < ys.length), xs[idx]'h1 ≠ ys[idx]'h2 } :=
+  match xs, ys with
+  | [], [] => False.elim (hNe rfl)
+  | _ :: _, [] => False.elim (Nat.succ_ne_zero _ hLen)
+  | [], _ :: _ => False.elim (Nat.succ_ne_zero _ hLen.symm)
+  | x :: xs', y :: ys' =>
+    if hxy : x = y then
+      have hTailNe : xs' ≠ ys' := fun hEq => hNe (by rw [hxy, hEq])
+      let ⟨i, hi⟩ := findListDiffCoord xs' ys' (Nat.succ.inj hLen) hTailNe
+      ⟨i + 1, by
+        rcases hi with ⟨h1, h2, hDiff⟩
+        exact ⟨Nat.succ_lt_succ h1, Nat.succ_lt_succ h2, by simpa using hDiff⟩⟩
+    else
+      ⟨0, ⟨Nat.zero_lt_succ _, Nat.zero_lt_succ _, by simpa using hxy⟩⟩
+termination_by structural xs
+
+/-- **Constructive Target-Sum Conservation Extractor (`findSmallerDigitCoord`)**:
+    Given `dsStar ≠ dsHon` of equal length with `natListSum dsStar ≤ natListSum dsHon`,
+    constructively (`0 Classical.choice`) extracts a coordinate `idx` with `dsStar[idx] < dsHon[idx]`. -/
+def findSmallerDigitCoord (dsStar dsHon : List Nat)
+    (hLen : dsStar.length = dsHon.length) (hNe : dsStar ≠ dsHon)
+    (hSum : natListSum dsStar ≤ natListSum dsHon) :
+    { idx : Nat // ∃ (h1 : idx < dsStar.length) (h2 : idx < dsHon.length), dsStar[idx]'h1 < dsHon[idx]'h2 } :=
+  match dsStar, dsHon with
+  | [], [] => False.elim (hNe rfl)
+  | _ :: _, [] => False.elim (Nat.succ_ne_zero _ hLen)
+  | [], _ :: _ => False.elim (Nat.succ_ne_zero _ hLen.symm)
+  | x :: xs, y :: ys =>
+    if hlt : x < y then
+      ⟨0, ⟨Nat.zero_lt_succ _, Nat.zero_lt_succ _, by simpa using hlt⟩⟩
+    else
+      have hTailNe : xs ≠ ys := fun hEq => by
+        have hxEq : x = y := by
+          dsimp only [natListSum] at hSum
+          rw [hEq] at hSum
+          omega
+        exact hNe (by rw [hxEq, hEq])
+      have hTailSum : natListSum xs ≤ natListSum ys := by
+        dsimp only [natListSum] at hSum
+        omega
+      let ⟨i, hi⟩ := findSmallerDigitCoord xs ys (Nat.succ.inj hLen) hTailNe hTailSum
+      ⟨i + 1, by
+        rcases hi with ⟨h1, h2, hDiff⟩
+        exact ⟨Nat.succ_lt_succ h1, Nat.succ_lt_succ h2, by simpa using hDiff⟩⟩
+termination_by structural dsStar
+
+/-- **WOTS+C Reused-Keypair Target-Sum Conservation (`wotsTargetSum_reused_smaller_digit`)**:
+    On any reused WOTS+C keypair with distinct digit vectors `dsStar ≠ dsHon` having equal sum
+    `targetSum`, there constructively exists a chain coordinate `idx` with `dsStar[idx] < dsHon[idx]`. -/
+def wotsTargetSum_reused_smaller_digit (targetSum : Nat) (dsStar dsHon : List Nat)
+    (hLen : dsStar.length = dsHon.length) (hNe : dsStar ≠ dsHon)
+    (hSumStar : natListSum dsStar = targetSum) (hSumHon : natListSum dsHon = targetSum) :
+    { idx : Nat // ∃ (h1 : idx < dsStar.length) (h2 : idx < dsHon.length), dsStar[idx]'h1 < dsHon[idx]'h2 } :=
+  findSmallerDigitCoord dsStar dsHon hLen hNe (by omega)
+
+private theorem natListSum_replicate (n k : Nat) :
+    natListSum (List.replicate n k) = k * n := by
+  induction n with
+  | zero => simp [natListSum]
+  | succ n ih =>
+    simp only [List.replicate_succ, natListSum, ih]
+    rw [Nat.mul_succ, Nat.add_comm]
+
+/-- Constructively extract a bounded witness `k < n` for a decidable predicate `P` (`0 Classical.choice`). -/
+def findBoundedDecidableWitness (P : Nat → Prop) [∀ k, Decidable (P k)] :
+    ∀ (n : Nat), (∃ k, k < n ∧ P k) → { k : Nat // k < n ∧ P k }
+  | 0, hEx => False.elim (by rcases hEx with ⟨_, hk, _⟩; exact Nat.not_lt_zero _ hk)
+  | n + 1, hEx =>
+    if hPn : P n then
+      ⟨n, ⟨Nat.lt_succ_self n, hPn⟩⟩
+    else
+      have hPrev : ∃ k, k < n ∧ P k := by
+        rcases hEx with ⟨k, hkLt, hPk⟩
+        rcases Nat.lt_succ_iff_lt_or_eq.mp hkLt with hkLt' | rfl
+        · exact ⟨k, hkLt', hPk⟩
+        · exact False.elim (hPn hPk)
+      let ⟨k, hkLt, hPk⟩ := findBoundedDecidableWitness P n hPrev
+      ⟨k, ⟨Nat.lt_succ_of_lt hkLt, hPk⟩⟩
+
+/-- Engine-parametric message-hash collision witness. -/
+structure CorduroyMsgHashCollisionWith (eng : CorduroyPermEngine) (cfg : CorduroyParams) where
+  r1             : Lane4
+  pk1            : CorduroyPublicKey
+  msg1           : Lane4
+  r2             : Lane4
+  pk2            : CorduroyPublicKey
+  msg2           : Lane4
+  distinctInputs : (r1, pk1, msg1) ≠ (r2, pk2, msg2)
+  sameLeafIdx    : (corduroyHashMsgWith eng cfg r1 pk1 msg1).1 = (corduroyHashMsgWith eng cfg r2 pk2 msg2).1
+  sameMsgDigest  : (corduroyHashMsgWith eng cfg r1 pk1 msg1).2.1 = (corduroyHashMsgWith eng cfg r2 pk2 msg2).2.1
+
+/-- **`Corduroy` Message-Hash Collision Witness (`CorduroyMsgHashCollision`)**:
+    Distinct `(R, pk, msg) ≠ (R', pk', msg')` mapping under `corduroyHashMsg` to the exact same
+    hypertree leaf index AND `k`-tree FORS message digest. -/
+structure CorduroyMsgHashCollision (cfg : CorduroyParams) where
+  r1             : Lane4
+  pk1            : CorduroyPublicKey
+  msg1           : Lane4
+  r2             : Lane4
+  pk2            : CorduroyPublicKey
+  msg2           : Lane4
+  distinctInputs : (r1, pk1, msg1) ≠ (r2, pk2, msg2)
+  sameLeafIdx    : (corduroyHashMsg cfg r1 pk1 msg1).1 = (corduroyHashMsg cfg r2 pk2 msg2).1
+  sameMsgDigest  : (corduroyHashMsg cfg r1 pk1 msg1).2.1 = (corduroyHashMsg cfg r2 pk2 msg2).2.1
+
+/-- Engine-parametric tweakable `Poseidon2` sponge collision witness. -/
+structure CorduroySpongeTweakCollisionWith (eng : CorduroyPermEngine) (pkSeed : Lane4) where
+  adrs1                : CorduroyAdrs
+  in1                  : List Lane4
+  adrs2                : CorduroyAdrs
+  in2                  : List Lane4
+  distinctTweakOrInput : (adrs1, in1) ≠ (adrs2, in2)
+  sameSpongeOutput     : corduroySpongeEvalWith eng pkSeed adrs1 in1 = corduroySpongeEvalWith eng pkSeed adrs2 in2
+
+/-- **`Corduroy` Tweakable Sponge Collision Witness (`CorduroySpongeTweakCollision`)**:
+    Distinct `(adrs1, in1) ≠ (adrs2, in2)` producing the identical 4-Goldilocks-limb `Lane4`
+    sponge output along the hypertree, FORS, `H_msg`, or WOTS+C `T_ℓ` compression. -/
+structure CorduroySpongeTweakCollision (pkSeed : Lane4) where
+  adrs1                : CorduroyAdrs
+  in1                  : List Lane4
+  adrs2                : CorduroyAdrs
+  in2                  : List Lane4
+  distinctTweakOrInput : (adrs1, in1) ≠ (adrs2, in2)
+  sameSpongeOutput     : corduroySpongeEval pkSeed adrs1 in1 = corduroySpongeEval pkSeed adrs2 in2
+
+/-- Engine-parametric WOTS+C / FORS chain link preimage inversion witness (`dStar < dHonest`). -/
+structure CorduroyWotsChainPreimageWith (eng : CorduroyPermEngine) (sk : CorduroySecretKey) where
+  adrs                : CorduroyAdrs
+  dStar               : Nat
+  dHonest             : Nat
+  candAtDStar         : Lane4
+  preimageLink        : Lane4
+  targetLink          : Lane4
+  stepStrictlyEarlier : dStar < dHonest
+  spongePreimageEq    : corduroySpongeEvalWith eng sk.pkSeed adrs [preimageLink] = targetLink
+  honestChainMatch    :
+    (∃ layer treeIdx kpIdx chainIdx,
+      dHonest ≤ 3 ∧
+      adrs = wotsStepAdrs layer treeIdx kpIdx chainIdx (dHonest - 1) ∧
+      corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dStar (dHonest - 1 - dStar) candAtDStar = preimageLink ∧
+      preimageLink = corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 (dHonest - 1)
+        (corduroyWotsSecretWith eng sk layer treeIdx kpIdx chainIdx) ∧
+      targetLink = corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 dHonest
+        (corduroyWotsSecretWith eng sk layer treeIdx kpIdx chainIdx)) ∨
+    (∃ leafGlobalIdx treeJ leafIdx,
+      dStar = 0 ∧ dHonest = 1 ∧
+      adrs = forsLeafAdrs leafGlobalIdx treeJ leafIdx ∧
+      candAtDStar = preimageLink ∧
+      preimageLink = corduroyForsSecretWith eng sk leafGlobalIdx treeJ leafIdx ∧
+      targetLink = corduroyHonestForsLeafWith eng sk leafGlobalIdx treeJ leafIdx)
+
+/-- **`Corduroy` Chain Preimage Inversion Witness (`CorduroyWotsChainPreimage`)**:
+    Explicit chain link inversion `dStar < dHonest` where `preimageLink` (computed constructively
+    from the adversary's forged signature link `candAtDStar`) satisfies
+    `corduroySpongeEval sk.pkSeed adrs [preimageLink] = targetLink` against an unrevealed link `< dHonest`. -/
+structure CorduroyWotsChainPreimage (sk : CorduroySecretKey) where
+  adrs                : CorduroyAdrs
+  dStar               : Nat
+  dHonest             : Nat
+  candAtDStar         : Lane4
+  preimageLink        : Lane4
+  targetLink          : Lane4
+  stepStrictlyEarlier : dStar < dHonest
+  spongePreimageEq    : corduroySpongeEval sk.pkSeed adrs [preimageLink] = targetLink
+  honestChainMatch    :
+    (∃ layer treeIdx kpIdx chainIdx,
+      dHonest ≤ 3 ∧
+      adrs = wotsStepAdrs layer treeIdx kpIdx chainIdx (dHonest - 1) ∧
+      corduroyChainIter sk.pkSeed layer treeIdx kpIdx chainIdx dStar (dHonest - 1 - dStar) candAtDStar = preimageLink ∧
+      preimageLink = corduroyChainIter sk.pkSeed layer treeIdx kpIdx chainIdx 0 (dHonest - 1)
+        (corduroyWotsSecret sk layer treeIdx kpIdx chainIdx) ∧
+      targetLink = corduroyChainIter sk.pkSeed layer treeIdx kpIdx chainIdx 0 dHonest
+        (corduroyWotsSecret sk layer treeIdx kpIdx chainIdx)) ∨
+    (∃ leafGlobalIdx treeJ leafIdx,
+      dStar = 0 ∧ dHonest = 1 ∧
+      adrs = forsLeafAdrs leafGlobalIdx treeJ leafIdx ∧
+      candAtDStar = preimageLink ∧
+      preimageLink = corduroyForsSecret sk leafGlobalIdx treeJ leafIdx ∧
+      targetLink = corduroyHonestForsLeaf sk leafGlobalIdx treeJ leafIdx)
+
+inductive CorduroyBreakWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (sk : CorduroySecretKey) : Type where
+  | msgHashCollision    : CorduroyMsgHashCollisionWith eng cfg → CorduroyBreakWith eng cfg pk sk
+  | spongeTweakCollision : CorduroySpongeTweakCollisionWith eng pk.pkSeed → CorduroyBreakWith eng cfg pk sk
+  | wotsChainPreimage   : CorduroyWotsChainPreimageWith eng sk → CorduroyBreakWith eng cfg pk sk
+
+/-- **Constructive 3-Way `Corduroy` Security Break Sum (`CorduroyBreak : Type`)**:
+    Lives in `Type` (`0 Classical.choice`) and constructively identifies an explicit
+    `msgHashCollision`, `spongeTweakCollision`, or `wotsChainPreimage` witness. -/
+inductive CorduroyBreak (cfg : CorduroyParams) (pk : CorduroyPublicKey) (sk : CorduroySecretKey) : Type where
+  | msgHashCollision    : CorduroyMsgHashCollision cfg → CorduroyBreak cfg pk sk
+  | spongeTweakCollision : CorduroySpongeTweakCollision pk.pkSeed → CorduroyBreak cfg pk sk
+  | wotsChainPreimage   : CorduroyWotsChainPreimage sk → CorduroyBreak cfg pk sk
+
+/-- Explicit `PSum` view of `CorduroyBreak` (`PSum` of the three concrete `Poseidon2`/sponge problems). -/
+def CorduroyBreak.toPSum {cfg : CorduroyParams} {pk : CorduroyPublicKey} {sk : CorduroySecretKey} :
+    CorduroyBreak cfg pk sk →
+      PSum (CorduroyMsgHashCollision cfg)
+        (PSum (CorduroySpongeTweakCollision pk.pkSeed) (CorduroyWotsChainPreimage sk))
+  | .msgHashCollision w    => .inl w
+  | .spongeTweakCollision w => .inr (.inl w)
+  | .wotsChainPreimage w   => .inr (.inr w)
+
+private def CorduroyBreakWith.toCanonical {cfg : CorduroyParams} {pk : CorduroyPublicKey} {sk : CorduroySecretKey} :
+    CorduroyBreakWith corduroyPoseidon2Engine cfg pk sk → CorduroyBreak cfg pk sk
+  | .msgHashCollision w =>
+    .msgHashCollision
+      { r1 := w.r1, pk1 := w.pk1, msg1 := w.msg1
+        r2 := w.r2, pk2 := w.pk2, msg2 := w.msg2
+        distinctInputs := w.distinctInputs
+        sameLeafIdx := w.sameLeafIdx
+        sameMsgDigest := w.sameMsgDigest }
+  | .spongeTweakCollision w =>
+    .spongeTweakCollision
+      { adrs1 := w.adrs1, in1 := w.in1
+        adrs2 := w.adrs2, in2 := w.in2
+        distinctTweakOrInput := w.distinctTweakOrInput
+        sameSpongeOutput := w.sameSpongeOutput }
+  | .wotsChainPreimage w =>
+    .wotsChainPreimage
+      { adrs := w.adrs, dStar := w.dStar, dHonest := w.dHonest
+        candAtDStar := w.candAtDStar, preimageLink := w.preimageLink, targetLink := w.targetLink
+        stepStrictlyEarlier := w.stepStrictlyEarlier
+        spongePreimageEq := w.spongePreimageEq
+        honestChainMatch := w.honestChainMatch }
+
+/-- Oracle signing query record `(msg, rand, sig)` in the `q_sig`-query EUF-CMA game. -/
+structure CorduroySignedQuery where
+  msg  : Lane4
+  rand : CorduroySignRand
+  sig  : CorduroySig
+  deriving DecidableEq, Repr
+
+/-- Honesty invariant of the `q_sig` signing oracle transcript:
+    1. Every query signature `q.sig` was generated by `corduroySign` under a valid counter grind;
+    2. Deterministic layer counter search (`tsw_baggy.rs:413-418`): any two queries visiting the
+       same static subtree keypair `(L, remL)` grind the identical deterministic counter `layerCtrs[L]`. -/
+def CorduroyQuerySetHonestWith (eng : CorduroyPermEngine) (cfg : CorduroyParams) (sk : CorduroySecretKey)
+    (queries : List CorduroySignedQuery) : Prop :=
+  let pk := corduroyDerivePkWith eng cfg sk
+  (∀ q ∈ queries,
+    q.sig = corduroySignWith eng cfg sk q.msg q.rand ∧
+    CorduroyValidGrindWith eng cfg sk q.msg q.rand) ∧
+  (∀ q1 ∈ queries, ∀ q2 ∈ queries, ∀ (L : Nat) (h1 : L < q1.rand.layerCtrs.length) (h2 : L < q2.rand.layerCtrs.length),
+    (corduroyHashMsgWith eng cfg q1.sig.rRand pk q1.msg).1 / (2 ^ (L * cfg.subtreeHeight)) =
+      (corduroyHashMsgWith eng cfg q2.sig.rRand pk q2.msg).1 / (2 ^ (L * cfg.subtreeHeight)) →
+    q1.rand.layerCtrs[L]'h1 = q2.rand.layerCtrs[L]'h2)
+
+def CorduroyQuerySetHonest (cfg : CorduroyParams) (sk : CorduroySecretKey)
+    (queries : List CorduroySignedQuery) : Prop :=
+  CorduroyQuerySetHonestWith corduroyPoseidon2Engine cfg sk queries
+
+/-- Multi-target FORS subset non-covering predicate at `leafGlobalIdx`:
+    either some query already collided with `(leafGlobalIdx, forsIndices)` on `H_msg`, OR there exists
+    a FORS tree `j < forsIndices.length` whose selected leaf `forsIndices[j]` was not opened by any
+    query hitting `leafGlobalIdx` (holds unconditionally whenever `≤ 1` query hits `leafGlobalIdx`!). -/
+def CorduroyForsUncoveredOrCollidingWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (queries : List CorduroySignedQuery)
+    (leafGlobalIdx : Nat) (forsIndices : List Nat) : Prop :=
+  (∃ q ∈ queries,
+    (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx ∧
+    (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1 = forsIndices) ∨
+  (∃ k, k < forsIndices.length ∧
+    ∀ q ∈ queries,
+      (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx →
+      (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1.getD k 0 ≠ forsIndices.getD k 0)
+
+def CorduroyForsUncoveredOrColliding (cfg : CorduroyParams) (pk : CorduroyPublicKey)
+    (queries : List CorduroySignedQuery) (leafGlobalIdx : Nat) (forsIndices : List Nat) : Prop :=
+  CorduroyForsUncoveredOrCollidingWith corduroyPoseidon2Engine cfg pk queries leafGlobalIdx forsIndices
+
+/-- **Unconditional Single-Hit FORS Non-Covering Theorem (`corduroy_single_leaf_hit_uncovered`)**:
+    Whenever at most ONE query in `queries` mapped to `leafGlobalIdx`, `CorduroyForsUncoveredOrColliding`
+    holds **unconditionally** (zero subset-covering failure probability!). -/
+theorem corduroy_single_leaf_hit_uncovered_with (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (queries : List CorduroySignedQuery)
+    (leafGlobalIdx : Nat) (forsIndices : List Nat)
+    (hForsPos : 0 < cfg.forsTrees) (hForsLen : forsIndices.length = cfg.forsTrees)
+    (hAtMostOne : (queries.filter (fun q => (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 == leafGlobalIdx)).length ≤ 1) :
+    CorduroyForsUncoveredOrCollidingWith eng cfg pk queries leafGlobalIdx forsIndices := by
+  let hits := queries.filter (fun q => (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 == leafGlobalIdx)
+  have hMemHits : ∀ q ∈ queries, (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx → q ∈ hits := by
+    intro q hMem hEq
+    exact List.mem_filter.mpr ⟨hMem, beq_iff_eq.mpr hEq⟩
+  cases hHitsEq : hits with
+  | nil =>
+    right
+    refine ⟨0, by omega, ?_⟩
+    intro q hMem hLeaf
+    have hIn := hMemHits q hMem hLeaf
+    rw [hHitsEq] at hIn
+    exact False.elim (List.not_mem_nil hIn)
+  | cons q0 restHits =>
+    cases restHits with
+    | cons _ _ =>
+      exfalso
+      change hits.length ≤ 1 at hAtMostOne
+      rw [hHitsEq] at hAtMostOne
+      simp only [List.length_cons] at hAtMostOne
+      omega
+    | nil =>
+      have hq0Mem : q0 ∈ queries ∧ (corduroyHashMsgWith eng cfg q0.sig.rRand pk q0.msg).1 = leafGlobalIdx := by
+        have hIn : q0 ∈ hits := by rw [hHitsEq]; exact List.mem_cons_self ..
+        obtain ⟨hm, hb⟩ := List.mem_filter.mp hIn
+        exact ⟨hm, beq_iff_eq.mp hb⟩
+      let qIdxs := (corduroyHashMsgWith eng cfg q0.sig.rRand pk q0.msg).2.1
+      by_cases hSameIdxs : qIdxs = forsIndices
+      · left
+        exact ⟨q0, hq0Mem.1, hq0Mem.2, hSameIdxs⟩
+      · right
+        have hqLen : qIdxs.length = forsIndices.length :=
+          (corduroyHashMsgWith_bounds eng cfg q0.sig.rRand pk q0.msg).2.1.trans hForsLen.symm
+        obtain ⟨idx, h1, h2, hDiff⟩ := findListDiffCoord qIdxs forsIndices hqLen hSameIdxs
+        refine ⟨idx, h2, ?_⟩
+        intro q hMem hLeaf
+        have hIn := hMemHits q hMem hLeaf
+        rw [hHitsEq, List.mem_singleton] at hIn
+        subst hIn
+        have hgd1 : qIdxs.getD idx 0 = qIdxs[idx]'h1 := by
+          rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h1]; rfl
+        have hgd2 : forsIndices.getD idx 0 = forsIndices[idx]'h2 := by
+          rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h2]; rfl
+        change qIdxs.getD idx 0 ≠ forsIndices.getD idx 0
+        rw [hgd1, hgd2]
+        exact hDiff
+
+private def extractForwardChainCollisionWith (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (layer treeIdx kpIdx chainIdx : Nat) (steps startStep : Nat) (u1 u2 : Lane4)
+    (hNe : u1 ≠ u2)
+    (hEq : corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep steps u1 =
+      corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep steps u2) :
+    CorduroySpongeTweakCollisionWith eng pkSeed :=
+  match steps with
+  | 0 => False.elim (hNe hEq)
+  | steps' + 1 =>
+    let v1 := corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep u1
+    let v2 := corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep u2
+    if hv : v1 = v2 then
+      { adrs1 := wotsStepAdrs layer treeIdx kpIdx chainIdx startStep
+        in1   := [u1]
+        adrs2 := wotsStepAdrs layer treeIdx kpIdx chainIdx startStep
+        in2   := [u2]
+        distinctTweakOrInput := fun hPair => by
+          injection hPair with _ hIn
+          injection hIn with hU _
+          exact hNe hU
+        sameSpongeOutput := by
+          rw [← corduroyWotsStepWith_eq, ← corduroyWotsStepWith_eq]
+          exact hv }
+    else
+      extractForwardChainCollisionWith eng pkSeed layer treeIdx kpIdx chainIdx steps' (startStep + 1) v1 v2 hv
+        (by rw [corduroyChainIterWith_succ, corduroyChainIterWith_succ] at hEq; exact hEq)
+termination_by structural steps
+
+private theorem chainIterWith_one (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (layer treeIdx kpIdx chainIdx startStep : Nat) (val : Lane4) :
+    corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep 1 val =
+      corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep val := by
+  rw [corduroyChainIterWith_succ, corduroyChainIterWith_zero]
+
+private def extractEarlierDigitBreakWith (eng : CorduroyPermEngine) (sk : CorduroySecretKey)
+    (pkSeed : Lane4) (hSeed : pkSeed = sk.pkSeed)
+    (layer treeIdx kpIdx chainIdx dStar dHonest : Nat) (chStar : Lane4)
+    (hdLt : dStar < dHonest) (hdHonLe : dHonest ≤ 3)
+    (hPeakEq : corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx dStar (3 - dStar) chStar =
+      corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 3
+        (corduroyWotsSecretWith eng sk layer treeIdx kpIdx chainIdx)) :
+    PSum (CorduroySpongeTweakCollisionWith eng pkSeed) (CorduroyWotsChainPreimageWith eng sk) :=
+  let sec := corduroyWotsSecretWith eng sk layer treeIdx kpIdx chainIdx
+  let advPre := corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dStar (dHonest - 1 - dStar) chStar
+  let honPre := corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 (dHonest - 1) sec
+  let advAtHon := corduroyWotsStepWith eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - 1) advPre
+  let honAtHon := corduroyWotsStepWith eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - 1) honPre
+  have hPeakSk : corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dStar (3 - dStar) chStar =
+      corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 3 sec := by
+    dsimp only [sec]
+    rw [hSeed] at hPeakEq
+    exact hPeakEq
+  have hAdv1 : advAtHon = corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dStar (dHonest - dStar) chStar := by
+    have hAdd := corduroyChainIterWith_add eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - 1 - dStar) 1 dStar chStar
+    rw [show dStar + (dHonest - 1 - dStar) = dHonest - 1 by omega,
+        show (dHonest - 1 - dStar) + 1 = dHonest - dStar by omega,
+        chainIterWith_one] at hAdd
+    exact hAdd
+  have hAdv2 : corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) advAtHon =
+      corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dStar (3 - dStar) chStar := by
+    have hAdd := corduroyChainIterWith_add eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - dStar) (3 - dHonest) dStar chStar
+    rw [show dStar + (dHonest - dStar) = dHonest by omega,
+        show (dHonest - dStar) + (3 - dHonest) = 3 - dStar by omega,
+        ← hAdv1] at hAdd
+    exact hAdd
+  have hHon1 : honAtHon = corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 dHonest sec := by
+    have hAdd := corduroyChainIterWith_add eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - 1) 1 0 sec
+    rw [Nat.zero_add, show (dHonest - 1) + 1 = dHonest by omega, chainIterWith_one] at hAdd
+    exact hAdd
+  have hHon2 : corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) honAtHon =
+      corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 3 sec := by
+    have hAdd := corduroyChainIterWith_add eng sk.pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) 0 sec
+    rw [Nat.zero_add, show dHonest + (3 - dHonest) = 3 by omega, ← hHon1] at hAdd
+    exact hAdd
+  have hTailEq : corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) advAtHon =
+      corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) honAtHon := by
+    rw [hSeed]
+    exact (hAdv2.trans hPeakSk).trans hHon2.symm
+  if hAtEq : advAtHon = honAtHon then
+    if hPreEq : advPre = honPre then
+      .inr
+        { adrs := wotsStepAdrs layer treeIdx kpIdx chainIdx (dHonest - 1)
+          dStar := dStar
+          dHonest := dHonest
+          candAtDStar := chStar
+          preimageLink := advPre
+          targetLink := honAtHon
+          stepStrictlyEarlier := hdLt
+          spongePreimageEq := by
+            rw [← corduroyWotsStepWith_eq]
+            exact hAtEq
+          honestChainMatch := Or.inl ⟨layer, treeIdx, kpIdx, chainIdx, hdHonLe, rfl, rfl, hPreEq, hHon1⟩ }
+    else
+      .inl
+        { adrs1 := wotsStepAdrs layer treeIdx kpIdx chainIdx (dHonest - 1)
+          in1   := [advPre]
+          adrs2 := wotsStepAdrs layer treeIdx kpIdx chainIdx (dHonest - 1)
+          in2   := [honPre]
+          distinctTweakOrInput := fun hPair => by
+            injection hPair with _ hIn
+            injection hIn with hU _
+            exact hPreEq hU
+          sameSpongeOutput := by
+            rw [hSeed, ← corduroyWotsStepWith_eq, ← corduroyWotsStepWith_eq]
+            exact hAtEq }
+  else
+    .inl (extractForwardChainCollisionWith eng pkSeed layer treeIdx kpIdx chainIdx (3 - dHonest) dHonest advAtHon honAtHon hAtEq hTailEq)
+
+private theorem corduroyRecoverPeaksWith_getD (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (layer treeIdx kpIdx : Nat) (digits : List Nat) (chains : List Lane4) (startC i : Nat)
+    (hLen : chains.length = digits.length) (hi : i < digits.length) :
+    (corduroyRecoverPeaksWith eng pkSeed layer treeIdx kpIdx startC digits chains).getD i lane4Zero =
+      corduroyChainIterWith eng pkSeed layer treeIdx kpIdx (startC + i)
+        (digits.getD i 0) (3 - digits.getD i 0) (chains.getD i lane4Zero) := by
+  induction digits generalizing startC chains i with
+  | nil => exact absurd hi (Nat.not_lt_zero i)
+  | cons d ds ih =>
+    cases chains with
+    | nil => exact absurd hLen (by simp only [List.length_cons, List.length_nil]; omega)
+    | cons ch chs =>
+      cases i with
+      | zero =>
+        simp only [corduroyRecoverPeaksWith, List.getD_cons_zero, Nat.add_zero]
+      | succ i' =>
+        simp only [corduroyRecoverPeaksWith, List.getD_cons_succ]
+        rw [ih chs (startC + 1) i' (Nat.succ.inj hLen) (Nat.lt_of_succ_lt_succ hi)]
+        have hAssoc : (startC + 1) + i' = startC + (i' + 1) := by omega
+        rw [hAssoc]
+
+private def extractMerkleWalkCollisionWith (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (mkAdrs : Nat → Nat → CorduroyAdrs) (leafFn : Nat → Lane4)
+    (path : List Lane4) (lvl idx : Nat) (cur : Lane4)
+    (hCurNe : cur ≠ computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn lvl idx)
+    (hRootEq : walkCorduroyMerklePathWith eng pkSeed mkAdrs lvl idx cur path =
+      computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn (lvl + path.length) (idx / (2 ^ path.length))) :
+    CorduroySpongeTweakCollisionWith eng pkSeed :=
+  match path with
+  | [] =>
+    False.elim (hCurNe (by
+      dsimp only [walkCorduroyMerklePathWith, List.length_nil] at hRootEq
+      rw [Nat.add_zero, Nat.pow_zero, Nat.div_one] at hRootEq
+      exact hRootEq))
+  | sib :: rest =>
+    let parentIdx  := idx / 2
+    let leftStar   := if idx % 2 == 0 then cur else sib
+    let rightStar  := if idx % 2 == 0 then sib else cur
+    let parentStar := corduroyMerkleHashWith eng pkSeed (mkAdrs lvl parentIdx) leftStar rightStar
+    let honLeft    := computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn lvl (2 * parentIdx)
+    let honRight   := computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn lvl (2 * parentIdx + 1)
+    let honParent  := computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn (lvl + 1) parentIdx
+    have hWalkStep : walkCorduroyMerklePathWith eng pkSeed mkAdrs lvl idx cur (sib :: rest) =
+        walkCorduroyMerklePathWith eng pkSeed mkAdrs (lvl + 1) parentIdx parentStar rest := by
+      dsimp only [walkCorduroyMerklePathWith, parentIdx, parentStar, leftStar, rightStar]
+      by_cases hEven : (idx % 2 == 0) = true
+      · simp only [hEven, ↓reduceIte]
+      · have hFalse : (idx % 2 == 0) = false := Bool.eq_false_iff.mpr hEven
+        simp only [hFalse, Bool.false_eq_true, ↓reduceIte]
+    if hParEq : parentStar = honParent then
+      { adrs1 := mkAdrs lvl parentIdx
+        in1   := [leftStar, rightStar]
+        adrs2 := mkAdrs lvl parentIdx
+        in2   := [honLeft, honRight]
+        distinctTweakOrInput := fun hPair => by
+          injection hPair with _ hIn
+          injection hIn with hL hTail
+          injection hTail with hR _
+          dsimp only [leftStar, rightStar, honLeft, honRight, parentIdx] at hL hR
+          rcases Nat.mod_two_eq_zero_or_one idx with hEv | hOd
+          · have hIdx : 2 * (idx / 2) = idx := by omega
+            simp only [hEv, beq_self_eq_true, ↓reduceIte, hIdx] at hL
+            exact hCurNe hL
+          · have hNe0 : (idx % 2 == 0) = false := by rw [hOd]; decide
+            have hIdx : 2 * (idx / 2) + 1 = idx := by omega
+            simp only [hNe0, Bool.false_eq_true, ↓reduceIte, hIdx] at hR
+            exact hCurNe hR
+        sameSpongeOutput := hParEq }
+    else
+      extractMerkleWalkCollisionWith eng pkSeed mkAdrs leafFn rest (lvl + 1) parentIdx parentStar hParEq (by
+        have hNextRoot : walkCorduroyMerklePathWith eng pkSeed mkAdrs (lvl + 1) parentIdx parentStar rest =
+            computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn (lvl + (sib :: rest).length)
+              (idx / (2 ^ (sib :: rest).length)) := hWalkStep.symm.trans hRootEq
+        have hLvl : lvl + (sib :: rest).length = (lvl + 1) + rest.length := by
+          simp only [List.length_cons]; omega
+        have hDiv : idx / (2 ^ (sib :: rest).length) = parentIdx / (2 ^ rest.length) := by
+          dsimp only [parentIdx]
+          simp only [List.length_cons]
+          rw [Nat.div_div_eq_div_mul, Nat.pow_succ, Nat.mul_comm 2 (2 ^ rest.length)]
+        rw [hLvl, hDiv] at hNextRoot
+        exact hNextRoot)
+termination_by structural path
+
+private def findQueryVisitingRemWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (L targetRem : Nat) (qs : List CorduroySignedQuery) :
+    Option { q : CorduroySignedQuery // q ∈ qs ∧
+      (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 / (2 ^ (L * cfg.subtreeHeight)) = targetRem } :=
+  match qs with
+  | [] => none
+  | q :: rest =>
+    if hEq : (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 / (2 ^ (L * cfg.subtreeHeight)) = targetRem then
+      some ⟨q, ⟨List.mem_cons_self .., hEq⟩⟩
+    else
+      match findQueryVisitingRemWith eng cfg pk L targetRem rest with
+      | none => none
+      | some ⟨q', hMem', hEq'⟩ => some ⟨q', ⟨List.mem_cons_of_mem _ hMem', hEq'⟩⟩
+termination_by structural qs
+
+private theorem corduroyVerifyLayerWith_inv (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (layer treeIdx kpIdx : Nat) (childRoot nextRoot : Lane4) (lsig : CorduroyLayerSig)
+    (hVer : corduroyVerifyLayerWith eng cfg pk layer treeIdx kpIdx childRoot lsig = some nextRoot) :
+    lsig.wotsChains.length = cfg.wotsChains ∧
+    lsig.authPath.length = cfg.subtreeHeight ∧
+    lsig.tswCtr < 2 ^ 56 ∧
+    let hmsg := corduroyLayerHmsgWith eng pk layer treeIdx kpIdx lsig.tswCtr childRoot
+    let digits := corduroyExtractDigits cfg.wotsChains hmsg
+    let peaks := corduroyRecoverPeaksWith eng pk.pkSeed layer treeIdx kpIdx 0 digits lsig.wotsChains
+    let wotsPk := corduroyWotsPkCompressWith eng pk.pkSeed layer treeIdx kpIdx peaks
+    natListSum digits = cfg.targetSum ∧
+    walkCorduroyMerklePathWith eng pk.pkSeed (xmssMerkleAdrs layer treeIdx) 0 kpIdx wotsPk lsig.authPath = nextRoot := by
+  unfold corduroyVerifyLayerWith at hVer
+  by_cases hGuard : (lsig.wotsChains.length == cfg.wotsChains && lsig.authPath.length == cfg.subtreeHeight &&
+      decide (lsig.tswCtr < 2 ^ 56)) = true
+  · simp only [hGuard, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hVer
+    simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hGuard
+    rcases hGuard with ⟨⟨hChLen, hPathLen⟩, hCtrLt⟩
+    refine ⟨hChLen, hPathLen, hCtrLt, ?_⟩
+    dsimp only
+    let hmsg := corduroyLayerHmsgWith eng pk layer treeIdx kpIdx lsig.tswCtr childRoot
+    let digits := corduroyExtractDigits cfg.wotsChains hmsg
+    change (if !(natListSum digits == cfg.targetSum) then none else _) = some nextRoot at hVer
+    by_cases hSum : (natListSum digits == cfg.targetSum) = true
+    · simp only [hSum, Bool.not_true, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hVer
+      exact ⟨beq_iff_eq.mp hSum, hVer⟩
+    · have hFalse : (natListSum digits == cfg.targetSum) = false := Bool.eq_false_iff.mpr hSum
+      simp only [hFalse, Bool.not_false, ↓reduceIte] at hVer
+      exact absurd hVer (by simp)
+  · have hFalse : (lsig.wotsChains.length == cfg.wotsChains && lsig.authPath.length == cfg.subtreeHeight &&
+        decide (lsig.tswCtr < 2 ^ 56)) = false := Bool.eq_false_iff.mpr hGuard
+    simp only [hFalse, Bool.not_false, ↓reduceIte] at hVer
+    exact absurd hVer (by simp)
+
+/-- Single-layer WOTS+C + Merkle constructive break extractor when `childRoot ≠ honChildRt` yet
+    `corduroyVerifyLayerWith` climbs to the honest subtree root! -/
+private def extractLayerBreakWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (hPk : pk = corduroyDerivePkWith eng cfg sk)
+    (hWf : cfg.wellFormed = true) (hFullDigits : cfg.wotsChains = 128)
+    (queries : List CorduroySignedQuery) (hHonQ : CorduroyQuerySetHonestWith eng cfg sk queries)
+    (L remIdx : Nat) (hLLt : L < cfg.numLayers)
+    (childRtStar : Lane4) (lsig : CorduroyLayerSig)
+    (hChildNe : childRtStar ≠
+      (if L = 0 then corduroyHonestForsPkWith eng cfg sk remIdx
+       else corduroyHonestSubtreeRootWith eng cfg sk (L - 1) remIdx))
+    (hVer : corduroyVerifyLayerWith eng cfg pk L (remIdx / (2 ^ cfg.subtreeHeight))
+      (remIdx % (2 ^ cfg.subtreeHeight)) childRtStar lsig =
+      some (corduroyHonestSubtreeRootWith eng cfg sk L (remIdx / (2 ^ cfg.subtreeHeight)))) :
+    PSum (CorduroySpongeTweakCollisionWith eng pk.pkSeed) (CorduroyWotsChainPreimageWith eng sk) :=
+  let subLeaves := 2 ^ cfg.subtreeHeight
+  let trL := remIdx / subLeaves
+  let kpL := remIdx % subLeaves
+  have hSeed : pk.pkSeed = sk.pkSeed := by rw [hPk]; rfl
+  have hKpLt : kpL < subLeaves := Nat.mod_lt _ (Nat.two_pow_pos _)
+  have hInv := corduroyVerifyLayerWith_inv eng cfg pk L trL kpL childRtStar
+    (corduroyHonestSubtreeRootWith eng cfg sk L trL) lsig hVer
+  let hmsgStar := corduroyLayerHmsgWith eng pk L trL kpL lsig.tswCtr childRtStar
+  let digitsStar := corduroyExtractDigits cfg.wotsChains hmsgStar
+  let peaksStar := corduroyRecoverPeaksWith eng pk.pkSeed L trL kpL 0 digitsStar lsig.wotsChains
+  let wotsPkStar := corduroyWotsPkCompressWith eng pk.pkSeed L trL kpL peaksStar
+  let honPeaks := corduroyHonestWotsPeaksWith eng cfg sk L trL kpL
+  let honWotsPk := corduroyHonestWotsPkWith eng cfg sk L trL kpL
+  if hWotsNe : wotsPkStar ≠ honWotsPk then
+    .inl (extractMerkleWalkCollisionWith eng pk.pkSeed (xmssMerkleAdrs L trL)
+      (corduroyHonestWotsPkWith eng cfg sk L trL) lsig.authPath 0 kpL wotsPkStar
+      (by
+        rw [hSeed]
+        exact hWotsNe)
+      (by
+        have hWalk := hInv.2.2.2.2
+        have hPathLen := hInv.2.1
+        rw [Nat.zero_add, hPathLen, Nat.div_eq_of_lt hKpLt]
+        dsimp only [wotsPkStar, peaksStar, digitsStar, hmsgStar, corduroyHonestSubtreeRootWith] at hWalk ⊢
+        rw [hSeed] at hWalk ⊢
+        exact hWalk))
+  else
+    have hWotsEq : wotsPkStar = honWotsPk := Decidable.of_not_not hWotsNe
+    if hPeaksNe : peaksStar ≠ honPeaks then
+      .inl
+        { adrs1 := wotsPkAdrs L trL kpL
+          in1   := peaksStar
+          adrs2 := wotsPkAdrs L trL kpL
+          in2   := honPeaks
+          distinctTweakOrInput := fun hPair => by
+            injection hPair with _ hIn
+            exact hPeaksNe hIn
+          sameSpongeOutput := by
+            have hComp : corduroyWotsPkCompressWith eng pk.pkSeed L trL kpL peaksStar =
+                corduroyWotsPkCompressWith eng pk.pkSeed L trL kpL honPeaks := by
+              change wotsPkStar = _
+              rw [hWotsEq]
+              unfold honWotsPk corduroyHonestWotsPkWith
+              rw [hSeed]
+            exact hComp }
+    else
+      have hPeaksEq : peaksStar = honPeaks := Decidable.of_not_not hPeaksNe
+      have hTargetLt : cfg.targetSum < 3 * cfg.wotsChains := by
+        unfold CorduroyParams.wellFormed at hWf
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+        exact hWf.1.1.1.1.1.1.1.1.2
+      have hChainsLe : cfg.wotsChains ≤ 128 := Nat.le_of_eq hFullDigits
+      have hDigStarSpec := corduroyExtractDigits_spec hChainsLe hmsgStar
+      have hDigLen : digitsStar.length = cfg.wotsChains := hDigStarSpec.1
+      match findQueryVisitingRemWith eng cfg pk L remIdx queries with
+      | none =>
+        let rep3 := List.replicate cfg.wotsChains 3
+        have hRepSum : natListSum rep3 = 3 * cfg.wotsChains := natListSum_replicate cfg.wotsChains 3
+        have hSumStar : natListSum digitsStar = cfg.targetSum := hInv.2.2.2.1
+        have hNeRep : digitsStar ≠ rep3 := fun hEq => by
+          rw [hEq, hRepSum] at hSumStar
+          omega
+        let ⟨c, hc⟩ := findSmallerDigitCoord digitsStar rep3
+          (hDigLen.trans List.length_replicate.symm) hNeRep (by omega)
+        have hcLt : c < cfg.wotsChains := by
+          rcases hc with ⟨h1, _, _⟩
+          omega
+        have hdStarLt3 : digitsStar.getD c 0 < 3 := by
+          rcases hc with ⟨h1, h2, hLtRep⟩
+          have hgd1 : digitsStar.getD c 0 = digitsStar[c]'h1 := by
+            rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h1]; rfl
+          have hgd2 : rep3[c]'h2 = 3 := List.getElem_replicate h2
+          rw [hgd2] at hLtRep
+          rw [hgd1]
+          exact hLtRep
+        have hCoordPeak : corduroyChainIterWith eng pk.pkSeed L trL kpL c
+            (digitsStar.getD c 0) (3 - digitsStar.getD c 0) (lsig.wotsChains.getD c lane4Zero) =
+            corduroyChainIterWith eng sk.pkSeed L trL kpL c 0 3 (corduroyWotsSecretWith eng sk L trL kpL c) := by
+          have hGet := congrArg (fun xs => xs.getD c lane4Zero) hPeaksEq
+          dsimp only [peaksStar, honPeaks, corduroyHonestWotsPeaksWith] at hGet
+          rw [corduroyRecoverPeaksWith_getD eng pk.pkSeed L trL kpL digitsStar lsig.wotsChains 0 c
+                (hInv.1.trans hDigLen.symm) (by rw [hDigLen]; exact hcLt),
+              Nat.zero_add,
+              getD_map_range _ lane4Zero cfg.wotsChains c hcLt] at hGet
+          exact hGet
+        extractEarlierDigitBreakWith eng sk pk.pkSeed hSeed L trL kpL c
+          (digitsStar.getD c 0) 3 (lsig.wotsChains.getD c lane4Zero) hdStarLt3 (Nat.le_refl 3) hCoordPeak
+      | some ⟨q, hqMem, hqRemEq⟩ =>
+        have hqHon := hHonQ.1 q hqMem
+        have hqCtrsLen : q.rand.layerCtrs.length = cfg.numLayers := hqHon.2.2.1
+        have hLLtQ : L < q.rand.layerCtrs.length := by omega
+        let ctrHon := q.rand.layerCtrs[L]'hLLtQ
+        let honChildRt :=
+          if L = 0 then corduroyHonestForsPkWith eng cfg sk remIdx
+          else corduroyHonestSubtreeRootWith eng cfg sk (L - 1) remIdx
+        let hmsgHon := corduroyLayerHmsgWith eng pk L trL kpL ctrHon honChildRt
+        let digitsHon := corduroyExtractDigits cfg.wotsChains hmsgHon
+        have hDigHonSpec := corduroyExtractDigits_spec hChainsLe hmsgHon
+        have hSumHon : natListSum digitsHon = cfg.targetSum := by
+          have hGrindL := hqHon.2.2.2 L hLLtQ
+          dsimp only at hGrindL
+          have hSigRand : q.sig.rRand = corduroyPrfMsgWith eng sk q.rand.optRand q.msg := by
+            rw [hqHon.1]; rfl
+          have hRemMatch : (corduroyHashMsgWith eng cfg (corduroyPrfMsgWith eng sk q.rand.optRand q.msg)
+              (corduroyDerivePkWith eng cfg sk) q.msg).1 / (2 ^ (L * cfg.subtreeHeight)) = remIdx := by
+            rw [← hSigRand, ← hPk]
+            exact hqRemEq
+          have hChildMatch :
+              (if L = 0 then
+                corduroyHonestForsPkWith eng cfg sk
+                  (corduroyHashMsgWith eng cfg (corduroyPrfMsgWith eng sk q.rand.optRand q.msg)
+                    (corduroyDerivePkWith eng cfg sk) q.msg).1
+               else
+                corduroyHonestSubtreeRootWith eng cfg sk (L - 1)
+                  ((corduroyHashMsgWith eng cfg (corduroyPrfMsgWith eng sk q.rand.optRand q.msg)
+                    (corduroyDerivePkWith eng cfg sk) q.msg).1 / (2 ^ (L * cfg.subtreeHeight)))) = honChildRt := by
+            dsimp only [honChildRt]
+            by_cases hL0 : L = 0
+            · subst hL0
+              simp only [↓reduceIte, Nat.zero_mul, Nat.pow_zero, Nat.div_one] at hRemMatch ⊢
+              rw [hRemMatch]
+            · simp only [hL0, ↓reduceIte]
+              rw [hRemMatch]
+          have hSumRaw := hGrindL.2
+          rw [hChildMatch, hRemMatch, ← hPk] at hSumRaw
+          exact hSumRaw
+        if hDigEq : digitsStar = digitsHon then
+          have hHmsgEq : hmsgStar = hmsgHon := by
+            dsimp only [digitsStar, digitsHon] at hDigEq
+            rw [hFullDigits] at hDigEq
+            exact corduroyExtractDigits_128_injective hDigEq
+          .inl
+            { adrs1 := layerHmsgAdrs L trL kpL lsig.tswCtr
+              in1   := [pk.pkRoot, childRtStar]
+              adrs2 := layerHmsgAdrs L trL kpL ctrHon
+              in2   := [pk.pkRoot, honChildRt]
+              distinctTweakOrInput := fun hPair => by
+                injection hPair with _ hIn
+                injection hIn with _ hTail
+                injection hTail with hChildEq _
+                exact hChildNe hChildEq
+              sameSpongeOutput := hHmsgEq }
+        else
+          let ⟨c, hc⟩ := wotsTargetSum_reused_smaller_digit cfg.targetSum digitsStar digitsHon
+            (hDigLen.trans hDigHonSpec.1.symm) hDigEq hInv.2.2.2.1 hSumHon
+          have hcLt : c < cfg.wotsChains := by
+            rcases hc with ⟨h1, _, _⟩
+            omega
+          have hdLt : digitsStar.getD c 0 < digitsHon.getD c 0 := by
+            rcases hc with ⟨h1, h2, hLt⟩
+            have hgd1 : digitsStar.getD c 0 = digitsStar[c]'h1 := by
+              rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h1]; rfl
+            have hgd2 : digitsHon.getD c 0 = digitsHon[c]'h2 := by
+              rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h2]; rfl
+            rw [hgd1, hgd2]
+            exact hLt
+          have hdHonLe3 : digitsHon.getD c 0 ≤ 3 := by
+            rcases hc with ⟨_, h2, _⟩
+            have hgd2 : digitsHon.getD c 0 = digitsHon[c]'h2 := by
+              rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h2]; rfl
+            have hLt4 := hDigHonSpec.2 (digitsHon[c]'h2) (List.getElem_mem h2)
+            rw [hgd2]
+            omega
+          have hCoordPeak : corduroyChainIterWith eng pk.pkSeed L trL kpL c
+              (digitsStar.getD c 0) (3 - digitsStar.getD c 0) (lsig.wotsChains.getD c lane4Zero) =
+              corduroyChainIterWith eng sk.pkSeed L trL kpL c 0 3 (corduroyWotsSecretWith eng sk L trL kpL c) := by
+            have hGet := congrArg (fun xs => xs.getD c lane4Zero) hPeaksEq
+            dsimp only [peaksStar, honPeaks, corduroyHonestWotsPeaksWith] at hGet
+            rw [corduroyRecoverPeaksWith_getD eng pk.pkSeed L trL kpL digitsStar lsig.wotsChains 0 c
+                  (hInv.1.trans hDigLen.symm) (by rw [hDigLen]; exact hcLt),
+                Nat.zero_add,
+                getD_map_range _ lane4Zero cfg.wotsChains c hcLt] at hGet
+            exact hGet
+          extractEarlierDigitBreakWith eng sk pk.pkSeed hSeed L trL kpL c
+            (digitsStar.getD c 0) (digitsHon.getD c 0) (lsig.wotsChains.getD c lane4Zero)
+            hdLt hdHonLe3 hCoordPeak
+
+/-- Walk `lsigs` from a forged child root `curRoot ≠ honestChildRt` to `topRoot = honestTopRoot`,
+    constructively extracting the break at the exact layer where the forged path merges into the honest hypertree. -/
+private def extractHypertreeDivergenceWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (hPk : pk = corduroyDerivePkWith eng cfg sk)
+    (hWf : cfg.wellFormed = true) (hFullDigits : cfg.wotsChains = 128)
+    (queries : List CorduroySignedQuery) (hHonQ : CorduroyQuerySetHonestWith eng cfg sk queries)
+    (lsigs : List CorduroyLayerSig) (startL remIdx : Nat) (curRoot : Lane4)
+    (hPos : 0 < lsigs.length)
+    (hSumL : startL + lsigs.length = cfg.numLayers)
+    (hRemLt : remIdx < 2 ^ (lsigs.length * cfg.subtreeHeight))
+    (hCurNe : curRoot ≠ (if startL = 0 then corduroyHonestForsPkWith eng cfg sk remIdx
+                         else corduroyHonestSubtreeRootWith eng cfg sk (startL - 1) remIdx))
+    (hHypVer : corduroyVerifyHypertreeWith eng cfg pk startL remIdx curRoot lsigs =
+      some (corduroyHonestSubtreeRootWith eng cfg sk (cfg.numLayers - 1) 0)) :
+    PSum (CorduroySpongeTweakCollisionWith eng pk.pkSeed) (CorduroyWotsChainPreimageWith eng sk) :=
+  match lsigs with
+  | [] => False.elim (Nat.not_lt_zero 0 hPos)
+  | lsig :: rest =>
+    let subLeaves := 2 ^ cfg.subtreeHeight
+    let trL := remIdx / subLeaves
+    match hLayer : corduroyVerifyLayerWith eng cfg pk startL trL (remIdx % subLeaves) curRoot lsig with
+    | none =>
+      False.elim (by
+        dsimp only [corduroyVerifyHypertreeWith] at hHypVer
+        change (match corduroyVerifyLayerWith eng cfg pk startL trL (remIdx % subLeaves) curRoot lsig with
+                | none => none
+                | some nextRoot => corduroyVerifyHypertreeWith eng cfg pk (startL + 1) trL nextRoot rest) = _ at hHypVer
+        simp [hLayer] at hHypVer)
+    | some nextRoot =>
+      have hRestVer : corduroyVerifyHypertreeWith eng cfg pk (startL + 1) trL nextRoot rest =
+          some (corduroyHonestSubtreeRootWith eng cfg sk (cfg.numLayers - 1) 0) := by
+        dsimp only [corduroyVerifyHypertreeWith] at hHypVer
+        change (match corduroyVerifyLayerWith eng cfg pk startL trL (remIdx % subLeaves) curRoot lsig with
+                | none => none
+                | some nextRoot => corduroyVerifyHypertreeWith eng cfg pk (startL + 1) trL nextRoot rest) = _ at hHypVer
+        rw [hLayer] at hHypVer
+        exact hHypVer
+      if hMerge : nextRoot = corduroyHonestSubtreeRootWith eng cfg sk startL trL then
+        extractLayerBreakWith eng cfg sk pk hPk hWf hFullDigits queries hHonQ startL remIdx
+          (by simp only [List.length_cons] at hSumL; omega) curRoot lsig hCurNe
+          (by rw [hLayer, hMerge])
+      else
+        match rest with
+        | [] =>
+          False.elim (by
+            dsimp only [corduroyVerifyHypertreeWith] at hRestVer
+            injection hRestVer with hTopEq
+            simp only [List.length_singleton] at hSumL hRemLt
+            rw [Nat.one_mul] at hRemLt
+            have hTr0 : trL = 0 := Nat.div_eq_of_lt hRemLt
+            have hLTop : startL = cfg.numLayers - 1 := by omega
+            rw [← hLTop, ← hTr0] at hTopEq
+            exact hMerge hTopEq)
+        | lsig1 :: tail =>
+          extractHypertreeDivergenceWith eng cfg sk pk hPk hWf hFullDigits queries hHonQ
+            (lsig1 :: tail) (startL + 1) trL nextRoot
+            (Nat.zero_lt_succ _)
+            (by simp only [List.length_cons] at hSumL ⊢; omega)
+            (by
+              dsimp only [trL, subLeaves]
+              simp only [List.length_cons] at hRemLt ⊢
+              have hPow : 2 ^ ((tail.length + 1 + 1) * cfg.subtreeHeight) =
+                  (2 ^ cfg.subtreeHeight) * (2 ^ ((tail.length + 1) * cfg.subtreeHeight)) := by
+                rw [← Nat.pow_add]
+                have hE : (tail.length + 1 + 1) * cfg.subtreeHeight =
+                    cfg.subtreeHeight + (tail.length + 1) * cfg.subtreeHeight := by
+                  rw [Nat.add_mul (tail.length + 1) 1 cfg.subtreeHeight, Nat.one_mul, Nat.add_comm]
+                rw [hE]
+              rw [hPow] at hRemLt
+              apply (Nat.div_lt_iff_lt_mul (Nat.two_pow_pos cfg.subtreeHeight)).mpr
+              simpa only [Nat.mul_comm] using hRemLt)
+            (by
+              simp only [Nat.succ_ne_zero, ↓reduceIte, Nat.add_sub_cancel]
+              exact hMerge)
+            hRestVer
+termination_by structural lsigs
+
+/-- Extract either a FORS sponge/Merkle collision OR exact secret recovery across all `k` FORS trees. -/
+private def extractForsTreesCollisionOrSecretsWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (sk : CorduroySecretKey) (pkSeed : Lane4) (hSeed : pkSeed = sk.pkSeed) (leafGlobalIdx : Nat)
+    (idxs : List Nat) (ops : List CorduroyForsOpening) (roots : List Lane4) (startJ : Nat)
+    (hVer : corduroyVerifyForsTreesWith eng cfg pkSeed leafGlobalIdx startJ idxs ops = some roots)
+    (hRootsEq : roots = ((List.range idxs.length).map fun t => corduroyHonestForsTreeRootWith eng cfg sk leafGlobalIdx (startJ + t))) :
+    PSum (CorduroySpongeTweakCollisionWith eng pkSeed)
+      (∀ (t : Nat), t < idxs.length →
+        (ops.getD t { secretVal := lane4Zero, authPath := [] }).secretVal =
+          corduroyForsSecretWith eng sk leafGlobalIdx (startJ + t) (idxs.getD t 0)) :=
+  match idxs, ops with
+  | [], [] => .inr (fun t ht => False.elim (Nat.not_lt_zero t ht))
+  | [], _ :: _ => False.elim (by simp [corduroyVerifyForsTreesWith] at hVer)
+  | _ :: _, [] => False.elim (by simp [corduroyVerifyForsTreesWith] at hVer)
+  | idx :: restIdxs, op :: restOps =>
+    have hUnpack : idx < 2 ^ cfg.forsHeight ∧ op.authPath.length = cfg.forsHeight ∧
+        ∃ restRts, corduroyVerifyForsTreesWith eng cfg pkSeed leafGlobalIdx (startJ + 1) restIdxs restOps = some restRts ∧
+          roots = walkCorduroyMerklePathWith eng pkSeed (forsNodeAdrs leafGlobalIdx startJ) 0 idx
+            (corduroyForsLeafHashWith eng pkSeed leafGlobalIdx startJ idx op.secretVal) op.authPath :: restRts := by
+      dsimp only [corduroyVerifyForsTreesWith] at hVer
+      by_cases hG : (decide (idx < 2 ^ cfg.forsHeight) && (op.authPath.length == cfg.forsHeight)) = true
+      · simp only [hG, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hVer
+        simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hG
+        refine ⟨hG.1, hG.2, ?_⟩
+        cases hRec : corduroyVerifyForsTreesWith eng cfg pkSeed leafGlobalIdx (startJ + 1) restIdxs restOps with
+        | none => rw [hRec] at hVer; exact absurd hVer (by simp)
+        | some restRts =>
+          rw [hRec] at hVer
+          injection hVer with hEqR
+          exact ⟨restRts, rfl, hEqR.symm⟩
+      · have hFalse : (decide (idx < 2 ^ cfg.forsHeight) && (op.authPath.length == cfg.forsHeight)) = false :=
+          Bool.eq_false_iff.mpr hG
+        simp only [hFalse, Bool.not_false, ↓reduceIte] at hVer
+        exact absurd hVer (by simp)
+    let leaf0 := corduroyForsLeafHashWith eng pkSeed leafGlobalIdx startJ idx op.secretVal
+    let honLeaf0 := corduroyHonestForsLeafWith eng sk leafGlobalIdx startJ idx
+    if hLeafNe : leaf0 ≠ honLeaf0 then
+      .inl (extractMerkleWalkCollisionWith eng pkSeed (forsNodeAdrs leafGlobalIdx startJ)
+        (corduroyHonestForsLeafWith eng sk leafGlobalIdx startJ) op.authPath 0 idx leaf0
+        (by
+          rw [hSeed]
+          exact hLeafNe)
+        (by
+          obtain ⟨hIdxLt, hPathLen, restRts, _, hRtsCons⟩ := hUnpack
+          rw [hRtsCons] at hRootsEq
+          simp only [List.length_cons, List.range_succ_eq_map, List.map_cons, Nat.add_zero, List.cons.injEq] at hRootsEq
+          have hRt0 := hRootsEq.1
+          rw [Nat.zero_add, hPathLen, Nat.div_eq_of_lt hIdxLt]
+          dsimp only [leaf0, corduroyHonestForsTreeRootWith] at hRt0 ⊢
+          rw [hSeed] at hRt0 ⊢
+          exact hRt0))
+    else
+      have hLeafEq : leaf0 = honLeaf0 := Decidable.of_not_not hLeafNe
+      if hSecNe : op.secretVal ≠ corduroyForsSecretWith eng sk leafGlobalIdx startJ idx then
+        .inl
+          { adrs1 := forsLeafAdrs leafGlobalIdx startJ idx
+            in1   := [op.secretVal]
+            adrs2 := forsLeafAdrs leafGlobalIdx startJ idx
+            in2   := [corduroyForsSecretWith eng sk leafGlobalIdx startJ idx]
+            distinctTweakOrInput := fun hPair => by
+              injection hPair with _ hIn
+              injection hIn with hU _
+              exact hSecNe hU
+            sameSpongeOutput := by
+              dsimp only [leaf0, honLeaf0, corduroyForsLeafHashWith, corduroyHonestForsLeafWith] at hLeafEq
+              rw [hSeed] at hLeafEq ⊢
+              exact hLeafEq }
+      else
+        have hSecEq : op.secretVal = corduroyForsSecretWith eng sk leafGlobalIdx startJ idx :=
+          Decidable.of_not_not hSecNe
+        let restRts := (List.range restIdxs.length).map fun t =>
+          corduroyHonestForsTreeRootWith eng cfg sk leafGlobalIdx ((startJ + 1) + t)
+        have hRestVer : corduroyVerifyForsTreesWith eng cfg pkSeed leafGlobalIdx (startJ + 1) restIdxs restOps =
+            some restRts := by
+          obtain ⟨_, _, rts', hRec, hRtsCons⟩ := hUnpack
+          rw [hRtsCons] at hRootsEq
+          simp only [List.length_cons, List.range_succ_eq_map, List.map_cons, Nat.add_zero, List.cons.injEq] at hRootsEq
+          have hTailEq : rts' = restRts := by
+            rw [hRootsEq.2, List.map_map]
+            apply List.map_congr_left
+            intro t _
+            dsimp only [Function.comp]
+            have hAssoc : startJ + (t + 1) = (startJ + 1) + t := by omega
+            rw [hAssoc]
+          rw [← hTailEq]
+          exact hRec
+        match extractForsTreesCollisionOrSecretsWith eng cfg sk pkSeed hSeed leafGlobalIdx
+                restIdxs restOps restRts (startJ + 1) hRestVer rfl with
+        | .inl col => .inl col
+        | .inr hTailSec =>
+          .inr (fun t ht => by
+            cases t with
+            | zero =>
+              simp only [List.getD_cons_zero, Nat.add_zero]
+              exact hSecEq
+            | succ t' =>
+              simp only [List.getD_cons_succ]
+              have ht' : t' < restIdxs.length := Nat.lt_of_succ_lt_succ ht
+              have hStep := hTailSec t' ht'
+              have hAssoc : (startJ + 1) + t' = startJ + (t' + 1) := by omega
+              rw [hAssoc] at hStep
+              exact hStep)
+termination_by structural idxs
+
+private def findCollidingMsgHashQueryWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (leafGlobalIdx : Nat) (forsIndices : List Nat)
+    (qs : List CorduroySignedQuery) :
+    Option { q : CorduroySignedQuery // q ∈ qs ∧
+      (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx ∧
+      (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1 = forsIndices } :=
+  match qs with
+  | [] => none
+  | q :: rest =>
+    if hMatch : (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx ∧
+                (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1 = forsIndices then
+      some ⟨q, ⟨List.mem_cons_self .., hMatch⟩⟩
+    else
+      match findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices rest with
+      | none => none
+      | some ⟨q', hMem', hM'⟩ => some ⟨q', ⟨List.mem_cons_of_mem _ hMem', hM'⟩⟩
+termination_by structural qs
+
+private theorem findCollidingMsgHashQueryWith_none (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (leafGlobalIdx : Nat) (forsIndices : List Nat)
+    (qs : List CorduroySignedQuery)
+    (hNone : findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices qs = none) :
+    ∀ q ∈ qs, ¬((corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx ∧
+                (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1 = forsIndices) := by
+  induction qs with
+  | nil => intro _ hMem; exact False.elim (List.not_mem_nil hMem)
+  | cons q rest ih =>
+    simp only [findCollidingMsgHashQueryWith] at hNone
+    by_cases hM : (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx ∧
+                  (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1 = forsIndices
+    · simp only [hM] at hNone
+      exact absurd hNone (by simp)
+    · simp only [hM] at hNone
+      have hSubNone : findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices rest = none := by
+        cases hSub : findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices rest with
+        | none => rfl
+        | some p => rw [hSub] at hNone; exact absurd hNone (by simp)
+      intro q' hMem'
+      rcases List.mem_cons.mp hMem' with rfl | hTail
+      · exact hM
+      · exact ih hSubNone q' hTail
+
+/-- Engine-parametric constructive multi-target EUF-CMA witness extractor. -/
+private def corduroy_euf_cma_extract_with
+    (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (queries : List CorduroySignedQuery)
+    (msgStar : Lane4) (sigStar : CorduroySig)
+    (hPk : pk = corduroyDerivePkWith eng cfg sk)
+    (hFullDigits : cfg.wotsChains = 128)
+    (hHonQ : CorduroyQuerySetHonestWith eng cfg sk queries)
+    (hFresh : msgStar ∉ queries.map (·.msg))
+    (hVer : corduroyVerifyWith eng cfg pk msgStar sigStar = true)
+    (hForsRes : CorduroyForsUncoveredOrCollidingWith eng cfg pk queries
+      (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+      (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).2.1) :
+    CorduroyBreakWith eng cfg pk sk :=
+  have hSeed : pk.pkSeed = sk.pkSeed := by rw [hPk]; rfl
+  have hUnpackVer : cfg.wellFormed = true ∧ sigStar.layerSigs.length = cfg.numLayers ∧
+      ∃ forsPkStar,
+        corduroyRecoverForsPkWith eng cfg pk.pkSeed
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).2.1
+          sigStar.forsOpenings = some forsPkStar ∧
+        corduroyVerifyHypertreeWith eng cfg pk 0
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+          forsPkStar sigStar.layerSigs = some pk.pkRoot := by
+    unfold corduroyVerifyWith at hVer
+    by_cases hG : (cfg.wellFormed && (sigStar.layerSigs.length == cfg.numLayers)) = true
+    · simp only [hG, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hVer
+      simp only [Bool.and_eq_true, beq_iff_eq] at hG
+      refine ⟨hG.1, hG.2, ?_⟩
+      cases hF : corduroyRecoverForsPkWith eng cfg pk.pkSeed
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).2.1
+          sigStar.forsOpenings with
+      | none => rw [hF] at hVer; exact absurd hVer (by simp)
+      | some forsPkStar =>
+        rw [hF] at hVer
+        dsimp only at hVer
+        cases hH : corduroyVerifyHypertreeWith eng cfg pk 0
+            (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+            forsPkStar sigStar.layerSigs with
+        | none => rw [hH] at hVer; exact absurd hVer (by simp)
+        | some topRt =>
+          rw [hH] at hVer
+          dsimp only at hVer
+          rw [beq_iff_eq] at hVer
+          rw [hVer] at hH
+          exact ⟨forsPkStar, rfl, hH⟩
+    · have hFalse : (cfg.wellFormed && (sigStar.layerSigs.length == cfg.numLayers)) = false :=
+        Bool.eq_false_iff.mpr hG
+      simp only [hFalse, Bool.not_false, ↓reduceIte] at hVer
+      exact absurd hVer (by simp)
+  let leafGlobalIdx := (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+  let forsIndices   := (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).2.1
+  match hFOpt : corduroyRecoverForsPkWith eng cfg pk.pkSeed leafGlobalIdx forsIndices sigStar.forsOpenings with
+  | none =>
+    False.elim (by
+      obtain ⟨_, _, _, hRec, _⟩ := hUnpackVer
+      rw [hFOpt] at hRec
+      exact absurd hRec (by simp))
+  | some forsPkStar =>
+    if hForsPkNe : forsPkStar ≠ corduroyHonestForsPkWith eng cfg sk leafGlobalIdx then
+      have hLayersPos : 0 < sigStar.layerSigs.length := by
+        have hWf := hUnpackVer.1
+        unfold CorduroyParams.wellFormed at hWf
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+        have hPos : 0 < cfg.numLayers := hWf.1.1.1.1.1.1.1.2
+        rw [hUnpackVer.2.1]
+        exact hPos
+      have hLeafLt : leafGlobalIdx < 2 ^ (sigStar.layerSigs.length * cfg.subtreeHeight) := by
+        rw [hUnpackVer.2.1]
+        exact (corduroyHashMsgWith_bounds eng cfg sigStar.rRand pk msgStar).1
+      have hHypEq : corduroyVerifyHypertreeWith eng cfg pk 0 leafGlobalIdx forsPkStar sigStar.layerSigs =
+          some (corduroyHonestSubtreeRootWith eng cfg sk (cfg.numLayers - 1) 0) := by
+        obtain ⟨_, _, fp, hRec, hHyp⟩ := hUnpackVer
+        rw [hFOpt] at hRec
+        injection hRec with hFpEq
+        subst hFpEq
+        have hPkRt : pk.pkRoot = corduroyHonestSubtreeRootWith eng cfg sk (cfg.numLayers - 1) 0 := by
+          rw [hPk]; rfl
+        rw [hPkRt] at hHyp
+        exact hHyp
+      match extractHypertreeDivergenceWith eng cfg sk pk hPk hUnpackVer.1 hFullDigits queries hHonQ
+              sigStar.layerSigs 0 leafGlobalIdx forsPkStar hLayersPos
+              (by rw [Nat.zero_add]; exact hUnpackVer.2.1) hLeafLt
+              (by simp only [↓reduceIte]; exact hForsPkNe) hHypEq with
+      | .inl col => .spongeTweakCollision col
+      | .inr pre => .wotsChainPreimage pre
+    else
+      have hForsPkEq : forsPkStar = corduroyHonestForsPkWith eng cfg sk leafGlobalIdx :=
+        Decidable.of_not_not hForsPkNe
+      match hTreesOpt : corduroyVerifyForsTreesWith eng cfg pk.pkSeed leafGlobalIdx 0 forsIndices sigStar.forsOpenings with
+      | none =>
+        False.elim (by
+          unfold corduroyRecoverForsPkWith at hFOpt
+          by_cases hG : (forsIndices.length == cfg.forsTrees && sigStar.forsOpenings.length == cfg.forsTrees) = true
+          · simp only [hG, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hTreesOpt] at hFOpt
+            exact absurd hFOpt (by simp)
+          · have hFalse : (forsIndices.length == cfg.forsTrees && sigStar.forsOpenings.length == cfg.forsTrees) = false :=
+              Bool.eq_false_iff.mpr hG
+            simp only [hFalse, Bool.not_false, ↓reduceIte] at hFOpt
+            exact absurd hFOpt (by simp))
+      | some rootsStar =>
+        have hCompEq : corduroyForsRootsCompressWith eng pk.pkSeed leafGlobalIdx rootsStar = forsPkStar := by
+          unfold corduroyRecoverForsPkWith at hFOpt
+          by_cases hG : (forsIndices.length == cfg.forsTrees && sigStar.forsOpenings.length == cfg.forsTrees) = true
+          · simp only [hG, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hTreesOpt, Option.some.injEq] at hFOpt
+            exact hFOpt
+          · have hFalse : (forsIndices.length == cfg.forsTrees && sigStar.forsOpenings.length == cfg.forsTrees) = false :=
+              Bool.eq_false_iff.mpr hG
+            simp only [hFalse, Bool.not_false, ↓reduceIte] at hFOpt
+            exact absurd hFOpt (by simp)
+        let honRoots := (List.range cfg.forsTrees).map (corduroyHonestForsTreeRootWith eng cfg sk leafGlobalIdx)
+        if hRootsNe : rootsStar ≠ honRoots then
+          .spongeTweakCollision
+            { adrs1 := forsRootsAdrs leafGlobalIdx
+              in1   := rootsStar
+              adrs2 := forsRootsAdrs leafGlobalIdx
+              in2   := honRoots
+              distinctTweakOrInput := fun hPair => by
+                injection hPair with _ hIn
+                exact hRootsNe hIn
+              sameSpongeOutput := by
+                dsimp only [honRoots, corduroyForsRootsCompressWith, corduroyHonestForsPkWith] at hCompEq hForsPkEq ⊢
+                rw [hSeed] at hCompEq ⊢
+                exact hCompEq.trans hForsPkEq }
+        else
+          have hRootsEq : rootsStar = honRoots := Decidable.of_not_not hRootsNe
+          have hForsIdxLen : forsIndices.length = cfg.forsTrees :=
+            (corduroyHashMsgWith_bounds eng cfg sigStar.rRand pk msgStar).2.1
+          have hRootsShift : rootsStar =
+              ((List.range forsIndices.length).map fun t =>
+                corduroyHonestForsTreeRootWith eng cfg sk leafGlobalIdx (0 + t)) := by
+            rw [hRootsEq, hForsIdxLen]
+            apply List.map_congr_left
+            intro t _
+            rw [Nat.zero_add]
+          match extractForsTreesCollisionOrSecretsWith eng cfg sk pk.pkSeed hSeed leafGlobalIdx
+                  forsIndices sigStar.forsOpenings rootsStar 0 hTreesOpt hRootsShift with
+          | .inl col => .spongeTweakCollision col
+          | .inr hAllSec =>
+            match hCollSearch : findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices queries with
+            | some ⟨q, hqMem, hSameLeaf, hSameDigest⟩ =>
+              .msgHashCollision
+                { r1   := sigStar.rRand
+                  pk1  := pk
+                  msg1 := msgStar
+                  r2   := q.sig.rRand
+                  pk2  := pk
+                  msg2 := q.msg
+                  distinctInputs := fun hEq => by
+                    injection hEq with _ hTail
+                    injection hTail with _ hMsgEq
+                    rw [hMsgEq] at hFresh
+                    exact hFresh (List.mem_map.mpr ⟨q, hqMem, rfl⟩)
+                  sameLeafIdx   := hSameLeaf.symm
+                  sameMsgDigest := hSameDigest.symm }
+            | none =>
+              have hNoColl := findCollidingMsgHashQueryWith_none eng cfg pk leafGlobalIdx forsIndices queries hCollSearch
+              have hUncovEx : ∃ k, k < forsIndices.length ∧
+                  ∀ q ∈ queries,
+                    (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx →
+                    (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1.getD k 0 ≠ forsIndices.getD k 0 := by
+                rcases hForsRes with ⟨q, hqMem, h1, h2⟩ | hEx
+                · exact False.elim (hNoColl q hqMem ⟨h1, h2⟩)
+                · exact hEx
+              let ⟨j, hjLt, _⟩ := findBoundedDecidableWitness
+                (fun k => ∀ q ∈ queries,
+                  (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx →
+                  (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1.getD k 0 ≠ forsIndices.getD k 0)
+                forsIndices.length hUncovEx
+              let candSec := (sigStar.forsOpenings.getD j { secretVal := lane4Zero, authPath := [] }).secretVal
+              let idxJ := forsIndices.getD j 0
+              have hSecMatch : candSec = corduroyForsSecretWith eng sk leafGlobalIdx j idxJ := by
+                have hM := hAllSec j hjLt
+                rw [Nat.zero_add] at hM
+                exact hM
+              .wotsChainPreimage
+                { adrs := forsLeafAdrs leafGlobalIdx j idxJ
+                  dStar := 0
+                  dHonest := 1
+                  candAtDStar := candSec
+                  preimageLink := candSec
+                  targetLink := corduroyHonestForsLeafWith eng sk leafGlobalIdx j idxJ
+                  stepStrictlyEarlier := Nat.zero_lt_one
+                  spongePreimageEq := by
+                    change corduroyForsLeafHashWith eng sk.pkSeed leafGlobalIdx j idxJ candSec = _
+                    rw [hSecMatch]
+                    rfl
+                  honestChainMatch := Or.inr ⟨leafGlobalIdx, j, idxJ, rfl, rfl, rfl, rfl, hSecMatch, rfl⟩ }
+
+/-- **Theorem 2: Constructive `Corduroy` Multi-Target EUF-CMA Witness Extractor (`corduroy_euf_cma_extract`)**:
+    Given `q_sig` honest signing queries `queries` and ANY valid `Corduroy` forgery `(msgStar, sigStar)`
+    on a fresh message `msgStar ∉ queries.map (·.msg)` (under standard multi-target FORS non-covering
+    `CorduroyForsUncoveredOrColliding`, which holds unconditionally whenever `≤ 1` query hit `leafGlobalIdx*`),
+    constructively (`Type`-valued, `0 Classical.choice`) extracts an explicit break of ONE of three
+    concrete `Poseidon2`/sponge problems:
+    - `CorduroyBreak.msgHashCollision`: distinct `(R, pk, msg) ≠ (R', pk', msg')` mapping to the same leaf index + message digest;
+    - `CorduroyBreak.spongeTweakCollision`: distinct `(adrs1, in1) ≠ (adrs2, in2)` producing the same 4-Goldilocks-limb sponge output;
+    - `CorduroyBreak.wotsChainPreimage`: explicit chain link inversion `d* < d_honest` via `targetSum` conservation. -/
+def corduroy_euf_cma_extract
+    (cfg : CorduroyParams) (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (queries : List CorduroySignedQuery)
+    (msgStar : Lane4) (sigStar : CorduroySig)
+    (hPk : pk = corduroyDerivePk cfg sk)
+    (hFullDigits : cfg.wotsChains = 128)
+    (hHonQ : CorduroyQuerySetHonest cfg sk queries)
+    (hFresh : msgStar ∉ queries.map (·.msg))
+    (hVer : corduroyVerify cfg pk msgStar sigStar = true)
+    (hForsRes : CorduroyForsUncoveredOrColliding cfg pk queries
+      (corduroyHashMsg cfg sigStar.rRand pk msgStar).1
+      (corduroyHashMsg cfg sigStar.rRand pk msgStar).2.1) :
+    CorduroyBreak cfg pk sk :=
+  (corduroy_euf_cma_extract_with corduroyPoseidon2Engine cfg sk pk queries msgStar sigStar
+    hPk hFullDigits hHonQ hFresh hVer hForsRes).toCanonical
+
+/-- `PSum`-formatted view of `corduroy_euf_cma_extract` (`0 Classical.choice`). -/
+def corduroy_euf_cma_extract_psum
+    (cfg : CorduroyParams) (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (queries : List CorduroySignedQuery)
+    (msgStar : Lane4) (sigStar : CorduroySig)
+    (hPk : pk = corduroyDerivePk cfg sk)
+    (hFullDigits : cfg.wotsChains = 128)
+    (hHonQ : CorduroyQuerySetHonest cfg sk queries)
+    (hFresh : msgStar ∉ queries.map (·.msg))
+    (hVer : corduroyVerify cfg pk msgStar sigStar = true)
+    (hForsRes : CorduroyForsUncoveredOrColliding cfg pk queries
+      (corduroyHashMsg cfg sigStar.rRand pk msgStar).1
+      (corduroyHashMsg cfg sigStar.rRand pk msgStar).2.1) :
+    PSum (CorduroyMsgHashCollision cfg)
+      (PSum (CorduroySpongeTweakCollision pk.pkSeed) (CorduroyWotsChainPreimage sk)) :=
+  (corduroy_euf_cma_extract cfg sk pk queries msgStar sigStar
+    hPk hFullDigits hHonQ hFresh hVer hForsRes).toPSum
+
+/-- Unconditional corollary of `corduroy_euf_cma_extract` whenever at most 1 query hit `leafGlobalIdx*`
+    (e.g., `1`-CMA or distinct-leaf `q_sig`-CMA — zero FORS subset-covering premise required!). -/
+def corduroy_euf_cma_extract_distinct_leaves
+    (cfg : CorduroyParams) (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (queries : List CorduroySignedQuery)
+    (msgStar : Lane4) (sigStar : CorduroySig)
+    (hPk : pk = corduroyDerivePk cfg sk)
+    (hFullDigits : cfg.wotsChains = 128)
+    (hHonQ : CorduroyQuerySetHonest cfg sk queries)
+    (hFresh : msgStar ∉ queries.map (·.msg))
+    (hVer : corduroyVerify cfg pk msgStar sigStar = true)
+    (hAtMostOneLeafHit : (queries.filter (fun q =>
+      (corduroyHashMsg cfg q.sig.rRand pk q.msg).1 ==
+        (corduroyHashMsg cfg sigStar.rRand pk msgStar).1)).length ≤ 1) :
+    CorduroyBreak cfg pk sk :=
+  have hWf : cfg.wellFormed = true := by
+    unfold corduroyVerify corduroyVerifyWith at hVer
+    by_cases hG : (cfg.wellFormed && (sigStar.layerSigs.length == cfg.numLayers)) = true
+    · simp only [Bool.and_eq_true] at hG; exact hG.1
+    · have hF : (cfg.wellFormed && (sigStar.layerSigs.length == cfg.numLayers)) = false :=
+        Bool.eq_false_iff.mpr hG
+      simp only [hF, Bool.not_false, ↓reduceIte] at hVer
+      exact absurd hVer (by simp)
+  have hForsPos : 0 < cfg.forsTrees := by
+    unfold CorduroyParams.wellFormed at hWf
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+    exact hWf.1.1.1.2
+  have hForsLen : (corduroyHashMsg cfg sigStar.rRand pk msgStar).2.1.length = cfg.forsTrees :=
+    (corduroyHashMsg_bounds cfg sigStar.rRand pk msgStar).2.1
+  corduroy_euf_cma_extract cfg sk pk queries msgStar sigStar hPk hFullDigits hHonQ hFresh hVer
+    (corduroy_single_leaf_hit_uncovered_with corduroyPoseidon2Engine cfg pk queries _ _
+      hForsPos hForsLen hAtMostOneLeafHit)
+
+end Qsag
+end
