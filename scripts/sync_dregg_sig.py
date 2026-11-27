@@ -21,7 +21,7 @@ Invariant preservation:
 
 Rename rules are anchored so that data never moves with a crate name:
   - `qsag-<crate>` is a package name only when no further name character follows it, so
-    `qsag-cred-voprf-share-v1`, `qsag-policy-ledger-v2` or `qsag-hem-quintic-proof-v2` stay.
+    `qsag-cred-spdz-voprf-share-v1`, `qsag-policy-ledger-v2` or `qsag-hem-quintic-proof-v2` stay.
   - `qsag_<crate>` is a crate identifier only at the start of an identifier (one leading
     underscore is allowed for Mach-O symbols), so `spec_qsag_agg_x` stays.
   - the bare CLI word `qsag` is never rewritten inside a byte string (`b"qsag kat ..."`).
@@ -50,7 +50,6 @@ CRATE_SUFFIXES: Tuple[str, ...] = (
     "quorum",
     "accel",
     "addr",
-    "ass2",
     "core",
     "cred",
     "agg",
@@ -65,7 +64,6 @@ WORKSPACE_CRATES: Tuple[str, ...] = (
     "addr",
     "agg",
     "asm",
-    "ass2",
     "cli",
     "core",
     "cred",
@@ -164,7 +162,7 @@ _HYPHEN_ALT = "|".join(re.escape(c) for c in CRATE_SUFFIXES)
 _IDENT_ALT = "|".join(re.escape(c.replace("-", "_")) for c in CRATE_SUFFIXES)
 _PATH_ALT = "|".join(re.escape(c) for c in WORKSPACE_CRATES)
 
-# Package names: `qsag-core`, `qsag-asm/std`, `dep:qsag-accel`; not `qsag-cred-voprf-share-v1`.
+# Package names: `qsag-core`, `qsag-asm/std`, `dep:qsag-accel`; not `qsag-cred-spdz-voprf-share-v1`.
 _RE_QSAG_PKG = re.compile(rf"qsag-({_HYPHEN_ALT}){_NAME_END}")
 _RE_DREGG_PKG = re.compile(rf"dregg-sig-({_HYPHEN_ALT}){_NAME_END}")
 # Crate identifiers and `[_]qsag_asm_*` symbols; not `spec_qsag_agg_x`.
@@ -437,7 +435,12 @@ def collect_qsag_mapped_files(qsag_root: pathlib.Path) -> Dict[str, str]:
 
 
 def collect_dregg_mapped_files(dregg_root: pathlib.Path) -> Dict[str, str]:
-    """Return `{dregg_rel: qsag_rel}` for all managed files present in `dregg_root`."""
+    """Return `{dregg_rel: qsag_rel}` for all managed files present in `dregg_root`.
+
+    Includes any extra or retired crate directories under `crates/` (e.g. `crates/ass2`) and
+    retired root directories (`hardware/`, `history/`) so `--diff` / `--check` flag them and
+    `--export` removes them cleanly under `members = ["crates/*"]`.
+    """
     mapping: Dict[str, str] = {}
 
     for root_file in SHARED_ROOT_FILES:
@@ -447,8 +450,20 @@ def collect_dregg_mapped_files(dregg_root: pathlib.Path) -> Dict[str, str]:
     if (dregg_root / "tests/kat_vectors.json").is_file():
         mapping["tests/kat_vectors.json"] = "tests/kat_vectors.json"
 
-    for c in WORKSPACE_CRATES:
-        ddir = dregg_root / "crates" / c
+    crates_dir = dregg_root / "crates"
+    extra_crates: List[str] = []
+    if crates_dir.is_dir():
+        extra_crates = sorted(
+            p.name
+            for p in crates_dir.iterdir()
+            if p.is_dir()
+            and p.name not in SKIP_DIR_NAMES
+            and p.name not in WORKSPACE_CRATES
+            and p.name not in {"verified", "whir-verified"}
+        )
+
+    for c in (*WORKSPACE_CRATES, *extra_crates):
+        ddir = crates_dir / c
         for f in _iter_files(ddir):
             sub = f.relative_to(ddir).as_posix()
             if sub == "Cargo.lock":
@@ -466,6 +481,12 @@ def collect_dregg_mapped_files(dregg_root: pathlib.Path) -> Dict[str, str]:
                 continue
             mapping[f"{d_sub}/{sub}"] = f"{q_sub}/{sub}"
 
+    for legacy_root in ("hardware", "history"):
+        ldir = dregg_root / legacy_root
+        for f in _iter_files(ldir):
+            sub = f.relative_to(ldir).as_posix()
+            mapping[f"{legacy_root}/{sub}"] = f"{legacy_root}/{sub}"
+
     fuzz_dir = dregg_root / "fuzz"
     for f in _iter_files(fuzz_dir):
         sub = f.relative_to(fuzz_dir).as_posix()
@@ -479,6 +500,26 @@ def collect_dregg_mapped_files(dregg_root: pathlib.Path) -> Dict[str, str]:
         mapping[f"validation/zcash/{sub}"] = f"validation/zcash/{sub}"
 
     return mapping
+
+
+def _prune_empty_parents(directory: pathlib.Path, stop_at: pathlib.Path) -> None:
+    cur = directory
+    stop = stop_at.resolve()
+    while cur.exists() and cur.resolve() != stop:
+        try:
+            cur.rmdir()
+        except OSError:
+            break
+        cur = cur.parent
+
+
+def _is_retired_qsag_target(qsag_rel: str) -> bool:
+    if qsag_rel.startswith(("hardware/", "history/")):
+        return True
+    if qsag_rel.startswith("crates/qsag-"):
+        crate = qsag_rel.split("/", 2)[1].removeprefix("qsag-")
+        return crate not in WORKSPACE_CRATES
+    return False
 
 
 def is_binary_path(rel_path: str) -> bool:
@@ -593,6 +634,7 @@ def run_export(qsag_root: pathlib.Path, dregg_root: pathlib.Path, dry_run: bool 
                 stale = dregg_root / d_rel
                 if stale.is_file():
                     stale.unlink()
+                    _prune_empty_parents(stale.parent, dregg_root)
 
     return written, unchanged, removed
 
@@ -602,6 +644,10 @@ def run_import(qsag_root: pathlib.Path, dregg_root: pathlib.Path, dry_run: bool 
         raise FileNotFoundError(f"dregg-sig directory does not exist: {dregg_root}")
 
     d_map = collect_dregg_mapped_files(dregg_root)
+    retired = [(d_rel, q_rel) for d_rel, q_rel in sorted(d_map.items()) if _is_retired_qsag_target(q_rel)]
+    if retired:
+        sample = ", ".join(f"{d_rel} -> {q_rel}" for d_rel, q_rel in retired[:5])
+        raise ValueError(f"refusing to import retired paths from dregg-sig ({sample})")
     existing_q = collect_qsag_mapped_files(qsag_root)
     imported_q_rels = set(d_map.values())
 
@@ -633,6 +679,7 @@ def run_import(qsag_root: pathlib.Path, dregg_root: pathlib.Path, dry_run: bool 
                 stale = qsag_root / q_rel
                 if stale.is_file():
                     stale.unlink()
+                    _prune_empty_parents(stale.parent, qsag_root)
 
     return written, unchanged, removed
 
