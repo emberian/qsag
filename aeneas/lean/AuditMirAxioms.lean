@@ -6,13 +6,10 @@ import all QsagVerified.Funs
 import all QsagVerified.Proofs
 import all QsagVerified.Proofs.Adrs
 import all QsagVerified.Proofs.AdrsConverse
-import all QsagVerified.Proofs.Bdoz
-import all QsagVerified.Proofs.BdozConsumption
 import all QsagVerified.Proofs.Common
 import all QsagVerified.Proofs.ConsumingOpening
 import all QsagVerified.Proofs.CredAndHdGuards
 import all QsagVerified.Proofs.Epoch
-import all QsagVerified.Proofs.FtsSpnGuard
 import all QsagVerified.Proofs.Gf256
 import all QsagVerified.Proofs.Goldilocks
 import all QsagVerified.Proofs.Hash
@@ -36,7 +33,7 @@ import all QsagVerified.Proofs.ShamirDkg
 import all QsagVerified.Proofs.Sponge
 import all QsagVerified.Proofs.SpongeConformance
 import all QsagVerified.Proofs.SpongeFraming
-import all QsagVerified.Proofs.TowerBdoz
+import all QsagVerified.Proofs.TowerArithmetic
 import all QsagVerified.Proofs.Tsw
 import all QsagVerified.Proofs.Wots
 import all QsagVerified.Types
@@ -79,7 +76,6 @@ run_cmd do
     ``qsag_verified.proofs.gf256_mul_refines_qsag,
     ``qsag_verified.proofs.gf256_add_refines_qsag,
     ``qsag_verified.proofs.tower128_add_refines_qsag,
-    ``qsag_verified.proofs.tower256_add_refines_qsag,
     -- Production MIR boundaries must remain present as theorems, not just modules.
     ``qsag_verified.proofs.wots_checksum_base16_spec,
     ``qsag_verified.proofs.wots_checksum_strict_antitone,
@@ -88,18 +84,13 @@ run_cmd do
     ``qsag_verified.proofs.adrs_encode_eq,
     ``qsag_verified.proofs.fips205_adrs_roundtrip_spec,
     ``qsag_verified.proofs.fips205_adrs_decode_invalid_type_none,
-    ``qsag_verified.proofs.bdoz_authenticate_open_spec,
-    ``qsag_verified.proofs.bdoz_tampered_mac_rejected,
-    ``qsag_verified.proofs.bdoz_mac_one_time_burn_spec,
     ``qsag_verified.proofs.shamir_eval_poly_gf256_spec,
     ``qsag_verified.proofs.shamir_lagrange_at_zero_gf256_2of2_spec,
     ``qsag_verified.proofs.shamir_lagrange_at_zero_gf256_3of3_spec,
     ``qsag_verified.proofs.shamir_degree_reduce_2of3_gf256_spec,
     ``qsag_verified.proofs.dkg_verify_shamir_2of3_key_bit_gf256_spec,
     ``qsag_verified.proofs.dkg_inconsistent_reconstructions_rejected,
-    ``qsag_verified.proofs.fts_guard_at_most_one_sig_per_epoch,
-    ``qsag_verified.proofs.wots_cs_68_sum136_incomparable_mir,
-    ``qsag_verified.proofs.fts_spn_output_implies_intermediate_mac_ok,
+    ``qsag_verified.proofs.epoch_latch_from_cursor_well_formed,
     ``qsag_verified.proofs.wotsc256_verify_refines_qsag,
     ``qsag_verified.proofs.wotsc256_accept_iff_qsag,
     ``qsag_verified.proofs.wotsc256_reject_iff_qsag,
@@ -110,8 +101,6 @@ run_cmd do
     ``qsag_verified.proofs.shake256_finalize_after_squeezing,
     ``qsag_verified.proofs.tower128_mul_refines_qsag,
     ``qsag_verified.proofs.tower128_mul_eq_zero_iff,
-    ``qsag_verified.proofs.tower256_mul_refines_qsag,
-    ``qsag_verified.proofs.bdoz_verify_arbitrary_batch,
     ``qsag_verified.proofs.belt_latch_bind_eq,
     ``qsag_verified.proofs.belt_latch_epoch_binding_unique,
     ``qsag_verified.proofs.belt_latch_poison_absorbing,

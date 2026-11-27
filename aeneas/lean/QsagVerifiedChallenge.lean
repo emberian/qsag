@@ -3,6 +3,8 @@ module
 public import Aeneas
 public import QsagVerified.Types
 public import QsagVerified.Funs
+public import Qsag.Machine.ElfFunctionalEquiv
+public import Qsag.Machine.McRefine
 public import Qsag.Oracle.Keccak
 public import Qsag.Math.Gf2Pow128
 public import QsagVerifiedChallengeDefs2
@@ -232,32 +234,6 @@ theorem fips205_wots_chain_oob_none
 
 
 
-abbrev bdozOpening1 (item : tower.BdozWireOpening2Lane) : Slice tower.BdozWireOpening2Lane :=
-  Std.Array.to_slice (Std.Array.make 1#usize [item])
-
-theorem bdoz_authenticate_open_spec (session : tower.BdozVerifierSession2Lane)
-    (batch : tower.BdozCommittedBatchOpening2Lane) (item : tower.BdozWireOpening2Lane) :
-    ∃ committed_tag session' accepted,
-      tower.bdoz_commit_masked_tag batch.session_id batch.round_id (bdozMaskedSum batch item)
-        batch.peer_masked_mac_lanes batch.open_nonce = .ok committed_tag ∧
-      tower.verify_mac_2lane_with_burn session batch (bdozOpening1 item) = .ok (session', accepted) ∧
-      (accepted = true ↔ session.burned = false ∧ item.chal_weight ≠ 0#u128 ∧
-        batch.tag_commitment = committed_tag ∧ batch.peer_masked_mac_lanes = bdozExpectedMacLanes session batch item) := sorry
-
-theorem bdoz_mac_one_time_burn_spec (session : tower.BdozVerifierSession2Lane)
-    (batch : tower.BdozCommittedBatchOpening2Lane) (openings : Slice tower.BdozWireOpening2Lane) :
-    ∃ session' accepted,
-      tower.verify_mac_2lane_with_burn session batch openings = .ok (session', accepted) ∧
-      ((accepted = false ∨ session.burned = true) →
-        session'.burned = true ∧ session'.alpha_lanes = Std.Array.make 2#usize [0#u128, 0#u128] ∧
-        ∀ batch' openings', tower.verify_mac_2lane_with_burn session' batch' openings' =
-          .ok (⟨Std.Array.make 2#usize [0#u128, 0#u128], true⟩, false)) := sorry
-
-theorem bdoz_tampered_mac_rejected (session : tower.BdozVerifierSession2Lane)
-    (batch : tower.BdozCommittedBatchOpening2Lane) (item : tower.BdozWireOpening2Lane)
-    (htamper : batch.peer_masked_mac_lanes ≠ bdozExpectedMacLanes session batch item) :
-    ∃ session', tower.verify_mac_2lane_with_burn session batch (bdozOpening1 item) = .ok (session', false) := sorry
-
 /-! ## Shamir sharing: Horner evaluation, point validation, Lagrange reconstruction -/
 
 /-- Horner recurrence on the first `n` coefficients, consuming highest degree first. -/
@@ -387,6 +363,11 @@ def traceAssignedEpochs : List EpochTurn → List Std.U64
   | [] => []
   | .advance _ (.Ok ep) :: ts => ep :: traceAssignedEpochs ts
   | _ :: ts => traceAssignedEpochs ts
+
+theorem epoch_latch_from_cursor_well_formed (next limit : Std.U64)
+    (key : Array Std.U8 32#usize) (last : threshold.LastBoundEpoch) (st : threshold.EpochLatch)
+    (accepted : threshold.EpochLatch.from_cursor next limit key last = .ok (.Ok st)) :
+    WellFormedWal st := by sorry
 
 theorem epoch_latch_acquire_or_retry_spec (st : threshold.EpochLatch)
     (req : threshold.EpochSignRequest) (hw : WellFormedWal st) :
@@ -562,26 +543,6 @@ def adrsBytes (a : fips205.Fips205Adrs) : Std.Array Std.U8 32#usize :=
 @[expose] def spongeRateByte (a : Array Std.U64 25#usize) (offset : Nat) : Std.U8 :=
   UScalar.cast .U8 ((⟨(a.val.getD (offset / 8) 0#u64).bv >>> (8 * (offset % 8))⟩ : Std.U64) &&& 255#u64)
 
-abbrev BdozBatchFoldState := Std.U8 × tower.Tower128 × tower.Tower128 × tower.Tower128
-
-def bdozBatchFoldStep (a : BdozBatchFoldState) (item : tower.BdozWireOpening2Lane) :
-    BdozBatchFoldState :=
-  (if item.chal_weight = 0#u128 then 0#u8 else a.1,
-   a.2.1 ^^^ pureTower128Mul item.chal_weight (UScalar.cast .U128 item.opened_value),
-   a.2.2.1 ^^^ pureTower128Mul item.chal_weight (item.key_lanes.val.getD 0 0#u128),
-   a.2.2.2 ^^^ pureTower128Mul item.chal_weight (item.key_lanes.val.getD 1 0#u128))
-
-def bdozBatchFold : List tower.BdozWireOpening2Lane → BdozBatchFoldState → BdozBatchFoldState
-  | [], a => a
-  | item :: rest, a => bdozBatchFold rest (bdozBatchFoldStep a item)
-
-def bdozBatchAccum (batch : tower.BdozCommittedBatchOpening2Lane)
-    (openings : Slice tower.BdozWireOpening2Lane) : BdozBatchFoldState :=
-  bdozBatchFold openings.val (1#u8, batch.mask_value,
-    batch.mask_key_lanes.val.getD 0 0#u128, batch.mask_key_lanes.val.getD 1 0#u128)
-
-@[expose] def bdozSpent (s : tower.BdozOpeningGuard2Lane) : tower.BdozOpeningGuard2Lane :=
-  { s with alpha_lanes := Array.make 2#usize [0#u128, 0#u128], consumed := true }
 
 theorem keccak_f1600_zero_state_nist :
     keccak.keccak_f1600 (Std.Array.repeat 25#usize 0#u64) =
@@ -625,58 +586,6 @@ theorem tower128_mul_refines_qsag (a b : Std.U128) :
 theorem tower128_mul_eq_zero_iff (a b : Std.U128) :
     tower.tower128_mul a b = .ok 0#u128 ↔ a = 0#u128 ∨ b = 0#u128 := sorry
 
-theorem bdoz_verify_arbitrary_batch
-    (alphas : Array tower.Tower128 2#usize)
-    (batch : tower.BdozCommittedBatchOpening2Lane)
-    (openings : Slice tower.BdozWireOpening2Lane) (tag : Array Std.U8 32#usize)
-    (htag : tower.bdoz_commit_masked_tag batch.session_id batch.round_id
-      (bdozBatchAccum batch openings).2.1 batch.peer_masked_mac_lanes batch.open_nonce = .ok tag) :
-    tower.verify_mac_2lane alphas batch openings = .ok (decide (
-      openings.val ≠ [] ∧
-      (∀ item ∈ openings.val, item.chal_weight ≠ 0#u128) ∧
-      tag = batch.tag_commitment ∧
-      ((batch.peer_masked_mac_lanes.val.getD 0 0#u128 ^^^
-          ((bdozBatchAccum batch openings).2.2.1 ^^^
-            pureTower128Mul (alphas.val.getD 0 0#u128) (bdozBatchAccum batch openings).2.1)) |||
-       (batch.peer_masked_mac_lanes.val.getD 1 0#u128 ^^^
-          ((bdozBatchAccum batch openings).2.2.2 ^^^
-            pureTower128Mul (alphas.val.getD 1 0#u128) (bdozBatchAccum batch openings).2.1))) = 0#u128)) := sorry
-
-theorem bdoz_verify_once_eq (s : tower.BdozOpeningGuard2Lane)
-    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane) :
-    tower.BdozOpeningGuard2Lane.verify_once s b xs =
-      if s.consumed then .ok (bdozSpent s, false)
-      else if s.session_id = b.session_id ∧ s.round_id = b.round_id then
-        (do let ok ← tower.verify_mac_2lane s.alpha_lanes b xs; .ok (bdozSpent s, ok))
-      else .ok (bdozSpent s, false) := sorry
-
-theorem bdoz_verify_once_replay (s : tower.BdozOpeningGuard2Lane)
-    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane)
-    (h : s.consumed = true) :
-    tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (bdozSpent s, false) := sorry
-
-theorem bdoz_verify_once_consumes (s t : tower.BdozOpeningGuard2Lane)
-    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane)
-    (ok : Bool) (h : tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (t, ok)) :
-    t = bdozSpent s := sorry
-
-theorem bdoz_verify_once_single_consumption (s t : tower.BdozOpeningGuard2Lane)
-    (b b' : tower.BdozCommittedBatchOpening2Lane)
-    (xs ys : Slice tower.BdozWireOpening2Lane) (ok : Bool)
-    (h : tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (t, ok)) :
-    tower.BdozOpeningGuard2Lane.verify_once t b' ys = .ok (bdozSpent t, false) := sorry
-
-theorem bdoz_verify_once_accepted (s t : tower.BdozOpeningGuard2Lane)
-    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane)
-    (h : tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (t, true)) :
-    s.consumed = false ∧ s.session_id = b.session_id ∧ s.round_id = b.round_id ∧
-      tower.verify_mac_2lane s.alpha_lanes b xs = .ok true := sorry
-
-theorem bdoz_verify_once_total (s : tower.BdozOpeningGuard2Lane)
-    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane) :
-    ∃ ok, tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (bdozSpent s, ok) := sorry
-
-
 theorem sigma_release_iff (sid : Array Std.U8 32#usize) (round : Std.U64)
     (binding : Array Std.U8 32#usize) (n : Std.U64) (xs : List OpeningInput) :
     (∃ t p, openingRound sid round binding n xs sid round binding = .ok (t, some p)) ↔
@@ -710,5 +619,90 @@ theorem tooth_sigma_nonzero_lane_refused (sid : Array Std.U8 32#usize) (round : 
 theorem shake256_32_refines (input : Slice Std.U8) :
     ∃ out, keccak.shake256_32 input = .ok out ∧
       u8Bytes out.val = Qsag.shake256Xof 32 (u8Bytes input.val) := sorry
+
+def goldilocksAbs (x : goldilocks.Goldilocks) : Qsag.Goldilocks :=
+  Qsag.Goldilocks.ofNat x.val
+
+def mirFieldWord (a : Qsag.Goldilocks) : Std.U64 := ⟨BitVec.ofNat 64 a.val⟩
+
+theorem elf_mir_goldilocks_add_x86_64 (a b : Qsag.Goldilocks) :
+    ∃ slice prog y,
+      Qsag.findSliceByNameBytes
+        (Qsag.extractAllRlibFuncs Qsag.currentX86RlibArchiveBytes) Qsag.goldAddX86Name = some slice ∧
+      Qsag.decodeX86Stream slice.code = some prog ∧
+      goldilocks.goldilocks_add (mirFieldWord a) (mirFieldWord b) = .ok y ∧
+      goldilocksAbs y = Qsag.Goldilocks.add a b ∧
+      ∀ (s : Qsag.X86State) (fuel : Nat),
+        s.pc = 0 → s.halted = false →
+        s.gpr.get 7 = UInt64.ofNat a.val → s.gpr.get 6 = UInt64.ofNat b.val →
+        25 ≤ fuel →
+          (Qsag.runX86 prog fuel s).1.halted = true ∧
+          (Qsag.runX86 prog fuel s).1.mem = s.mem ∧
+          ((Qsag.runX86 prog fuel s).1.gpr.get 0).toNat = y.val := by sorry
+
+theorem elf_mir_goldilocks_sub_x86_64 (a b : Qsag.Goldilocks) :
+    ∃ slice prog y,
+      Qsag.findSliceByNameBytes
+        (Qsag.extractAllRlibFuncs Qsag.currentX86RlibArchiveBytes) Qsag.goldSubX86Name = some slice ∧
+      Qsag.decodeX86Stream slice.code = some prog ∧
+      goldilocks.goldilocks_sub (mirFieldWord a) (mirFieldWord b) = .ok y ∧
+      goldilocksAbs y = Qsag.Goldilocks.sub a b ∧
+      ∀ (s : Qsag.X86State) (fuel : Nat),
+        s.pc = 0 → s.halted = false →
+        s.gpr.get 7 = UInt64.ofNat a.val → s.gpr.get 6 = UInt64.ofNat b.val →
+        31 ≤ fuel →
+          (Qsag.runX86 prog fuel s).1.halted = true ∧
+          (Qsag.runX86 prog fuel s).1.mem = s.mem ∧
+          ((Qsag.runX86 prog fuel s).1.gpr.get 0).toNat = y.val := by sorry
+
+theorem elf_mir_goldilocks_mul_x86_64 (a b : Qsag.Goldilocks) :
+    ∃ slice prog y,
+      Qsag.findSliceByNameBytes
+        (Qsag.extractAllRlibFuncs Qsag.currentX86RlibArchiveBytes) Qsag.goldMulX86Name = some slice ∧
+      Qsag.decodeX86Stream slice.code = some prog ∧
+      goldilocks.goldilocks_mul (mirFieldWord a) (mirFieldWord b) = .ok y ∧
+      goldilocksAbs y = Qsag.Goldilocks.mul a b ∧
+      ∀ (s : Qsag.X86State) (fuel : Nat),
+        s.pc = 0 → s.halted = false →
+        s.gpr.get 7 = UInt64.ofNat a.val → s.gpr.get 6 = UInt64.ofNat b.val →
+        33 ≤ fuel →
+          (Qsag.runX86 prog fuel s).1.halted = true ∧
+          (Qsag.runX86 prog fuel s).1.mem = s.mem ∧
+          ((Qsag.runX86 prog fuel s).1.gpr.get 0).toNat = y.val := by sorry
+
+theorem elf_mir_goldilocks_mul_aarch64 (a b : Qsag.Goldilocks) :
+    ∃ slice prog y,
+      Qsag.findSliceByNameBytes
+        (Qsag.extractAllRlibFuncs Qsag.currentAarch64RlibArchiveBytes) Qsag.goldMulArmName = some slice ∧
+      Qsag.decodeArm64Stream slice.code = some prog ∧
+      goldilocks.goldilocks_mul (mirFieldWord a) (mirFieldWord b) = .ok y ∧
+      goldilocksAbs y = Qsag.Goldilocks.mul a b ∧
+      ∀ (s : Qsag.Arm64State) (fuel : Nat),
+        s.pc = 0 → s.halted = false →
+        s.gpr.get 0 = UInt64.ofNat a.val → s.gpr.get 1 = UInt64.ofNat b.val →
+        30 ≤ fuel →
+          (Qsag.runArm64 prog fuel s).1.halted = true ∧
+          (Qsag.runArm64 prog fuel s).1.mem = s.mem ∧
+          ((Qsag.runArm64 prog fuel s).1.gpr.get 0).toNat = y.val := by sorry
+
+theorem mlDsa_abort_in_place_refuses_valid_checks
+    (g : cred_and_hd_guards.MlDsaReleaseGate) (out₀ : Array Std.U8 32#usize) :
+    let cOk : cred_and_hd_guards.MlDsaBarrierChecks :=
+      ⟨g.session_id, g.attempt, true, true, true, true⟩
+    ∃ g' : cred_and_hd_guards.MlDsaReleaseGate,
+      cred_and_hd_guards.MlDsaReleaseGate.abort_in_place g = .ok g' ∧
+      cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into g' cOk out₀ =
+        .ok (.Err .GateAbortedOrReleased, g', Array.repeat 32#usize 0#u8) := sorry
+
+theorem mlDsa_try_release_into_eq_by_value
+    (g : cred_and_hd_guards.MlDsaReleaseGate)
+    (c : cred_and_hd_guards.MlDsaBarrierChecks)
+    (out₀ : Array Std.U8 32#usize) :
+    cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into g c out₀ =
+      Result.bind (cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share g c)
+        fun (g', res) =>
+          match res with
+          | .Ok z_out => .ok (.Ok (), g', z_out)
+          | .Err err => .ok (.Err err, g', Array.repeat 32#usize 0#u8) := sorry
 
 end qsag_verified.proofs
