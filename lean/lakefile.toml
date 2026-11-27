@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 name = "qsag"
 version = "0.1.0"
-defaultTargets = ["Qsag", "QsagChallenge"]
+defaultTargets = ["Qsag", "QsagChallenge", "audit-axioms"]
 
 [[lean_lib]]
 name = "Qsag"
@@ -34,3 +34,4 @@ name = "TraceAxiom"
 [[lean_exe]]
 name = "audit-axioms"
 root = "AuditAxiomsMain"
+needs = ["AuditAxioms"]
