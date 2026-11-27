@@ -1928,3 +1928,966 @@ def simSbox (px : Goldilocks × Goldilocks) (scE scE1 simOutE1 : SboxCoins) :
   let m4 := simMulGate m3.2 m2.2 scE.2.2.2 scE1.2.2.2 simOutE1.2.2.2
   ((⟨m1.1.1, m2.1.1, m3.1.1, m4.1.1⟩, ⟨m1.1.2, m2.1.2, m3.1.2, m4.1.2⟩), m4.2)
 
+def sboxOutEquiv (e : Fin 3) (wx : VcWire3) (scE scE1 : SboxCoins) :
+    SimpleEquiv SboxCoins SboxCoins :=
+  seDepProd (mulGateOutEquiv e wx wx scE1.1) fun r1U =>
+    let w2 := vcMulGate3 wx wx (mkParty3At e scE.1 scE1.1 r1U)
+    seDepProd (mulGateOutEquiv e w2 wx scE1.2.1) fun r2U =>
+      let w3 := vcMulGate3 w2 wx (mkParty3At e scE.2.1 scE1.2.1 r2U)
+      seDepProd (mulGateOutEquiv e w2 w2 scE1.2.2.1) fun r3U =>
+        let w4 := vcMulGate3 w2 w2 (mkParty3At e scE.2.2.1 scE1.2.2.1 r3U)
+        mulGateOutEquiv e w4 w3 scE1.2.2.2
+
+private theorem simSbox_eq_honest (e : Fin 3) (wx : VcWire3) (scE scE1 scU : SboxCoins) :
+    let sc := mkParty3At e scE scE1 scU
+    simSbox (vcPairAt wx e) scE scE1 ((sboxOutEquiv e wx scE scE1).toFun scU) =
+      (((honestSboxView3 wx sc).1 e, (honestSboxView3 wx sc).1 (vcNextParty3 e)),
+       vcPairAt (honestSboxView3 wx sc).2 e) := by
+  rcases scE with ⟨r1E, r2E, r3E, r4E⟩
+  rcases scE1 with ⟨r1E1, r2E1, r3E1, r4E1⟩
+  rcases scU with ⟨r1U, r2U, r3U, r4U⟩
+  dsimp only [sboxOutEquiv, seDepProd, simSbox, honestSboxView3]
+  have hProj1 : (fun i => (mkParty3At e (r1E, r2E, r3E, r4E) (r1E1, r2E1, r3E1, r4E1) (r1U, r2U, r3U, r4U) i).1) =
+      mkParty3At e r1E r1E1 r1U := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have hProj2 : (fun i => (mkParty3At e (r1E, r2E, r3E, r4E) (r1E1, r2E1, r3E1, r4E1) (r1U, r2U, r3U, r4U) i).2.1) =
+      mkParty3At e r2E r2E1 r2U := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have hProj3 : (fun i => (mkParty3At e (r1E, r2E, r3E, r4E) (r1E1, r2E1, r3E1, r4E1) (r1U, r2U, r3U, r4U) i).2.2.1) =
+      mkParty3At e r3E r3E1 r3U := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have hProj4 : (fun i => (mkParty3At e (r1E, r2E, r3E, r4E) (r1E1, r2E1, r3E1, r4E1) (r1U, r2U, r3U, r4U) i).2.2.2) =
+      mkParty3At e r4E r4E1 r4U := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  rw [hProj1, hProj2, hProj3, hProj4]
+  rw [simMulGate_eq_honest]; dsimp only
+  rw [simMulGate_eq_honest]; dsimp only
+  rw [simMulGate_eq_honest]; dsimp only
+  rw [simMulGate_eq_honest]
+
+private theorem extractSboxCoins_sim (px : Goldilocks × Goldilocks) (scE scE1 simOutE1 : SboxCoins) :
+    extractSboxCoins (simSbox px scE scE1 simOutE1).1.1 = scE ∧
+    extractSboxCoins (simSbox px scE scE1 simOutE1).1.2 = scE1 := by
+  rcases scE with ⟨_, _, _, _⟩
+  rcases scE1 with ⟨_, _, _, _⟩
+  exact ⟨rfl, rfl⟩
+
+private theorem pairCheckSbox_sim (px : Goldilocks × Goldilocks) (scE scE1 simOutE1 : SboxCoins) :
+    pairCheckSbox px (simSbox px scE scE1 simOutE1).1.1 (simSbox px scE scE1 simOutE1).1.2 =
+      some (simSbox px scE scE1 simOutE1).2 := by
+  unfold pairCheckSbox simSbox
+  dsimp only
+  rw [pairCheckMul_sim]; dsimp only
+  rw [pairCheckMul_sim]; dsimp only
+  rw [pairCheckMul_sim]; dsimp only
+  rw [pairCheckMul_sim]
+
+private def extRoundCoinsTupleEquiv :
+    SimpleEquiv ExtRoundCoins
+      (SboxCoins × SboxCoins × SboxCoins × SboxCoins × SboxCoins × SboxCoins ×
+       SboxCoins × SboxCoins × SboxCoins × SboxCoins × SboxCoins × SboxCoins) where
+  toFun c := (c.s0, c.s1, c.s2, c.s3, c.s4, c.s5, c.s6, c.s7, c.s8, c.s9, c.s10, c.s11)
+  invFun t := ⟨t.1, t.2.1, t.2.2.1, t.2.2.2.1, t.2.2.2.2.1, t.2.2.2.2.2.1,
+               t.2.2.2.2.2.2.1, t.2.2.2.2.2.2.2.1, t.2.2.2.2.2.2.2.2.1,
+               t.2.2.2.2.2.2.2.2.2.1, t.2.2.2.2.2.2.2.2.2.2.1, t.2.2.2.2.2.2.2.2.2.2.2⟩
+  left_inv := fun ⟨_, _, _, _, _, _, _, _, _, _, _, _⟩ => rfl
+  right_inv := fun ⟨_, _, _, _, _, _, _, _, _, _, _, _⟩ => rfl
+
+def simExtRound (e : Fin 3) (rc : Poseidon2State12)
+    (st : Poseidon2State12 × Poseidon2State12) (ecE ecE1 simOutE1 : ExtRoundCoins) :
+    (PartyExtRoundView × PartyExtRoundView) × (Poseidon2State12 × Poseidon2State12) :=
+  let run (f : Poseidon2State12 → Goldilocks) (sel : ExtRoundCoins → SboxCoins) :=
+    simSbox (vcPairAddConst e (f st.1, f st.2) (f rc)) (sel ecE) (sel ecE1) (sel simOutE1)
+  let r0 := run (·.b0.x0) (·.s0); let r1 := run (·.b0.x1) (·.s1)
+  let r2 := run (·.b0.x2) (·.s2); let r3 := run (·.b0.x3) (·.s3)
+  let r4 := run (·.b1.x0) (·.s4); let r5 := run (·.b1.x1) (·.s5)
+  let r6 := run (·.b1.x2) (·.s6); let r7 := run (·.b1.x3) (·.s7)
+  let r8 := run (·.b2.x0) (·.s8); let r9 := run (·.b2.x1) (·.s9)
+  let r10 := run (·.b2.x2) (·.s10); let r11 := run (·.b2.x3) (·.s11)
+  ((⟨r0.1.1, r1.1.1, r2.1.1, r3.1.1, r4.1.1, r5.1.1, r6.1.1, r7.1.1, r8.1.1, r9.1.1, r10.1.1, r11.1.1⟩,
+    ⟨r0.1.2, r1.1.2, r2.1.2, r3.1.2, r4.1.2, r5.1.2, r6.1.2, r7.1.2, r8.1.2, r9.1.2, r10.1.2, r11.1.2⟩),
+   (applyME ⟨⟨r0.2.1, r1.2.1, r2.2.1, r3.2.1⟩, ⟨r4.2.1, r5.2.1, r6.2.1, r7.2.1⟩, ⟨r8.2.1, r9.2.1, r10.2.1, r11.2.1⟩⟩,
+    applyME ⟨⟨r0.2.2, r1.2.2, r2.2.2, r3.2.2⟩, ⟨r4.2.2, r5.2.2, r6.2.2, r7.2.2⟩, ⟨r8.2.2, r9.2.2, r10.2.2, r11.2.2⟩⟩))
+
+def extRoundOutEquiv (e : Fin 3) (rc : Poseidon2State12) (st : VcState12_3)
+    (ecE ecE1 : ExtRoundCoins) : SimpleEquiv ExtRoundCoins ExtRoundCoins :=
+  let eqLane (f : Poseidon2State12 → Goldilocks) (sel : ExtRoundCoins → SboxCoins) :=
+    sboxOutEquiv e (vcWireAddConst3 (fun i => f (st i)) (f rc)) (sel ecE) (sel ecE1)
+  seTrans extRoundCoinsTupleEquiv
+    (seTrans
+      (seProdCongr (eqLane (·.b0.x0) (·.s0))
+      (seProdCongr (eqLane (·.b0.x1) (·.s1))
+      (seProdCongr (eqLane (·.b0.x2) (·.s2))
+      (seProdCongr (eqLane (·.b0.x3) (·.s3))
+      (seProdCongr (eqLane (·.b1.x0) (·.s4))
+      (seProdCongr (eqLane (·.b1.x1) (·.s5))
+      (seProdCongr (eqLane (·.b1.x2) (·.s6))
+      (seProdCongr (eqLane (·.b1.x3) (·.s7))
+      (seProdCongr (eqLane (·.b2.x0) (·.s8))
+      (seProdCongr (eqLane (·.b2.x1) (·.s9))
+      (seProdCongr (eqLane (·.b2.x2) (·.s10))
+                   (eqLane (·.b2.x3) (·.s11)))))))))))))
+      (seSymm extRoundCoinsTupleEquiv))
+
+private theorem simExtRound_eq_honest (e : Fin 3) (rc : Poseidon2State12) (st : VcState12_3)
+    (ecE ecE1 ecU : ExtRoundCoins) :
+    let ec := mkParty3At e ecE ecE1 ecU
+    simExtRound e rc (vcPairAtState12 st e) ecE ecE1 ((extRoundOutEquiv e rc st ecE ecE1).toFun ecU) =
+      (((honestExtRound3 rc st ec).1 e, (honestExtRound3 rc st ec).1 (vcNextParty3 e)),
+       vcPairAtState12 (honestExtRound3 rc st ec).2 e) := by
+  have hAt : ∀ f : Poseidon2State12 → Goldilocks,
+      vcPairAddConst e (f (st e), f (st (vcNextParty3 e))) (f rc) =
+        vcPairAt (vcWireAddConst3 (fun i => f (st i)) (f rc)) e :=
+    fun f => vcPairAddConst_spec (fun i => f (st i)) (f rc) e
+  have hSel : ∀ sel : ExtRoundCoins → SboxCoins,
+      (fun i => sel (mkParty3At e ecE ecE1 ecU i)) = mkParty3At e (sel ecE) (sel ecE1) (sel ecU) := by
+    intro sel; funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  unfold simExtRound extRoundOutEquiv honestExtRound3 vcPairAtState12 vcExtRoundOut3
+  dsimp only [seTrans, seProdCongr, seSymm, extRoundCoinsTupleEquiv]
+  rw [hAt (·.b0.x0), hAt (·.b0.x1), hAt (·.b0.x2), hAt (·.b0.x3),
+      hAt (·.b1.x0), hAt (·.b1.x1), hAt (·.b1.x2), hAt (·.b1.x3),
+      hAt (·.b2.x0), hAt (·.b2.x1), hAt (·.b2.x2), hAt (·.b2.x3),
+      hSel (·.s0), hSel (·.s1), hSel (·.s2), hSel (·.s3),
+      hSel (·.s4), hSel (·.s5), hSel (·.s6), hSel (·.s7),
+      hSel (·.s8), hSel (·.s9), hSel (·.s10), hSel (·.s11),
+      simSbox_eq_honest, simSbox_eq_honest, simSbox_eq_honest, simSbox_eq_honest,
+      simSbox_eq_honest, simSbox_eq_honest, simSbox_eq_honest, simSbox_eq_honest,
+      simSbox_eq_honest, simSbox_eq_honest, simSbox_eq_honest, simSbox_eq_honest]
+  rfl
+
+private theorem extractExtRoundCoins_sim (e : Fin 3) (rc : Poseidon2State12)
+    (st : Poseidon2State12 × Poseidon2State12) (ecE ecE1 simOutE1 : ExtRoundCoins) :
+    extractExtRoundCoins (simExtRound e rc st ecE ecE1 simOutE1).1.1 = ecE ∧
+    extractExtRoundCoins (simExtRound e rc st ecE ecE1 simOutE1).1.2 = ecE1 := by
+  rcases ecE with ⟨s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11⟩
+  rcases ecE1 with ⟨t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11⟩
+  unfold extractExtRoundCoins simExtRound
+  dsimp only
+  simp only [(extractSboxCoins_sim _ _ _ _).1, (extractSboxCoins_sim _ _ _ _).2, and_self]
+
+private theorem pairCheckExtRound_sim (e : Fin 3) (rc : Poseidon2State12)
+    (st : Poseidon2State12 × Poseidon2State12) (ecE ecE1 simOutE1 : ExtRoundCoins) :
+    pairCheckExtRound e rc (simExtRound e rc st ecE ecE1 simOutE1).1.1
+      (simExtRound e rc st ecE ecE1 simOutE1).1.2 st =
+      some (simExtRound e rc st ecE ecE1 simOutE1).2 := by
+  unfold pairCheckExtRound simExtRound
+  dsimp only
+  simp only [pairCheckSbox_sim]
+
+def simIntRound (e : Fin 3) (rc : Goldilocks)
+    (st : Poseidon2State12 × Poseidon2State12) (scE scE1 simOutE1 : SboxCoins) :
+    (PartySboxView × PartySboxView) × (Poseidon2State12 × Poseidon2State12) :=
+  let r0 := simSbox (vcPairAddConst e (st.1.b0.x0, st.2.b0.x0) rc) scE scE1 simOutE1
+  (r0.1,
+   (applyMI ⟨⟨r0.2.1, st.1.b0.x1, st.1.b0.x2, st.1.b0.x3⟩, st.1.b1, st.1.b2⟩,
+    applyMI ⟨⟨r0.2.2, st.2.b0.x1, st.2.b0.x2, st.2.b0.x3⟩, st.2.b1, st.2.b2⟩))
+
+def intRoundOutEquiv (e : Fin 3) (rc : Goldilocks) (st : VcState12_3)
+    (scE scE1 : SboxCoins) : SimpleEquiv SboxCoins SboxCoins :=
+  sboxOutEquiv e (vcWireAddConst3 (fun i => (st i).b0.x0) rc) scE scE1
+
+private theorem simIntRound_eq_honest (e : Fin 3) (rc : Goldilocks) (st : VcState12_3)
+    (scE scE1 scU : SboxCoins) :
+    let sc := mkParty3At e scE scE1 scU
+    simIntRound e rc (vcPairAtState12 st e) scE scE1 ((intRoundOutEquiv e rc st scE scE1).toFun scU) =
+      (((honestIntRound3 rc st sc).1 e, (honestIntRound3 rc st sc).1 (vcNextParty3 e)),
+       vcPairAtState12 (honestIntRound3 rc st sc).2 e) := by
+  unfold simIntRound intRoundOutEquiv honestIntRound3 vcPairAtState12 vcIntRoundOut3
+  dsimp only
+  rw [show ((st e).b0.x0, (st (vcNextParty3 e)).b0.x0) = vcPairAt (fun i => (st i).b0.x0) e from rfl,
+      vcPairAddConst_spec (fun i => (st i).b0.x0) rc e, simSbox_eq_honest]
+  rfl
+
+private theorem pairCheckIntRound_sim (e : Fin 3) (rc : Goldilocks)
+    (st : Poseidon2State12 × Poseidon2State12) (scE scE1 simOutE1 : SboxCoins) :
+    pairCheckIntRound e rc (simIntRound e rc st scE scE1 simOutE1).1.1
+      (simIntRound e rc st scE scE1 simOutE1).1.2 st =
+      some (simIntRound e rc st scE scE1 simOutE1).2 := by
+  unfold pairCheckIntRound simIntRound
+  dsimp only
+  rw [pairCheckSbox_sim]
+
+def simExtRounds (e : Fin 3) :
+    (rcs : List Poseidon2State12) → (Poseidon2State12 × Poseidon2State12) →
+    Vec ExtRoundCoins rcs.length → Vec ExtRoundCoins rcs.length → Vec ExtRoundCoins rcs.length →
+    (List PartyExtRoundView × List PartyExtRoundView) × (Poseidon2State12 × Poseidon2State12)
+  | [], st, .nil, .nil, .nil => (([], []), st)
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 =>
+    let hd := simExtRound e rc st cE cE1 oE1
+    let tl := simExtRounds e rcs hd.2 csE csE1 osE1
+    ((hd.1.1 :: tl.1.1, hd.1.2 :: tl.1.2), tl.2)
+
+def extRoundsOutEquiv (e : Fin 3) :
+    (rcs : List Poseidon2State12) → VcState12_3 →
+    Vec ExtRoundCoins rcs.length → Vec ExtRoundCoins rcs.length →
+    SimpleEquiv (Vec ExtRoundCoins rcs.length) (Vec ExtRoundCoins rcs.length)
+  | [], _, .nil, .nil => seRefl _
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1 =>
+    seDepCons (extRoundOutEquiv e rc st cE cE1) fun cU =>
+      extRoundsOutEquiv e rcs (honestExtRound3 rc st (mkParty3At e cE cE1 cU)).2 csE csE1
+
+private theorem simExtRounds_eq_honest (e : Fin 3) :
+    ∀ (rcs : List Poseidon2State12) (st : VcState12_3)
+      (csE csE1 csU : Vec ExtRoundCoins rcs.length),
+      let cs := mkParty3At e csE csE1 csU
+      simExtRounds e rcs (vcPairAtState12 st e) csE csE1
+        ((extRoundsOutEquiv e rcs st csE csE1).toFun csU) =
+        (((honestExtRounds3 rcs st cs).1 e, (honestExtRounds3 rcs st cs).1 (vcNextParty3 e)),
+         vcPairAtState12 (honestExtRounds3 rcs st cs).2 e)
+  | [], _, .nil, .nil, .nil => rfl
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1, .cons cU csU => by
+    simp only [extRoundsOutEquiv, seDepCons, seDepConsToFun, simExtRounds, honestExtRounds3]
+    have hHead : (fun i => (mkParty3At e (Vec.cons cE csE) (Vec.cons cE1 csE1) (Vec.cons cU csU) i).head) =
+        mkParty3At e cE cE1 cU := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    have hTail : (fun i => (mkParty3At e (Vec.cons cE csE) (Vec.cons cE1 csE1) (Vec.cons cU csU) i).tail) =
+        mkParty3At e csE csE1 csU := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    rw [hHead, hTail, simExtRound_eq_honest]
+    dsimp only
+    rw [simExtRounds_eq_honest e rcs _ csE csE1 csU]
+
+private theorem extractExtRoundsCoins_sim (e : Fin 3) :
+    ∀ (rcs : List Poseidon2State12) (st : Poseidon2State12 × Poseidon2State12)
+      (csE csE1 osE1 : Vec ExtRoundCoins rcs.length),
+      extractExtRoundsCoins rcs (simExtRounds e rcs st csE csE1 osE1).1.1 = some csE ∧
+      extractExtRoundsCoins rcs (simExtRounds e rcs st csE csE1 osE1).1.2 = some csE1
+  | [], _, .nil, .nil, .nil => ⟨rfl, rfl⟩
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 => by
+    simp only [simExtRounds, extractExtRoundsCoins]
+    obtain ⟨ih1, ih2⟩ := extractExtRoundsCoins_sim e rcs (simExtRound e rc st cE cE1 oE1).2 csE csE1 osE1
+    obtain ⟨h1, h2⟩ := extractExtRoundCoins_sim e rc st cE cE1 oE1
+    rw [ih1, ih2, h1, h2]
+    exact ⟨rfl, rfl⟩
+
+private theorem pairCheckExtRounds_sim (e : Fin 3) :
+    ∀ (rcs : List Poseidon2State12) (st : Poseidon2State12 × Poseidon2State12)
+      (csE csE1 osE1 : Vec ExtRoundCoins rcs.length),
+      pairCheckExtRounds e rcs (simExtRounds e rcs st csE csE1 osE1).1.1
+        (simExtRounds e rcs st csE csE1 osE1).1.2 st =
+        some (simExtRounds e rcs st csE csE1 osE1).2
+  | [], _, .nil, .nil, .nil => rfl
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 => by
+    simp only [simExtRounds, pairCheckExtRounds]
+    rw [pairCheckExtRound_sim]
+    exact pairCheckExtRounds_sim e rcs _ csE csE1 osE1
+
+def simIntRounds (e : Fin 3) :
+    (rcs : List Goldilocks) → (Poseidon2State12 × Poseidon2State12) →
+    Vec SboxCoins rcs.length → Vec SboxCoins rcs.length → Vec SboxCoins rcs.length →
+    (List PartySboxView × List PartySboxView) × (Poseidon2State12 × Poseidon2State12)
+  | [], st, .nil, .nil, .nil => (([], []), st)
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 =>
+    let hd := simIntRound e rc st cE cE1 oE1
+    let tl := simIntRounds e rcs hd.2 csE csE1 osE1
+    ((hd.1.1 :: tl.1.1, hd.1.2 :: tl.1.2), tl.2)
+
+def intRoundsOutEquiv (e : Fin 3) :
+    (rcs : List Goldilocks) → VcState12_3 →
+    Vec SboxCoins rcs.length → Vec SboxCoins rcs.length →
+    SimpleEquiv (Vec SboxCoins rcs.length) (Vec SboxCoins rcs.length)
+  | [], _, .nil, .nil => seRefl _
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1 =>
+    seDepCons (intRoundOutEquiv e rc st cE cE1) fun cU =>
+      intRoundsOutEquiv e rcs (honestIntRound3 rc st (mkParty3At e cE cE1 cU)).2 csE csE1
+
+private theorem simIntRounds_eq_honest (e : Fin 3) :
+    ∀ (rcs : List Goldilocks) (st : VcState12_3)
+      (csE csE1 csU : Vec SboxCoins rcs.length),
+      let cs := mkParty3At e csE csE1 csU
+      simIntRounds e rcs (vcPairAtState12 st e) csE csE1
+        ((intRoundsOutEquiv e rcs st csE csE1).toFun csU) =
+        (((honestIntRounds3 rcs st cs).1 e, (honestIntRounds3 rcs st cs).1 (vcNextParty3 e)),
+         vcPairAtState12 (honestIntRounds3 rcs st cs).2 e)
+  | [], _, .nil, .nil, .nil => rfl
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1, .cons cU csU => by
+    simp only [intRoundsOutEquiv, seDepCons, seDepConsToFun, simIntRounds, honestIntRounds3]
+    have hHead : (fun i => (mkParty3At e (Vec.cons cE csE) (Vec.cons cE1 csE1) (Vec.cons cU csU) i).head) =
+        mkParty3At e cE cE1 cU := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    have hTail : (fun i => (mkParty3At e (Vec.cons cE csE) (Vec.cons cE1 csE1) (Vec.cons cU csU) i).tail) =
+        mkParty3At e csE csE1 csU := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    rw [hHead, hTail, simIntRound_eq_honest]
+    dsimp only
+    rw [simIntRounds_eq_honest e rcs _ csE csE1 csU]
+
+private theorem extractIntRoundsCoins_sim (e : Fin 3) :
+    ∀ (rcs : List Goldilocks) (st : Poseidon2State12 × Poseidon2State12)
+      (csE csE1 osE1 : Vec SboxCoins rcs.length),
+      extractIntRoundsCoins rcs (simIntRounds e rcs st csE csE1 osE1).1.1 = some csE ∧
+      extractIntRoundsCoins rcs (simIntRounds e rcs st csE csE1 osE1).1.2 = some csE1
+  | [], _, .nil, .nil, .nil => ⟨rfl, rfl⟩
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 => by
+    simp only [simIntRounds, extractIntRoundsCoins]
+    obtain ⟨ih1, ih2⟩ := extractIntRoundsCoins_sim e rcs (simIntRound e rc st cE cE1 oE1).2 csE csE1 osE1
+    obtain ⟨h1, h2⟩ := extractSboxCoins_sim (vcPairAddConst e (st.1.b0.x0, st.2.b0.x0) rc) cE cE1 oE1
+    dsimp only [simIntRound] at *
+    rw [ih1, ih2, h1, h2]
+    exact ⟨rfl, rfl⟩
+
+private theorem pairCheckIntRounds_sim (e : Fin 3) :
+    ∀ (rcs : List Goldilocks) (st : Poseidon2State12 × Poseidon2State12)
+      (csE csE1 osE1 : Vec SboxCoins rcs.length),
+      pairCheckIntRounds e rcs (simIntRounds e rcs st csE csE1 osE1).1.1
+        (simIntRounds e rcs st csE csE1 osE1).1.2 st =
+        some (simIntRounds e rcs st csE csE1 osE1).2
+  | [], _, .nil, .nil, .nil => rfl
+  | rc :: rcs, st, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 => by
+    simp only [simIntRounds, pairCheckIntRounds]
+    rw [pairCheckIntRound_sim]
+    exact pairCheckIntRounds_sim e rcs _ csE csE1 osE1
+
+private def perm12CoinsTupleEquiv :
+    SimpleEquiv Perm12Coins
+      (Vec ExtRoundCoins poseidon2InitialExtConsts.length ×
+       Vec SboxCoins poseidon2InternalConsts.length ×
+       Vec ExtRoundCoins poseidon2TerminalExtConsts.length) where
+  toFun c := (c.initExt, c.internal, c.termExt)
+  invFun t := ⟨t.1, t.2.1, t.2.2⟩
+  left_inv := fun ⟨_, _, _⟩ => rfl
+  right_inv := fun ⟨_, _, _⟩ => rfl
+
+def simRawPerm12 (e : Fin 3) (st : Poseidon2State12 × Poseidon2State12)
+    (pcE pcE1 osE1 : Perm12Coins) :
+    (PartyPerm12View × PartyPerm12View) × (Poseidon2State12 × Poseidon2State12) :=
+  let s0 := (applyME st.1, applyME st.2)
+  let r1 := simExtRounds e poseidon2InitialExtConsts s0 pcE.initExt pcE1.initExt osE1.initExt
+  let r2 := simIntRounds e poseidon2InternalConsts r1.2 pcE.internal pcE1.internal osE1.internal
+  let r3 := simExtRounds e poseidon2TerminalExtConsts r2.2 pcE.termExt pcE1.termExt osE1.termExt
+  ((⟨r1.1.1, r2.1.1, r3.1.1⟩, ⟨r1.1.2, r2.1.2, r3.1.2⟩), r3.2)
+
+def perm12OutEquiv (e : Fin 3) (st : VcState12_3) (pcE pcE1 : Perm12Coins) :
+    SimpleEquiv Perm12Coins Perm12Coins :=
+  let s0 : VcState12_3 := fun i => applyME (st i)
+  seTrans perm12CoinsTupleEquiv
+    (seTrans
+      (seDepProd (extRoundsOutEquiv e poseidon2InitialExtConsts s0 pcE.initExt pcE1.initExt) fun c1U =>
+        let st1 := (honestExtRounds3 poseidon2InitialExtConsts s0 (mkParty3At e pcE.initExt pcE1.initExt c1U)).2
+        seDepProd (intRoundsOutEquiv e poseidon2InternalConsts st1 pcE.internal pcE1.internal) fun c2U =>
+          let st2 := (honestIntRounds3 poseidon2InternalConsts st1 (mkParty3At e pcE.internal pcE1.internal c2U)).2
+          extRoundsOutEquiv e poseidon2TerminalExtConsts st2 pcE.termExt pcE1.termExt)
+      (seSymm perm12CoinsTupleEquiv))
+
+private theorem simRawPerm12_eq_honest (e : Fin 3) (st : VcState12_3) (pcE pcE1 pcU : Perm12Coins) :
+    let pc := mkParty3At e pcE pcE1 pcU
+    simRawPerm12 e (vcPairAtState12 st e) pcE pcE1 ((perm12OutEquiv e st pcE pcE1).toFun pcU) =
+      (((honestRawPerm12_3 st pc).1 e, (honestRawPerm12_3 st pc).1 (vcNextParty3 e)),
+       vcPairAtState12 (honestRawPerm12_3 st pc).2 e) := by
+  have h1 : (fun i => (mkParty3At e pcE pcE1 pcU i).initExt) = mkParty3At e pcE.initExt pcE1.initExt pcU.initExt := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have h2 : (fun i => (mkParty3At e pcE pcE1 pcU i).internal) = mkParty3At e pcE.internal pcE1.internal pcU.internal := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have h3 : (fun i => (mkParty3At e pcE pcE1 pcU i).termExt) = mkParty3At e pcE.termExt pcE1.termExt pcU.termExt := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  unfold simRawPerm12 perm12OutEquiv honestRawPerm12_3
+  dsimp only [seTrans, seDepProd, seSymm, perm12CoinsTupleEquiv]
+  rw [h1, h2, h3]
+  have hs0 : (applyME (vcPairAtState12 st e).1, applyME (vcPairAtState12 st e).2) =
+      vcPairAtState12 (fun i => applyME (st i)) e := rfl
+  rw [hs0, simExtRounds_eq_honest]; dsimp only
+  rw [simIntRounds_eq_honest]; dsimp only
+  rw [simExtRounds_eq_honest]
+
+private theorem extractPerm12Coins_sim (e : Fin 3) (st : Poseidon2State12 × Poseidon2State12)
+    (pcE pcE1 osE1 : Perm12Coins) :
+    extractPerm12Coins (simRawPerm12 e st pcE pcE1 osE1).1.1 = some pcE ∧
+    extractPerm12Coins (simRawPerm12 e st pcE pcE1 osE1).1.2 = some pcE1 := by
+  rcases pcE with ⟨a1, a2, a3⟩
+  rcases pcE1 with ⟨b1, b2, b3⟩
+  unfold extractPerm12Coins simRawPerm12
+  dsimp only
+  obtain ⟨e1, f1⟩ := extractExtRoundsCoins_sim e poseidon2InitialExtConsts _ a1 b1 osE1.initExt
+  obtain ⟨e2, f2⟩ := extractIntRoundsCoins_sim e poseidon2InternalConsts _ a2 b2 osE1.internal
+  obtain ⟨e3, f3⟩ := extractExtRoundsCoins_sim e poseidon2TerminalExtConsts _ a3 b3 osE1.termExt
+  rw [e1, e2, e3, f1, f2, f3]
+  exact ⟨rfl, rfl⟩
+
+private theorem pairCheckRawPerm12_sim (e : Fin 3) (st : Poseidon2State12 × Poseidon2State12)
+    (pcE pcE1 osE1 : Perm12Coins) :
+    pairCheckRawPerm12 e (simRawPerm12 e st pcE pcE1 osE1).1.1
+      (simRawPerm12 e st pcE pcE1 osE1).1.2 st =
+      some (simRawPerm12 e st pcE pcE1 osE1).2 := by
+  unfold pairCheckRawPerm12 simRawPerm12
+  dsimp only
+  rw [pairCheckExtRounds_sim]; dsimp only
+  rw [pairCheckIntRounds_sim]; dsimp only
+  rw [pairCheckExtRounds_sim]
+
+private def sponge3CoinsTupleEquiv :
+    SimpleEquiv Sponge3Coins (Perm12Coins × Perm12Coins × Perm12Coins) where
+  toFun c := (c.perm1, c.perm2, c.perm3)
+  invFun t := ⟨t.1, t.2.1, t.2.2⟩
+  left_inv := fun ⟨_, _, _⟩ => rfl
+  right_inv := fun ⟨_, _, _⟩ => rfl
+
+def simSponge3Perm (e : Fin 3) (c0 c1 c2 : Lane6 × Lane6)
+    (scE scE1 osE1 : Sponge3Coins) :
+    (PartySponge3PermView × PartySponge3PermView) × (Lane6 × Lane6) :=
+  let s1 := (mkState12Of6 c0.1 lane6Zero, mkState12Of6 c0.2 lane6Zero)
+  let r1 := simRawPerm12 e s1 scE.perm1 scE1.perm1 osE1.perm1
+  let s2 := (mkState12Of6 (lane6Add (state12Rate6 r1.2.1) c1.1) (state12Cap6 r1.2.1),
+             mkState12Of6 (lane6Add (state12Rate6 r1.2.2) c1.2) (state12Cap6 r1.2.2))
+  let r2 := simRawPerm12 e s2 scE.perm2 scE1.perm2 osE1.perm2
+  let s3 := (mkState12Of6 (lane6Add (state12Rate6 r2.2.1) c2.1) (state12Cap6 r2.2.1),
+             mkState12Of6 (lane6Add (state12Rate6 r2.2.2) c2.2) (state12Cap6 r2.2.2))
+  let r3 := simRawPerm12 e s3 scE.perm3 scE1.perm3 osE1.perm3
+  ((⟨r1.1.1, r2.1.1, r3.1.1⟩, ⟨r1.1.2, r2.1.2, r3.1.2⟩), (state12Rate6 r3.2.1, state12Rate6 r3.2.2))
+
+def sponge3OutEquiv (e : Fin 3) (c0 c1 c2 : VcLane6_3) (scE scE1 : Sponge3Coins) :
+    SimpleEquiv Sponge3Coins Sponge3Coins :=
+  let s1 : VcState12_3 := fun i => mkState12Of6 (c0 i) lane6Zero
+  seTrans sponge3CoinsTupleEquiv
+    (seTrans
+      (seDepProd (perm12OutEquiv e s1 scE.perm1 scE1.perm1) fun p1U =>
+        let p1 := (honestRawPerm12_3 s1 (mkParty3At e scE.perm1 scE1.perm1 p1U)).2
+        let s2 : VcState12_3 := fun i => mkState12Of6 (lane6Add (state12Rate6 (p1 i)) (c1 i)) (state12Cap6 (p1 i))
+        seDepProd (perm12OutEquiv e s2 scE.perm2 scE1.perm2) fun p2U =>
+          let p2 := (honestRawPerm12_3 s2 (mkParty3At e scE.perm2 scE1.perm2 p2U)).2
+          let s3 : VcState12_3 := fun i => mkState12Of6 (lane6Add (state12Rate6 (p2 i)) (c2 i)) (state12Cap6 (p2 i))
+          perm12OutEquiv e s3 scE.perm3 scE1.perm3)
+      (seSymm sponge3CoinsTupleEquiv))
+
+theorem simSponge3Perm_eq_honest (e : Fin 3) (c0 c1 c2 : VcLane6_3)
+    (scE scE1 scU : Sponge3Coins) :
+    let sc := mkParty3At e scE scE1 scU
+    simSponge3Perm e (vcPairAtLane6 c0 e) (vcPairAtLane6 c1 e) (vcPairAtLane6 c2 e)
+      scE scE1 ((sponge3OutEquiv e c0 c1 c2 scE scE1).toFun scU) =
+      (((honestSponge3Perm3 c0 c1 c2 sc).1 e, (honestSponge3Perm3 c0 c1 c2 sc).1 (vcNextParty3 e)),
+       vcPairAtLane6 (honestSponge3Perm3 c0 c1 c2 sc).2 e) := by
+  have h1 : (fun i => (mkParty3At e scE scE1 scU i).perm1) = mkParty3At e scE.perm1 scE1.perm1 scU.perm1 := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have h2 : (fun i => (mkParty3At e scE scE1 scU i).perm2) = mkParty3At e scE.perm2 scE1.perm2 scU.perm2 := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have h3 : (fun i => (mkParty3At e scE scE1 scU i).perm3) = mkParty3At e scE.perm3 scE1.perm3 scU.perm3 := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  unfold simSponge3Perm sponge3OutEquiv honestSponge3Perm3 vcPairAtLane6
+  dsimp only [seTrans, seDepProd, seSymm, sponge3CoinsTupleEquiv]
+  rw [h1, h2, h3]
+  have hs1 : (mkState12Of6 (c0 e) lane6Zero, mkState12Of6 (c0 (vcNextParty3 e)) lane6Zero) =
+      vcPairAtState12 (fun i => mkState12Of6 (c0 i) lane6Zero) e := rfl
+  rw [hs1, simRawPerm12_eq_honest]; dsimp only
+  let p1 := (honestRawPerm12_3 (fun i => mkState12Of6 (c0 i) lane6Zero) (mkParty3At e scE.perm1 scE1.perm1 scU.perm1)).2
+  have hs2 : (mkState12Of6 (lane6Add (state12Rate6 (vcPairAtState12 p1 e).1) (c1 e)) (state12Cap6 (vcPairAtState12 p1 e).1),
+              mkState12Of6 (lane6Add (state12Rate6 (vcPairAtState12 p1 e).2) (c1 (vcNextParty3 e))) (state12Cap6 (vcPairAtState12 p1 e).2)) =
+      vcPairAtState12 (fun i => mkState12Of6 (lane6Add (state12Rate6 (p1 i)) (c1 i)) (state12Cap6 (p1 i))) e := rfl
+  rw [hs2, simRawPerm12_eq_honest]; dsimp only
+  let p2 := (honestRawPerm12_3 (fun i => mkState12Of6 (lane6Add (state12Rate6 (p1 i)) (c1 i)) (state12Cap6 (p1 i)))
+    (mkParty3At e scE.perm2 scE1.perm2 scU.perm2)).2
+  have hs3 : (mkState12Of6 (lane6Add (state12Rate6 (vcPairAtState12 p2 e).1) (c2 e)) (state12Cap6 (vcPairAtState12 p2 e).1),
+              mkState12Of6 (lane6Add (state12Rate6 (vcPairAtState12 p2 e).2) (c2 (vcNextParty3 e))) (state12Cap6 (vcPairAtState12 p2 e).2)) =
+      vcPairAtState12 (fun i => mkState12Of6 (lane6Add (state12Rate6 (p2 i)) (c2 i)) (state12Cap6 (p2 i))) e := rfl
+  rw [hs3, simRawPerm12_eq_honest]
+  rfl
+
+theorem extractSponge3Coins_sim (e : Fin 3) (c0 c1 c2 : Lane6 × Lane6)
+    (scE scE1 osE1 : Sponge3Coins) :
+    extractSponge3Coins (simSponge3Perm e c0 c1 c2 scE scE1 osE1).1.1 = some scE ∧
+    extractSponge3Coins (simSponge3Perm e c0 c1 c2 scE scE1 osE1).1.2 = some scE1 := by
+  rcases scE with ⟨a1, a2, a3⟩
+  rcases scE1 with ⟨b1, b2, b3⟩
+  unfold extractSponge3Coins simSponge3Perm
+  dsimp only
+  obtain ⟨e1, f1⟩ := extractPerm12Coins_sim e _ a1 b1 osE1.perm1
+  obtain ⟨e2, f2⟩ := extractPerm12Coins_sim e _ a2 b2 osE1.perm2
+  obtain ⟨e3, f3⟩ := extractPerm12Coins_sim e _ a3 b3 osE1.perm3
+  rw [e1, e2, e3, f1, f2, f3]
+  exact ⟨rfl, rfl⟩
+
+theorem pairCheckSponge3Perm_sim (e : Fin 3) (c0 c1 c2 : Lane6 × Lane6)
+    (scE scE1 osE1 : Sponge3Coins) :
+    pairCheckSponge3Perm e (simSponge3Perm e c0 c1 c2 scE scE1 osE1).1.1
+      (simSponge3Perm e c0 c1 c2 scE scE1 osE1).1.2 c0 c1 c2 =
+      some (simSponge3Perm e c0 c1 c2 scE scE1 osE1).2 := by
+  unfold pairCheckSponge3Perm simSponge3Perm
+  dsimp only
+  rw [pairCheckRawPerm12_sim]; dsimp only
+  rw [pairCheckRawPerm12_sim]; dsimp only
+  rw [pairCheckRawPerm12_sim]
+
+private def merkleLevelCoinsTupleEquiv :
+    SimpleEquiv MerkleLevelCoins
+      (Goldilocks × (Goldilocks × Goldilocks × Goldilocks × Goldilocks × Goldilocks × Goldilocks) × Sponge3Coins) where
+  toFun m := (m.boolR, (m.sel0R, m.sel1R, m.sel2R, m.sel3R, m.sel4R, m.sel5R), m.hashCoins)
+  invFun t := ⟨t.1, t.2.1.1, t.2.1.2.1, t.2.1.2.2.1, t.2.1.2.2.2.1, t.2.1.2.2.2.2.1, t.2.1.2.2.2.2.2, t.2.2⟩
+  left_inv := fun ⟨_, _, _, _, _, _, _, _⟩ => rfl
+  right_inv := fun ⟨_, ⟨_, _, _, _, _, _⟩, _⟩ => rfl
+
+def simMerkleLevel (e : Fin 3) (epoch : UInt64) (layer : Nat)
+    (cur : Lane6 × Lane6) (b : Goldilocks × Goldilocks) (sib : Lane6 × Lane6)
+    (mcE mcE1 osE1 : MerkleLevelCoins) :
+    (PartyMerkleLevelView × PartyMerkleLevelView) × (Lane6 × Lane6) × (Goldilocks × Goldilocks) :=
+  let oneMinusB := pairSubGold (vcConstPair e Goldilocks.one) b
+  let bg := simMulGate b oneMinusB mcE.boolR mcE1.boolR osE1.boolR
+  let m0 := simMulGate b (pairSubGold (sib.1.x0, sib.2.x0) (cur.1.x0, cur.2.x0)) mcE.sel0R mcE1.sel0R osE1.sel0R
+  let m1 := simMulGate b (pairSubGold (sib.1.x1, sib.2.x1) (cur.1.x1, cur.2.x1)) mcE.sel1R mcE1.sel1R osE1.sel1R
+  let m2 := simMulGate b (pairSubGold (sib.1.x2, sib.2.x2) (cur.1.x2, cur.2.x2)) mcE.sel2R mcE1.sel2R osE1.sel2R
+  let m3 := simMulGate b (pairSubGold (sib.1.x3, sib.2.x3) (cur.1.x3, cur.2.x3)) mcE.sel3R mcE1.sel3R osE1.sel3R
+  let m4 := simMulGate b (pairSubGold (sib.1.x4, sib.2.x4) (cur.1.x4, cur.2.x4)) mcE.sel4R mcE1.sel4R osE1.sel4R
+  let m5 := simMulGate b (pairSubGold (sib.1.x5, sib.2.x5) (cur.1.x5, cur.2.x5)) mcE.sel5R mcE1.sel5R osE1.sel5R
+  let l0 := pairAddGold (cur.1.x0, cur.2.x0) m0.2; let l1 := pairAddGold (cur.1.x1, cur.2.x1) m1.2
+  let l2 := pairAddGold (cur.1.x2, cur.2.x2) m2.2; let l3 := pairAddGold (cur.1.x3, cur.2.x3) m3.2
+  let l4 := pairAddGold (cur.1.x4, cur.2.x4) m4.2; let l5 := pairAddGold (cur.1.x5, cur.2.x5) m5.2
+  let r0 := pairSubGold (sib.1.x0, sib.2.x0) m0.2; let r1 := pairSubGold (sib.1.x1, sib.2.x1) m1.2
+  let r2 := pairSubGold (sib.1.x2, sib.2.x2) m2.2; let r3 := pairSubGold (sib.1.x3, sib.2.x3) m3.2
+  let r4 := pairSubGold (sib.1.x4, sib.2.x4) m4.2; let r5 := pairSubGold (sib.1.x5, sib.2.x5) m5.2
+  let k0 := vcConstPair e (vcSchemaLo epoch)
+  let k1 := vcConstPair e (Goldilocks.ofNat layer)
+  let k2 := vcConstPair e (Goldilocks.ofNat vcMerkleNodeTag.toNat)
+  let k3 := vcConstPair e (vcSchemaHiWithTag epoch poseidon2ConstIV)
+  let k4 := vcConstPair e Goldilocks.one
+  let c0P : Lane6 × Lane6 := (⟨l0.1, l1.1, l2.1, l3.1, l4.1, l5.1⟩, ⟨l0.2, l1.2, l2.2, l3.2, l4.2, l5.2⟩)
+  let c1P : Lane6 × Lane6 := (⟨r0.1, r1.1, r2.1, r3.1, r4.1, r5.1⟩, ⟨r0.2, r1.2, r2.2, r3.2, r4.2, r5.2⟩)
+  let c2P : Lane6 × Lane6 := (⟨k0.1, k1.1, k2.1, k3.1, k4.1, Goldilocks.zero⟩,
+                              ⟨k0.2, k1.2, k2.2, k3.2, k4.2, Goldilocks.zero⟩)
+  let sp := simSponge3Perm e c0P c1P c2P mcE.hashCoins mcE1.hashCoins osE1.hashCoins
+  ((⟨b.1, sib.1, bg.1.1, m0.1.1, m1.1.1, m2.1.1, m3.1.1, m4.1.1, m5.1.1, sp.1.1⟩,
+    ⟨b.2, sib.2, bg.1.2, m0.1.2, m1.1.2, m2.1.2, m3.1.2, m4.1.2, m5.1.2, sp.1.2⟩),
+   sp.2, bg.2)
+
+def merkleLevelOutEquiv (e : Fin 3) (epoch : UInt64) (layer : Nat)
+    (cur : VcLane6_3) (b : VcWire3) (sib : VcLane6_3) (mcE mcE1 : MerkleLevelCoins) :
+    SimpleEquiv MerkleLevelCoins MerkleLevelCoins :=
+  let oneMinusB : VcWire3 := fun i => Goldilocks.sub (vcConstWire3 Goldilocks.one i) (b i)
+  let d0 : VcWire3 := fun i => Goldilocks.sub (sib i).x0 (cur i).x0
+  let d1 : VcWire3 := fun i => Goldilocks.sub (sib i).x1 (cur i).x1
+  let d2 : VcWire3 := fun i => Goldilocks.sub (sib i).x2 (cur i).x2
+  let d3 : VcWire3 := fun i => Goldilocks.sub (sib i).x3 (cur i).x3
+  let d4 : VcWire3 := fun i => Goldilocks.sub (sib i).x4 (cur i).x4
+  let d5 : VcWire3 := fun i => Goldilocks.sub (sib i).x5 (cur i).x5
+  let selEq :=
+    seProdCongr (mulGateOutEquiv e b d0 mcE1.sel0R)
+    (seProdCongr (mulGateOutEquiv e b d1 mcE1.sel1R)
+    (seProdCongr (mulGateOutEquiv e b d2 mcE1.sel2R)
+    (seProdCongr (mulGateOutEquiv e b d3 mcE1.sel3R)
+    (seProdCongr (mulGateOutEquiv e b d4 mcE1.sel4R)
+                 (mulGateOutEquiv e b d5 mcE1.sel5R)))))
+  seTrans merkleLevelCoinsTupleEquiv
+    (seTrans
+      (seProdCongr (mulGateOutEquiv e b oneMinusB mcE1.boolR)
+        (seDepProd selEq fun ⟨u0, u1, u2, u3, u4, u5⟩ =>
+          let del0 := vcMulGate3 b d0 (mkParty3At e mcE.sel0R mcE1.sel0R u0)
+          let del1 := vcMulGate3 b d1 (mkParty3At e mcE.sel1R mcE1.sel1R u1)
+          let del2 := vcMulGate3 b d2 (mkParty3At e mcE.sel2R mcE1.sel2R u2)
+          let del3 := vcMulGate3 b d3 (mkParty3At e mcE.sel3R mcE1.sel3R u3)
+          let del4 := vcMulGate3 b d4 (mkParty3At e mcE.sel4R mcE1.sel4R u4)
+          let del5 := vcMulGate3 b d5 (mkParty3At e mcE.sel5R mcE1.sel5R u5)
+          let c0 : VcLane6_3 := fun i =>
+            ⟨Goldilocks.add (cur i).x0 (del0 i), Goldilocks.add (cur i).x1 (del1 i),
+             Goldilocks.add (cur i).x2 (del2 i), Goldilocks.add (cur i).x3 (del3 i),
+             Goldilocks.add (cur i).x4 (del4 i), Goldilocks.add (cur i).x5 (del5 i)⟩
+          let c1 : VcLane6_3 := fun i =>
+            ⟨Goldilocks.sub (sib i).x0 (del0 i), Goldilocks.sub (sib i).x1 (del1 i),
+             Goldilocks.sub (sib i).x2 (del2 i), Goldilocks.sub (sib i).x3 (del3 i),
+             Goldilocks.sub (sib i).x4 (del4 i), Goldilocks.sub (sib i).x5 (del5 i)⟩
+          let c2 : VcLane6_3 := fun i =>
+            ⟨vcConstWire3 (vcSchemaLo epoch) i, vcConstWire3 (Goldilocks.ofNat layer) i,
+             vcConstWire3 (Goldilocks.ofNat vcMerkleNodeTag.toNat) i,
+             vcConstWire3 (vcSchemaHiWithTag epoch poseidon2ConstIV) i,
+             vcConstWire3 Goldilocks.one i, Goldilocks.zero⟩
+          sponge3OutEquiv e c0 c1 c2 mcE.hashCoins mcE1.hashCoins))
+      (seSymm merkleLevelCoinsTupleEquiv))
+
+theorem simMerkleLevel_eq_honest (e : Fin 3) (epoch : UInt64) (layer : Nat)
+    (cur : VcLane6_3) (b : VcWire3) (sib : VcLane6_3) (mcE mcE1 mcU : MerkleLevelCoins) :
+    let mc := mkParty3At e mcE mcE1 mcU
+    simMerkleLevel e epoch layer (vcPairAtLane6 cur e) (vcPairAt b e) (vcPairAtLane6 sib e)
+      mcE mcE1 ((merkleLevelOutEquiv e epoch layer cur b sib mcE mcE1).toFun mcU) =
+      (((honestMerkleLevel3 epoch layer cur b sib mc).1 e,
+        (honestMerkleLevel3 epoch layer cur b sib mc).1 (vcNextParty3 e)),
+       vcPairAtLane6 (honestMerkleLevel3 epoch layer cur b sib mc).2.1 e,
+       vcPairAt (honestMerkleLevel3 epoch layer cur b sib mc).2.2 e) := by
+  have hProj : ∀ f : MerkleLevelCoins → Goldilocks,
+      (fun i => f (mkParty3At e mcE mcE1 mcU i)) = mkParty3At e (f mcE) (f mcE1) (f mcU) := by
+    intro f; funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have hHash : (fun i => (mkParty3At e mcE mcE1 mcU i).hashCoins) =
+      mkParty3At e mcE.hashCoins mcE1.hashCoins mcU.hashCoins := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  unfold simMerkleLevel merkleLevelOutEquiv honestMerkleLevel3 vcPairAtLane6
+  dsimp only [seTrans, seProdCongr, seDepProd, seSymm,
+    merkleLevelCoinsTupleEquiv]
+  rw [hProj (·.boolR), hProj (·.sel0R), hProj (·.sel1R), hProj (·.sel2R),
+      hProj (·.sel3R), hProj (·.sel4R), hProj (·.sel5R), hHash]
+  rw [vcConstPair_spec Goldilocks.one e,
+      vcConstPair_spec (vcSchemaLo epoch) e,
+      vcConstPair_spec (Goldilocks.ofNat layer) e,
+      vcConstPair_spec (Goldilocks.ofNat vcMerkleNodeTag.toNat) e,
+      vcConstPair_spec (vcSchemaHiWithTag epoch poseidon2ConstIV) e]
+  have hOneSub : pairSubGold (vcPairAt (vcConstWire3 Goldilocks.one) e) (vcPairAt b e) =
+      vcPairAt (fun i => Goldilocks.sub (vcConstWire3 Goldilocks.one i) (b i)) e := rfl
+  have hd0 : pairSubGold ((sib e).x0, (sib (vcNextParty3 e)).x0) ((cur e).x0, (cur (vcNextParty3 e)).x0) =
+      vcPairAt (fun i => Goldilocks.sub (sib i).x0 (cur i).x0) e := rfl
+  have hd1 : pairSubGold ((sib e).x1, (sib (vcNextParty3 e)).x1) ((cur e).x1, (cur (vcNextParty3 e)).x1) =
+      vcPairAt (fun i => Goldilocks.sub (sib i).x1 (cur i).x1) e := rfl
+  have hd2 : pairSubGold ((sib e).x2, (sib (vcNextParty3 e)).x2) ((cur e).x2, (cur (vcNextParty3 e)).x2) =
+      vcPairAt (fun i => Goldilocks.sub (sib i).x2 (cur i).x2) e := rfl
+  have hd3 : pairSubGold ((sib e).x3, (sib (vcNextParty3 e)).x3) ((cur e).x3, (cur (vcNextParty3 e)).x3) =
+      vcPairAt (fun i => Goldilocks.sub (sib i).x3 (cur i).x3) e := rfl
+  have hd4 : pairSubGold ((sib e).x4, (sib (vcNextParty3 e)).x4) ((cur e).x4, (cur (vcNextParty3 e)).x4) =
+      vcPairAt (fun i => Goldilocks.sub (sib i).x4 (cur i).x4) e := rfl
+  have hd5 : pairSubGold ((sib e).x5, (sib (vcNextParty3 e)).x5) ((cur e).x5, (cur (vcNextParty3 e)).x5) =
+      vcPairAt (fun i => Goldilocks.sub (sib i).x5 (cur i).x5) e := rfl
+  rw [hOneSub, hd0, hd1, hd2, hd3, hd4, hd5,
+      simMulGate_eq_honest, simMulGate_eq_honest, simMulGate_eq_honest, simMulGate_eq_honest,
+      simMulGate_eq_honest, simMulGate_eq_honest, simMulGate_eq_honest]
+  dsimp only
+  have hsp := simSponge3Perm_eq_honest e
+    (fun i =>
+      ⟨Goldilocks.add (cur i).x0 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x0 (cur k).x0) (mkParty3At e mcE.sel0R mcE1.sel0R mcU.sel0R) i),
+       Goldilocks.add (cur i).x1 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x1 (cur k).x1) (mkParty3At e mcE.sel1R mcE1.sel1R mcU.sel1R) i),
+       Goldilocks.add (cur i).x2 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x2 (cur k).x2) (mkParty3At e mcE.sel2R mcE1.sel2R mcU.sel2R) i),
+       Goldilocks.add (cur i).x3 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x3 (cur k).x3) (mkParty3At e mcE.sel3R mcE1.sel3R mcU.sel3R) i),
+       Goldilocks.add (cur i).x4 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x4 (cur k).x4) (mkParty3At e mcE.sel4R mcE1.sel4R mcU.sel4R) i),
+       Goldilocks.add (cur i).x5 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x5 (cur k).x5) (mkParty3At e mcE.sel5R mcE1.sel5R mcU.sel5R) i)⟩)
+    (fun i =>
+      ⟨Goldilocks.sub (sib i).x0 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x0 (cur k).x0) (mkParty3At e mcE.sel0R mcE1.sel0R mcU.sel0R) i),
+       Goldilocks.sub (sib i).x1 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x1 (cur k).x1) (mkParty3At e mcE.sel1R mcE1.sel1R mcU.sel1R) i),
+       Goldilocks.sub (sib i).x2 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x2 (cur k).x2) (mkParty3At e mcE.sel2R mcE1.sel2R mcU.sel2R) i),
+       Goldilocks.sub (sib i).x3 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x3 (cur k).x3) (mkParty3At e mcE.sel3R mcE1.sel3R mcU.sel3R) i),
+       Goldilocks.sub (sib i).x4 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x4 (cur k).x4) (mkParty3At e mcE.sel4R mcE1.sel4R mcU.sel4R) i),
+       Goldilocks.sub (sib i).x5 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x5 (cur k).x5) (mkParty3At e mcE.sel5R mcE1.sel5R mcU.sel5R) i)⟩)
+    (fun i =>
+      ⟨vcConstWire3 (vcSchemaLo epoch) i, vcConstWire3 (Goldilocks.ofNat layer) i,
+       vcConstWire3 (Goldilocks.ofNat vcMerkleNodeTag.toNat) i,
+       vcConstWire3 (vcSchemaHiWithTag epoch poseidon2ConstIV) i,
+       vcConstWire3 Goldilocks.one i, Goldilocks.zero⟩)
+    mcE.hashCoins mcE1.hashCoins mcU.hashCoins
+  dsimp only [vcPairAtLane6, pairAddGold, pairSubGold, vcPairAt] at hsp ⊢
+  rw [hsp]
+
+private theorem extractMerkleLevelCoins_sim (e : Fin 3) (epoch : UInt64) (layer : Nat)
+    (cur : Lane6 × Lane6) (b : Goldilocks × Goldilocks) (sib : Lane6 × Lane6)
+    (mcE mcE1 osE1 : MerkleLevelCoins) :
+    extractMerkleLevelCoins (simMerkleLevel e epoch layer cur b sib mcE mcE1 osE1).1.1 = some mcE ∧
+    extractMerkleLevelCoins (simMerkleLevel e epoch layer cur b sib mcE mcE1 osE1).1.2 = some mcE1 := by
+  rcases mcE with ⟨_, _, _, _, _, _, _, hcE⟩
+  rcases mcE1 with ⟨_, _, _, _, _, _, _, hcE1⟩
+  unfold extractMerkleLevelCoins simMerkleLevel
+  dsimp only
+  obtain ⟨h1, h2⟩ := extractSponge3Coins_sim e _ _ _ hcE hcE1 osE1.hashCoins
+  rw [h1, h2]
+  exact ⟨rfl, rfl⟩
+
+private theorem pairCheckMerkleLevel_sim (e : Fin 3) (epoch : UInt64) (layer : Nat)
+    (cur : Lane6 × Lane6) (b : Goldilocks × Goldilocks) (sib : Lane6 × Lane6)
+    (mcE mcE1 osE1 : MerkleLevelCoins) :
+    pairCheckMerkleLevel e epoch layer cur
+      (simMerkleLevel e epoch layer cur b sib mcE mcE1 osE1).1.1
+      (simMerkleLevel e epoch layer cur b sib mcE mcE1 osE1).1.2 =
+      some (simMerkleLevel e epoch layer cur b sib mcE mcE1 osE1).2 := by
+  unfold pairCheckMerkleLevel simMerkleLevel
+  dsimp only
+  rw [pairCheckMul_sim]; dsimp only
+  rw [pairCheckMul_sim, pairCheckMul_sim, pairCheckMul_sim,
+      pairCheckMul_sim, pairCheckMul_sim, pairCheckMul_sim]; dsimp only
+  rw [pairCheckSponge3Perm_sim]
+
+def simMerklePath (e : Fin 3) (epoch : UInt64) :
+    {D : Nat} → Nat → (Lane6 × Lane6) →
+    Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D →
+    Vec MerkleLevelCoins D → Vec MerkleLevelCoins D → Vec MerkleLevelCoins D →
+    (List PartyMerkleLevelView × List PartyMerkleLevelView) × (Lane6 × Lane6) × List (Goldilocks × Goldilocks)
+  | 0, _, cur, .nil, .nil, .nil, .nil => (([], []), cur, [])
+  | _ + 1, layer, cur, .cons (bp, sp) restIn, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 =>
+    let hd := simMerkleLevel e epoch layer cur bp sp cE cE1 oE1
+    let tl := simMerklePath e epoch (layer + 1) hd.2.1 restIn csE csE1 osE1
+    ((hd.1.1 :: tl.1.1, hd.1.2 :: tl.1.2), tl.2.1, hd.2.2 :: tl.2.2)
+
+def merklePathOutEquiv (e : Fin 3) (epoch : UInt64) :
+    {D : Nat} → Nat → VcLane6_3 → Vec (VcWire3 × VcLane6_3) D →
+    Vec MerkleLevelCoins D → Vec MerkleLevelCoins D →
+    SimpleEquiv (Vec MerkleLevelCoins D) (Vec MerkleLevelCoins D)
+  | 0, _, _, .nil, .nil, .nil => seRefl _
+  | _ + 1, layer, cur, .cons (b, sib) rest, .cons cE csE, .cons cE1 csE1 =>
+    seDepCons (merkleLevelOutEquiv e epoch layer cur b sib cE cE1) fun cU =>
+      let nextCur := (honestMerkleLevel3 epoch layer cur b sib (mkParty3At e cE cE1 cU)).2.1
+      merklePathOutEquiv e epoch (layer + 1) nextCur rest csE csE1
+
+theorem simMerklePath_length (e : Fin 3) (epoch : UInt64) :
+    ∀ {D : Nat} (layer : Nat) (cur : Lane6 × Lane6)
+      (inSteps : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D)
+      (csE csE1 osE1 : Vec MerkleLevelCoins D),
+      (simMerklePath e epoch layer cur inSteps csE csE1 osE1).1.1.length = D ∧
+      (simMerklePath e epoch layer cur inSteps csE csE1 osE1).1.2.length = D
+  | 0, _, _, .nil, .nil, .nil, .nil => ⟨rfl, rfl⟩
+  | _ + 1, layer, cur, .cons (bp, sp) restIn, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 => by
+    obtain ⟨h1, h2⟩ := simMerklePath_length e epoch (layer + 1)
+      (simMerkleLevel e epoch layer cur bp sp cE cE1 oE1).2.1 restIn csE csE1 osE1
+    simp only [simMerklePath, List.length_cons]
+    exact ⟨by omega, by omega⟩
+
+theorem extractMerklePathCoins_sim (e : Fin 3) (epoch : UInt64) :
+    ∀ {D : Nat} (layer : Nat) (cur : Lane6 × Lane6)
+      (inSteps : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D)
+      (csE csE1 osE1 : Vec MerkleLevelCoins D),
+      extractMerklePathCoins D (simMerklePath e epoch layer cur inSteps csE csE1 osE1).1.1 = some csE ∧
+      extractMerklePathCoins D (simMerklePath e epoch layer cur inSteps csE csE1 osE1).1.2 = some csE1
+  | 0, _, _, .nil, .nil, .nil, .nil => ⟨rfl, rfl⟩
+  | _ + 1, layer, cur, .cons (bp, sp) restIn, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 => by
+    simp only [simMerklePath, extractMerklePathCoins]
+    obtain ⟨h1, h2⟩ := extractMerkleLevelCoins_sim e epoch layer cur bp sp cE cE1 oE1
+    obtain ⟨ih1, ih2⟩ := extractMerklePathCoins_sim e epoch (layer + 1) _ restIn csE csE1 osE1
+    rw [h1, h2, ih1, ih2]
+    exact ⟨rfl, rfl⟩
+
+theorem pairCheckMerklePath_sim (e : Fin 3) (epoch : UInt64) :
+    ∀ {D : Nat} (layer : Nat) (cur : Lane6 × Lane6)
+      (inSteps : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D)
+      (csE csE1 osE1 : Vec MerkleLevelCoins D),
+      pairCheckMerklePath e epoch layer cur
+        (simMerklePath e epoch layer cur inSteps csE csE1 osE1).1.1
+        (simMerklePath e epoch layer cur inSteps csE csE1 osE1).1.2 =
+        some (simMerklePath e epoch layer cur inSteps csE csE1 osE1).2
+  | 0, _, _, .nil, .nil, .nil, .nil => rfl
+  | _ + 1, layer, cur, .cons (bp, sp) restIn, .cons cE csE, .cons cE1 csE1, .cons oE1 osE1 => by
+    simp only [simMerklePath, pairCheckMerklePath]
+    rw [pairCheckMerkleLevel_sim]; dsimp only
+    rw [pairCheckMerklePath_sim e epoch (layer + 1) _ restIn csE csE1 osE1]
+
+/-- 3-party additive wire sharing of `secret` from two uniform shares `coins = (c0, c1)`. -/
+def vcShareWire3 (secret : Goldilocks) (coins : Goldilocks × Goldilocks) : VcWire3
+  | ⟨0, _⟩ => coins.1
+  | ⟨1, _⟩ => coins.2
+  | ⟨2, _⟩ => Goldilocks.sub (Goldilocks.sub secret coins.1) coins.2
+
+theorem vcSum3_shareWire3 (secret : Goldilocks) (coins : Goldilocks × Goldilocks) :
+    vcSum3 (vcShareWire3 secret coins) = secret := by
+  unfold vcSum3 vcShareWire3
+  dsimp only
+  rw [← goldOfInt_nat secret, ← goldOfInt_nat coins.1, ← goldOfInt_nat coins.2]
+  simp only [goldOfInt_add, goldOfInt_sub]; congr 1; omega
+
+/-- Constructive bijection (`0 Classical.choice`) between prover sharing coins `(c0, c1)` and
+    the opened 2-party wire pair `(w_e, w_{(e+1)%3})` for any `secret : Goldilocks`. -/
+def vcOpenedShareEquiv3 (e : Fin 3) (secret : Goldilocks) :
+    SimpleEquiv (Goldilocks × Goldilocks) (Goldilocks × Goldilocks) where
+  toFun c := vcPairAt (vcShareWire3 secret c) e
+  invFun p :=
+    match e with
+    | ⟨0, _⟩ => (p.1, p.2)
+    | ⟨1, _⟩ => (Goldilocks.sub (Goldilocks.sub secret p.1) p.2, p.1)
+    | ⟨2, _⟩ => (p.2, Goldilocks.sub (Goldilocks.sub secret p.1) p.2)
+  left_inv := fun ⟨c0, c1⟩ => by
+    rcases fin3_eq_012 e with rfl | rfl | rfl
+    · rfl
+    · dsimp only [vcPairAt, vcShareWire3, vcNextParty3]
+      refine Prod.ext ?_ rfl
+      rw [← goldOfInt_nat secret, ← goldOfInt_nat c0, ← goldOfInt_nat c1]
+      simp only [goldOfInt_sub]; congr 1; omega
+    · dsimp only [vcPairAt, vcShareWire3, vcNextParty3]
+      refine Prod.ext rfl ?_
+      rw [← goldOfInt_nat secret, ← goldOfInt_nat c0, ← goldOfInt_nat c1]
+      simp only [goldOfInt_sub]; congr 1; omega
+  right_inv := fun ⟨p0, p1⟩ => by
+    rcases fin3_eq_012 e with rfl | rfl | rfl
+    · rfl
+    · dsimp only [vcPairAt, vcShareWire3, vcNextParty3]
+      refine Prod.ext rfl ?_
+      rw [← goldOfInt_nat secret, ← goldOfInt_nat p0, ← goldOfInt_nat p1]
+      simp only [goldOfInt_sub]; congr 1; omega
+    · dsimp only [vcPairAt, vcShareWire3, vcNextParty3]
+      refine Prod.ext ?_ rfl
+      rw [← goldOfInt_nat secret, ← goldOfInt_nat p0, ← goldOfInt_nat p1]
+      simp only [goldOfInt_sub]; congr 1; omega
+
+def vcShareLane4_3 (secret : Lane4) (coins : Lane4 × Lane4) : VcLane4_3 :=
+  fun i =>
+    ⟨vcShareWire3 secret.x0 (coins.1.x0, coins.2.x0) i,
+     vcShareWire3 secret.x1 (coins.1.x1, coins.2.x1) i,
+     vcShareWire3 secret.x2 (coins.1.x2, coins.2.x2) i,
+     vcShareWire3 secret.x3 (coins.1.x3, coins.2.x3) i⟩
+
+private theorem vcSumLane4_3_share (secret : Lane4) (coins : Lane4 × Lane4) :
+    vcSumLane4_3 (vcShareLane4_3 secret coins) = secret := by
+  rw [vcSumLane4_3_eq]
+  unfold vcShareLane4_3
+  dsimp only
+  rw [vcSum3_shareWire3, vcSum3_shareWire3, vcSum3_shareWire3, vcSum3_shareWire3]
+
+private def lane4PairTupleEquiv :
+    SimpleEquiv (Lane4 × Lane4)
+      ((Goldilocks × Goldilocks) × (Goldilocks × Goldilocks) ×
+       (Goldilocks × Goldilocks) × (Goldilocks × Goldilocks)) where
+  toFun p := ((p.1.x0, p.2.x0), (p.1.x1, p.2.x1), (p.1.x2, p.2.x2), (p.1.x3, p.2.x3))
+  invFun q := (⟨q.1.1, q.2.1.1, q.2.2.1.1, q.2.2.2.1⟩, ⟨q.1.2, q.2.1.2, q.2.2.1.2, q.2.2.2.2⟩)
+  left_inv := fun ⟨⟨_, _, _, _⟩, ⟨_, _, _, _⟩⟩ => rfl
+  right_inv := fun ⟨⟨_, _⟩, ⟨_, _⟩, ⟨_, _⟩, ⟨_, _⟩⟩ => rfl
+
+def vcLane4OpenedShareEquiv3 (e : Fin 3) (secret : Lane4) :
+    SimpleEquiv (Lane4 × Lane4) (Lane4 × Lane4) :=
+  seTrans lane4PairTupleEquiv
+    (seTrans
+      (seProdCongr (vcOpenedShareEquiv3 e secret.x0)
+        (seProdCongr (vcOpenedShareEquiv3 e secret.x1)
+          (seProdCongr (vcOpenedShareEquiv3 e secret.x2)
+            (vcOpenedShareEquiv3 e secret.x3))))
+      (seSymm lane4PairTupleEquiv))
+
+theorem vcLane4OpenedShareEquiv3_toFun (e : Fin 3) (secret : Lane4) (coins : Lane4 × Lane4) :
+    (vcLane4OpenedShareEquiv3 e secret).toFun coins =
+      (vcShareLane4_3 secret coins e, vcShareLane4_3 secret coins (vcNextParty3 e)) := by
+  unfold vcLane4OpenedShareEquiv3
+  rfl
+
+def vcShareLane6_3 (secret : Lane6) (coins : Lane6 × Lane6) : VcLane6_3 :=
+  fun i =>
+    ⟨vcShareWire3 secret.x0 (coins.1.x0, coins.2.x0) i,
+     vcShareWire3 secret.x1 (coins.1.x1, coins.2.x1) i,
+     vcShareWire3 secret.x2 (coins.1.x2, coins.2.x2) i,
+     vcShareWire3 secret.x3 (coins.1.x3, coins.2.x3) i,
+     vcShareWire3 secret.x4 (coins.1.x4, coins.2.x4) i,
+     vcShareWire3 secret.x5 (coins.1.x5, coins.2.x5) i⟩
+
+theorem vcSumLane6_3_share (secret : Lane6) (coins : Lane6 × Lane6) :
+    vcSumLane6_3 (vcShareLane6_3 secret coins) = secret := by
+  rw [vcSumLane6_3_eq]
+  unfold vcShareLane6_3
+  dsimp only
+  rw [vcSum3_shareWire3, vcSum3_shareWire3, vcSum3_shareWire3,
+      vcSum3_shareWire3, vcSum3_shareWire3, vcSum3_shareWire3]
+
+private def lane6PairTupleEquiv :
+    SimpleEquiv (Lane6 × Lane6)
+      ((Goldilocks × Goldilocks) × (Goldilocks × Goldilocks) × (Goldilocks × Goldilocks) ×
+       (Goldilocks × Goldilocks) × (Goldilocks × Goldilocks) × (Goldilocks × Goldilocks)) where
+  toFun p := ((p.1.x0, p.2.x0), (p.1.x1, p.2.x1), (p.1.x2, p.2.x2),
+              (p.1.x3, p.2.x3), (p.1.x4, p.2.x4), (p.1.x5, p.2.x5))
+  invFun q :=
+    (⟨q.1.1, q.2.1.1, q.2.2.1.1, q.2.2.2.1.1, q.2.2.2.2.1.1, q.2.2.2.2.2.1⟩,
+     ⟨q.1.2, q.2.1.2, q.2.2.1.2, q.2.2.2.1.2, q.2.2.2.2.1.2, q.2.2.2.2.2.2⟩)
+  left_inv := fun ⟨⟨_, _, _, _, _, _⟩, ⟨_, _, _, _, _, _⟩⟩ => rfl
+  right_inv := fun ⟨⟨_, _⟩, ⟨_, _⟩, ⟨_, _⟩, ⟨_, _⟩, ⟨_, _⟩, ⟨_, _⟩⟩ => rfl
+
+def vcLane6OpenedShareEquiv3 (e : Fin 3) (secret : Lane6) :
+    SimpleEquiv (Lane6 × Lane6) (Lane6 × Lane6) :=
+  seTrans lane6PairTupleEquiv
+    (seTrans
+      (seProdCongr (vcOpenedShareEquiv3 e secret.x0)
+        (seProdCongr (vcOpenedShareEquiv3 e secret.x1)
+          (seProdCongr (vcOpenedShareEquiv3 e secret.x2)
+            (seProdCongr (vcOpenedShareEquiv3 e secret.x3)
+              (seProdCongr (vcOpenedShareEquiv3 e secret.x4)
+                (vcOpenedShareEquiv3 e secret.x5))))))
+      (seSymm lane6PairTupleEquiv))
+
+theorem vcLane6OpenedShareEquiv3_toFun (e : Fin 3) (secret : Lane6) (coins : Lane6 × Lane6) :
+    (vcLane6OpenedShareEquiv3 e secret).toFun coins = vcPairAtLane6 (vcShareLane6_3 secret coins) e := by
+  unfold vcLane6OpenedShareEquiv3
+  rfl
+
+
+/-- Share boolean Merkle path witness `Vec (Bool × Lane6) D` into `Vec (VcWire3 × VcLane6_3) D`. -/
+def vcShareMerkleSteps3 :
+    {D : Nat} → Vec (Bool × Lane6) D → Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D →
+    Vec (VcWire3 × VcLane6_3) D
+  | 0, .nil, .nil => .nil
+  | _ + 1, .cons (b, sib) rest, .cons (bc, sc) cs =>
+    let bGold := if b then Goldilocks.one else Goldilocks.zero
+    .cons (vcShareWire3 bGold bc, vcShareLane6_3 sib sc) (vcShareMerkleSteps3 rest cs)
+
+def vcMerkleStepsEquiv3 (e : Fin 3) :
+    {D : Nat} → Vec (Bool × Lane6) D →
+    SimpleEquiv (Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D)
+                (Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D)
+  | 0, .nil => seRefl _
+  | _ + 1, .cons (b, sib) rest =>
+    let bGold := if b then Goldilocks.one else Goldilocks.zero
+    seDepCons
+      (seProdCongr (vcOpenedShareEquiv3 e bGold) (vcLane6OpenedShareEquiv3 e sib))
+      (fun _ => vcMerkleStepsEquiv3 e rest)
+
+theorem simMerklePath_eq_honest (e : Fin 3) (epoch : UInt64) :
+    ∀ {D : Nat} (layer : Nat) (cur : VcLane6_3)
+      (witSteps : Vec (Bool × Lane6) D)
+      (stepCoins : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D)
+      (csE csE1 csU : Vec MerkleLevelCoins D),
+      let steps3 := vcShareMerkleSteps3 witSteps stepCoins
+      let cs := mkParty3At e csE csE1 csU
+      simMerklePath e epoch layer (vcPairAtLane6 cur e)
+        ((vcMerkleStepsEquiv3 e witSteps).toFun stepCoins) csE csE1
+        ((merklePathOutEquiv e epoch layer cur steps3 csE csE1).toFun csU) =
+        (((honestMerklePath3 epoch layer cur steps3 cs).1 e,
+          (honestMerklePath3 epoch layer cur steps3 cs).1 (vcNextParty3 e)),
+         vcPairAtLane6 (honestMerklePath3 epoch layer cur steps3 cs).2.1 e,
+         (honestMerklePath3 epoch layer cur steps3 cs).2.2.map (fun w => vcPairAt w e))
+  | 0, _, _, .nil, .nil, .nil, .nil, .nil => rfl
+  | _ + 1, layer, cur, .cons (b, sib) restW, .cons (bc, sc) restC, .cons cE csE, .cons cE1 csE1, .cons cU csU => by
+    simp only [vcShareMerkleSteps3, vcMerkleStepsEquiv3, merklePathOutEquiv,
+      seDepCons, seDepConsToFun, seProdCongr, simMerklePath, honestMerklePath3, List.map]
+    have hHead : (fun i => (mkParty3At e (Vec.cons cE csE) (Vec.cons cE1 csE1) (Vec.cons cU csU) i).head) =
+        mkParty3At e cE cE1 cU := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    have hTail : (fun i => (mkParty3At e (Vec.cons cE csE) (Vec.cons cE1 csE1) (Vec.cons cU csU) i).tail) =
+        mkParty3At e csE csE1 csU := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    rw [hHead, hTail]
+    have hbEq : (vcOpenedShareEquiv3 e (if b = true then Goldilocks.one else Goldilocks.zero)).1 bc =
+        vcPairAt (vcShareWire3 (if b = true then Goldilocks.one else Goldilocks.zero) bc) e := rfl
+    have hsEq : (vcLane6OpenedShareEquiv3 e sib).1 sc = vcPairAtLane6 (vcShareLane6_3 sib sc) e := rfl
+    simp only [hbEq, hsEq, simMerkleLevel_eq_honest]
+    rw [simMerklePath_eq_honest e epoch (layer + 1) _ restW restC csE csE1 csU]
+
+theorem vcMerkleStepSum_bool :
+    ∀ {D : Nat} (epoch : UInt64) (layer : Nat) (cur : VcLane6_3)
+      (witSteps : Vec (Bool × Lane6) D)
+      (stepCoins : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D)
+      (mcs : Fin 3 → Vec MerkleLevelCoins D),
+      let run := honestMerklePath3 epoch layer cur (vcShareMerkleSteps3 witSteps stepCoins) mcs
+      vcSumLane6_3 run.2.1 = evalVcMerklePathBool epoch layer (vcSumLane6_3 cur) witSteps.toList ∧
+      ∀ z ∈ run.2.2, vcSum3 z = Goldilocks.zero
+  | 0, _, _, _, .nil, .nil, _ => ⟨(evalVcMerklePathBool_nil ..).symm, fun _ hz => nomatch hz⟩
+  | _ + 1, epoch, layer, cur, .cons (b, sib) restW, .cons (bc, sc) restC, mcs => by
+    simp only [vcShareMerkleSteps3, honestMerklePath3, Vec.toList]
+    let bGold := if b = true then Goldilocks.one else Goldilocks.zero
+    let bw := vcShareWire3 bGold bc
+    let sw := vcShareLane6_3 sib sc
+    have h0 := pairCheckMerkleLevel_honest epoch layer cur bw sw (fun i => (mcs i).head) 0
+    have h1 := pairCheckMerkleLevel_honest epoch layer cur bw sw (fun i => (mcs i).head) 1
+    have h2 := pairCheckMerkleLevel_honest epoch layer cur bw sw (fun i => (mcs i).head) 2
+    obtain ⟨nextCur, bz, ep0, ep1, _, hBzSum, hNextSum⟩ := pairCheckMerkleLevel_extract3 h0 h1 h2
+    have hNextEq : (honestMerkleLevel3 epoch layer cur bw sw (fun i => (mcs i).head)).2.1 = nextCur := by
+      have e0 := congrArg Prod.fst ep0; have e1 := congrArg Prod.fst ep1
+      exact funext (BlindVc.fin3_all (congrArg Prod.fst e0) (congrArg Prod.snd e0) (congrArg Prod.snd e1))
+    have hBzEq : (honestMerkleLevel3 epoch layer cur bw sw (fun i => (mcs i).head)).2.2 = bz := by
+      have e0 := congrArg Prod.snd ep0; have e1 := congrArg Prod.snd ep1
+      exact funext (BlindVc.fin3_all (congrArg Prod.fst e0) (congrArg Prod.snd e0) (congrArg Prod.snd e1))
+    have hLvBit : (fun i => ((honestMerkleLevel3 epoch layer cur bw sw (fun i => (mcs i).head)).1 i).bitShare) = bw := rfl
+    have hLvSib : (fun i => ((honestMerkleLevel3 epoch layer cur bw sw (fun i => (mcs i).head)).1 i).sibShare) = sw := rfl
+    have hbSum : vcSum3 bw = bGold := vcSum3_shareWire3 bGold bc
+    have hsSum : vcSumLane6_3 sw = sib := vcSumLane6_3_share sib sc
+    obtain ⟨ihRoot, ihZeros⟩ := vcMerkleStepSum_bool epoch (layer + 1)
+      (honestMerkleLevel3 epoch layer cur bw sw (fun i => (mcs i).head)).2.1 restW restC (fun i => (mcs i).tail)
+    refine ⟨?_, ?_⟩
+    · rw [ihRoot, hNextEq, hNextSum, hLvBit, hLvSib, hbSum, hsSum]
+      cases b with
+      | false =>
+        have hbG : bGold = Goldilocks.zero := rfl
+        rw [hbG, vcMerkleStepArith_zero]
+        simp only [evalVcMerklePathBool_cons_false]
+      | true =>
+        have hbG : bGold = Goldilocks.one := rfl
+        rw [hbG, vcMerkleStepArith_one]
+        simp only [evalVcMerklePathBool_cons_true]
+    · intro z hz
+      rcases List.mem_cons.mp hz with rfl | hzTail
+      · rw [hBzEq, hBzSum, hLvBit, hbSum]
+        cases b with
+        | false =>
+          have hbG : bGold = Goldilocks.zero := rfl
+          rw [hbG, ← goldOfInt_nat Goldilocks.zero, ← goldOfInt_nat Goldilocks.one]
+          simp only [Goldilocks.zero_val, goldOfInt_sub, goldOfInt_mul]; congr 1
+        | true =>
+          have hbG : bGold = Goldilocks.one := rfl
+          rw [hbG, ← goldOfInt_nat Goldilocks.zero, ← goldOfInt_nat Goldilocks.one]
+          simp only [Goldilocks.zero_val, Goldilocks.one_val, goldOfInt_sub, goldOfInt_mul]; congr 1
+      · exact ihZeros z hzTail
+
+theorem vcOpenedShareEquiv3_toFun (e : Fin 3) (secret : Goldilocks) (coins : Goldilocks × Goldilocks) :
+    (vcOpenedShareEquiv3 e secret).toFun coins = vcPairAt (vcShareWire3 secret coins) e := by
+  unfold vcOpenedShareEquiv3
+  rfl
+
+#export_eqns vcShareLane4_3
+
+end Qsag
+end
