@@ -56,19 +56,7 @@ For larger validator sets, the payload comparison assumes full participation. A 
 | 100,000 | 455.47 | 12,596 |
 | 1,048,576 | 4,776.00 | 131,168 |
 
-### Synthesized Verifier Hardware (`QSAG-NI v2`, measured)
-
-| Target and configuration | Mapped area or FPGA resources | Routed clock |
-| --- | --- | --- |
-| IHP SG13G2, autonomous | 709.61 kGE | — |
-| Sky130 HD, autonomous | 784.54 kGE | — |
-| ECP5-85F, compact | 23,576 LUT4 | 33.62 MHz |
-| ECP5-85F, full rate | 35,153 LUT4 | 29.86 MHz |
-| `CL_QSAG_F2`, VU47P wrapper | 314,047 LUT1–6, 290 DSP48E2, 315 RAMB36E2 | — |
-
 <!-- END GENERATED SCALING TABLES -->
-
-The ASIC figures are mapped standard-cell area with autonomous verification and the 32 KiB ROM. The four SRAM banks are black boxes. ECP5 clocks are final routed estimates for the named timing wrappers. The F2 row counts resources for the complete mapped custom-logic wrapper. [ASIC synthesis](../hardware/asic/synth/RESULTS.md) · [ECP5 routing](../hardware/fpga/RESULTS.md) · [F2 synthesis](../hardware/aws_f2/README.md)
 
 ## Custody and aggregation
 

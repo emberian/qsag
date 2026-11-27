@@ -68,13 +68,6 @@ def generated(link_mbps=100):
         table(("Validators", "Raw Jorts signatures at height 20 (MiB)", "96 B signature + bitmap (B)"),
               [(f"{n:,}", f"{n * jorts_bytes(JORTS_MAX_HEIGHT) / 2**20:,.2f}",
                 f"{bitmap_certificate_bytes(n):,}") for n in (1_500, 9_088, 10_000, 100_000, 1_048_576)]),
-        "### Synthesized Verifier Hardware (`QSAG-NI v2`, measured)",
-        table(("Target and configuration", "Mapped area or FPGA resources", "Routed clock"),
-              [("IHP SG13G2, autonomous", "709.61 kGE", "—"),
-               ("Sky130 HD, autonomous", "784.54 kGE", "—"),
-               ("ECP5-85F, compact", "23,576 LUT4", "33.62 MHz"),
-               ("ECP5-85F, full rate", "35,153 LUT4", "29.86 MHz"),
-               ("`CL_QSAG_F2`, VU47P wrapper", "314,047 LUT1–6, 290 DSP48E2, 315 RAMB36E2", "—")]),
         END,
     ])
 
@@ -87,7 +80,7 @@ def check_sources():
         agg / "src/hem_quintic/tests.rs": ["let active = [0, 2, 3]", "from_active_indices(4,",
                                           *(f"HemQuinticProfile::{name}, {size}," for name, _, size in SPARSE_VECTORS)],
         agg / "src/zk_hem/v2/params.rs": ["MIN_LOG_CELLS: usize = 16", "MAX_LOG_CELLS: usize = 28",
-                                         str(list(STAGE0_QUERIES.values()))],
+                                         ", ".join(map(str, STAGE0_QUERIES.values()))],
         agg / "src/recursive.rs": [r'b"QSAGHEM\x04"', "pub struct PreparedPolicyRegistry",
                                    "policy_registry_root: [u8; 32]"],
         agg / "src/zk_hem/recursive_ivc.rs": ["pub struct IvcSubtreeStatement", "shard_hi: u64"],
