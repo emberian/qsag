@@ -1,18 +1,26 @@
 module
 import Lean
 import all QsagWhirVerified.Funs
+public import QsagWhirVerified.PayloadVerifier
+import all QsagWhirVerified.PayloadVerifier
+import all QsagWhirVerified.PayloadWire
+import all QsagWhirVerified.FoldPayload
+public import QsagWhirVerified.Opening
+import all QsagWhirVerified.Opening
+import all QsagWhirVerified.WireBounds
+import all QsagWhirVerified.RowPolynomial
+import all QsagWhirVerified.CanopyCount
 public import QsagWhirVerified.Canonical
 import all QsagWhirVerified.Canonical
 public import QsagWhirVerified.ProtocolWeld
 import all QsagWhirVerified.ProtocolWeld
 
 /-!
-# `QsagWhirSpecWeld` — 54/54 Quintic `Fp5` WHIR MIR-to-`Qsag` Protocol Weld Library & Axiom Census
+# `QsagWhirSpecWeld` — 86/86 Quintic `Fp5` WHIR MIR-to-`Qsag` Protocol Weld Library & Axiom Census
 
 Root weld target for `qsag_whir_aeneas`, enforcing at compile time:
-1. **100% Canonical `Qsag` Weld Coverage (54/54 `QsagWhirVerified.Funs` Definitions):**
-   Every extracted Rust constant/function in `QsagWhirVerified.Funs` (50 Rust items plus 4 split
-   loop helpers) occurs in a non-`tooth_*` theorem statement whose proposition ALSO references a
+1. **100% Canonical `Qsag` Weld Coverage (86/86 `QsagWhirVerified.Funs` Definitions):**
+   Every extracted Rust constant/function in `QsagWhirVerified.Funs` occurs in a non-`tooth_*` theorem statement whose proposition ALSO references a
    canonical `Qsag.*` specification declaration!
 2. **Protocol-Level Quintic `Fp5` Anchors:**
    Verifies the presence of the multi-round sumcheck weld (`mirVerifyShiftSumcheckChainFp5_iff_qsag`),
@@ -88,6 +96,26 @@ end QsagWhirSpecWeld
 open Lean Elab Command in
 run_cmd do
   let canonicalWeldTheorems : Array Name := #[
+    ``qsag_whir_verified.proofs.verify_qsaghqm2_cwyz_fold_at_refines_qsag,
+    ``qsag_whir_verified.proofs.verify_qsaghqm2_cwyz_folds_at_refines_qsag,
+    ``qsag_whir_verified.proofs.fp5_block_end_refines_qsag,
+    ``qsag_whir_verified.proofs.qsaghqm2_stage_end_refines_qsag,
+    ``qsag_whir_verified.proofs.payload_schedule_ok_for_prod_stages,
+    ``qsag_whir_verified.proofs.verify_qsaghqm2_multiproof_and_rounds_refines_qsag,
+    ``qsag_whir_verified.proofs.verify_qsaghqm2_row_rounds_at_refines_qsag,
+    ``qsag_whir_verified.proofs.canonical_words_between_refines_qsag,
+    ``qsag_whir_verified.proofs.qsaghqm2_digest_block_end_refines_qsag,
+    ``qsag_whir_verified.proofs.turbo_digest_block_end,
+    ``qsag_whir_verified.proofs.qsaghqm2_opening_bounds_refines_qsag,
+    ``qsag_whir_verified.proofs.row_interpolation_weight_inverse,
+    ``qsag_whir_verified.proofs.verify_deg8_row_sumcheck_round_at_refines_qsag,
+    ``qsag_whir_verified.proofs.sibling_path_below_join_canopy,
+    ``qsag_whir_verified.proofs.compute_steiner_multiproof_siblings_refines_qsag,
+    ``qsag_whir_verified.proofs.has_bytes_at_word_iff_qsag,
+    ``qsag_whir_verified.proofs.load_le_u64_slice_refines_qsag,
+    ``qsag_whir_verified.proofs.decode_canonical_u64_at_refines_qsag,
+    ``qsag_whir_verified.proofs.decode_canonical_fp5_at_refines_qsag,
+    ``qsag_whir_verified.proofs.decode_canonical_gl24_at_refines_qsag,
     ``qsag_whir_verified.proofs.goldilocks_p_eq_qsag_prime,
     ``qsag_whir_verified.proofs.max_u64_word_lt_two_pow_64_qsag,
     ``qsag_whir_verified.proofs.fp5_nonresidue_w_eq_qsag,
@@ -179,9 +207,11 @@ run_cmd do
           defUses origin loopName && (sym == loopName || defUses loopName sym)
       | none => mentioned.contains sym
     if !cov then gaps := gaps.push sym
-  unless symbols.size == 54 && gaps.isEmpty do
+  unless symbols.size == 86 && gaps.isEmpty do
     throwError "WHIR spec weld symbol coverage failed: {symbols.size} symbols, uncovered={gaps}"
-  let weldModules := ["QsagWhirVerified.Canonical", "QsagWhirVerified.ProtocolWeld"]
+  let weldModules := ["QsagWhirVerified.PayloadWire", "QsagWhirVerified.PayloadVerifier", "QsagWhirVerified.FoldPayload",
+    "QsagWhirVerified.Canonical", "QsagWhirVerified.ProtocolWeld",
+    "QsagWhirVerified.Opening", "QsagWhirVerified.WireBounds", "QsagWhirVerified.RowPolynomial", "QsagWhirVerified.CanopyCount"]
   let mut checked : Nat := 0
   let mut rejected : Nat := 0
   for (name, _) in env.constants.toList do
@@ -196,4 +226,4 @@ run_cmd do
           logInfo m!"REJECT {name} ({owner}): {forbidden}"
   if checked == 0 || rejected > 0 then
     throwError "WHIR spec weld axiom audit failed: checked={checked}, rejected={rejected}"
-  logInfo m!"WHIR spec weld audit: {symbols.size}/54 Funs symbols welded to Qsag, {checked} declarations audited, 0 rejected"
+  logInfo m!"WHIR spec weld audit: {symbols.size}/86 Funs symbols welded to Qsag, {checked} declarations audited, 0 rejected"

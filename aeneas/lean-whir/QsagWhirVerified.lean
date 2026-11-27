@@ -6,3 +6,11 @@ public import QsagWhirVerified.Proofs
 
 public import QsagWhirVerified.Canonical
 public import QsagWhirVerified.ProtocolWeld
+public import QsagWhirVerified.Opening
+public import QsagWhirVerified.Fp5Equality
+public import QsagWhirVerified.RowPolynomial
+public import QsagWhirVerified.CanopyCount
+public import QsagWhirVerified.WireBounds
+public import QsagWhirVerified.PayloadWire
+public import QsagWhirVerified.FoldPayload
+public import QsagWhirVerified.PayloadVerifier
