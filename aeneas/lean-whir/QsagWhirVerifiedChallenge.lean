@@ -2,7 +2,9 @@ module
 public import Aeneas
 public import QsagWhirVerified.Types
 public import QsagWhirVerified.Funs
-public import QsagWhirVerifiedChallengeDefs
+public import QsagWhirVerified.PayloadWire
+public import QsagWhirVerified.WireBounds
+public import QsagWhirVerifiedChallengeDefs2
 
 public section
 
@@ -10,7 +12,7 @@ public section
 # Independent Challenge Statement Module for Quintic `Fp5` WHIR Rust MIR Refinement Theorems
 
 Pins the exact theorem statements for the generated `qsag-whir-verified` Rust MIR model
-(`QsagWhirVerified.Types` and `QsagWhirVerified.Funs`, 54 definitions) without importing any
+(`QsagWhirVerified.Types` and `QsagWhirVerified.Funs`, 86 definitions) without importing any
 proof module (`Arithmetic`, `Proofs`, `Canonical`, or `ProtocolWeld`). `lake comparator --paranoid`
 replays `QsagWhirVerified` against these independent obligations across all six external kernels.
 
@@ -708,6 +710,214 @@ theorem tooth_canonical_cwyz_fp5_fold_rejects_wrong_twiddle_and_forged_claim :
       (canonicalFp5 forged) = .ok false ∧
     verify_cwyz_duet_fold_step_fp5 v0 v1 iyBad it yy fp5Zero fp5Zero fp5Zero
       (canonicalFp5 honest) = .ok false := sorry
+
+
+theorem has_bytes_at_spec (bytes : Slice U8) (off width : Usize) :
+    has_bytes_at bytes off width = .ok (decide (off.val + width.val ≤ bytes.val.length)) := sorry
+
+theorem load_le_u64_slice_spec (bytes : Slice U8) (off : Usize) :
+    load_le_u64_slice bytes off =
+      .ok (if off.val + 8 ≤ bytes.val.length then some (lePackU64At bytes.val off.val) else none) := sorry
+
+theorem decode_canonical_u64_at_spec (bytes : Slice U8) (off : Usize) :
+    decode_canonical_u64_at bytes off = .ok
+      (if off.val + 8 ≤ bytes.val.length ∧ IsCanonical (lePackU64At bytes.val off.val)
+       then some (lePackU64At bytes.val off.val) else none) := sorry
+
+theorem decode_canonical_fp5_at_spec (bytes : Slice U8) (off : Usize) :
+    let word := fun k => lePackU64At bytes.val (off.val + k)
+    let v : Fp5 := ⟨word 0, word 8, word 16, word 24, word 32⟩
+    decode_canonical_fp5_at bytes off = .ok
+      (if off.val + 40 ≤ bytes.val.length ∧ IsCanonicalFp5 v then some v else none) := sorry
+
+theorem decode_canonical_gl24_at_spec (bytes : Slice U8) (off : Usize) :
+    let word := fun k => lePackU64At bytes.val (off.val + k)
+    let v : Gl24Digest := ⟨word 0, word 8, word 16, word 24, word 32, word 40, word 48⟩
+    decode_canonical_gl24_at bytes off = .ok
+      (if off.val + 56 ≤ bytes.val.length ∧ IsCanonicalGl24 v then some v else none) := sorry
+
+theorem sibling_path_below_join_spec (d : U64) :
+    sibling_path_below_join d = .ok (UScalar.ofNat .U64 d.val.log2) := sorry
+
+theorem has_bytes_at_word_iff_qsag (bytes : Slice U8) (off : Usize) :
+    has_bytes_at bytes off 8#usize = .ok true ↔
+      (Option.map fieldAbs <$> load_le_u64_slice bytes off) =
+        .ok (some (Qsag.Goldilocks.ofNat (lePackU64At bytes.val off.val).val)) := sorry
+
+theorem load_le_u64_slice_refines_qsag (bytes : Slice U8) (off : Usize) :
+    (Option.map fieldAbs <$> load_le_u64_slice bytes off) = .ok
+      (if off.val + 8 ≤ bytes.val.length
+       then some (Qsag.Goldilocks.ofNat (lePackU64At bytes.val off.val).val) else none) := sorry
+
+theorem decode_canonical_u64_at_refines_qsag (bytes : Slice U8) (off : Usize) :
+    let w := lePackU64At bytes.val off.val
+    (Option.map fieldAbs <$> decode_canonical_u64_at bytes off) = .ok
+      (if off.val + 8 ≤ bytes.val.length ∧ w.val < Qsag.goldilocksPrime
+       then some (Qsag.Goldilocks.ofNat w.val) else none) := sorry
+
+theorem decode_canonical_fp5_at_refines_qsag (bytes : Slice U8) (off : Usize) :
+    let w := fun k => lePackU64At bytes.val (off.val + k)
+    let v : Fp5 := ⟨w 0, w 8, w 16, w 24, w 32⟩
+    (Option.map fp5Abs <$> decode_canonical_fp5_at bytes off) = .ok
+      (if off.val + 40 ≤ bytes.val.length ∧ IsCanonicalFp5 v then
+        some (⟨fieldAbs (w 0), fieldAbs (w 8), fieldAbs (w 16), fieldAbs (w 24), fieldAbs (w 32)⟩ : Qsag.QuinticGoldilocks)
+       else none) := sorry
+
+theorem decode_canonical_gl24_at_refines_qsag (bytes : Slice U8) (off : Usize) :
+    let w := fun k => lePackU64At bytes.val (off.val + k)
+    let v : Gl24Digest := ⟨w 0, w 8, w 16, w 24, w 32, w 40, w 48⟩
+    (Option.map gl24Abs <$> decode_canonical_gl24_at bytes off) = .ok
+      (if off.val + 56 ≤ bytes.val.length ∧ IsCanonicalGl24 v then
+        some (⟨fieldAbs (w 0), fieldAbs (w 8), fieldAbs (w 16), fieldAbs (w 24), fieldAbs (w 32), fieldAbs (w 40), fieldAbs (w 48)⟩ : Qsag.Poseidon2Gl24.Digest7)
+       else none) := sorry
+
+
+theorem compute_steiner_multiproof_siblings_spec (depth : U32) (indices : Slice Usize) :
+    compute_steiner_multiproof_siblings depth indices = .ok (steinerCount depth.val indices.val) := sorry
+
+theorem row_interpolation_weight_spec (i : Usize) :
+    row_interpolation_weight i = .ok (rowLagrangeWeight i.val) := sorry
+
+theorem verify_deg8_row_sumcheck_round_at_spec (bytes : Slice U8) (off : Usize) (claim r : Fp5) :
+    verify_deg8_row_sumcheck_round_at bytes off claim r = .ok
+      (if off.val + 360 ≤ bytes.val.length then
+        rowLagrangeRounds bytes.val off.val claim r 9 0 fp5Zero fp5Zero fp5One else none) := sorry
+
+theorem tooth_row_bytes_reject_wrong_sum :
+    let bytes := Array.to_slice (Array.repeat 360#usize 0#u8)
+    verify_deg8_row_sumcheck_round_at bytes 0#usize fp5Zero fp5Zero = .ok (some fp5Zero) ∧
+    verify_deg8_row_sumcheck_round_at bytes 0#usize fp5One fp5Zero = .ok none := sorry
+
+theorem tooth_row_first_byte_rejected :
+    let good := Array.to_slice (Array.repeat 360#usize 0#u8)
+    let bad : Slice U8 := ⟨1#u8 :: List.replicate 359 0#u8, by simp; decide⟩
+    verify_deg8_row_sumcheck_round_at good 0#usize fp5Zero fp5Zero = .ok (some fp5Zero) ∧
+    verify_deg8_row_sumcheck_round_at bad 0#usize fp5Zero fp5Zero = .ok none := sorry
+
+theorem tooth_steiner_pruning_rejects_duplicate :
+    compute_steiner_multiproof_siblings 3#u32 ⟨[0#usize, 1#usize, 6#usize], by decide⟩ =
+        .ok (some 3#usize) ∧
+    compute_steiner_multiproof_siblings 3#u32 ⟨[0#usize, 1#usize, 1#usize], by decide⟩ =
+        .ok none := sorry
+
+theorem row_interpolation_weight_inverse (i : Usize) (hi : i.val < 9) :
+    ∃ w, row_interpolation_weight i = .ok w ∧
+      (w.val * (((List.range 9).erase i.val).foldl
+        (fun acc j => acc * (Qsag.goldilocksPrime + i.val - j) % Qsag.goldilocksPrime) 1)) %
+        Qsag.goldilocksPrime = 1 := sorry
+
+theorem verify_deg8_row_sumcheck_round_at_refines_qsag
+    (bytes : Slice U8) (off : Usize) (claim r : Fp5) (hc : IsCanonicalFp5 claim) :
+    (Option.map fp5Abs <$> verify_deg8_row_sumcheck_round_at bytes off claim r) =
+      .ok (if off.val + 360 ≤ bytes.val.length then
+        rowGridRounds (fun j => (fp5AtBytes bytes.val (off.val + 40*j)).map fp5Abs)
+          (fun j => fieldAbs (rowLagrangeWeight j)) (fp5Abs claim) (fp5Abs r) 9 0
+          Qsag.QuinticGoldilocks.zero Qsag.QuinticGoldilocks.zero Qsag.QuinticGoldilocks.one
+        else none) := sorry
+
+theorem sibling_path_below_join_canopy (d : Nat) (x y : U64) (hxy : x.val < y.val)
+    (hy : y.val < 2^d) :
+    ∃ h, sibling_path_below_join (x ^^^ y) = .ok h ∧
+      Qsag.steinerSiblingCount d [x.val, y.val] + 1 = d + h.val := sorry
+
+theorem compute_steiner_multiproof_siblings_refines_qsag (depth : U32) (indices : Slice Usize) :
+    compute_steiner_multiproof_siblings depth indices =
+      .ok (if depth.val ≤ 28 ∧ Qsag.canopyIndicesOk (2^depth.val) (indices.val.map UScalar.val) then
+        some (UScalar.ofNat .Usize (Qsag.steinerSiblingCount depth.val (indices.val.map UScalar.val)))
+        else none) := sorry
+
+theorem verify_qsaghqm2_row_rounds_at_spec (bytes : Slice U8) (off : Usize) (rs : Slice Fp5) :
+    verify_qsaghqm2_row_rounds_at bytes off rs = .ok
+      (if rs.val.length ≤ 20 ∧ off.val + 360 * rs.val.length ≤ bytes.val.length
+       then rowChain bytes.val off.val fp5Zero rs.val else none) := sorry
+
+theorem verify_qsaghqm2_row_rounds_at_refines_qsag (bytes : Slice U8) (off : Usize) (rs : Slice Fp5) :
+    (Option.map fp5Abs <$> verify_qsaghqm2_row_rounds_at bytes off rs) =
+      .ok (if rs.val.length ≤ 20 ∧ off.val + 360 * rs.val.length ≤ bytes.val.length then
+        rowGridChain (fun j => (fp5AtBytes bytes.val j).map fp5Abs) (fun i => fieldAbs (rowLagrangeWeight i))
+          off.val Qsag.QuinticGoldilocks.zero (rs.val.map fp5Abs) else none) := sorry
+
+theorem block_end_spec (len off count width : Usize) :
+    block_end len off count width = .ok (boundedEnd len.val off.val count.val width.val) := sorry
+
+theorem canonical_words_between_refines_qsag (bytes : Slice U8) (off stop : Usize) :
+    canonical_words_between bytes off stop = .ok (validWordRegion
+      (fun j => (lePackU64At bytes.val j).val) Qsag.goldilocksPrime bytes.val.length off.val stop.val) := sorry
+
+theorem qsaghqm2_digest_block_end_refines_qsag (bytes : Slice U8) (off count : Usize) (tag : U8) :
+    qsaghqm2_digest_block_end bytes off count tag =
+      .ok (digestRegion (fun j => (lePackU64At bytes.val j).val) bytes.val.length off.val count.val
+        (show Option Qsag.Aggregation.PublicHemQuintic128 from decodePublicHemProfileTag tag)) := sorry
+
+theorem turbo_digest_block_end (bytes : Slice U8) (off count : Usize) :
+    decodePublicHemProfileTag QSAGHQM2_PROFILE_TURBO400 = some Qsag.Aggregation.PublicHemQuintic128.turboShake400 ∧
+    qsaghqm2_digest_block_end bytes off count QSAGHQM2_PROFILE_TURBO400 = block_end (Slice.len bytes) off count 50#usize := sorry
+
+theorem qsaghqm2_opening_bounds_refines_qsag (bytes : Slice U8) (off : Usize) (indices : Slice Usize)
+    (depth fold : U32) (base : Bool) (tag : U8) :
+    qsaghqm2_opening_bounds bytes off indices depth fold base tag =
+      .ok (openingRegion (fun j => (lePackU64At bytes.val j).val) bytes.val.length off.val depth.val
+        fold.val (indices.val.map UScalar.val) base
+        (show Option Qsag.Aggregation.PublicHemQuintic128 from decodePublicHemProfileTag tag)) := sorry
+
+theorem tooth_digest_rejects_noncanonical_word :
+    let good := Array.to_slice (Array.repeat 56#usize 0#u8)
+    let bad := Array.to_slice (Array.repeat 56#usize 255#u8)
+    qsaghqm2_digest_block_end good 0#usize 1#usize QSAGHQM2_PROFILE_GL24 = .ok (some 56#usize) ∧
+    qsaghqm2_digest_block_end bad 0#usize 1#usize QSAGHQM2_PROFILE_GL24 = .ok none := sorry
+
+theorem canonical_decoders_at_end (bytes : Slice U8) :
+    decode_canonical_fp5_at bytes (Slice.len bytes) = .ok none ∧
+    decode_canonical_gl24_at bytes (Slice.len bytes) = .ok none := sorry
+
+theorem verify_qsaghqm2_cwyz_fold_at_refines_qsag
+    (bytes : Slice U8) (off : Usize) (claim : Fp5) (c : CwyzFoldChals) :
+    (Option.map fp5Abs <$> verify_qsaghqm2_cwyz_fold_at bytes off claim c) =
+      .ok (qsagFold (fun j => (fp5AtBytes bytes.val j).map fp5Abs) fp5Abs bytes.val.length
+        off.val (fp5Abs claim) c) := sorry
+
+theorem verify_qsaghqm2_cwyz_folds_at_refines_qsag
+    (bytes : Slice U8) (off : Usize) (claim : Fp5) (cs : Slice CwyzFoldChals) :
+    (Option.map fp5Abs <$> verify_qsaghqm2_cwyz_folds_at bytes off claim cs) =
+      .ok (if cs.val.length ≤ 28 ∧ off.val + 200 * cs.val.length ≤ bytes.val.length then
+        foldMessages (qsagFold (fun j => (fp5AtBytes bytes.val j).map fp5Abs) fp5Abs bytes.val.length)
+          off.val (fp5Abs claim) cs.val else none) := sorry
+
+theorem tooth_cwyz_fold_rejects_noncanonical_fifth_element (claim : Fp5) (c : CwyzFoldChals) :
+    let bytes : Slice U8 := ⟨List.replicate 192 0#u8 ++ List.replicate 8 255#u8, by decide⟩
+    verify_qsaghqm2_cwyz_fold_at bytes 0#usize claim c = .ok none := sorry
+
+theorem fp5_block_end_refines_qsag (bytes : Slice U8) (off count : Usize) :
+    fp5_block_end bytes off count = .ok (fieldRegion
+      (fun j => (lePackU64At bytes.val j).val) bytes.val.length off.val count.val Qsag.goldilocksPrime) := sorry
+
+theorem qsaghqm2_stage_end_refines_qsag (bytes : Slice U8) (off : Usize)
+    (s : StageEnvelope) (base : Bool) (terminal : Usize) (tag : U8) :
+    qsaghqm2_stage_end bytes off s base terminal tag = .ok (stageRegion
+      (fun j => (lePackU64At bytes.val j).val) bytes.val.length off.val s base terminal.val
+      (show Option Qsag.Aggregation.PublicHemQuintic128 from decodePublicHemProfileTag tag)) := sorry
+
+theorem payload_schedule_ok_refines_qsag (rows : Usize) (early a b c d count : U32) :
+    payload_schedule_ok rows early a b c d count =
+      .ok (decide (scheduleCounts rows.val early.val a.val b.val c.val d.val count.val)) := sorry
+
+theorem payload_schedule_ok_for_prod_stages (rows : Usize) (early a b c d count : U32)
+    (hr : rows.val ≤ 20) (hlo : 16 ≤ rows.val + 8)
+    (ha : a.val ≤ 6) (hb : b.val ≤ 6) (hc : c.val ≤ 6) (hd : d.val ≤ 6)
+    (hf : a.val + b.val + c.val + d.val =
+      ((Qsag.ZkHemV2Cert.zkHemV2ProdStages (rows.val+8)).map Qsag.ClosedWhir.WhirStage.foldK).sum)
+    (hn : count.val = (Qsag.ZkHemV2Cert.zkHemV2ProdStages (rows.val+8)).length)
+    (he : early.val = rows.val+8 - (a.val + b.val + c.val + d.val)) :
+    payload_schedule_ok rows early a b c d count = .ok true := sorry
+
+theorem verify_qsaghqm2_multiproof_and_rounds_refines_qsag
+    (bytes : Slice U8) (tag : U8) (rs : Slice Fp5) (early : U32) (s : PayloadStages) :
+    verify_qsaghqm2_multiproof_and_rounds bytes tag rs early s = .ok
+      (payloadWire (fun j => (lePackU64At bytes.val j).val)
+        (fun r => if rs.val.length ≤ 20 ∧ r.val + 360 * rs.val.length ≤ bytes.val.length then
+          rowChain bytes.val r.val fp5Zero rs.val else none)
+        bytes.val.length rs.val.length early.val
+        (show Option Qsag.Aggregation.PublicHemQuintic128 from decodePublicHemProfileTag tag) s) := sorry
 
 end qsag_whir_verified.proofs
 end

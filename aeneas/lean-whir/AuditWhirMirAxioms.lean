@@ -3,6 +3,14 @@ import Lean
 import all Lean.Util.CollectAxioms
 import all QsagWhirVerified
 import all QsagWhirSpecWeld
+import all QsagWhirVerified.PayloadVerifier
+import all QsagWhirVerified.FoldPayload
+import all QsagWhirVerified.PayloadWire
+import all QsagWhirVerified.Fp5Equality
+import all QsagWhirVerified.Opening
+import all QsagWhirVerified.WireBounds
+import all QsagWhirVerified.CanopyCount
+import all QsagWhirVerified.RowPolynomial
 import all QsagWhirVerified.Canonical
 import all QsagWhirVerified.ProtocolWeld
 import all QsagWhirVerified.Proofs
@@ -17,6 +25,44 @@ import all Aeneas.Std.Types
 open Lean
 
 private def requiredWhirMirTheorems : Array Name := #[
+  ``qsag_whir_verified.proofs.canonical_decoders_at_end,
+  ``qsag_whir_verified.proofs.verify_qsaghqm2_cwyz_fold_at_refines_qsag,
+  ``qsag_whir_verified.proofs.verify_qsaghqm2_cwyz_folds_at_refines_qsag,
+  ``qsag_whir_verified.proofs.tooth_cwyz_fold_rejects_noncanonical_fifth_element,
+  ``qsag_whir_verified.proofs.fp5_block_end_refines_qsag,
+  ``qsag_whir_verified.proofs.qsaghqm2_stage_end_refines_qsag,
+  ``qsag_whir_verified.proofs.payload_schedule_ok_refines_qsag,
+  ``qsag_whir_verified.proofs.payload_schedule_ok_for_prod_stages,
+  ``qsag_whir_verified.proofs.verify_qsaghqm2_multiproof_and_rounds_refines_qsag,
+    ``qsag_whir_verified.proofs.verify_qsaghqm2_row_rounds_at_spec,
+    ``qsag_whir_verified.proofs.verify_qsaghqm2_row_rounds_at_refines_qsag,
+    ``qsag_whir_verified.proofs.block_end_spec,
+    ``qsag_whir_verified.proofs.canonical_words_between_refines_qsag,
+    ``qsag_whir_verified.proofs.qsaghqm2_digest_block_end_refines_qsag,
+    ``qsag_whir_verified.proofs.turbo_digest_block_end,
+    ``qsag_whir_verified.proofs.qsaghqm2_opening_bounds_refines_qsag,
+    ``qsag_whir_verified.proofs.tooth_digest_rejects_noncanonical_word,
+    ``qsag_whir_verified.proofs.compute_steiner_multiproof_siblings_spec,
+    ``qsag_whir_verified.proofs.row_interpolation_weight_spec,
+    ``qsag_whir_verified.proofs.verify_deg8_row_sumcheck_round_at_spec,
+    ``qsag_whir_verified.proofs.tooth_row_bytes_reject_wrong_sum,
+    ``qsag_whir_verified.proofs.tooth_row_first_byte_rejected,
+    ``qsag_whir_verified.proofs.tooth_steiner_pruning_rejects_duplicate,
+    ``qsag_whir_verified.proofs.row_interpolation_weight_inverse,
+    ``qsag_whir_verified.proofs.verify_deg8_row_sumcheck_round_at_refines_qsag,
+    ``qsag_whir_verified.proofs.sibling_path_below_join_canopy,
+    ``qsag_whir_verified.proofs.compute_steiner_multiproof_siblings_refines_qsag,
+    ``qsag_whir_verified.proofs.has_bytes_at_spec,
+    ``qsag_whir_verified.proofs.load_le_u64_slice_spec,
+    ``qsag_whir_verified.proofs.decode_canonical_u64_at_spec,
+    ``qsag_whir_verified.proofs.decode_canonical_fp5_at_spec,
+    ``qsag_whir_verified.proofs.decode_canonical_gl24_at_spec,
+    ``qsag_whir_verified.proofs.sibling_path_below_join_spec,
+    ``qsag_whir_verified.proofs.has_bytes_at_word_iff_qsag,
+    ``qsag_whir_verified.proofs.load_le_u64_slice_refines_qsag,
+    ``qsag_whir_verified.proofs.decode_canonical_u64_at_refines_qsag,
+    ``qsag_whir_verified.proofs.decode_canonical_fp5_at_refines_qsag,
+    ``qsag_whir_verified.proofs.decode_canonical_gl24_at_refines_qsag,
   ``qsag_whir_verified.proofs.goldilocks_p_val,
   ``qsag_whir_verified.proofs.max_u64_word_val,
   ``qsag_whir_verified.proofs.fp5_nonresidue_w_val,
