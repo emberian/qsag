@@ -87,7 +87,19 @@ def pureGf256Mul (a b : Std.U8) : Std.U8 :=
   (p ^^^ q) ||| ⟨hi.bv <<< 4⟩
 
 theorem gf256_mul_eq_pure (a b : tower.Gf256) :
-    tower.gf256_mul a b = .ok (pureGf256Mul a b) := by rfl
+    tower.gf256_mul a b = .ok (pureGf256Mul a b) := by
+  have h : ∀ v : BitVec 8, ((v &&& 15#8) <<< 4) = (v <<< 4) := by decide
+  let al := a &&& 15#u8
+  let ah := (⟨a.bv >>> 4⟩ : Std.U8) &&& 15#u8
+  let bl := b &&& 15#u8
+  let bh := (⟨b.bv >>> 4⟩ : Std.U8) &&& 15#u8
+  let p := pureMulT2 al bl
+  let q := pureMulT2 ah bh
+  let r := pureMulT2 (al ^^^ ah) (bl ^^^ bh)
+  let high := (((r ^^^ p) ^^^ q) ^^^ pureScaleXT2 q).bv
+  change Result.ok ((p ^^^ q) ||| (⟨(high &&& 15#8) <<< 4⟩ : Std.U8)) =
+    Result.ok ((p ^^^ q) ||| (⟨high <<< 4⟩ : Std.U8))
+  rw [h]
 
 @[expose]
 def pureGf256Inv (a : Std.U8) : Std.U8 :=
@@ -392,6 +404,8 @@ theorem dkg_beaver_frobenius_eval_spec (a b c s : tower.Gf256)
   rw [gf256_mul_eq_pure] at hc
   injection hc with hc_eq
   subst hc_eq
+  simp only [threshold.dkg_beaver_frobenius_eval_gf256, tower.gf256_frobenius_residual,
+    tower.gf256_add, gf256_mul_eq_pure, bind_eq_result_bind, result_bind_ok]
   change Result.ok
       (((pureGf256Mul a b ^^^ pureGf256Mul (s ^^^ a) b) ^^^
         (pureGf256Mul (s ^^^ b) a ^^^ pureGf256Mul (s ^^^ a) (s ^^^ b))) ^^^ s) =

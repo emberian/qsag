@@ -65,6 +65,30 @@ theorem epoch_latch_new_spec (max_epoch : Std.U64) (key_epoch_id : Array Std.U8 
   · exact Nat.zero_le _
   · intro b h; cases h
 
+/-- Every successful recovery supplies the invariant required by the transition theorems. -/
+theorem epoch_latch_from_cursor_well_formed (next limit : Std.U64)
+    (key : Array Std.U8 32#usize) (last : threshold.LastBoundEpoch) (st : threshold.EpochLatch)
+    (accepted : threshold.EpochLatch.from_cursor next limit key last = .ok (.Ok st)) :
+    WellFormedWal st := by
+  unfold threshold.EpochLatch.from_cursor at accepted
+  by_cases over : next > limit
+  · simp [over] at accepted
+  have hn : next.val ≤ limit.val := Nat.le_of_not_gt (fun h => over ((UScalar.lt_iff_val _ _).mpr h))
+  cases last with
+  | Unset =>
+    simp [over] at accepted
+    subst st
+    exact ⟨hn, fun _ h => by cases h⟩
+  | Bound b =>
+    by_cases stale : b.epoch ≥ next
+    · simp [over, stale] at accepted
+    · simp [over, stale] at accepted
+      subst st
+      refine ⟨hn, ?_⟩
+      intro record h
+      cases h
+      exact Nat.lt_of_not_ge (fun h => stale ((UScalar.le_iff_val _ _).mpr h))
+
 private theorem epoch_increment_ok (st : threshold.EpochLatch)
     (h : st.next_epoch < st.max_epoch) :
     ∃ next : Std.U64, (st.next_epoch + 1#u64 : Result Std.U64) = .ok next ∧

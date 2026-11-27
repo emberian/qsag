@@ -58,10 +58,14 @@ private theorem horner_gf256_fuel (coeffs : Slice tower.Gf256) (x : tower.Gf256)
     have hget : Slice.index_usize coeffs r = .ok (coeffs.val.getD n 0#u8) := by
       simp only [Slice.index_usize, dite_eq_left_of_eq_true (eq_true hi)]
       rw [List.getElem_eq_getD 0#u8, hr']
+    have step : threshold.shamir_eval_poly_gf256_loop.body coeffs x acc rem =
+        .ok (.cont (pureGf256Mul acc x ^^^ coeffs.val.getD n 0#u8, r)) := by
+      simp only [threshold.shamir_eval_poly_gf256_loop.body, hp, ite_eq_left_of_eq_true,
+        hs, bind_eq_result_bind, result_bind_ok, gf256_mul_eq_pure, hget,
+        tower.gf256_add, lift_eq_ok]
     rw [loopFuel_succ]
-    simp only [threshold.shamir_eval_poly_gf256_loop.body, hp, ite_eq_left_of_eq_true,
-      hs, bind_eq_result_bind, result_bind_ok, gf256_mul_eq_pure, hget,
-      tower.gf256_add, lift_eq_ok]
+    change (threshold.shamir_eval_poly_gf256_loop.body coeffs x acc rem >>= _) = _
+    rw [step]
     exact ih r _ hr' (Nat.le_trans (Nat.le_succ n) hn)
 
 theorem shamir_eval_poly_gf256_spec (coeffs : Slice tower.Gf256) (x : tower.Gf256) :

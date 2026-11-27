@@ -1,14 +1,14 @@
 module
 import all QsagVerified.Funs
-public import QsagVerified.Proofs.TowerBdoz
+public import QsagVerified.Proofs.TowerArithmetic
 public import Qsag.Math.Gf2Pow128
 
 /-!
 # Binary-tower weld between the Aeneas extraction and `Qsag.Math.Gf2Pow128`
 
 Every extracted Wiedemann-tower operation is identified with the canonical recursive field
-`Qsag.TowerElem k` under `Qsag.unpackTower`: GF(256) (`k = 3`), `Tower128` (`k = 7`) and
-`Tower256` (`k = 8`), for both addition and multiplication. The wide levels are obtained from
+`Qsag.TowerElem k` under `Qsag.unpackTower`: GF(256) (`k = 3`) and `Tower128` (`k = 7`),
+for both addition and multiplication. The wide levels are obtained from
 one level-generic Karatsuba step (`wide_mul_step`, `wide_scale_step`) instantiated at 16, 32, 64
 and 128 bits, so no level is checked by enumeration above GF(256).
 
@@ -309,40 +309,6 @@ theorem pureTower128Mul_eq_qsag (a b : Std.U128) :
     (fun x y => (pureMulT6 ⟨x⟩ ⟨y⟩).bv) (fun x => (pureScaleXT6 ⟨x⟩).bv)
     (fun x y => pureMulT6_eq_qsag ⟨x⟩ ⟨y⟩) (fun x => pureScaleXT6_eq_qsag ⟨x⟩)
 
-/-- Pure model of the extracted `scale_x_t7`. -/
-def pureScaleXT7 (a : Std.U128) : Std.U128 :=
-  let hi : Std.U64 :=
-    UScalar.cast .U64 ((⟨a.bv >>> 64⟩ : Std.U128) &&& 18446744073709551615#u128)
-  let sx := pureScaleXT6 hi
-  ⟨(UScalar.cast .U128 hi).bv |||
-    ((UScalar.cast .U128
-      ((UScalar.cast .U64 (a &&& 18446744073709551615#u128)) ^^^ sx)).bv <<< 64)⟩
-
-theorem scale_x_t7_eq_pure (a : Std.U128) :
-    tower.scale_x_t7 a = .ok (pureScaleXT7 a) := by
-  let hi : Std.U64 :=
-    UScalar.cast .U64 ((⟨a.bv >>> 64⟩ : Std.U128) &&& 18446744073709551615#u128)
-  have hs := scale_x_t6_eq_independent hi
-  have ha : (a >>> 64#i32 : Result Std.U128) = .ok ⟨a.bv >>> 64⟩ := rfl
-  change tower.scale_x_t7 a = .ok ⟨(UScalar.cast .U128 hi).bv |||
-    ((UScalar.cast .U128
-      ((UScalar.cast .U64 (a &&& 18446744073709551615#u128)) ^^^ pureScaleXT6 hi)).bv <<< 64)⟩
-  unfold tower.scale_x_t7
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step ha
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step hs
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  rfl
-
-theorem pureScaleXT7_eq_qsag (a : Std.U128) :
-    (pureScaleXT7 a).bv = Qsag.scaleXExec 7 a.bv :=
-  wide_scale_step 6 a.bv (18446744073709551615#u128).bv (by decide)
-    (fun x => (pureScaleXT6 ⟨x⟩).bv) (fun x => pureScaleXT6_eq_qsag ⟨x⟩)
 
 /-- Every extracted 128-bit multiplication is multiplication in the canonical field
 `Qsag.TowerElem 7`. -/
@@ -385,73 +351,5 @@ theorem tower128_mul_eq_zero_iff (a b : Std.U128) :
         Qsag.towerZero 7 :=
       (Qsag.towerMul_eq_zero_iff 7 _ _).mpr (h.imp (hzero a).mpr (hzero b).mpr)
     exact congrArg Result.ok ((hzero y).mp (hAbs.trans hprod))
-
-/-! ## Tower256 -/
-
-/-- Production-order low/high coordinates of an extracted 256-bit tower element. -/
-def tower256Abs (a : tower.Tower256) : Qsag.TowerElem 8 :=
-  (Qsag.unpackTower 7 a.lo.bv, Qsag.unpackTower 7 a.hi.bv)
-
-/-- Extracted 256-bit addition refines the canonical level-eight operation. -/
-theorem tower256_add_refines_qsag (a b : tower.Tower256) :
-    ∃ y, tower.tower256_add a b = .ok y ∧
-      tower256Abs y = Qsag.towerAdd 8 (tower256Abs a) (tower256Abs b) := by
-  refine ⟨⟨a.lo ^^^ b.lo, a.hi ^^^ b.hi⟩, rfl, ?_⟩
-  change (Qsag.unpackTower 7 (a.lo.bv ^^^ b.lo.bv),
-      Qsag.unpackTower 7 (a.hi.bv ^^^ b.hi.bv)) = _
-  rw [unpackTower_xor 7, unpackTower_xor 7]
-  rfl
-
-/-- Pure model of the extracted `tower256_mul`. -/
-def pureTower256Mul (a b : tower.Tower256) : tower.Tower256 :=
-  let p := pureTower128Mul a.lo b.lo
-  let q := pureTower128Mul a.hi b.hi
-  let r := pureTower128Mul (a.lo ^^^ a.hi) (b.lo ^^^ b.hi)
-  ⟨p ^^^ q, r ^^^ p ^^^ q ^^^ pureScaleXT7 q⟩
-
-theorem tower256_mul_eq_pure (a b : tower.Tower256) :
-    tower.tower256_mul a b = .ok (pureTower256Mul a b) := by
-  have hp := tower128_mul_eq_independent a.lo b.lo
-  have hq := tower128_mul_eq_independent a.hi b.hi
-  have hr := tower128_mul_eq_independent (a.lo ^^^ a.hi) (b.lo ^^^ b.hi)
-  have hs := scale_x_t7_eq_pure (pureTower128Mul a.hi b.hi)
-  unfold tower.tower256_mul
-  apply bind_ok_step hp
-  apply bind_ok_step hq
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step hr
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step hs
-  apply bind_ok_step (lift_eq_ok _)
-  rfl
-
-private theorem pack_tower256Abs (a : tower.Tower256) :
-    Qsag.packTower 8 (tower256Abs a) = Qsag.joinBits 7 a.lo.bv a.hi.bv := by
-  show Qsag.joinBits 7 (Qsag.packTower 7 (Qsag.unpackTower 7 a.lo.bv))
-    (Qsag.packTower 7 (Qsag.unpackTower 7 a.hi.bv)) = _
-  rw [Qsag.packTower_unpackTower, Qsag.packTower_unpackTower]
-
-/-- Every extracted 256-bit multiplication is multiplication in the canonical field
-`Qsag.TowerElem 8`. -/
-theorem tower256_mul_refines_qsag (a b : tower.Tower256) :
-    ∃ y, tower.tower256_mul a b = .ok y ∧
-      tower256Abs y = Qsag.towerMul 8 (tower256Abs a) (tower256Abs b) := by
-  refine ⟨pureTower256Mul a b, tower256_mul_eq_pure a b, ?_⟩
-  apply Qsag.packTower_injective 8
-  rw [← Qsag.mulExec_refines, pack_tower256Abs, pack_tower256Abs, pack_tower256Abs,
-    mulExec_succ 7]
-  simp only [Qsag.lowBits_join, Qsag.highBits_join, pureTower256Mul, UScalar.bv_xor,
-    pureTower128Mul_eq_qsag, pureScaleXT7_eq_qsag, BitVec.xor_assoc]
-
-/-- `#tooth`: the welds separate the operations and the levels. In `Tower256` the generator
-satisfies `X₇² = 1 + X₆·X₇` (not `X₇`, and not the sum `0`), while the same low words multiply
-to `3` at level seven. -/
-theorem tooth_tower256_generator_square :
-    (pureTower256Mul ⟨0#u128, 1#u128⟩ ⟨0#u128, 1#u128⟩).lo = 1#u128 ∧
-      (pureTower256Mul ⟨0#u128, 1#u128⟩ ⟨0#u128, 1#u128⟩).hi = 18446744073709551616#u128 ∧
-      pureTower128Mul 2#u128 2#u128 = 3#u128 := by decide
 
 end qsag_verified.proofs
