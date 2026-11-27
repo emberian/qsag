@@ -1,6 +1,6 @@
 name = "qsag_aeneas"
 version = "0.1.0"
-defaultTargets = ["Aeneas", "QsagVerified", "QsagMirProofs", "QsagSpecWeld", "AuditMirAxioms", "QsagCustodyWeld"]
+defaultTargets = ["Aeneas", "QsagVerified", "QsagMirProofs", "QsagSpecWeld", "AuditMirAxioms", "QsagCustodyWeld", "audit-mir-axioms"]
 
 [leanOptions]
 autoImplicit = false

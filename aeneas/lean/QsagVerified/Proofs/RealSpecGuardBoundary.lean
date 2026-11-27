@@ -8,6 +8,7 @@ public import QsagVerified.Proofs.RealSpecFieldWeld
 public import QsagVerified.Proofs.BeltLatchKernel
 import all QsagVerified.Proofs.BeltLatchKernel
 public import Qsag.Machine.MirSpecBridge
+public import Qsag.Top.Custody
 import all Qsag.Machine.MirSpecBridgeCore
 import Qsag.Tactic.AssuranceKit
 
@@ -253,6 +254,20 @@ theorem extractedVelocity_multiTurn_cap_and_monotonic_nonce
     exact ⟨hn, (u64Abs_inj _ _).mp hw, arrayU8ToBytes_injective hpp, arrayU8ToBytes_injective hap⟩
   · exact (List.pairwise_map.mp hPair).imp fun h => by simpa [velocityReqAbs] using h
 
+/-- Approval of a nonce twice is impossible along an extracted Rust execution. -/
+theorem extractedVelocity_approved_nonces_nodup
+    {initial final : policy_and_addr.StatefulVelocityGuard}
+    {tr : List (policy_and_addr.VelocitySpendRequest × BitVec 128)}
+    (cap : initial.spent_units.val ≤ initial.cap_units.val)
+    (trace : extractedVelocityMachine.ValidTrace initial tr final) :
+    (tr.map (fun turn => turn.1.nonce.val)).Nodup := by
+  obtain ⟨_, hTrace, rfl⟩ := extractedVelocity_forwardSim_mirVelocity.lift_validTrace
+    (a₀ := velocityGuardAbs initial) rfl trace
+  simpa [List.map_map, Function.comp_def, velocityReqAbs] using
+    Qsag.Top.velocity_approved_nonces_nodup (by exact cap) (comapInputs_validTrace hTrace)
+
+#verify_constructive extractedVelocity_approved_nonces_nodup
+
 /-! ## §6B. `MlDsaReleaseGate::try_release_z_share` against `Qsag.mirMlDsaReleaseMachine` -/
 
 /-- State abstraction, field for field. -/
@@ -380,6 +395,18 @@ theorem mlDsa_abort_in_place_spec (g : cred_and_hd_guards.MlDsaReleaseGate) :
   rcases g with ⟨sid, att, z, rel, ab⟩
   rfl
 
+private theorem mlDsaBarrierPassBool_iff
+    (g : cred_and_hd_guards.MlDsaReleaseGate)
+    (c : cred_and_hd_guards.MlDsaBarrierChecks) :
+    mlDsaBarrierPassBool g c = true ↔
+      (g.aborted = false ∧ g.released = false ∧
+       g.session_id = c.req_session_id ∧ g.attempt = c.req_attempt ∧
+       c.z_norm_ok = true ∧ c.r0_norm_ok = true ∧
+       c.w1_match = true ∧ c.u_com_bound = true) := by
+  unfold mlDsaBarrierPassBool
+  cases g.aborted <;> cases g.released <;>
+    simp [Bool.and_eq_true, decide_eq_true_eq, and_assoc]
+
 /-- **Exact correspondence between `&mut` `try_release_z_share_into` and consuming `try_release_z_share`.**
     For every gate state `g`, barrier-check record `c`, and initial caller output buffer `out₀`,
     `try_release_z_share_into` produces the exact same post-state `g'` and `Ok`/`Err` decision
@@ -399,7 +426,9 @@ theorem mlDsa_try_release_into_eq_by_value
   rcases c with ⟨csid, catt, zn, r0, w1, uc⟩
   unfold cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into
     cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share
-    cred_and_hd_guards.MlDsaReleaseGate.abort_in_place
+    cred_and_hd_guards.MlDsaReleaseGate.impl.attempt
+    cred_and_hd_guards.MlDsaReleaseGate.impl.released
+    cred_and_hd_guards.MlDsaReleaseGate.impl.aborted
     cred_and_hd_guards.abort_mldsa_gate
   simp only [ct_eq_bytes32_spec]
   cases ab <;> cases rel
@@ -408,23 +437,11 @@ theorem mlDsa_try_release_into_eq_by_value
       · cases zn <;> cases r0 <;> cases w1 <;> cases uc <;>
           simp [hsid, hatt, bind_eq_result_bind, result_bind_ok]
       · have hne : (att != catt) = true := bne_iff_ne.mpr hatt
-        simp [hsid, hne, bind_eq_result_bind, result_bind_ok]
+        simp [hsid, hatt, hne, bind_eq_result_bind, result_bind_ok]
     · simp [hsid, bind_eq_result_bind, result_bind_ok]
   · simp [bind_eq_result_bind, result_bind_ok]
   · simp [bind_eq_result_bind, result_bind_ok]
   · simp [bind_eq_result_bind, result_bind_ok]
-
-private theorem mlDsaBarrierPassBool_iff
-    (g : cred_and_hd_guards.MlDsaReleaseGate)
-    (c : cred_and_hd_guards.MlDsaBarrierChecks) :
-    mlDsaBarrierPassBool g c = true ↔
-      (g.aborted = false ∧ g.released = false ∧
-       g.session_id = c.req_session_id ∧ g.attempt = c.req_attempt ∧
-       c.z_norm_ok = true ∧ c.r0_norm_ok = true ∧
-       c.w1_match = true ∧ c.u_com_bound = true) := by
-  unfold mlDsaBarrierPassBool
-  cases g.aborted <;> cases g.released <;>
-    simp [Bool.and_eq_true, decide_eq_true_eq, and_assoc]
 
 /-- **Complete constructive postcondition for `MlDsaReleaseGate::try_release_z_share_into`.**
     For every gate `g`, check record `c`, and caller buffer `out₀`:

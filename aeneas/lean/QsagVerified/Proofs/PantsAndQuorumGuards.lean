@@ -4,7 +4,6 @@ import all QsagVerified.Funs
 public import QsagVerified.Proofs.Common
 public import QsagVerified.Proofs.MirRefinementKit
 public import QsagVerified.Proofs.Wots
-public import QsagVerified.Proofs.FtsSpnGuard
 public import QsagVerified.Proofs.Sponge
 
 public section
@@ -61,6 +60,10 @@ private theorem u64_lt_max_of_ne {x : Std.U64} (hne : x ≠ core.num.U64.MAX) :
 private theorem u64_add_one_lt64_of_ne_max {x : Std.U64} (hne : x ≠ core.num.U64.MAX) :
     x.val + 1 < 2 ^ 64 :=
   Nat.lt_of_le_of_lt (Nat.succ_le_of_lt (u64_lt_max_of_ne hne)) core.num.U64.MAX.bv.isLt
+
+def u8DigitsNatSum : List Std.U8 → Nat
+  | [] => 0
+  | d :: ds => d.val + u8DigitsNatSum ds
 
 /-! ## 1. `VerifiedBeltQuorumGuard` (`2 * q > n + f` BFT Quorum-Switching + Bounded Jump + Poison) -/
 

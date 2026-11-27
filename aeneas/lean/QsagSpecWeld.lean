@@ -27,7 +27,7 @@ dependencies, not production linkage.
 
 Mathematical content:
 * Goldilocks: add/sub/mul and canonical inversion, including exact nonzero MIR cancellation.
-* Binary towers: addition and multiplication at GF(256), Tower128 and Tower256 against the
+* Binary towers: addition and multiplication over GF(256) and Tower128 against the
   canonical recursive field, and absence of zero divisors for the extracted Tower128 product.
 * Hash signatures: WOTS+C digit acceptance/rejection, not hash-chain verification.
 * Keccak: arbitrary-state 24-round permutation and streaming phase laws.

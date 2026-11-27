@@ -3,6 +3,7 @@ import all QsagVerified.Funs
 
 public import QsagVerified.Proofs
 public import QsagVerified.Proofs.CustodyMediation
+public import QsagCustodyWeld
 public import QsagSpecWeld
 public import QsagVerified.Proofs.SpongeConformance
 public import QsagVerified.Proofs.SpongeFraming
@@ -37,10 +38,6 @@ export qsag_verified.proofs (
   cshake256_squeeze_refines
   tooth_multiblock_squeeze_permuted_beyond_136
   GoldilocksP
-  bdoz_authenticate_open_total
-  bdoz_authenticate_open_spec
-  bdoz_mac_one_time_burn_spec
-  bdoz_tampered_mac_rejected
   pureTower128Mul
   BeltAckCountInvariant
   repeatCustodianAck
@@ -83,10 +80,6 @@ export qsag_verified.proofs (
   tower128_mul_comm
   tower_basis_square_vector
   tower_basis_is_not_untranslated_artin_schreier
-  bdozMaskedSum
-  bdozFoldedKey
-  bdozExpectedMacLanes
-  bdozOpening1
   goldilocks_canon_spec
   goldilocks_add_spec
   goldilocks_sub_spec
@@ -107,8 +100,6 @@ export qsag_verified.proofs (
   pureGf256Mul_xor_right
   pureGf256Mul_xor_left
   dkg_beaver_frobenius_eval_spec
-  verify_mac_2lane_rejects_empty
-  verify_mac_2lane_burn_irreversible
   rss_reconstruct_share_roundtrip
   rss_xor_homomorphic
   rss_not_spec
@@ -129,7 +120,6 @@ export qsag_verified.proofs (
   goldilocks_neg_spec
   goldilocks_ext2_add_spec
   goldilocks_ext2_mul_spec
-  tower256_mul_total
   pureHornerGf256Prefix
   pureHornerGf256
   shamir_eval_poly_gf256_spec
@@ -239,26 +229,7 @@ export qsag_verified.proofs (
   tooth_rss_cut_skip_round3_poisoned
   tooth_rss_cut_nonzero_mac_poisoned
   tooth_rss_cut_replay_open_poisoned
-  FtsEpochConsumeReq
-  mirFtsEpochStep
-  ftsEpochMealy
-  fts_epoch_step_sim
-  fts_guard_at_most_one_sig_per_epoch
   u8DigitsNatSum
-  wots_cs_verify_68_w5_sum136_spec
-  wots_cs_verify_68_array_spec
-  wots_cs_68_sum136_incomparable_mir
-  FtsMacStepInput
-  FtsMacStepOutput
-  wotsCsValidBool
-  mirFtsMacStep
-  ftsMacMealy
-  fts_mac_step_sim
-  ftsMacTraceSafe
-  fts_spn_output_implies_intermediate_mac_ok
-  tooth_fts_second_epoch_burn_rejected
-  tooth_fts_unverified_mac_release_quarantined
-  tooth_wots_cs_68_wrong_sum_rejected
   u128AmountsNatSum
   velocitySpendStep
   velocitySpendMealy
@@ -369,10 +340,6 @@ export qsag_verified.proofs (
   velocity_trace_nonce_burn
   velocity_trace_window_budget
   velocity_multiwindow_cap_conservation
-  BdozBurnTrace
-  bdoz_burn_step_inv
-  bdoz_burn_trace_absorbing
-  bdoz_burn_trace_never_unburns
   RssSessionTable
   RssSessionEvent
   RssMultiSessionTrace
@@ -501,7 +468,6 @@ export qsag_verified.proofs (
   velocity_spend_accepts
   velocity_rotate_accepts
   inhabited_velocity_trace_two_windows
-  inhabited_bdoz_burn_trace
   belt_ack_success_shape
   BeltBitInherited
   BeltBitInserted
@@ -524,8 +490,6 @@ export qsag_verified.proofs (
   BooleanContract
   MlDsaCallerContract
   mldsa_release_under_caller_contract
-  FtsResidualContract
-  fts_release_under_caller_contract
   RssResidualContract
   rss_release_under_caller_contract
   extractedPartyMachine
@@ -609,14 +573,6 @@ export qsag_verified.proofs (
   tower128_mul_refines_qsag
   tower128_mul_eq_zero_iff
   tower128_add_refines_qsag
-  tower256Abs
-  tower256_add_refines_qsag
-  pureScaleXT7
-  scale_x_t7_eq_pure
-  pureTower256Mul
-  tower256_mul_eq_pure
-  tower256_mul_refines_qsag
-  tooth_tower256_generator_square
   goldilocks_inv_or_zero_refines_qsag
   goldilocks_inverse_mul_eq_one
   goldilocks_inv_none_iff_zero
