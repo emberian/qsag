@@ -4,11 +4,11 @@
 
 **Post-quantum threshold signing, signature aggregation and key migration.** QSAG lets custodians share a signing key, change the quorum that can use it and compress committee signatures into a publicly verifiable proof.
 
-**Cut-the-Hash** evaluates four secret hash-oracle families inside MPC and builds the public Merkle layers in the clear. **Hem** proves signature verification with sumcheck and Johnson-radius WHIR over the quintic Goldilocks field. A regional verifier can check each committee against a prepared policy registry. A verifier of a contiguous binary tree of Jorts shards can check a single **639,673 B** recursive proof.
+**Cut-the-Hash** evaluates four secret hash-oracle families inside MPC and builds the public Merkle layers in the clear. **Hem** proves signature verification with sumcheck and Johnson-radius WHIR over the quintic Goldilocks field. A regional verifier can check each committee against a prepared policy registry. A verifier of a contiguous binary tree of Jorts committees can check a single **639,673 B** recursive proof.
 
-[Results and demos](#performance-and-scaling) · [How it works](#how-it-works) · [Try it](#quickstart) · [Paper](paper/qsag.typ) · [Assurance boundaries](ASSURANCE.md)
+[Results and demos](#performance-and-scaling) · [How it works](#how-it-works) · [Try it](#quickstart) · [Cut-the-Hash](paper/cut-the-hash.typ) · [Quintic Hem](paper/quintic-hem.typ) · [Assurance boundaries](ASSURANCE.md)
 
-Research prototype; no external audit. [ASSURANCE.md](ASSURANCE.md) states exact theorem scopes, QROM regimes, hardware signoff status, and the trusted computing base. `qsag` supplies the signing, aggregation, and custody layer; applications supply their consensus and settlement rules.
+QSAG is a research prototype without an external audit. Applications supply their own consensus and settlement rules. The papers and crate security specifications state the assumptions behind the cryptographic claims.
 
 ## Performance and scaling
 
@@ -16,17 +16,16 @@ Research prototype; no external audit. [ASSURANCE.md](ASSURANCE.md) states exact
 | --- | --- | ---: |
 | Public `QSAGHQM2` | Four keys, three active, `HemQuinticProfile::TurboShake400` | 360,391 B |
 | Public `QSAGHQM2` | Same keys, bitmap and message, `HemQuinticProfile::Poseidon2Gl24` | 381,661 B |
-| Recursive `QSAGIVC1` | Contiguous Jorts shards, fixed `[DKT26]` relation, tag `0x00` | 639,673 B |
+| Recursive `QSAGIVC1` | Contiguous Jorts committees, fixed `[DKT26]` relation, tag `0x00` | 639,673 B |
 
-The public sizes are pinned wire vectors. A `HierarchicalHemAggregate` includes one public proof per region, so its wire size grows with the sum of the shard sizes. For binary IVC, adding a level doubles the leaf count while preserving the root length. The current IVC leaf relation admits up to two signers per shard. Lean proves a depth-16 straight-line extraction bound (65,536 shards, up to $2^{64}$ quantum queries) for its three-stage margin schedule. The Rust root uses a separate $2^{23}$-cell schedule. [Public wire vectors](crates/qsag-agg/src/hem_quintic/tests.rs) · [Recursive proof implementation](crates/qsag-agg/src/zk_hem/recursive_ivc/)
+The public sizes are pinned wire vectors. A regional aggregate includes one proof per committee. The recursive root stays the same size as the tree grows. Its default leaf checks up to 64 signatures among 256 member positions. Within one committee a merge counts the union of signer bitmaps. A merge across adjacent committees adds the signer totals after checking completion. [Public vectors](crates/qsag-agg/src/hem_quintic/tests.rs) · [Recursive verifier](crates/qsag-agg/src/zk_hem/recursive_ivc/)
 
-Selected signing and verification measurements from [paper §7](paper/qsag.typ).
+Selected signing and verification measurements from [Cut-the-Hash](paper/cut-the-hash.typ).
 
 | Operation | Result |
 | --- | --- |
 | Prepared Jorts threshold signature, 2-of-3 | 1.0 ms in memory; 81 ms over a simulated WAN |
-| QS-A 2-of-3 / QS-B 3-of-7, encrypted channels and synced journal | 4.37 / 5.21 ms |
-| Isolated CNF, one 256-hash Keccak wave, 2-of-3 / 3-of-5 | 39.5 / 96.2 ms; 1.8 / 5.9 MiB traffic |
+| Prepared BFT Shamir Jorts signature, 3-of-4 | 2.44 ms, 4,172 B |
 | Pooled blinded MAC check (`OtMesh`, active Beaver sacrifice), 3 parties | 31 µs online; 4.04 ms amortized offline refill |
 | Compact1122, verify 1,200 votes | 1.23 s on one core; 158–187 ms on eight threads |
 | SpongeMacaroon, three caveats | 161 B; 1.8 µs verify |
@@ -35,26 +34,27 @@ Selected signing and verification measurements from [paper §7](paper/qsag.typ).
 
 ### Threshold signing: keep only the secret hashes in MPC
 
-Cut-the-Hash evaluates four secret oracle families under MPC, checks the custodians' contributions, opens the boundary digests, and computes the public tree above them in the clear. Secret computation is at most 16 hashes deep for SLH-DSA and 4 for the native formats, independent of tree height.
+Cut-the-Hash evaluates four secret oracle families under MPC, checks the custodians' contributions, opens the boundary digests, and computes the public tree above them in the clear. Each Winternitz chain takes at most 16 sequential secret hashes for SLH-DSA and four for Jorts, Baggy and Corduroy, independent of tree height.
 
-For **SLH-DSA (FIPS 205)**, the output is byte-identical to a single signer's signature on matched key and randomness. Three engines serve it: a 256-lane bitsliced 2-of-3 engine, isolated per-custodian CNF parties (`IsolatedCnfParty`) for honest-majority thresholds ($2(t-1) < n$) over deployment-bound encrypted wire channels, and an authenticated SPDZ engine (`SoftSpokenOT` + active-sacrifice `OtMesh`) for dishonest majorities. A separate dealerless protocol threshold-signs **ML-DSA-44/65/87 (FIPS 204)**.
+For **SLH-DSA (FIPS 205)**, the public assembler uses the standard wire format. Lean proves byte identity for the replicated-sharing oracle model on matched key and randomness. Rust supplies bitsliced 2-of-3 Keccak and per-custodian honest-majority CNF parties. In `IsolatedCnfParty`, custodians compute the shared mask product before drawing the public coin, then open a masked sum and a blinded check value. The SPDZ cluster also implements the SLH-DSA oracles. Authenticated arithmetic over Goldilocks serves the Poseidon2 paths. Per-party protocols share a `no_std` `WireTransport` interface. A local ceremony that loads several custodian files runs within one host's trust boundary.
 
 | Format | Purpose | Signature size |
 | --- | --- | --- |
 | **Baggy** | Stateless signing; cached public upper layers, pruned PORS+FP few-time tree | At most 71,654 B |
 | **Jorts** / **JortsPoseidon2** | Stateful, one online round after preprocessing; Poseidon2 variant feeds Hem | 4,328–4,776 B |
-| **Compact1122** | Single-use live votes; SIMD batch verification | 1,122 B; 1,218 B with 96-byte header |
+| **Corduroy** | Stateless Poseidon2 hypertree for public aggregation | 76,896 B |
+| **FrontierSumFts** (`fts-compact-1122`) | Single-use live votes; SIMD batch verification | 1,122 B, or 1,218 B with 96-byte header |
 
 ### Quorum switching: share a key without reusing a leaf
 
-**BeltLatch** logs and syncs `(leaf, intent)` on two separate 4,096-byte high-water-mark pages before releasing a share, backed by external TPM 2.0 NV counters (`--anchor-tpm-nv`), disjoint-device mounts (`--anchor-dir`), and hypervisor `VMGENID` fork guards (`--anchor-vmgenid`). **QS-A** assigns disjoint leaf spaces to committees; **QS-B** and **3-of-5 / 4-of-5 CommitteeHandoffJorts** certify leaves under symmetric, weighted, tree-composed, or Cachin–Tackmann $B^3$ asymmetric quorum intersection (including dealerless wire MSP enrollment).
+**BeltLatch** records the leaf and intent and syncs the reservation before share release. A TPM NV counter or a directory on disjoint storage can anchor the journal. A VM generation guard adds clone detection. **HemDynamicShamirQuorum** preserves one JortsPoseidon2 validator key across roster and threshold changes. Each detached custodian persists its own leaf floor before acknowledging. The signing subset releases after an honestly intersecting acknowledgment quorum confirms. The successor is released only after durable retirement of predecessor custody.
 
 ### Hem aggregation and zero knowledge
 
 All three proof formats use $\mathbb F_{p^5} = \mathbb F_p[X]/(X^5-3)$ with $p=2^{64}-2^{32}+1$.
 
 - **Public committees.** `prove_hem_quintic_128` and `verify_hem_quintic_128` use 50-byte TurboSHAKE256 or seven-limb Poseidon2-GL-w24 Canopy digests. All 138 non-S-box trace columns are pinned to canonical zero on inactive slots. `prove_hierarchical_hem_prepared` and `verify_hierarchical_hem_prepared` compose the proofs against a `PreparedPolicyRegistry` (`QSAGHEM\x04`).
-- **Private statements.** zk-Hem v2 uses fresh Stage-0 tree nonces and leaf salts, with joint masking for LogUp lookups. Its single-prover and split-share encodings are `QSAGZKH2` and `QSAGZKS2`. The public and hiding schedule certificates bound QROM error below $2^{-128}$ for all 13 table sizes from $2^{16}$ to $2^{28}$ cells at $Q\le 2^{64}$.
+- **Private statements.** zk-Hem v2 uses fresh Stage-0 tree nonces and leaf salts, with joint masking for LogUp lookups. Its single-prover and split-share encodings are `QSAGZKH2` and `QSAGZKS2`. For all 13 table sizes from $2^{16}$ to $2^{28}$ cells, Lean checks rational error budgets below $2^{-128}$ at $Q\le 2^{64}$. Applying those budgets to a verifier requires the protocol reduction, its schedule premises and the ideal-hash assumptions.
 - **Recursive roots.** `prove_ivc_tree` and `verify_ivc_tree` use `IvcTreeStepRelation` to check two child WHIR openings and fold their public-matrix claims with a degree-two sumcheck. [Binary IVC](crates/qsag-agg/src/zk_hem/recursive_ivc.rs)
 
 ## Quickstart
@@ -69,48 +69,47 @@ cargo run --release -p qsag-cli -- info
 # Generate an SLH-DSA key, sign a file, verify it.
 umask 077 && D=$(mktemp -d /tmp/qsag.XXXXXX) && printf 'hello\n' > "$D/msg"
 cargo run --release -p qsag-cli -- keygen --scheme slh-dsa-shake-128f \
-  --secret-out "$D/sk.json" --public-out "$D/pk.json" --ephemeral-unanchored
+  --secret-out "$D/sk.json" --public-out "$D/pk.json"
 cargo run --release -p qsag-cli -- sign --secret "$D/sk.json" --in "$D/msg" \
-  --out "$D/sig.json" --ephemeral-unanchored
+  --out "$D/sig.json"
 cargo run --release -p qsag-cli -- verify --public "$D/pk.json" --in "$D/msg" --sig "$D/sig.json"
 
-# 128-bit QROM quintic public aggregation (--hem-profile quintic-turbo | quintic-gl24):
+# Aggregate 128 signatures. For a smaller run, append -- --signers 8.
 cargo run --release -p qsag-cli --example succinct_k_to_1_aggregation
 cargo run --release -p qsag-cli --example threshold_slh_dsa_quickstart
 ```
+
+The default example verified a 1,238,354-byte aggregate for 112 Jorts and 16 Corduroy signers. Their signatures totalled 1,715,072 bytes before aggregation, a 27.8% reduction on the wire. The example prints both sizes and the prover and verifier times. Proof length can vary with the authenticated Merkle paths.
+
+For a public committee proof, `qsag verify-agg --public committee.json --in message.bin --proof proof.json --min-signers 3` requires at least three authenticated signer positions. Use `--allow-any-subset` to accept any nonempty subset. The expected profile defaults to `quintic-turbo`. Select `--hem-profile quintic-gl24` for a GL24 proof. Stateful key enrollment mixes fresh OS entropy into supplied seeds by default. Reproducible test enrollment uses `--deterministic-test-only`. The HD and credential test modes conflict with anchor options.
 
 ## Wallets, migration, and capabilities
 
 | Component | What it provides |
 | --- | --- |
-| `qsag-hd`, `qsag-addr` | Dealerless module-lattice key hierarchies, committed watch-only inventories, Bech32m PQ addresses, and hybrid keys |
-| `qsag-migrate` | Local `QSAGZKH2` and collaborative `QSAGZKS2` ownership proofs across 19 CLI kinds, including Bitcoin/Taproot/Ethereum secp256k1, Solana Ed25519, BLS12-381 and Zcash NU7 Sapling, Orchard, ZIP-2005 Ironwood and ZIP-2007 Transparent. `hem::collab::Engine::new_anchored` burns `tape_id()` against an `ExternalMonotoneAnchor` before round 1 and uses nine-triple Toom-3 multiplication over `Fp5`. |
+| `qsag-hd`, `qsag-addr` | The canonical `PiHdCommitInventory` commits an enrolled batch of child public keys. `hd derive` produces a Bech32m address and inclusion proof from the watch-only table. Custody shares are required for private recovery. |
+| `qsag-migrate` | The migration CLI supports 19 statement kinds, including Bitcoin/Taproot/Ethereum secp256k1, Solana Ed25519, BLS12-381 and Zcash NU7 Sapling, Orchard, ZIP-2005 Ironwood and ZIP-2007 Transparent. Ownership claims support local `QSAGZKH2` proofs and collaborative `QSAGZKS2` proofs. `hem::collab::Engine::new_anchored` burns `tape_id()` against an `ExternalMonotoneAnchor` before round 1 and uses nine-triple Toom-3 multiplication over `Fp5`. |
 | `qsag-policy` | Stateful velocity, allowlist, and window rules checked before custodians release shares |
-| `SpongeMacaroon`, `PqBiscuit`, `QSAGCAU1` | Keyed-sponge macaroons, offline one-time-signature biscuits, and unlinkable zero-knowledge capability presentations |
-| `qsag-cred` | Threshold ML-DSA and Poseidon2 OPRFs. Blind credential issuance uses 438 repetitions of three-party Goldilocks MPC-in-the-head. Selective disclosure and private multisignatures use zk-Hem v2. |
+| `SpongeMacaroon`, `PqBiscuit`, `QSAGCAU1` | Shared-secret caveat verification, public offline delegation via one-use `Compact1122` signatures, and challenge-bound unlinkable zero-knowledge presentations, respectively. |
+| `qsag-cred` | Any enrolled `t` of `n` can evaluate the Shamir-SPDZ Poseidon2 TOPRF. Threshold ML-DSA-44/65/87 requires at least `2t − 1` online and keeps `w1` sealed on rejection. Blind credential issuance uses 438 repetitions of three-party Goldilocks MPC-in-the-head. Selective disclosure and private multisignatures use zk-Hem v2. |
 
-## Verification and hardware
+## Verification
 
-Across the three Lean 4.35 packages, the audits accept **148,052 declarations**, including **78,465 theorems in 401 modules**. Six kernels accept the challenge exports for each package (326 theorems, 35 definitions, 18/18 runs). The two Aeneas packages connect Rust MIR to the specification, including all 54 extracted quintic WHIR definitions. The implementation checks include 317 cross-language vectors, 319 rejected mutations and 18/18 detected compiled clause-drop mutants. [Assurance evidence](ASSURANCE.md)
+Lean mechanizes multi-hop signing reductions conditional on `SigningPrimitiveBounds`. For aggregation, the protocol and extractor theorems carry schedule and oracle hypotheses. The 86 extracted definitions of `qsag-whir-verified` cover selected field, decoding, counting and proof-payload operations. The outer Rust verifier drives the transcript and authenticates Merkle openings. [Aggregation security](crates/qsag-agg/SECURITY.md) · [Migration security](crates/qsag-migrate/SECURITY.md)
 
-- **QSAG-NI v2.** The autonomous verifier consumes serialized `QSAGZKH2` and `QSAGHQM2` proofs. Its mapped logic uses 709.61 kGE on IHP SG13G2 and 784.54 kGE on Sky130 HD, excluding SRAM. All eight Lattice ECP5-85F bitstreams meet routed timing, including the compact and full-rate cores at 33.62 and 29.86 MHz against 20 MHz targets. [ASIC results](hardware/asic/synth/RESULTS.md) · [FPGA results](hardware/fpga/RESULTS.md)
-- **ASS2-0P5 / Dregg-64.** The 64-bit GF180MCU-D 5 V custody enclave targets the 56-pad wafer.space `SLOT_0P5X0P5`. Two-ring hardware W^X reserves peripheral access for the immutable 4 KiB resident ROM and runs owner-signed SRAM applets behind a hardware fence. [Programming guide](hardware/ass2/PROGRAMMING_GUIDE.md)
-- **CL_QSAG_F2.** The AWS F2 HDK wrapper integrates two verifier engines and three isolated custody vats in 314,047 LUT1–6, 290 DSP48E2 and 315 RAMB36E2. Rust-to-Verilator cosimulation covers autonomous proof verification and a 32,768-cycle reset scrub. AFI deployment requires AWS-supported replacements for customer DNA_PORT and SYSMON identity and entropy sources. [F2 shell and deployment boundary](hardware/aws_f2/README.md)
-
-Superseded hardware prototypes and non-manufacturable academic PDK runs are archived in [`history/`](history/README.md).
+The standalone hardware repository contains the silicon and FPGA designs and their signoff evidence. [qsag-chip](https://github.com/emberian/qsag-chip)
 
 ## Repository map
 
 | Crates / directory | Contents |
 | --- | --- |
 | `qsag-core`, `qsag-quorum`, `qsag-fts` | Hash-based signatures, MPC engines, quorum switching, hardware anchors, few-time votes |
-| `qsag-agg`, `qsag-accel`, `qsag-asm` | Hem / `HemQuintic128` / `zk-Hem v2` / `QSAGIVC1`, Vulkan & AWS F2 backends, SIMD & certified assembly kernels |
-| `qsag-hd`, `qsag-addr`, `qsag-policy`, `qsag-cred`, `qsag-migrate`, `qsag-ass2` | Wallet, capability, credential, 19-kind migration, and `ASS2-0P5` enclave host SDK |
+| `qsag-agg`, `qsag-accel`, `qsag-asm` | Hem / `HemQuintic128` / `zk-Hem v2` / `QSAGIVC1`, RX 6750 XT Vulkan measurements, SIMD and ISA-level assembly evidence |
+| `qsag-hd`, `qsag-addr`, `qsag-policy`, `qsag-cred`, `qsag-migrate` | Wallet, capability, credential, and 19-kind migration crates |
 | `qsag-cli` | CLI (`qsag`, synced bijectively to `dregg-sig`) and runnable examples |
 | `lean/`, `aeneas/`, `validation/` | Protocol proofs, MIR extractions, six-kernel replay and differential validation |
-| `hardware/` | Verifier ASIC and FPGA implementations, the ASS2 enclave and carrier, and the AWS F2 shell |
 
-[Paper](paper/qsag.typ) · [Assurance boundaries](ASSURANCE.md) · [Hardware assurance matrix](docs/MIL_STD_ASSURANCE_MATRIX.md) · [Security and constant-time proofs](docs/SECURITY_AND_CT_PROOFS.md)
+[Cut-the-Hash](paper/cut-the-hash.typ) · [Quintic Hem](paper/quintic-hem.typ) · [Assurance boundaries](ASSURANCE.md) · [Security and constant-time proofs](docs/SECURITY_AND_CT_PROOFS.md)
 
 ## License
 
