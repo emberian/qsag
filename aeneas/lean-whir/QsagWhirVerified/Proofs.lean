@@ -1397,7 +1397,7 @@ theorem tooth_unchecked_mod_p_accepts_aliased_field_limb :
   simp only [decode_canonical_u64.public_eqs, GOLDILOCKS_P.public_eqs]
   decide
 
-private theorem u8_cast_u64_bv (b : U8) :
+theorem u8_cast_u64_bv (b : U8) :
     (UScalar.cast .U64 b).bv = BitVec.ofNat 64 b.val := by
   apply BitVec.eq_of_toNat_eq
   change (UScalar.cast .U64 b).val = (BitVec.ofNat 64 b.val).toNat
@@ -1675,5 +1675,759 @@ theorem tooth_qsaghqm2_header_and_schedule_reject_tamper :
     min_quintic_log_cells_val, max_quintic_log_cells_val,
     Qsaghqm2HeaderSpec, QuinticScheduleEnvelopeSpec]
   decide
+
+/-! ## Canonical field words at arbitrary byte offsets -/
+
+theorem has_bytes_at_spec (bytes : Slice U8) (off width : Usize) :
+    has_bytes_at bytes off width = .ok (decide (off.val + width.val ≤ bytes.val.length)) := by
+  simp only [has_bytes_at.public_eqs, UScalar.le_iff_val, Slice.len_val]
+  by_cases h : width.val ≤ bytes.val.length
+  · have hsub : (Slice.len bytes - width : Result Usize) =
+        .ok ⟨(Slice.len bytes).bv - width.bv⟩ := by
+      simp [hSub_uscalar_eq, h]
+    have hv : (⟨(Slice.len bytes).bv - width.bv⟩ : Usize).val = bytes.val.length - width.val := by
+      rw [← Slice.len_val bytes]
+      exact BitVec.toNat_sub_of_le (BitVec.le_def.mpr (by simpa using h))
+    simp only [h, ↓reduceIte, hsub, bind_eq_result_bind, result_bind_ok, UScalar.le_iff_val, hv]
+    by_cases he : off.val + width.val ≤ bytes.val.length
+    · have ho : off.val ≤ bytes.val.length - width.val := by omega
+      rw [decide_eq_true ho, decide_eq_true he]
+    · have ho : ¬ off.val ≤ bytes.val.length - width.val := by omega
+      rw [decide_eq_false ho, decide_eq_false he]
+  · have hn : ¬ off.val + width.val ≤ bytes.val.length := by omega
+    simp [h, hn]
+
+theorem slice_offset (bytes : Slice U8) (off delta : Usize) (k : Nat)
+    (hk : delta.val = k) (h : off.val + k < bytes.val.length) :
+    ∃ j : Usize, (off + delta : Result Usize) = .ok j ∧ j.val = off.val + k := by
+  have hlen : bytes.val.length ≤ 18446744073709551615 := bytes.property
+  have hfit : off.val + delta.val < 2^64 := by rw [hk]; omega
+  refine ⟨⟨off.bv + delta.bv⟩, ?_, ?_⟩
+  · simp [hAdd_uscalar_eq, hfit]
+  · change (off.bv + delta.bv).toNat = off.val + k
+    rw [BitVec.toNat_add, Nat.mod_eq_of_lt hfit, hk]
+
+private theorem slice_index_byte (bytes : Slice U8) (off : Usize) (h : off.val < bytes.val.length) :
+    Slice.index_usize bytes off = .ok (bytes.val.getD off.val 0#u8) := by
+  simp only [Slice.index_usize, dite_eq_left h, Result.ok.injEq]
+  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h, Option.getD_some]
+
+theorem load_le_u64_slice_spec (bytes : Slice U8) (off : Usize) :
+    load_le_u64_slice bytes off =
+      .ok (if off.val + 8 ≤ bytes.val.length then some (lePackU64At bytes.val off.val) else none) := by
+  have h8 : (8#usize).val = 8 := rfl
+  simp only [load_le_u64_slice.public_eqs, has_bytes_at_spec, h8, bind_eq_result_bind, result_bind_ok]
+  by_cases h : off.val + 8 ≤ bytes.val.length
+  · have hv0 := slice_index_byte bytes off (by omega)
+    obtain ⟨j1, ha1, hj1⟩ := slice_offset bytes off 1#usize 1 rfl (by omega)
+    have hv1 := slice_index_byte bytes j1 (by rw [hj1]; omega)
+    rw [hj1] at hv1
+    obtain ⟨j2, ha2, hj2⟩ := slice_offset bytes off 2#usize 2 rfl (by omega)
+    have hv2 := slice_index_byte bytes j2 (by rw [hj2]; omega)
+    rw [hj2] at hv2
+    obtain ⟨j3, ha3, hj3⟩ := slice_offset bytes off 3#usize 3 rfl (by omega)
+    have hv3 := slice_index_byte bytes j3 (by rw [hj3]; omega)
+    rw [hj3] at hv3
+    obtain ⟨j4, ha4, hj4⟩ := slice_offset bytes off 4#usize 4 rfl (by omega)
+    have hv4 := slice_index_byte bytes j4 (by rw [hj4]; omega)
+    rw [hj4] at hv4
+    obtain ⟨j5, ha5, hj5⟩ := slice_offset bytes off 5#usize 5 rfl (by omega)
+    have hv5 := slice_index_byte bytes j5 (by rw [hj5]; omega)
+    rw [hj5] at hv5
+    obtain ⟨j6, ha6, hj6⟩ := slice_offset bytes off 6#usize 6 rfl (by omega)
+    have hv6 := slice_index_byte bytes j6 (by rw [hj6]; omega)
+    rw [hj6] at hv6
+    obtain ⟨j7, ha7, hj7⟩ := slice_offset bytes off 7#usize 7 rfl (by omega)
+    have hv7 := slice_index_byte bytes j7 (by rw [hj7]; omega)
+    rw [hj7] at hv7
+    simp only [h, decide_true, ↓reduceIte, hv0, ha1, hv1, ha2, hv2, ha3, hv3, ha4, hv4, ha5, hv5, ha6, hv6, ha7, hv7, shl8, shl16, shl24, shl32, shl40, shl48, shl56,
+      lift_eq_ok, bind_eq_result_bind, result_bind_ok, lePackU64At]
+    rfl
+  · simp [h]
+
+theorem decode_canonical_u64_at_spec (bytes : Slice U8) (off : Usize) :
+    decode_canonical_u64_at bytes off = .ok
+      (if off.val + 8 ≤ bytes.val.length ∧ IsCanonical (lePackU64At bytes.val off.val)
+       then some (lePackU64At bytes.val off.val) else none) := by
+  by_cases h : off.val + 8 ≤ bytes.val.length <;>
+    simp [decode_canonical_u64_at.public_eqs, load_le_u64_slice_spec, decode_canonical_u64_spec,
+      h, IsCanonical, goldilocksMod]
+
+theorem decode_canonical_fp5_at_spec (bytes : Slice U8) (off : Usize) :
+    let word := fun k => lePackU64At bytes.val (off.val + k)
+    let v : Fp5 := ⟨word 0, word 8, word 16, word 24, word 32⟩
+    decode_canonical_fp5_at bytes off = .ok
+      (if off.val + 40 ≤ bytes.val.length ∧ IsCanonicalFp5 v then some v else none) := by
+  dsimp only
+  have hw : (40#usize).val = 40 := rfl
+  simp only [decode_canonical_fp5_at.public_eqs, has_bytes_at_spec, hw, bind_eq_result_bind, result_bind_ok]
+  by_cases h : off.val + 40 ≤ bytes.val.length
+  · have h0 : off.val + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j1, ha1, hj1⟩ := slice_offset bytes off 8#usize 8 rfl (by omega)
+    have hb1 : off.val + 8 + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j2, ha2, hj2⟩ := slice_offset bytes off 16#usize 16 rfl (by omega)
+    have hb2 : off.val + 16 + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j3, ha3, hj3⟩ := slice_offset bytes off 24#usize 24 rfl (by omega)
+    have hb3 : off.val + 24 + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j4, ha4, hj4⟩ := slice_offset bytes off 32#usize 32 rfl (by omega)
+    have hb4 : off.val + 32 + 8 ≤ bytes.val.length := by omega
+    simp [h, h0, ha1, hb1, hj1, ha2, hb2, hj2, ha3, hb3, hj3, ha4, hb4, hj4, load_le_u64_slice_spec,
+      decode_canonical_fp5_limbs_spec, IsCanonicalFp5]
+  · simp [h]
+
+theorem decode_canonical_gl24_at_spec (bytes : Slice U8) (off : Usize) :
+    let word := fun k => lePackU64At bytes.val (off.val + k)
+    let v : Gl24Digest := ⟨word 0, word 8, word 16, word 24, word 32, word 40, word 48⟩
+    decode_canonical_gl24_at bytes off = .ok
+      (if off.val + 56 ≤ bytes.val.length ∧ IsCanonicalGl24 v then some v else none) := by
+  dsimp only
+  have hw : (56#usize).val = 56 := rfl
+  simp only [decode_canonical_gl24_at.public_eqs, has_bytes_at_spec, hw, bind_eq_result_bind, result_bind_ok]
+  by_cases h : off.val + 56 ≤ bytes.val.length
+  · have h0 : off.val + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j1, ha1, hj1⟩ := slice_offset bytes off 8#usize 8 rfl (by omega)
+    have hb1 : off.val + 8 + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j2, ha2, hj2⟩ := slice_offset bytes off 16#usize 16 rfl (by omega)
+    have hb2 : off.val + 16 + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j3, ha3, hj3⟩ := slice_offset bytes off 24#usize 24 rfl (by omega)
+    have hb3 : off.val + 24 + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j4, ha4, hj4⟩ := slice_offset bytes off 32#usize 32 rfl (by omega)
+    have hb4 : off.val + 32 + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j5, ha5, hj5⟩ := slice_offset bytes off 40#usize 40 rfl (by omega)
+    have hb5 : off.val + 40 + 8 ≤ bytes.val.length := by omega
+    obtain ⟨j6, ha6, hj6⟩ := slice_offset bytes off 48#usize 48 rfl (by omega)
+    have hb6 : off.val + 48 + 8 ≤ bytes.val.length := by omega
+    simp [h, h0, ha1, hb1, hj1, ha2, hb2, hj2, ha3, hb3, hj3, ha4, hb4, hj4, ha5, hb5, hj5, ha6, hb6, hj6, load_le_u64_slice_spec,
+      decode_canonical_gl24_limbs_spec, IsCanonicalGl24]
+  · simp [h]
+
+
+private theorem join_height_fuel (k : Nat) (difference height : U64)
+    (hk : difference.val.log2 = k) (hb : height.val + k < 2^64) :
+    loopFuel (k + 1) (fun (d, h) => sibling_path_below_join_loop.body d h)
+      (difference, height) = .ok (UScalar.ofNat .U64 (height.val + k)) := by
+  have hrec := Nat.log2_def difference.val
+  have hone : (1#u64).val = 1 := rfl
+  induction k generalizing difference height with
+  | zero =>
+    have hn : ¬ 2 ≤ difference.val := by
+      intro h
+      rw [ite_eq_left h] at hrec
+      omega
+    have hng : ¬ difference > 1#u64 := by change ¬ 1 < difference.val; omega
+    rw [loopFuel_succ]
+    dsimp only
+    simp only [sibling_path_below_join_loop.body.public_eqs, hng, ↓reduceIte, result_bind_ok]
+    congr 1
+    apply UScalar.eq_of_val_eq
+    rw [UScalar.val_ofNat, Nat.add_zero, Nat.mod_eq_of_lt (UScalar.val_lt height)]
+  | succ k ih =>
+    have hg : 2 ≤ difference.val := by
+      by_cases h : 2 ≤ difference.val
+      · exact h
+      · rw [ite_eq_right h] at hrec
+        omega
+    rw [ite_eq_left hg] at hrec
+    have hgt : difference > 1#u64 := by change 1 < difference.val; omega
+    let d : U64 := ⟨difference.bv >>> 1⟩
+    have hd : (difference >>> 1#i32 : Result U64) = .ok d := rfl
+    have hdval : d.val = difference.val / 2 := by
+      change (difference.bv >>> 1).toNat = difference.val / 2
+      rw [BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]
+    let h : U64 := ⟨height.bv + (1#u64).bv⟩
+    have hfit : height.val + (1#u64).val < 2^64 := by rw [hone]; omega
+    have hadd : (height + 1#u64 : Result U64) = .ok h := by
+      simp [hAdd_uscalar_eq, hfit, h]
+    have hv : h.val = height.val + 1 := by
+      change (height.bv + (1#u64).bv).toNat = height.val + 1
+      rw [BitVec.toNat_add, Nat.mod_eq_of_lt hfit]; rfl
+    have hbody : sibling_path_below_join_loop.body difference height = .ok (.cont (d, h)) := by
+      simp [sibling_path_below_join_loop.body.public_eqs, hgt, hd, hadd]
+    rw [loopFuel_succ]
+    dsimp only
+    rw [hbody, result_bind_ok]
+    dsimp only
+    rw [ih d h (by rw [hdval]; omega) (by rw [hv]; omega) (Nat.log2_def _)]
+    rw [hv, Nat.add_right_comm, Nat.add_assoc]
+
+theorem sibling_path_below_join_spec (d : U64) :
+    sibling_path_below_join d = .ok (UScalar.ofNat .U64 d.val.log2) := by
+  rw [sibling_path_below_join.public_eqs, sibling_path_below_join_loop.public_eqs]
+  apply loop_ok_of_loopFuel (fuel := d.val.log2 + 1)
+  · have h := Nat.log2_le_self d.val
+    have hlt := UScalar.val_lt d
+    refine Nat.le_trans ?_ (usize_lt_loopMaxFuel 18446744073709551615#usize)
+    change d.val.log2 + 1 ≤ 18446744073709551615 + 1
+    change d.val < 2^64 at hlt
+    omega
+  · have hlt := UScalar.val_lt d
+    have hb := Nat.log2_le_self d.val
+    change d.val < 2^64 at hlt
+    have he := join_height_fuel d.val.log2 d 0#u64 rfl (by change 0 + d.val.log2 < 2^64; omega)
+    have hz : (0#u64).val + d.val.log2 = d.val.log2 := Nat.zero_add _
+    rw [hz] at he
+    exact he
+
+/-! ## Interpolation on the nine-point row grid -/
+
+abbrev fp5AtBytes (bytes : List U8) (off : Nat) : Option Fp5 :=
+  let w := fun k => lePackU64At bytes (off + k)
+  let v : Fp5 := ⟨w 0, w 8, w 16, w 24, w 32⟩
+  if off + 40 ≤ bytes.length ∧ IsCanonicalFp5 v then some v else none
+
+@[expose] def rowLagrangeWeight : Nat → U64
+  | 0 | 8 => 877958875724369725#u64
+  | 1 | 7 => 11423073063619626521#u64
+  | 2 | 6 => 6136104450867767979#u64
+  | 3 | 5 => 6174535167679048363#u64
+  | _ => 6116889092462127787#u64
+
+/-- The third component is the product of all node factors visited so far.
+The second accumulates the Lagrange numerator of the prefix. -/
+@[expose] def rowLagrangeStep (bytes : List U8) (off i : Nat) (claim r : Fp5)
+    (first sum product : Fp5) : Option (Fp5 × Fp5 × Fp5) := do
+  let v ← fp5AtBytes bytes (off + 40 * i)
+  if i = 1 ∧ fp5Add first v ≠ claim then none else
+    let factor := fp5Sub r (fp5FromBase (UScalar.ofNat .U64 i))
+    some (if i = 0 then v else first,
+      fp5Add (fp5Mul sum factor) (fp5Mul product (fp5Scale v (rowLagrangeWeight i))),
+      fp5Mul product factor)
+
+@[expose] def rowLagrangeRounds (bytes : List U8) (off : Nat) (claim r : Fp5) :
+    Nat → Nat → Fp5 → Fp5 → Fp5 → Option Fp5
+  | 0, _, _, sum, _ => some sum
+  | n+1, i, first, sum, product => do
+    let (f, s, p) ← rowLagrangeStep bytes off i claim r first sum product
+    rowLagrangeRounds bytes off claim r n (i+1) f s p
+
+theorem row_interpolation_weight_spec (i : Usize) :
+    row_interpolation_weight i = .ok (rowLagrangeWeight i.val) := by
+  rw [row_interpolation_weight.public_eqs]
+  generalize i.val = n
+  rcases n with _ | n
+  · rfl
+  rcases n with _ | n
+  · rfl
+  rcases n with _ | n
+  · rfl
+  rcases n with _ | n
+  · rfl
+  rcases n with _ | n
+  · rfl
+  rcases n with _ | n
+  · rfl
+  rcases n with _ | n
+  · rfl
+  rcases n with _ | n
+  · rfl
+  rcases n with _ | n
+  · rfl
+  rfl
+
+private theorem row_step_refines (bytes : Slice U8) (off i : Usize) (claim r first sum prod : Fp5)
+    (hfit : off.val + 360 ≤ bytes.val.length) (hi : i.val < 9) :
+    ∃ j : Usize, j.val = i.val + 1 ∧
+      verify_deg8_row_sumcheck_round_at_loop.body bytes off claim r first sum prod i =
+      .ok (match rowLagrangeStep bytes.val off.val i.val claim r first sum prod with
+           | none => .done none
+           | some (f, s, p) => .cont (f, s, p, j)) := by
+  have h40 : (40#usize).val = 40 := rfl
+  have h1 : (1#usize).val = 1 := rfl
+  have hi' : i < 9#usize := hi
+  let mulOff : Usize := ⟨(40#usize).bv * i.bv⟩
+  have hmulfit : (40#usize).val * i.val < 2^64 := by rw [h40]; omega
+  have hm : (40#usize * i : Result Usize) = .ok mulOff := by
+    simp [hMul_uscalar_eq, hmulfit, mulOff]
+  have hmv : mulOff.val = 40 * i.val := by
+    change ((40#usize).bv * i.bv).toNat = _
+    rw [BitVec.toNat_mul, Nat.mod_eq_of_lt hmulfit]; rfl
+  obtain ⟨idx, ha, hv⟩ := slice_offset bytes off mulOff _ hmv (by omega)
+  obtain ⟨j, hj, hjv⟩ := slice_offset bytes i 1#usize 1 h1 (by omega)
+  refine ⟨j, hjv, ?_⟩
+  have hd : decode_canonical_fp5_at bytes idx = .ok (fp5AtBytes bytes.val (off.val + 40 * i.val)) := by
+    rw [decode_canonical_fp5_at_spec, hv]
+  have hcast : UScalar.cast .U64 i = UScalar.ofNat .U64 i.val := by
+    apply UScalar.eq_of_val_eq
+    rw [UScalar.cast_val, UScalar.val_ofNat]
+  have h0if : i = 0#usize ↔ i.val = 0 := ⟨fun h => by rw [h]; rfl, fun h => UScalar.eq_of_val_eq h⟩
+  have h1if : i = 1#usize ↔ i.val = 1 := ⟨fun h => by rw [h]; rfl, fun h => UScalar.eq_of_val_eq h⟩
+  simp only [verify_deg8_row_sumcheck_round_at_loop.body.public_eqs, hi', ↓reduceIte, hm,
+    ha, hd, bind_eq_result_bind, result_bind_ok, rowLagrangeStep]
+  cases h : fp5AtBytes bytes.val (off.val + 40 * i.val) with
+  | none => rfl
+  | some v =>
+    simp only [h0if, h1if, copy_fp5_spec, fp5_add_refines, fp5_eq_spec, row_interpolation_weight_spec,
+      fp5_from_base_refines, fp5_mul_refines, fp5_sub_refines, fp5_scale_refines, hcast,
+      hj, lift_eq_ok, bind_eq_result_bind, result_bind_ok, Option.bind_some, Option.pure_def]
+    by_cases h0 : i.val = 0
+    · have h1' : i.val ≠ 1 := by omega
+      simp [h0, h1']
+    · by_cases h1' : i.val = 1 <;> by_cases he : fp5Add first v = claim <;>
+        simp [h0, h1', he]
+
+private theorem fuel_of_done {α β : Type} (body : α → Result (ControlFlow α β))
+    (n : Nat) (s : α) (v : β) (h : body s = .ok (.done v)) :
+    loopFuel (n+1) body s = .ok v := by rw [loopFuel_succ, h]; rfl
+
+private theorem fuel_of_cont {α β : Type} (body : α → Result (ControlFlow α β))
+    (n : Nat) (s t : α) (v : β) (h : body s = .ok (.cont t)) (ht : loopFuel n body t = .ok v) :
+    loopFuel (n+1) body s = .ok v := by rw [loopFuel_succ, h]; exact ht
+
+private theorem row_round_fuel (bytes : Slice U8) (off : Usize) (claim r : Fp5)
+    (hfit : off.val + 360 ≤ bytes.val.length) (n : Nat) (i : Usize)
+    (hi : i.val + n = 9) (first sum prod : Fp5) :
+    loopFuel (n + 1)
+      (fun (f, s, p, j) => verify_deg8_row_sumcheck_round_at_loop.body bytes off claim r f s p j)
+      (first, sum, prod, i) =
+    .ok (rowLagrangeRounds bytes.val off.val claim r n i.val first sum prod) := by
+  let body := fun (f, s, p, j) => verify_deg8_row_sumcheck_round_at_loop.body bytes off claim r f s p j
+  change loopFuel _ body _ = _
+  induction n generalizing i first sum prod with
+  | zero =>
+    have hn : ¬ i < 9#usize := by change ¬ i.val < 9; omega
+    apply fuel_of_done body 0 _ (some sum)
+    exact (verify_deg8_row_sumcheck_round_at_loop.body.public_eqs ..).trans (ite_eq_right hn)
+  | succ n ih =>
+    obtain ⟨j, hj, hbody⟩ := row_step_refines bytes off i claim r first sum prod hfit (by omega)
+    cases hs : rowLagrangeStep bytes.val off.val i.val claim r first sum prod with
+    | none =>
+      rw [hs] at hbody
+      rw [rowLagrangeRounds, hs]
+      exact fuel_of_done body (n+1) _ none hbody
+    | some x =>
+      obtain ⟨f, s, p⟩ := x
+      rw [hs] at hbody
+      rw [rowLagrangeRounds, hs]
+      have ht := ih j (by omega) f s p
+      rw [hj] at ht
+      exact fuel_of_cont body (n+1) _ (f,s,p,j) _ hbody ht
+
+private theorem row_round_loop (bytes : Slice U8) (off : Usize) (claim r : Fp5)
+    (hfit : off.val + 360 ≤ bytes.val.length) (n : Nat) (i : Usize)
+    (hi : i.val + n = 9) (first sum prod : Fp5) :
+    verify_deg8_row_sumcheck_round_at_loop bytes off claim r first sum prod i =
+      .ok (rowLagrangeRounds bytes.val off.val claim r n i.val first sum prod) := by
+  rw [verify_deg8_row_sumcheck_round_at_loop.public_eqs]
+  apply loop_ok_of_loopFuel (fuel := n+1)
+  · exact Nat.le_trans (show n+1 ≤ 10 by omega) (usize_lt_loopMaxFuel 9#usize)
+  · exact row_round_fuel bytes off claim r hfit n i hi first sum prod
+
+theorem verify_deg8_row_sumcheck_round_at_spec (bytes : Slice U8) (off : Usize) (claim r : Fp5) :
+    verify_deg8_row_sumcheck_round_at bytes off claim r = .ok
+      (if off.val + 360 ≤ bytes.val.length then
+        rowLagrangeRounds bytes.val off.val claim r 9 0 fp5Zero fp5Zero fp5One else none) := by
+  have hw : (360#usize).val = 360 := rfl
+  simp only [verify_deg8_row_sumcheck_round_at.public_eqs, has_bytes_at_spec, hw,
+    fp5_zero_refines, fp5_one_refines, bind_eq_result_bind, result_bind_ok]
+  by_cases h : off.val + 360 ≤ bytes.val.length
+  · simp only [h, decide_true, ↓reduceIte]
+    have hs := row_round_loop bytes off claim r h 9 0#usize rfl fp5Zero fp5Zero fp5One
+    simpa only [show (0#usize).val = 0 from rfl] using hs
+  · simp [h]
+
+/-! ## Sibling count for sorted Canopy openings -/
+
+/-- Extend the opened prefix by replacing the unopened subtree containing the
+next leaf. Its branching bit is the highest bit that differs from its predecessor. -/
+@[expose] def steinerSuffix (limit : Nat) (prev count : Nat) : List Usize → Nat × Bool
+  | [] => (count, true)
+  | x :: xs =>
+    if prev < x.val ∧ x.val < limit ∧ 0 < count then
+      steinerSuffix limit x.val (count - 1 + (prev ^^^ x.val).log2) xs
+    else (count, false)
+
+abbrev steinerCount (depth : Nat) (leaves : List Usize) : Option Usize := do
+  let x :: xs := leaves | none
+  if depth > 28 ∨ x.val ≥ 2^depth then none else
+    let (n, valid) := steinerSuffix (2^depth) x.val depth xs
+    if valid then some (UScalar.ofNat .Usize n) else none
+
+
+private theorem same_usize (x : Usize) : UScalar.ofNat .Usize x.val = x := by
+  apply UScalar.eq_of_val_eq
+  rw [UScalar.val_ofNat, Nat.mod_eq_of_lt (UScalar.val_lt x)]
+
+private theorem steiner_loop_fuel (indices : Slice Usize) (limit : Usize)
+    (hl : limit.val ≤ 2^28) (n : Nat) (i prev count : Usize)
+    (hi : i.val + n = indices.val.length)
+    (hp : prev.val < limit.val) (hc : count.val ≤ 64 * (prev.val + 1)) :
+    let result := steinerSuffix limit.val prev.val count.val (indices.val.drop i.val)
+    loopFuel (n+1) (fun (p, s, j, ok) =>
+      compute_steiner_multiproof_siblings_loop.body indices limit p s j ok)
+      (prev, count, i, true) = .ok (UScalar.ofNat .Usize result.1, result.2) := by
+  dsimp only
+  induction n generalizing i prev count with
+  | zero =>
+    have hv : i.val = indices.val.length := by omega
+    have hn : ¬ i < Slice.len indices := by simp [UScalar.lt_iff_val, hv]
+    rw [loopFuel_succ]
+    simp [compute_steiner_multiproof_siblings_loop.body.public_eqs, hn, hv, steinerSuffix]
+    exact (same_usize count).symm
+  | succ n ih =>
+    have hin : i.val < indices.val.length := by omega
+    have hlt : i < Slice.len indices := (UScalar.lt_iff_val ..).mpr (by simpa using hin)
+    let leaf := indices.val[i.val]'hin
+    have hidx : Slice.index_usize indices i = .ok leaf := by simp [Slice.index_usize, hin, leaf]
+    let j : Usize := ⟨i.bv + (1#usize).bv⟩
+    have hlen : indices.val.length ≤ 18446744073709551615 := indices.property
+    have h1 : (1#usize).val = 1 := rfl
+    have hjfit : i.val + (1#usize).val < 2^64 := by rw [h1]; omega
+    have hj : (i + 1#usize : Result Usize) = .ok j := by simp [j, hAdd_uscalar_eq, hjfit]
+    have hjv : j.val = i.val + 1 := by
+      change (i.bv + (1#usize).bv).toNat = _
+      rw [BitVec.toNat_add, Nat.mod_eq_of_lt hjfit]; rfl
+    have hdr : indices.val.drop i.val = leaf :: indices.val.drop j.val := by
+      rw [hjv]; exact List.drop_eq_getElem_cons hin
+    have hzero : count = 0#usize ↔ count.val = 0 :=
+      ⟨fun h => by rw [h]; rfl, fun h => UScalar.eq_of_val_eq h⟩
+    rw [hdr, steinerSuffix]
+    rw [loopFuel_succ]
+    dsimp only
+    have base := compute_steiner_multiproof_siblings_loop.body.public_eqs indices limit prev count i true
+    simp only [Bool.true_eq, ↓reduceIte, hlt, hidx, bind_eq_result_bind, result_bind_ok] at base
+    by_cases valid : prev.val < leaf.val ∧ leaf.val < limit.val ∧ 0 < count.val
+    · obtain ⟨hprev, hleaf, hcount⟩ := valid
+      have hnz : count ≠ 0#usize := fun h => (Nat.ne_of_gt hcount) (hzero.mp h)
+      have hnzb : (count != 0#usize) = true := bne_iff_ne.mpr hnz
+      let low : Usize := ⟨count.bv - (1#usize).bv⟩
+      have hone : (1#usize).val ≤ count.val := hcount
+      have hlow : (count - 1#usize : Result Usize) = .ok low := by simp [hSub_uscalar_eq, hone, low]
+      have hlv : low.val = count.val - 1 := BitVec.toNat_sub_of_le (BitVec.le_def.mpr hone)
+      let diff := UScalar.cast .U64 (prev ^^^ leaf)
+      have hdv : diff.val = prev.val ^^^ leaf.val := by
+        change (UScalar.cast .U64 (prev ^^^ leaf)).val = _
+        rw [UScalar.cast_val, Nat.mod_eq_of_lt (UScalar.val_lt (prev ^^^ leaf))]
+        change (prev ^^^ leaf : Usize).bv.toNat = _
+        rw [UScalar.bv_xor, BitVec.toNat_xor]
+      have hlog : diff.val.log2 < 64 := by
+        by_cases h : diff.val = 0
+        · rw [h, Nat.log2_zero]; decide
+        · exact (Nat.log2_lt h).mpr (UScalar.val_lt diff)
+      let term := UScalar.cast .Usize (UScalar.ofNat .U64 diff.val.log2)
+      have ht : term.val = diff.val.log2 := by
+        have hbound : diff.val.log2 < 2^64 := by omega
+        simp [term, UScalar.cast_val, UScalar.val_ofNat, Nat.mod_eq_of_lt hbound]
+      let total : Usize := ⟨low.bv + term.bv⟩
+      have haddfit : low.val + term.val < 2^64 := by rw [hlv, ht]; omega
+      have hadd : (low + term : Result Usize) = .ok total := by simp [hAdd_uscalar_eq, haddfit, total]
+      have htv : total.val = count.val - 1 + diff.val.log2 := by
+        change (low.bv + term.bv).toNat = _
+        rw [BitVec.toNat_add, Nat.mod_eq_of_lt haddfit, hlv, ht]
+      have hw : compute_steiner_multiproof_siblings_loop.body indices limit prev count i true =
+          .ok (.cont (leaf, total, j, true)) := by
+        rw [base]
+        simp only [UScalar.lt_iff_val, hprev, hleaf, hnzb, decide_true,
+          ↓reduceIte, bind_eq_result_bind, result_bind_ok, hlow, lift_eq_ok, sibling_path_below_join_spec]
+        change (do let s ← (low + term : Result Usize); let k ← (i + 1#usize : Result Usize)
+                   pure (ControlFlow.cont (leaf, s, k, true))) = _
+        rw [hadd]; simp [hj]
+      rw [hw, result_bind_ok]
+      dsimp only
+      have hrec := ih j leaf total (by omega) hleaf (by rw [htv]; omega)
+      rw [hrec]
+      simp [hprev, hleaf, hcount, htv, hdv]
+    · have hb : compute_steiner_multiproof_siblings_loop.body indices limit prev count i true =
+          .ok (.cont (prev, count, j, false)) := by
+        rw [base]
+        by_cases h₁ : prev.val < leaf.val <;> by_cases h₂ : leaf.val < limit.val <;>
+          simp [UScalar.lt_iff_val, h₁, h₂, hj]
+        have hc0 : count.val = 0 := Nat.eq_zero_of_not_pos (fun hc => valid ⟨h₁, h₂, hc⟩)
+        simp [hzero.mpr hc0, hj]
+      rw [hb, result_bind_ok]
+      dsimp only
+      rw [loopFuel_succ]
+      simp [compute_steiner_multiproof_siblings_loop.body.public_eqs, valid]
+      exact (same_usize count).symm
+
+
+theorem compute_steiner_multiproof_siblings_spec (depth : U32) (indices : Slice Usize) :
+    compute_steiner_multiproof_siblings depth indices = .ok (steinerCount depth.val indices.val) := by
+  have hmax : MAX_CANOPY_LOG_LEAVES.val = 28 := by rw [max_canopy_log_leaves_val]; rfl
+  simp only [compute_steiner_multiproof_siblings.public_eqs, GT.gt, UScalar.lt_iff_val, hmax,
+    core.slice.Slice.is_empty_eq, bind_eq_result_bind, result_bind_ok]
+  cases he : indices.val with
+  | nil => simp [steinerCount, List.isEmpty]
+  | cons x xs =>
+    by_cases hd : depth.val > 28
+    · simp [hd, steinerCount]
+    · have hpow : 2^depth.val ≤ 2^28 := Nat.pow_le_pow_right (by decide) (Nat.le_of_not_gt hd)
+      let limit : Usize := ⟨(1#usize).bv <<< depth.val⟩
+      have hsh : (1#usize <<< depth : Result Usize) = .ok limit := by
+        have h64 : depth.val < 64 := by omega
+        simp [hShlU_uscalar_eq, h64, limit]
+      have hlv : limit.val = 2^depth.val := by
+        change ((1#usize).bv <<< depth.val).toNat = _
+        rw [BitVec.toNat_shiftLeft, Nat.shiftLeft_eq]
+        change (1 * 2^depth.val) % 2^64 = _
+        rw [Nat.one_mul, Nat.mod_eq_of_lt (by omega)]
+      have hx : Slice.index_usize indices 0#usize = .ok x := by
+        have hz : (0#usize).val = 0 := rfl
+        simp [Slice.index_usize, he, hz]
+      have h1 : (1#usize).val = 1 := rfl
+      have hcount : (UScalar.cast .Usize depth).val = depth.val := by
+        rw [UScalar.cast_val, Nat.mod_eq_of_lt (by change depth.val < 2^64; omega)]
+      simp only [hd, List.isEmpty_cons, Bool.false_eq_true, ↓reduceIte, hsh, hx,
+        bind_eq_result_bind, result_bind_ok, ge_iff_le, UScalar.le_iff_val, hlv]
+      by_cases hbad : 2^depth.val ≤ x.val
+      · simp [hbad, steinerCount, hd]
+      · have hxs : 1 + xs.length = indices.val.length := by simp [he, Nat.add_comm]
+        have hloop := steiner_loop_fuel indices limit (hlv ▸ hpow) xs.length 1#usize x
+          (UScalar.cast .Usize depth) (by rw [h1]; exact hxs)
+          (by rw [hlv]; omega) (by rw [hcount]; omega)
+        have hdrop : indices.val.drop (1#usize).val = xs := by rw [h1, he]; rfl
+        simp only [hdrop, hlv, hcount] at hloop
+        have hfuel : xs.length + 1 ≤ loopMaxFuel := by
+          refine Nat.le_trans ?_ (usize_lt_loopMaxFuel (Slice.len indices))
+          rw [Slice.len_val]; omega
+        have hr := loop_ok_of_loopFuel hfuel hloop
+        simp only [hbad, ↓reduceIte, lift_eq_ok, bind_eq_result_bind, result_bind_ok,
+          compute_steiner_multiproof_siblings_loop.public_eqs, hr]
+        cases hb : (steinerSuffix (2^depth.val) x.val depth.val xs).2 <;> simp [steinerCount, hd, hbad, hb]
+
+
+private theorem zero_row_sample {i : Nat} (hi : i < 9) :
+    fp5AtBytes (List.replicate 360 0#u8) (0 + 40*i) = some fp5Zero := by
+  have hb (j : Nat) : (List.replicate 360 0#u8).getD j 0#u8 = 0#u8 := by
+    rw [List.getD_eq_getElem?_getD, List.getElem?_replicate]
+    split <;> rfl
+  have hw (j : Nat) : lePackU64At (List.replicate 360 0#u8) j = 0#u64 := by
+    simp only [lePackU64At, hb, u8_cast_u64_bv]; rfl
+  have hfit : 0 + 40*i + 40 ≤ 360 := by omega
+  simp only [fp5AtBytes, hw, List.length_replicate, hfit, true_and]
+  decide
+
+private theorem zero_lagrange_step (i : Nat) (hi : i < 9) (c prod : Fp5) :
+    rowLagrangeStep (List.replicate 360 0#u8) 0 i c fp5Zero fp5Zero fp5Zero prod =
+    (if i = 1 ∧ fp5Zero ≠ c then none else some (fp5Zero, fp5Zero,
+      fp5Mul prod (fp5Sub fp5Zero (fp5FromBase (UScalar.ofNat .U64 i))))) := by
+  have ha : fp5Add fp5Zero fp5Zero = fp5Zero := fp5Add_zero (by decide)
+  have hm (f : Fp5) : fp5Mul fp5Zero f = fp5Zero := (fp5Mul_comm _ _).trans (fp5Mul_zero _)
+  have hs (w : U64) : fp5Scale fp5Zero w = fp5Zero := by
+    have hz : fieldMul 0#u64 w = 0#u64 := (fieldMul_comm _ _).trans (fieldMul_zero _)
+    simp only [fp5Scale, fp5Zero, hz]
+  rw [rowLagrangeStep, zero_row_sample hi]
+  simp only [Option.bind_eq_bind, Option.bind_some, ha, hm, hs, ite_self]
+  rw [fp5Mul_zero prod, ha]
+
+private theorem zero_lagrange_rounds (n i : Nat) (hi : i+n ≤ 9) (prod : Fp5) :
+    rowLagrangeRounds (List.replicate 360 0#u8) 0 fp5Zero fp5Zero n i fp5Zero fp5Zero prod =
+      some fp5Zero := by
+  induction n generalizing i prod with
+  | zero => rfl
+  | succ n ih =>
+    rw [rowLagrangeRounds, zero_lagrange_step i (by omega)]
+    simp only [ne_eq, not_true_eq_false, and_false, ↓reduceIte]
+    exact ih _ (by omega) _
+
+private theorem zero_round_rejects_one (n : Nat) :
+    rowLagrangeRounds (List.replicate 360 0#u8) 0 fp5One fp5Zero (n+2) 0
+      fp5Zero fp5Zero fp5One = none := by
+  rw [rowLagrangeRounds, zero_lagrange_step 0 (by decide)]
+  simp only [Nat.zero_ne_one, false_and, ↓reduceIte, Option.bind_eq_bind, Option.bind_some]
+  rw [rowLagrangeRounds, zero_lagrange_step 1 (by decide)]
+  have hne : fp5Zero ≠ fp5One := by decide
+  rw [ite_eq_left (show 1 = 1 ∧ fp5Zero ≠ fp5One from ⟨rfl, hne⟩)]
+  rfl
+
+private theorem row_bytes_result (bytes : Slice U8) (off : Usize) (claim r : Fp5)
+    (bs : List U8) (pos : Nat) (value : Option Fp5) (hb : bytes.val = bs) (ho : off.val = pos)
+    (hf : pos + 360 ≤ bs.length)
+    (hr : rowLagrangeRounds bs pos claim r 9 0 fp5Zero fp5Zero fp5One = value) :
+    verify_deg8_row_sumcheck_round_at bytes off claim r = .ok value := by
+  rw [verify_deg8_row_sumcheck_round_at_spec, hb, ho, ite_eq_left hf, hr]
+
+/-- A well-formed zero row accepts the zero incoming claim and rejects one. -/
+theorem tooth_row_bytes_reject_wrong_sum :
+    let bytes := Array.to_slice (Array.repeat 360#usize 0#u8)
+    verify_deg8_row_sumcheck_round_at bytes 0#usize fp5Zero fp5Zero = .ok (some fp5Zero) ∧
+    verify_deg8_row_sumcheck_round_at bytes 0#usize fp5One fp5Zero = .ok none := by
+  dsimp only
+  have hfit : 0 + 360 ≤ (List.replicate 360 0#u8).length := by simp
+  exact ⟨row_bytes_result _ _ _ _ _ _ _ rfl rfl hfit (zero_lagrange_rounds 9 0 (by decide) fp5One),
+    row_bytes_result _ _ _ _ _ _ _ rfl rfl hfit (zero_round_rejects_one 7)⟩
+
+private theorem row_rejects_bad_pair (bytes : List U8) (pos : Nat) (claim r a b : Fp5) (n : Nat)
+    (ha : fp5AtBytes bytes pos = some a) (hb : fp5AtBytes bytes (pos+40) = some b)
+    (hm : fp5Add a b ≠ claim) :
+    rowLagrangeRounds bytes pos claim r (n+2) 0 fp5Zero fp5Zero fp5One = none := by
+  rw [rowLagrangeRounds, rowLagrangeStep]
+  simp only [Nat.mul_zero, Nat.add_zero, ha, Option.bind_eq_bind, Option.bind_some, Nat.zero_ne_one,
+    false_and, ↓reduceIte]
+  rw [rowLagrangeRounds, rowLagrangeStep]
+  simp only [Nat.mul_one, hb, Option.bind_eq_bind, Option.bind_some]
+  rw [ite_eq_left (show True ∧ fp5Add a b ≠ claim from ⟨True.intro, hm⟩)]
+  rfl
+
+/-- Changing the first wire byte of a valid all-zero row breaks its Boolean sum. -/
+theorem tooth_row_first_byte_rejected :
+    let good := Array.to_slice (Array.repeat 360#usize 0#u8)
+    let bad : Slice U8 := ⟨1#u8 :: List.replicate 359 0#u8, by simp; decide⟩
+    verify_deg8_row_sumcheck_round_at good 0#usize fp5Zero fp5Zero = .ok (some fp5Zero) ∧
+    verify_deg8_row_sumcheck_round_at bad 0#usize fp5Zero fp5Zero = .ok none := by
+  dsimp only
+  refine ⟨tooth_row_bytes_reject_wrong_sum.1, ?_⟩
+  let bs := 1#u8 :: List.replicate 359 0#u8
+  have h0 : fp5AtBytes bs 0 = some fp5One := by
+    simp only [fp5AtBytes, bs, lePackU64At, u8_cast_u64_bv, IsCanonicalFp5, IsCanonical, fp5One]
+    decide
+  have h1 : fp5AtBytes bs (0+40) = some fp5Zero := by
+    simp only [fp5AtBytes, bs, lePackU64At, u8_cast_u64_bv, IsCanonicalFp5, IsCanonical, fp5Zero]
+    decide
+  have hm : fp5Add fp5One fp5Zero ≠ fp5Zero := by
+    rw [fp5Add_zero (by decide)]
+    decide
+  exact row_bytes_result _ _ _ _ bs 0 none rfl rfl (by simp [bs])
+    (row_rejects_bad_pair bs 0 fp5Zero fp5Zero fp5One fp5Zero 7 h0 h1 hm)
+
+theorem tooth_steiner_pruning_rejects_duplicate :
+    compute_steiner_multiproof_siblings 3#u32 ⟨[0#usize, 1#usize, 6#usize], by decide⟩ =
+        .ok (some 3#usize) ∧
+    compute_steiner_multiproof_siblings 3#u32 ⟨[0#usize, 1#usize, 1#usize], by decide⟩ =
+        .ok none := by
+  rw [compute_steiner_multiproof_siblings_spec, compute_steiner_multiproof_siblings_spec]
+  decide
+
+/-! ## Chaining the row claims from the initial zero claim -/
+
+@[expose] def rowChain (bytes : List U8) (off : Nat) (claim : Fp5) : List Fp5 → Option Fp5
+  | [] => some claim
+  | r :: rest => do
+    let next ← rowLagrangeRounds bytes off claim r 9 0 fp5Zero fp5Zero fp5One
+    rowChain bytes (off + 360) next rest
+
+
+theorem usize_mul_bounded (a b : Usize) (h : a.val * b.val < 2^64) :
+    ∃ v : Usize, (a * b : Result Usize) = .ok v ∧ v.val = a.val*b.val := by
+  refine ⟨⟨a.bv * b.bv⟩, ?_, ?_⟩
+  · simp [hMul_uscalar_eq, h]
+  · exact (BitVec.toNat_mul ..).trans (Nat.mod_eq_of_lt h)
+
+theorem usize_add_bounded (a b : Usize) (h : a.val + b.val < 2^64) :
+    ∃ v : Usize, (a + b : Result Usize) = .ok v ∧ v.val = a.val+b.val := by
+  refine ⟨⟨a.bv + b.bv⟩, ?_, ?_⟩
+  · simp [hAdd_uscalar_eq, h]
+  · exact (BitVec.toNat_add ..).trans (Nat.mod_eq_of_lt h)
+
+private theorem row_chain_fuel (bytes : Slice U8) (off : Usize) (rs : Slice Fp5)
+    (hcap : rs.val.length ≤ 20) (hfit : off.val + 360 * rs.val.length ≤ bytes.val.length)
+    (n : Nat) (i : Usize) (hi : i.val + n = rs.val.length) (claim : Fp5) :
+    loopFuel (n+1) (fun (c, j) => verify_qsaghqm2_row_rounds_at_loop.body bytes off rs c j)
+      (claim, i) = .ok (rowChain bytes.val (off.val + 360*i.val) claim (rs.val.drop i.val)) := by
+  induction n generalizing i claim with
+  | zero =>
+    have hv : i.val = rs.val.length := by omega
+    have hn : ¬ i < Slice.len rs := by simp [UScalar.lt_iff_val, hv]
+    rw [loopFuel_succ]
+    simp [verify_qsaghqm2_row_rounds_at_loop.body.public_eqs, hn, hv, rowChain]
+  | succ n ih =>
+    have hin : i.val < rs.val.length := by omega
+    have hlt : i < Slice.len rs := (UScalar.lt_iff_val ..).mpr (by simpa using hin)
+    let r := rs.val[i.val]'hin
+    have hidx : Slice.index_usize rs i = .ok r := by simp [Slice.index_usize, hin, r]
+    have h360 : (360#usize).val = 360 := rfl
+    have h1 : (1#usize).val = 1 := rfl
+    obtain ⟨w, hmul, hw⟩ := usize_mul_bounded 360#usize i (by rw [h360]; omega)
+    rw [h360] at hw
+    obtain ⟨j, hadd, hj⟩ := slice_offset bytes off w _ hw (by omega)
+    obtain ⟨next, hinc, hnext⟩ := usize_add_bounded i 1#usize (by rw [h1]; omega)
+    rw [h1] at hnext
+    have hdr : rs.val.drop i.val = r :: rs.val.drop next.val := by
+      rw [hnext]; exact List.drop_eq_getElem_cons hin
+    have hf : j.val + 360 ≤ bytes.val.length := by omega
+    rw [hj] at hf
+    rw [hdr, rowChain, loopFuel_succ]
+    dsimp only
+    have step := verify_qsaghqm2_row_rounds_at_loop.body.public_eqs bytes off rs claim i
+    simp only [hlt, ↓reduceIte, hmul,
+      hadd, hidx, copy_fp5_spec, verify_deg8_row_sumcheck_round_at_spec, hf, hj, hinc,
+      bind_eq_result_bind, result_bind_ok] at step
+    rw [step]
+    cases he : rowLagrangeRounds bytes.val (off.val + 360*i.val) claim r 9 0 fp5Zero fp5Zero fp5One with
+    | none => rfl
+    | some v =>
+      have h := ih next (by omega) v
+      have heq : off.val + 360 * next.val = off.val + 360 * i.val + 360 := by omega
+      rw [heq] at h
+      exact h
+
+theorem verify_qsaghqm2_row_rounds_at_spec (bytes : Slice U8) (off : Usize) (rs : Slice Fp5) :
+    verify_qsaghqm2_row_rounds_at bytes off rs = .ok
+      (if rs.val.length ≤ 20 ∧ off.val + 360 * rs.val.length ≤ bytes.val.length
+       then rowChain bytes.val off.val fp5Zero rs.val else none) := by
+  have h20 : (20#usize).val = 20 := rfl
+  have h360 : (360#usize).val = 360 := rfl
+  simp only [verify_qsaghqm2_row_rounds_at.public_eqs, GT.gt, UScalar.lt_iff_val, Slice.len_val, h20]
+  by_cases hcap : rs.val.length ≤ 20
+  · obtain ⟨w, hm, hw⟩ := usize_mul_bounded 360#usize (Slice.len rs) (by rw [h360, Slice.len_val]; omega)
+    rw [h360, Slice.len_val] at hw
+    simp only [Nat.not_lt_of_ge hcap, ↓reduceIte, hm, has_bytes_at_spec, bind_eq_result_bind,
+      result_bind_ok, hw, fp5_zero_refines, hcap, true_and]
+    by_cases hf : off.val + 360 * rs.val.length ≤ bytes.val.length
+    · simp only [hf, decide_true, ↓reduceIte, verify_qsaghqm2_row_rounds_at_loop.public_eqs]
+      apply loop_ok_of_loopFuel (fuel := rs.val.length + 1)
+      · simpa only [Slice.len_val] using usize_lt_loopMaxFuel (Slice.len rs)
+      · have hh := row_chain_fuel bytes off rs hcap hf rs.val.length 0#usize (by change 0 + _ = _; omega) fp5Zero
+        have h0 : (0#usize).val = 0 := rfl
+        simpa only [h0, Nat.mul_zero, Nat.add_zero, List.drop_zero] using hh
+    · simp [hf]
+  · simp [hcap, Nat.lt_of_not_ge hcap]
+
+/-- Every fixed-width canonical decoder rejects a missing first byte. -/
+theorem canonical_decoders_at_end (bytes : Slice U8) :
+    decode_canonical_fp5_at bytes (Slice.len bytes) = .ok none ∧
+    decode_canonical_gl24_at bytes (Slice.len bytes) = .ok none := by
+  simp [decode_canonical_fp5_at_spec, decode_canonical_gl24_at_spec, Slice.len_val,
+    show ¬ bytes.val.length + 40 ≤ bytes.val.length by omega,
+    show ¬ bytes.val.length + 56 ≤ bytes.val.length by omega]
+
+theorem block_end_rejects_zero_width (len off count : Usize) :
+    block_end len off count 0#usize = .ok none := by simp [block_end.public_eqs]
+
+theorem field_region_rejects_reversed_interval (bytes : Slice U8) (off stop : Usize)
+    (h : off > stop) : canonical_words_between bytes off stop = .ok false := by
+  rw [canonical_words_between.public_eqs]
+  split <;> simp [h]
+
+theorem digest_rejects_unknown_profile (bytes : Slice U8) (off count : Usize) (tag : U8)
+    (ht : tag ≠ QSAGHQM2_PROFILE_TURBO400) (hg : tag ≠ QSAGHQM2_PROFILE_GL24) :
+    qsaghqm2_digest_block_end bytes off count tag = .ok none := by
+  simp [qsaghqm2_digest_block_end.public_eqs, ht, hg]
+
+theorem opening_rejects_large_fold (bytes : Slice U8) (off : Usize) (indices : Slice Usize)
+    (depth step : U32) (base : Bool) (tag : U8) (h : step > MAX_QUINTIC_LOG_CELLS) :
+    qsaghqm2_opening_bounds bytes off indices depth step base tag = .ok none := by
+  simp [qsaghqm2_opening_bounds.public_eqs, h]
+
+theorem fp5_block_rejects_missing_region (bytes : Slice U8) (off count : Usize)
+    (h : block_end (Slice.len bytes) off count 40#usize = .ok none) :
+    fp5_block_end bytes off count = .ok none := by simp [fp5_block_end.public_eqs, h]
+
+theorem fold_rejects_truncated_message (bytes : Slice U8) (off : Usize) (claim : Fp5)
+    (c : CwyzFoldChals) (h : bytes.val.length < off.val + 200) :
+    verify_qsaghqm2_cwyz_fold_at bytes off claim c = .ok none := by
+  simp [verify_qsaghqm2_cwyz_fold_at.public_eqs, has_bytes_at_spec,
+    show (200#usize).val = 200 from rfl, Nat.not_le_of_gt h]
+
+theorem folds_reject_excess_challenges (bytes : Slice U8) (off : Usize) (claim : Fp5)
+    (cs : Slice CwyzFoldChals) (h : 28 < cs.val.length) :
+    verify_qsaghqm2_cwyz_folds_at bytes off claim cs = .ok none := by
+  have hm : (UScalar.cast .Usize MAX_QUINTIC_LOG_CELLS).val = 28 := by
+    rw [max_quintic_log_cells_val, UScalar.cast_val]; rfl
+  simp [verify_qsaghqm2_cwyz_folds_at.public_eqs, UScalar.lt_iff_val, hm, h]
+
+theorem stage_rejects_zero_folds (bytes : Slice U8) (off : Usize) (s : StageEnvelope)
+    (base : Bool) (terminal : Usize) (tag : U8) (h : s.step_vars = 0#u32) :
+    qsaghqm2_stage_end bytes off s base terminal tag = .ok none := by
+  simp [qsaghqm2_stage_end.public_eqs, h]
+
+theorem schedule_rejects_excess_rows (rows : Usize) (e a b c d n : U32) (h : rows > 20#usize) :
+    payload_schedule_ok rows e a b c d n = .ok false := by simp [payload_schedule_ok.public_eqs, h]
+
+theorem payload_rejects_large_terminal (bytes : Slice U8) (rs : Slice Fp5) (s : PayloadStages)
+    (tag : U8) (e : U32) (h : e > 8#u32) :
+    verify_qsaghqm2_multiproof_and_rounds bytes tag rs e s = .ok none := by
+  cases s with
+  | mk a b c last =>
+    cases last <;> simp [verify_qsaghqm2_multiproof_and_rounds.public_eqs, h]
 
 end qsag_whir_verified.proofs

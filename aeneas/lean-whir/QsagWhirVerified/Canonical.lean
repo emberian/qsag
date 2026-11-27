@@ -1,4 +1,5 @@
 module
+public import QsagWhirVerified.RowPolynomial
 public import QsagWhirVerified.Proofs
 public import Qsag.Math.QuinticExt5
 public import Qsag.Math.Poseidon2Gl24
@@ -1145,6 +1146,177 @@ theorem checked_quorum_sum_wp_u64NatRefines
   fp5Inv_rel1
   cwyz_bridge_claim_step_fp5_wp_fp5Refines
   checked_quorum_sum_wp_u64NatRefines
+
+
+theorem load_le_u64_slice_refines_qsag (bytes : Slice U8) (off : Usize) :
+    (Option.map fieldAbs <$> load_le_u64_slice bytes off) = .ok
+      (if off.val + 8 ≤ bytes.val.length
+       then some (Qsag.Goldilocks.ofNat (lePackU64At bytes.val off.val).val) else none) := by
+  rw [load_le_u64_slice_spec]
+  split <;> rfl
+
+theorem decode_canonical_u64_at_refines_qsag (bytes : Slice U8) (off : Usize) :
+    let w := lePackU64At bytes.val off.val
+    (Option.map fieldAbs <$> decode_canonical_u64_at bytes off) = .ok
+      (if off.val + 8 ≤ bytes.val.length ∧ w.val < Qsag.goldilocksPrime
+       then some (Qsag.Goldilocks.ofNat w.val) else none) := by
+  dsimp only
+  rw [decode_canonical_u64_at_spec]
+  simp only [IsCanonical, Qsag.goldilocksPrime]
+  change Result.ok (Option.map fieldAbs _) = _
+  split <;> rename_i h <;> simp [h, fieldAbs]
+
+theorem decode_canonical_fp5_at_refines_qsag (bytes : Slice U8) (off : Usize) :
+    let w := fun k => lePackU64At bytes.val (off.val + k)
+    let v : Fp5 := ⟨w 0, w 8, w 16, w 24, w 32⟩
+    (Option.map fp5Abs <$> decode_canonical_fp5_at bytes off) = .ok
+      (if off.val + 40 ≤ bytes.val.length ∧ IsCanonicalFp5 v then
+        some (⟨fieldAbs (w 0), fieldAbs (w 8), fieldAbs (w 16), fieldAbs (w 24), fieldAbs (w 32)⟩ : Qsag.QuinticGoldilocks)
+       else none) := by
+  dsimp only
+  rw [decode_canonical_fp5_at_spec]
+  change Result.ok (Option.map fp5Abs _) = _
+  split <;> rfl
+
+theorem decode_canonical_gl24_at_refines_qsag (bytes : Slice U8) (off : Usize) :
+    let w := fun k => lePackU64At bytes.val (off.val + k)
+    let v : Gl24Digest := ⟨w 0, w 8, w 16, w 24, w 32, w 40, w 48⟩
+    (Option.map gl24Abs <$> decode_canonical_gl24_at bytes off) = .ok
+      (if off.val + 56 ≤ bytes.val.length ∧ IsCanonicalGl24 v then
+        some (⟨fieldAbs (w 0), fieldAbs (w 8), fieldAbs (w 16), fieldAbs (w 24), fieldAbs (w 32), fieldAbs (w 40), fieldAbs (w 48)⟩ : Qsag.Poseidon2Gl24.Digest7)
+       else none) := by
+  dsimp only
+  rw [decode_canonical_gl24_at_spec]
+  change Result.ok (Option.map gl24Abs _) = _
+  split <;> rfl
+
+theorem has_bytes_at_word_iff_qsag (bytes : Slice U8) (off : Usize) :
+    has_bytes_at bytes off 8#usize = .ok true ↔
+      (Option.map fieldAbs <$> load_le_u64_slice bytes off) =
+        .ok (some (Qsag.Goldilocks.ofNat (lePackU64At bytes.val off.val).val)) := by
+  rw [load_le_u64_slice_refines_qsag, has_bytes_at_spec]
+  have h8 : (8#usize).val = 8 := rfl
+  by_cases h : off.val + 8 ≤ bytes.val.length <;> simp [h8, h]
+
+
+private theorem row_grid_refines (bytes : List U8) (off : Nat) (claim r : Fp5)
+    (hc : IsCanonicalFp5 claim) (n i : Nat) (hi : n + i ≤ 9) (first sum prod : Fp5) :
+    (rowLagrangeRounds bytes off claim r n i first sum prod).map fp5Abs =
+      rowGridRounds (fun j => (fp5AtBytes bytes (off + 40*j)).map fp5Abs)
+        (fun j => fieldAbs (rowLagrangeWeight j)) (fp5Abs claim) (fp5Abs r)
+        n i (fp5Abs first) (fp5Abs sum) (fp5Abs prod) := by
+  induction n generalizing i first sum prod with
+  | zero => rfl
+  | succ n ih =>
+    rw [rowLagrangeRounds, rowGridRounds, rowLagrangeStep]
+    cases hv : fp5AtBytes bytes (off + 40*i) with
+    | none => rfl
+    | some v =>
+      have he : fp5Abs (fp5Add first v) = fp5Abs claim ↔ fp5Add first v = claim :=
+        fp5Abs_inj (fp5Add_canonical _ _) hc
+      have hword : fieldAbs (UScalar.ofNat .U64 i) = Qsag.Goldilocks.ofNat i := by
+        rw [fieldAbs, UScalar.val_ofNat, Nat.mod_eq_of_lt (by change i < 2^64; omega)]
+      by_cases hbad : i = 1 ∧ fp5Add first v ≠ claim
+      · have hb : i = 1 ∧ Qsag.QuinticGoldilocks.add (fp5Abs first) (fp5Abs v) ≠ fp5Abs claim :=
+          ⟨hbad.1, fun h => hbad.2 (he.mp (by rwa [fp5Abs_add]))⟩
+        simp [hbad, hb]
+      · have hb : ¬ (i = 1 ∧ Qsag.QuinticGoldilocks.add (fp5Abs first) (fp5Abs v) ≠ fp5Abs claim) := by
+          intro h
+          apply hbad
+          exact ⟨h.1, fun eq => h.2 (by rw [← fp5Abs_add, eq])⟩
+        simp only [Option.map_some, Option.bind_eq_bind, Option.bind_some, hbad, hb, ↓reduceIte]
+        rw [ih (i+1) (by omega)]
+        simp only [fp5Abs_add, fp5Abs_mul, fp5Abs_scale, fp5Abs_sub]
+        rw [fp5Abs_fromBase (UScalar.ofNat .U64 i), hword]
+        by_cases hz : i = 0 <;> simp only [hz, ↓reduceIte]
+
+theorem verify_deg8_row_sumcheck_round_at_refines_qsag
+    (bytes : Slice U8) (off : Usize) (claim r : Fp5) (hc : IsCanonicalFp5 claim) :
+    (Option.map fp5Abs <$> verify_deg8_row_sumcheck_round_at bytes off claim r) =
+      .ok (if off.val + 360 ≤ bytes.val.length then
+        rowGridRounds (fun j => (fp5AtBytes bytes.val (off.val + 40*j)).map fp5Abs)
+          (fun j => fieldAbs (rowLagrangeWeight j)) (fp5Abs claim) (fp5Abs r) 9 0
+          Qsag.QuinticGoldilocks.zero Qsag.QuinticGoldilocks.zero Qsag.QuinticGoldilocks.one
+        else none) := by
+  rw [verify_deg8_row_sumcheck_round_at_spec]
+  change Result.ok (Option.map fp5Abs _) = _
+  split
+  · rw [row_grid_refines _ _ _ _ hc _ _ (by decide), fp5Abs_zero, fp5Abs_one]
+  · rfl
+
+theorem row_interpolation_weight_inverse (i : Usize) (hi : i.val < 9) :
+    ∃ w, row_interpolation_weight i = .ok w ∧
+      (w.val * (((List.range 9).erase i.val).foldl
+        (fun acc j => acc * (Qsag.goldilocksPrime + i.val - j) % Qsag.goldilocksPrime) 1)) %
+        Qsag.goldilocksPrime = 1 := by
+  refine ⟨_, row_interpolation_weight_spec i, ?_⟩
+  generalize he : i.val = n at hi ⊢
+  rcases n with _ | n
+  · decide
+  rcases n with _ | n
+  · decide
+  rcases n with _ | n
+  · decide
+  rcases n with _ | n
+  · decide
+  rcases n with _ | n
+  · decide
+  rcases n with _ | n
+  · decide
+  rcases n with _ | n
+  · decide
+  rcases n with _ | n
+  · decide
+  rcases n with _ | n
+  · decide
+  omega
+
+
+private theorem row_round_result_canonical (bytes : List U8) (off : Nat) (claim r : Fp5)
+    (n i : Nat) (f s p out : Fp5) (hs : IsCanonicalFp5 s)
+    (hr : rowLagrangeRounds bytes off claim r n i f s p = some out) : IsCanonicalFp5 out := by
+  induction n generalizing i f s p with
+  | zero => have he : s = out := Option.some.inj hr; exact he ▸ hs
+  | succ n ih =>
+    rw [rowLagrangeRounds, rowLagrangeStep] at hr
+    cases hv : fp5AtBytes bytes (off + 40*i) with
+    | none => simp [hv] at hr
+    | some v =>
+      simp only [hv, Option.bind_eq_bind, Option.bind_some] at hr
+      by_cases hbad : i = 1 ∧ fp5Add f v ≠ claim
+      · rw [ite_eq_left hbad] at hr
+        contradiction
+      · rw [ite_eq_right hbad] at hr
+        exact ih _ _ _ _ (fp5Add_canonical _ _) hr
+
+private theorem row_chain_grid (bytes : List U8) (off : Nat) (claim : Fp5) (rs : List Fp5)
+    (hc : IsCanonicalFp5 claim) :
+    (rowChain bytes off claim rs).map fp5Abs =
+      rowGridChain (fun pos => (fp5AtBytes bytes pos).map fp5Abs) (fun i => fieldAbs (rowLagrangeWeight i))
+        off (fp5Abs claim) (rs.map fp5Abs) := by
+  induction rs generalizing off claim with
+  | nil => rfl
+  | cons r rs ih =>
+    simp only [rowChain, List.map_cons, rowGridChain]
+    have hw := row_grid_refines bytes off claim r hc 9 0 (by decide) fp5Zero fp5Zero fp5One
+    rw [fp5Abs_zero, fp5Abs_one] at hw
+    rw [← hw]
+    cases h : rowLagrangeRounds bytes off claim r 9 0 fp5Zero fp5Zero fp5One with
+    | none => rfl
+    | some v =>
+      exact ih _ _ (row_round_result_canonical bytes off claim r 9 0 fp5Zero fp5Zero fp5One v
+        (by decide) h)
+
+theorem verify_qsaghqm2_row_rounds_at_refines_qsag (bytes : Slice U8) (off : Usize) (rs : Slice Fp5) :
+    (Option.map fp5Abs <$> verify_qsaghqm2_row_rounds_at bytes off rs) =
+      .ok (if rs.val.length ≤ 20 ∧ off.val + 360 * rs.val.length ≤ bytes.val.length then
+        rowGridChain (fun j => (fp5AtBytes bytes.val j).map fp5Abs) (fun i => fieldAbs (rowLagrangeWeight i))
+          off.val Qsag.QuinticGoldilocks.zero (rs.val.map fp5Abs) else none) := by
+  rw [verify_qsaghqm2_row_rounds_at_spec]
+  change Result.ok (Option.map fp5Abs _) = _
+  split
+  · rw [row_chain_grid bytes.val off.val fp5Zero rs.val (by decide), fp5Abs_zero]
+  · rfl
 
 end qsag_whir_verified.proofs
 end
