@@ -1162,3 +1162,1164 @@ def honestHybrid1Rep
 /-- Real-world PRG prover triple (`Hybrid 0`) from 3 `(tapeSeed, commitSalt)` pairs:
     opening `honestPrgTriple` at `e` is literally `honestHybrid1Rep` at
     `gateCoins := prgExpand ... seedU` and `unopenedCommitCoins := Vec.replicate 32 0`! -/
+def honestPrgTriple
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (repIdx : Nat)
+    (seeds salts : Fin 3 → Vec UInt8 32)
+    (attrCoins : Vec (Goldilocks × Goldilocks) stmt.schema.arity)
+    (hbCoins pbCoins : Lane4 × Lane4)
+    (mkCoins : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) stmt.treeDepth) :
+    BlindVcRepTriple :=
+  buildHonestBlindVcTriple stmt wit seeds salts attrCoins hbCoins pbCoins mkCoins
+    (fun i => prgExpand stmt.treeDepth repIdx i (seeds i))
+
+private theorem buildHonestBlindVcTriple_sums
+    {stmt : BlindVcPublicStatement}
+    {wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth}
+    (hValid : BlindVcWitnessValid stmt wit)
+    (seeds salts : Fin 3 → Vec UInt8 32)
+    (attrCoins : Vec (Goldilocks × Goldilocks) stmt.schema.arity)
+    (hbCoins pbCoins : Lane4 × Lane4)
+    (mkCoins : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) stmt.treeDepth)
+    (gateCoins3 : Fin 3 → PartyGateCoins stmt.treeDepth) :
+    let tr := buildHonestBlindVcTriple stmt wit seeds salts attrCoins hbCoins pbCoins mkCoins gateCoins3
+    vcSumLane6_3 tr.finalOuts.rootShares.get = stmt.accumulatorRoot ∧
+    vcSumLane6_3 tr.finalOuts.presShares.get = stmt.presCommit ∧
+    vcSumLane6_3 tr.finalOuts.scopeShares.get = stmt.scopeTag ∧
+    (∀ t ∈ tr.finalOuts.boolZeroShares, vcSum3 t.get = Goldilocks.zero) := by
+  rcases hValid with ⟨_, _, ⟨leaf, hAttrCom, hMkEval⟩, hPresCom, hScopeEval⟩
+  unfold buildHonestBlindVcTriple
+  dsimp only
+  have hGetFn : ∀ {α : Type} (f : Fin 3 → α), (Triple3.ofFn f).get = f :=
+    fun f => funext (Triple3.get_ofFn f)
+  rw [hGetFn, hGetFn, hGetFn]
+  have hAttrsLen : wit.attrs.toList.length = stmt.schema.arity := Vec.toList_length wit.attrs
+  unfold computeVcPoseidon2Commit at hAttrCom hPresCom
+  rw [ite_true_of hAttrsLen] at hAttrCom hPresCom
+  injection hAttrCom with hLeafEq
+  injection hPresCom with hPresEq
+  have hChunksEq : ∀ (blind : Lane4) (bCoins : Lane4 × Lane4) (tag : UInt64),
+      let (c0, c1, c2) := vcCommitChunks3 stmt.schema
+        (vcShareAttrs3 stmt.disclosedAttrs 0 wit.attrs attrCoins)
+        (vcShareLane4_3 blind bCoins) tag
+      (vcSumLane6_3 c0, vcSumLane6_3 c1, vcSumLane6_3 c2) =
+        vcCommitChunks stmt.schema wit.attrs.toList blind tag := by
+    intro blind bCoins tag
+    unfold vcCommitChunks3
+    rw [vcCommitChunks.public_eq_1]
+    simp only [vcShareLane4_3.public_eq_1]
+    simp only [vcSumLane6_3_eq, vcSum3_constWire, vcSum3_zero,
+      vcShareAttrs3_sum_getElem?, vcSum3_shareWire3]
+  have hAC := hChunksEq wit.holderBlind hbCoins vcAttrCommitTag
+  dsimp only at hAC
+  have hac0 := congrArg Prod.fst hAC
+  have hac1 := congrArg (fun p => p.2.1) hAC
+  have hac2 := congrArg (fun p => p.2.2) hAC
+  dsimp only at hac0 hac1 hac2
+  have hPC := hChunksEq wit.presBlind pbCoins vcPresCommitTag
+  dsimp only at hPC
+  have hpc0 := congrArg Prod.fst hPC
+  have hpc1 := congrArg (fun p => p.2.1) hPC
+  have hpc2 := congrArg (fun p => p.2.2) hPC
+  dsimp only at hpc0 hpc1 hpc2
+  have hSC :
+      let (c0, c1, c2) := vcScopeChunks3 stmt.schema.schemaId
+        (vcShareLane4_3 wit.holderBlind hbCoins) stmt.verifierScopeLimbs
+      (vcSumLane6_3 c0, vcSumLane6_3 c1, vcSumLane6_3 c2) =
+        vcScopeChunks stmt.schema.schemaId wit.holderBlind stmt.verifierScopeLimbs := by
+    unfold vcScopeChunks3
+    rw [vcScopeChunks.public_eq_1]
+    simp only [vcShareLane4_3.public_eq_1]
+    simp only [vcSumLane6_3_eq, vcSum3_constWire, vcSum3_zero, vcSum3_shareWire3]
+  dsimp only at hSC
+  have hsc0 := congrArg Prod.fst hSC
+  have hsc1 := congrArg (fun p => p.2.1) hSC
+  have hsc2 := congrArg (fun p => p.2.2) hSC
+  dsimp only at hsc0 hsc1 hsc2
+  let ac := vcCommitChunks3 stmt.schema
+    (vcShareAttrs3 stmt.disclosedAttrs 0 wit.attrs attrCoins)
+    (vcShareLane4_3 wit.holderBlind hbCoins) vcAttrCommitTag
+  let pc := vcCommitChunks3 stmt.schema
+    (vcShareAttrs3 stmt.disclosedAttrs 0 wit.attrs attrCoins)
+    (vcShareLane4_3 wit.presBlind pbCoins) vcPresCommitTag
+  let sc := vcScopeChunks3 stmt.schema.schemaId
+    (vcShareLane4_3 wit.holderBlind hbCoins) stmt.verifierScopeLimbs
+  have hAttrSum : vcSumLane6_3 (honestSponge3Perm3 ac.1 ac.2.1 ac.2.2 (fun i => (gateCoins3 i).attrCoins)).2 = leaf := by
+    rw [honestSponge3Perm3_sum, hac0, hac1, hac2]; exact hLeafEq
+  have hPresSum : vcSumLane6_3 (honestSponge3Perm3 pc.1 pc.2.1 pc.2.2 (fun i => (gateCoins3 i).presCoins)).2 = stmt.presCommit := by
+    rw [honestSponge3Perm3_sum, hpc0, hpc1, hpc2]; exact hPresEq
+  have hScopeSum : vcSumLane6_3 (honestSponge3Perm3 sc.1 sc.2.1 sc.2.2 (fun i => (gateCoins3 i).scopeCoins)).2 = stmt.scopeTag := by
+    rw [honestSponge3Perm3_sum, hsc0, hsc1, hsc2]
+    simpa only [computeVcScopeTag.public_eq_1] using hScopeEval
+  obtain ⟨hMkRoot, hMkZeros⟩ := vcMerkleStepSum_bool stmt.issuerEpoch 0
+    (honestSponge3Perm3 ac.1 ac.2.1 ac.2.2 (fun i => (gateCoins3 i).attrCoins)).2
+    wit.merkleSteps mkCoins (fun i => (gateCoins3 i).merkleCoins)
+  rw [hAttrSum, hMkEval] at hMkRoot
+  refine ⟨hMkRoot, hPresSum, hScopeSum, ?_⟩
+  intro t ht
+  obtain ⟨z, hzMem, rfl⟩ := List.mem_map.mp ht
+  rw [hGetFn]
+  exact hMkZeros z hzMem
+
+/-- Bijection on `PartyGateCoins` mapping unopened party coins `gU` to simulated `gateOutsE1`. -/
+def partyGateOutEquiv (e : Fin 3) (stmt : BlindVcPublicStatement)
+    (attrShares : Fin 3 → List Goldilocks)
+    (hbShares pbShares : VcLane4_3)
+    (mkSteps3 : Vec (VcWire3 × VcLane6_3) stmt.treeDepth)
+    (gE gE1 : PartyGateCoins stmt.treeDepth) :
+    SimpleEquiv (PartyGateCoins stmt.treeDepth) (PartyGateCoins stmt.treeDepth) :=
+  let (ac0, ac1, ac2) := vcCommitChunks3 stmt.schema attrShares hbShares vcAttrCommitTag
+  let (pc0, pc1, pc2) := vcCommitChunks3 stmt.schema attrShares pbShares vcPresCommitTag
+  let (sc0, sc1, sc2) := vcScopeChunks3 stmt.schema.schemaId hbShares stmt.verifierScopeLimbs
+  seTrans partyGateCoinsTupleEquiv
+    (seTrans
+      (seDepProd (sponge3OutEquiv e ac0 ac1 ac2 gE.attrCoins gE1.attrCoins) fun acU =>
+        let leaf3 := (honestSponge3Perm3 ac0 ac1 ac2 (mkParty3At e gE.attrCoins gE1.attrCoins acU)).2
+        seProdCongr (sponge3OutEquiv e pc0 pc1 pc2 gE.presCoins gE1.presCoins)
+          (seProdCongr (sponge3OutEquiv e sc0 sc1 sc2 gE.scopeCoins gE1.scopeCoins)
+            (merklePathOutEquiv e stmt.issuerEpoch 0 leaf3 mkSteps3 gE.merkleCoins gE1.merkleCoins)))
+      (seSymm partyGateCoinsTupleEquiv))
+
+private def repRandomnessTupleEquiv {A D : Nat} :
+    SimpleEquiv (RepRandomness A D)
+      ((Vec UInt8 32 × Vec UInt8 32 × Vec UInt8 32 × Vec UInt8 32) ×
+       ((Vec (Goldilocks × Goldilocks) A × (Lane4 × Lane4) × (Lane4 × Lane4) ×
+         Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) D) ×
+        (PartyGateCoins D × Vec UInt8 32))) where
+  toFun r := ((r.seedE, r.seedE1, r.saltE, r.saltE1),
+              ((r.attrShareCoins, r.holderBlindCoins, r.presBlindCoins, r.merkleStepCoins),
+               (r.gateCoins, r.unopenedCommitCoins)))
+  invFun t := ⟨t.1.1, t.1.2.1, t.1.2.2.1, t.1.2.2.2,
+               t.2.1.1, t.2.1.2.1, t.2.1.2.2.1, t.2.1.2.2.2,
+               t.2.2.1, t.2.2.2⟩
+  left_inv := fun ⟨_, _, _, _, _, _, _, _, _, _⟩ => rfl
+  right_inv := fun ⟨⟨_, _, _, _⟩, ⟨⟨_, _, _, _⟩, ⟨_, _⟩⟩⟩ => rfl
+
+/-- **Full-Repetition Zero-Knowledge Bijection (`zkOpenedRepFullEquiv`, `0 Classical.choice`)**:
+    Maps the prover's Hybrid-1 randomness space bijectively onto the simulator's randomness space
+    such that `honestHybrid1Rep` and `simulateOpenedBlindVcRep` output the **EXACT SAME**
+    `OpenedBlindVcRep` (`viewE`, `viewE1`, `unopenedCommit`, AND `finalOuts`)! -/
+def zkOpenedRepFullEquiv
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (repIdx : Nat) (e : Fin 3) :
+    SimpleEquiv (RepRandomness stmt.schema.arity stmt.treeDepth)
+                (RepRandomness stmt.schema.arity stmt.treeDepth) :=
+  let e1 := vcNextParty3 e
+  let e2 := vcUnopenedParty3 e
+  let inEq :=
+    seProdCongr (vcAttrSharesEquiv3 e stmt.disclosedAttrs 0 wit.attrs)
+      (seProdCongr (vcLane4OpenedShareEquiv3 e wit.holderBlind)
+        (seProdCongr (vcLane4OpenedShareEquiv3 e wit.presBlind)
+          (vcMerkleStepsEquiv3 e wit.merkleSteps)))
+  seTrans repRandomnessTupleEquiv
+    (seTrans
+      (seDepProd (seRefl _) fun ⟨seedE, seedE1, saltE, saltE1⟩ =>
+        let gE := prgExpand stmt.treeDepth repIdx e seedE
+        let gE1 := prgExpand stmt.treeDepth repIdx e1 seedE1
+        seDepProd inEq fun ⟨attrCoins, hbCoins, pbCoins, mkCoins⟩ =>
+          let attrShares := vcShareAttrs3 stmt.disclosedAttrs 0 wit.attrs attrCoins
+          let hbShares := vcShareLane4_3 wit.holderBlind hbCoins
+          let pbShares := vcShareLane4_3 wit.presBlind pbCoins
+          let mkSteps3 := vcShareMerkleSteps3 wit.merkleSteps mkCoins
+          seDepProd (partyGateOutEquiv e stmt attrShares hbShares pbShares mkSteps3 gE gE1) fun gateU =>
+            let seeds := mkParty3At e seedE seedE1 (Vec.replicate 32 0)
+            let salts := mkParty3At e saltE saltE1 (Vec.replicate 32 0)
+            let gateCoins3 := mkParty3At e gE gE1 gateU
+            let triple := buildHonestBlindVcTriple stmt wit seeds salts attrCoins hbCoins pbCoins mkCoins gateCoins3
+            let rawComU := vcCommitPartyView H stmt.presNonce repIdx e2 (triple.views e2)
+              (vcPartyFinalOutAt triple.finalOuts e2)
+            xorBytesWithVecEquiv rawComU)
+      (seSymm repRandomnessTupleEquiv))
+
+/-- **Exact Full-View Simulation Theorem (`zkOpenedRepFullEquiv_simulates`)**:
+    For every valid secret witness `wit` and every randomness draw `hRand`,
+    `honestHybrid1Rep` equals `simulateOpenedBlindVcRep` across ALL fields of `OpenedBlindVcRep`! -/
+theorem zkOpenedRepFullEquiv_simulates
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (hValid : BlindVcWitnessValid stmt wit)
+    (repIdx : Nat) (e : Fin 3)
+    (hRand : RepRandomness stmt.schema.arity stmt.treeDepth) :
+    honestHybrid1Rep H prgExpand stmt wit repIdx e hRand =
+      simulateOpenedBlindVcRep prgExpand stmt repIdx e
+        ((zkOpenedRepFullEquiv H prgExpand stmt wit repIdx e).toFun hRand) := by
+  have hPin : ∀ k : Nat, (hk : k < stmt.schema.arity) → ∀ pubVal,
+      vcLookupDisclosed stmt.disclosedAttrs (0 + k) = some pubVal →
+      wit.attrs.toList[k]'(by rw [Vec.toList_length]; exact hk) = pubVal := by
+    intro k hk pubVal hLook
+    rw [Nat.zero_add] at hLook
+    have hSome := hValid.2.1 (k, pubVal) (vcLookupDisclosed_mem hLook)
+    rw [List.getElem?_eq_getElem (by rw [Vec.toList_length]; exact hk)] at hSome
+    injection hSome
+  obtain ⟨hRootSum, hPresSum, hScopeSum, hBoolZeros⟩ :=
+    buildHonestBlindVcTriple_sums hValid
+      (mkParty3At e hRand.seedE hRand.seedE1 (Vec.replicate 32 0))
+      (mkParty3At e hRand.saltE hRand.saltE1 (Vec.replicate 32 0))
+      hRand.attrShareCoins hRand.holderBlindCoins hRand.presBlindCoins hRand.merkleStepCoins
+      (mkParty3At e (prgExpand stmt.treeDepth repIdx e hRand.seedE)
+        (prgExpand stmt.treeDepth repIdx (vcNextParty3 e) hRand.seedE1) hRand.gateCoins)
+  rcases hRand with ⟨seedE, seedE1, saltE, saltE1, attrC, hbC, pbC, mkC, gateU, comMask⟩
+  let e1 := vcNextParty3 e
+  let gE := prgExpand stmt.treeDepth repIdx e seedE
+  let gE1 := prgExpand stmt.treeDepth repIdx e1 seedE1
+  have hAttrSim : simAttrPairs e stmt.disclosedAttrs 0
+      ((vcAttrSharesEquiv3 e stmt.disclosedAttrs 0 wit.attrs).1 attrC) =
+      (vcShareAttrs3 stmt.disclosedAttrs 0 wit.attrs attrC e,
+       vcShareAttrs3 stmt.disclosedAttrs 0 wit.attrs attrC (vcNextParty3 e)) :=
+    simAttrPairs_eq_honest e stmt.disclosedAttrs 0 wit.attrs attrC hPin
+  have hHbFst : ((vcLane4OpenedShareEquiv3 e wit.holderBlind).toFun hbC).fst =
+      vcShareLane4_3 wit.holderBlind hbC e :=
+        congrArg Prod.fst (vcLane4OpenedShareEquiv3_toFun ..)
+  have hHbSnd : ((vcLane4OpenedShareEquiv3 e wit.holderBlind).toFun hbC).snd =
+      vcShareLane4_3 wit.holderBlind hbC (vcNextParty3 e) :=
+        congrArg Prod.snd (vcLane4OpenedShareEquiv3_toFun ..)
+  have hPbFst : ((vcLane4OpenedShareEquiv3 e wit.presBlind).toFun pbC).fst =
+      vcShareLane4_3 wit.presBlind pbC e :=
+        congrArg Prod.fst (vcLane4OpenedShareEquiv3_toFun ..)
+  have hPbSnd : ((vcLane4OpenedShareEquiv3 e wit.presBlind).toFun pbC).snd =
+      vcShareLane4_3 wit.presBlind pbC (vcNextParty3 e) :=
+        congrArg Prod.snd (vcLane4OpenedShareEquiv3_toFun ..)
+  unfold honestHybrid1Rep simulateOpenedBlindVcRep zkOpenedRepFullEquiv partyGateOutEquiv buildHonestBlindVcTriple
+  dsimp only [seTrans, seDepProd, seProdCongr, seRefl,
+    seSymm, repRandomnessTupleEquiv, partyGateCoinsTupleEquiv, xorBytesWithVecEquiv]
+  rw [hAttrSim, hHbFst, hHbSnd, hPbFst, hPbSnd]
+  dsimp only
+  rw [vcPairCommitChunks_spec e stmt.schema
+        (vcShareAttrs3 stmt.disclosedAttrs 0 wit.attrs attrC)
+        (vcShareLane4_3 wit.holderBlind hbC) vcAttrCommitTag,
+      vcPairCommitChunks_spec e stmt.schema
+        (vcShareAttrs3 stmt.disclosedAttrs 0 wit.attrs attrC)
+        (vcShareLane4_3 wit.presBlind pbC) vcPresCommitTag,
+      vcPairScopeChunks_spec e stmt.schema.schemaId
+        (vcShareLane4_3 wit.holderBlind hbC) stmt.verifierScopeLimbs]
+  dsimp only
+  have hgAttr : (fun i => (mkParty3At e gE gE1 gateU i).attrCoins) =
+      mkParty3At e gE.attrCoins gE1.attrCoins gateU.attrCoins := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have hgPres : (fun i => (mkParty3At e gE gE1 gateU i).presCoins) =
+      mkParty3At e gE.presCoins gE1.presCoins gateU.presCoins := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have hgScope : (fun i => (mkParty3At e gE gE1 gateU i).scopeCoins) =
+      mkParty3At e gE.scopeCoins gE1.scopeCoins gateU.scopeCoins := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  have hgMk : (fun i => (mkParty3At e gE gE1 gateU i).merkleCoins) =
+      mkParty3At e gE.merkleCoins gE1.merkleCoins gateU.merkleCoins := by
+    funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+  rw [hgAttr, hgPres, hgScope, hgMk]
+  rw [simSponge3Perm_eq_honest, simSponge3Perm_eq_honest, simSponge3Perm_eq_honest]
+  dsimp only
+  rw [simMerklePath_eq_honest]
+  dsimp only
+  rw [mkParty3At_e, mkParty3At_next, mkParty3At_e, mkParty3At_next]
+  congr 1
+  unfold buildHonestBlindVcTriple at hRootSum hPresSum hScopeSum hBoolZeros
+  dsimp only at hRootSum hPresSum hScopeSum hBoolZeros
+  rw [hgAttr, hgMk] at hRootSum hBoolZeros
+  rw [hgPres] at hPresSum
+  rw [hgScope] at hScopeSum
+  have hGetFn : ∀ {α : Type} (f : Fin 3 → α), (Triple3.ofFn f).get = f :=
+    fun f => funext (Triple3.get_ofFn f)
+  rw [hGetFn] at hRootSum hPresSum hScopeSum
+  have hR := vcUnopened_of_sumLane6_3 e hRootSum
+  have hP := vcUnopened_of_sumLane6_3 e hPresSum
+  have hS := vcUnopened_of_sumLane6_3 e hScopeSum
+  unfold completeLane6Shares3 completeZeroShares3 vcPairAtLane6
+  congr 1
+  · exact congrArg Triple3.ofFn hR
+  · exact congrArg Triple3.ofFn hP
+  · exact congrArg Triple3.ofFn hS
+  · rw [List.map_map]
+    have hMapEq : ∀ (bzs : List VcWire3),
+        (∀ t ∈ List.map Triple3.ofFn bzs, vcSum3 t.get = Goldilocks.zero) →
+        List.map Triple3.ofFn bzs =
+          List.map ((fun p : Goldilocks × Goldilocks =>
+            Triple3.ofFn (mkParty3At e p.1 p.2
+              (Goldilocks.sub (Goldilocks.sub Goldilocks.zero p.1) p.2))) ∘
+            (fun w => vcPairAt w e)) bzs := by
+      intro bzs hBZ
+      induction bzs with
+      | nil => rfl
+      | cons z zs ih =>
+        dsimp only [List.map, Function.comp, vcPairAt]
+        have hzSum : vcSum3 z = Goldilocks.zero := by
+          have hm := hBZ (Triple3.ofFn z) (.head _)
+          rwa [hGetFn] at hm
+        have hz0 := vcUnopened_of_sum3 e hzSum
+        rw [← congrArg Triple3.ofFn hz0, ih (fun t ht => hBZ t (.tail _ ht))]
+        rfl
+    exact hMapEq _ hBoolZeros
+
+/-- Every simulated `OpenedBlindVcRep` passes `verifyOpenedBlindVcRep = true` (including
+    `checkPartyPrgTape` on BOTH `viewE` and `viewE1`) whenever `stmt.disclosedAttrs` is strictly ascending. -/
+theorem simulateOpenedBlindVcRep_verifies
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement)
+    (hAsc : vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs = true)
+    (repIdx : Nat) (e : Fin 3)
+    (simRand : RepRandomness stmt.schema.arity stmt.treeDepth) :
+    verifyOpenedBlindVcRep prgExpand stmt.schema stmt.issuerEpoch stmt.treeDepth
+      stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
+      stmt.disclosedAttrs repIdx e (simulateOpenedBlindVcRep prgExpand stmt repIdx e simRand) = true := by
+  let o := simulateOpenedBlindVcRep prgExpand stmt repIdx e simRand
+  obtain ⟨hALen1, hALen2⟩ := simAttrPairs_length e stmt.disclosedAttrs 0 simRand.attrShareCoins
+  obtain ⟨hDisc1, hDisc2⟩ := simAttrPairs_disclosed_ok e hAsc simRand.attrShareCoins
+  let gE := prgExpand stmt.treeDepth repIdx e simRand.seedE
+  let gE1 := prgExpand stmt.treeDepth repIdx (vcNextParty3 e) simRand.seedE1
+  obtain ⟨hMkLen1, hMkLen2⟩ := simMerklePath_length e stmt.issuerEpoch 0 _ simRand.merkleStepCoins
+    gE.merkleCoins gE1.merkleCoins simRand.gateCoins.merkleCoins
+  have hTapeE : checkPartyPrgTape prgExpand stmt.treeDepth repIdx e o.viewE = true := by
+    rw [checkPartyPrgTape.public_eq_1]
+    apply decide_eq_true
+    unfold extractPartyGateCoins
+    dsimp only [o, simulateOpenedBlindVcRep]
+    rw [(extractSponge3Coins_sim e _ _ _ gE.attrCoins gE1.attrCoins _).1,
+        (extractSponge3Coins_sim e _ _ _ gE.presCoins gE1.presCoins _).1,
+        (extractSponge3Coins_sim e _ _ _ gE.scopeCoins gE1.scopeCoins _).1,
+        (extractMerklePathCoins_sim e stmt.issuerEpoch 0 _ _ gE.merkleCoins gE1.merkleCoins _).1]
+  have hTapeE1 : checkPartyPrgTape prgExpand stmt.treeDepth repIdx (vcNextParty3 e) o.viewE1 = true := by
+    rw [checkPartyPrgTape.public_eq_1]
+    apply decide_eq_true
+    unfold extractPartyGateCoins
+    dsimp only [o, simulateOpenedBlindVcRep]
+    rw [(extractSponge3Coins_sim e _ _ _ gE.attrCoins gE1.attrCoins _).2,
+        (extractSponge3Coins_sim e _ _ _ gE.presCoins gE1.presCoins _).2,
+        (extractSponge3Coins_sim e _ _ _ gE.scopeCoins gE1.scopeCoins _).2,
+        (extractMerklePathCoins_sim e stmt.issuerEpoch 0 _ _ gE.merkleCoins gE1.merkleCoins _).2]
+  change verifyOpenedBlindVcRep prgExpand stmt.schema stmt.issuerEpoch stmt.treeDepth
+    stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
+    stmt.disclosedAttrs repIdx e o = true
+  unfold verifyOpenedBlindVcRep
+  dsimp only
+  have hGuardTrue :
+      (decide (o.e = e) &&
+       vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs &&
+       decide (o.viewE.attrShares.length = stmt.schema.arity) &&
+       decide (o.viewE1.attrShares.length = stmt.schema.arity) &&
+       decide (o.viewE.merkleLevels.length = stmt.treeDepth) &&
+       decide (o.viewE1.merkleLevels.length = stmt.treeDepth) &&
+       vcCheckPartyDisclosedShares o.e o.viewE.attrShares stmt.disclosedAttrs &&
+       vcCheckPartyDisclosedShares (vcNextParty3 o.e) o.viewE1.attrShares stmt.disclosedAttrs &&
+       checkPartyPrgTape prgExpand stmt.treeDepth repIdx o.e o.viewE &&
+       checkPartyPrgTape prgExpand stmt.treeDepth repIdx (vcNextParty3 o.e) o.viewE1) = true := by
+    have hoe : o.e = e := rfl
+    have ha1 : o.viewE.attrShares.length = stmt.schema.arity := hALen1
+    have ha2 : o.viewE1.attrShares.length = stmt.schema.arity := hALen2
+    have hm1 : o.viewE.merkleLevels.length = stmt.treeDepth := hMkLen1
+    have hm2 : o.viewE1.merkleLevels.length = stmt.treeDepth := hMkLen2
+    have hd1 : vcCheckPartyDisclosedShares e o.viewE.attrShares stmt.disclosedAttrs = true := hDisc1
+    have hd2 : vcCheckPartyDisclosedShares (vcNextParty3 e) o.viewE1.attrShares stmt.disclosedAttrs = true := hDisc2
+    rw [hoe, decide_eq_true rfl, hAsc,
+        decide_eq_true ha1, decide_eq_true ha2,
+        decide_eq_true hm1, decide_eq_true hm2,
+        hd1, hd2, hTapeE, hTapeE1]
+    rfl
+  rw [hGuardTrue]
+  simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+  dsimp only [o, simulateOpenedBlindVcRep]
+  rw [pairCheckSponge3Perm_sim, pairCheckSponge3Perm_sim, pairCheckSponge3Perm_sim]
+  dsimp only
+  rw [pairCheckMerklePath_sim]
+  dsimp only
+  have hCompletePair : ∀ (target : Lane6) (p : Lane6 × Lane6),
+      vcPairAtLane6 (completeLane6Shares3 e target p).get e = p := by
+    intro target ⟨p1, p2⟩
+    unfold completeLane6Shares3 vcPairAtLane6
+    rw [Triple3.get_ofFn, Triple3.get_ofFn, mkParty3At_e, mkParty3At_next]
+  have hCompleteSum : ∀ (target : Lane6) (p : Lane6 × Lane6),
+      vcSumLane6_3 (completeLane6Shares3 e target p).get = target := by
+    intro target ⟨p1, p2⟩
+    unfold completeLane6Shares3
+    have hGet : (Triple3.ofFn (mkParty3At e p1 p2 (lane6Sub (lane6Sub target p1) p2))).get =
+        mkParty3At e p1 p2 (lane6Sub (lane6Sub target p1) p2) := funext (Triple3.get_ofFn _)
+    rw [hGet, vcSumLane6_3_eq]
+    have hScalar : ∀ (t a b : Goldilocks),
+        vcSum3 (fun i => mkParty3At e a b (Goldilocks.sub (Goldilocks.sub t a) b) i) = t := by
+      intro t a b
+      rw [vcSum3.public_eq_1]
+      rcases fin3_eq_012 e with rfl | rfl | rfl <;>
+        (dsimp only [mkParty3At];
+         rw [← goldOfInt_nat t, ← goldOfInt_nat a, ← goldOfInt_nat b];
+         simp only [goldOfInt_add, goldOfInt_sub]; congr 1; omega)
+    have hProj0 : (fun i => (mkParty3At e p1 p2 (lane6Sub (lane6Sub target p1) p2) i).x0) =
+        (fun i => mkParty3At e p1.x0 p2.x0 (Goldilocks.sub (Goldilocks.sub target.x0 p1.x0) p2.x0) i) := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    have hProj1 : (fun i => (mkParty3At e p1 p2 (lane6Sub (lane6Sub target p1) p2) i).x1) =
+        (fun i => mkParty3At e p1.x1 p2.x1 (Goldilocks.sub (Goldilocks.sub target.x1 p1.x1) p2.x1) i) := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    have hProj2 : (fun i => (mkParty3At e p1 p2 (lane6Sub (lane6Sub target p1) p2) i).x2) =
+        (fun i => mkParty3At e p1.x2 p2.x2 (Goldilocks.sub (Goldilocks.sub target.x2 p1.x2) p2.x2) i) := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    have hProj3 : (fun i => (mkParty3At e p1 p2 (lane6Sub (lane6Sub target p1) p2) i).x3) =
+        (fun i => mkParty3At e p1.x3 p2.x3 (Goldilocks.sub (Goldilocks.sub target.x3 p1.x3) p2.x3) i) := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    have hProj4 : (fun i => (mkParty3At e p1 p2 (lane6Sub (lane6Sub target p1) p2) i).x4) =
+        (fun i => mkParty3At e p1.x4 p2.x4 (Goldilocks.sub (Goldilocks.sub target.x4 p1.x4) p2.x4) i) := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    have hProj5 : (fun i => (mkParty3At e p1 p2 (lane6Sub (lane6Sub target p1) p2) i).x5) =
+        (fun i => mkParty3At e p1.x5 p2.x5 (Goldilocks.sub (Goldilocks.sub target.x5 p1.x5) p2.x5) i) := by
+      funext i; rcases fin3_eq_012 e with rfl | rfl | rfl <;> rcases fin3_eq_012 i with rfl | rfl | rfl <;> rfl
+    rw [hProj0, hProj1, hProj2, hProj3, hProj4, hProj5,
+        hScalar, hScalar, hScalar, hScalar, hScalar, hScalar]
+  have hBzOk : ∀ pairs : List (Goldilocks × Goldilocks),
+      checkBoolZeroOutputs e pairs (completeZeroShares3 e pairs) = true := by
+    intro pairs
+    rw [checkBoolZeroOutputs_spec]
+    refine ⟨?_, ?_⟩
+    · induction pairs with
+      | nil => rfl
+      | cons hd tl ih =>
+        rcases hd with ⟨a, b⟩
+        unfold completeZeroShares3 at ih ⊢
+        dsimp only [List.map]
+        rw [← ih]
+        congr 1
+        unfold vcPairAt
+        rw [Triple3.get_ofFn, Triple3.get_ofFn, mkParty3At_e, mkParty3At_next]
+    · intro t ht
+      obtain ⟨⟨a, b⟩, _, rfl⟩ := List.mem_map.mp ht
+      have hGet : (Triple3.ofFn (mkParty3At e a b (Goldilocks.sub (Goldilocks.sub Goldilocks.zero a) b))).get =
+          mkParty3At e a b (Goldilocks.sub (Goldilocks.sub Goldilocks.zero a) b) := funext (Triple3.get_ofFn _)
+      rw [hGet]
+      rw [vcSum3.public_eq_1]
+      rcases fin3_eq_012 e with rfl | rfl | rfl <;>
+        (dsimp only [mkParty3At];
+         rw [← goldOfInt_nat Goldilocks.zero, ← goldOfInt_nat a, ← goldOfInt_nat b];
+         simp only [goldOfInt_add, goldOfInt_sub]; congr 1; omega)
+  simp only [Bool.and_eq_true]
+  exact ⟨⟨⟨⟨⟨⟨decide_eq_true (hCompletePair _ _), decide_eq_true (hCompleteSum _ _)⟩,
+            decide_eq_true (hCompletePair _ _)⟩, decide_eq_true (hCompleteSum _ _)⟩,
+          decide_eq_true (hCompletePair _ _)⟩, decide_eq_true (hCompleteSum _ _)⟩, hBzOk _⟩
+
+private def sePiCongrRight {ι : Type} {α β : ι → Type}
+    (es : ∀ i, SimpleEquiv (α i) (β i)) :
+    SimpleEquiv (∀ i, α i) (∀ i, β i) where
+  toFun f i := (es i).toFun (f i)
+  invFun g i := (es i).invFun (g i)
+  left_inv f := funext fun i => (es i).left_inv (f i)
+  right_inv g := funext fun i => (es i).right_inv (g i)
+
+/-- Multi-repetition 2-witness indistinguishability bijection (`zkMultiRepViewEquiv`, `0 Classical.choice`):
+    for ANY two valid secret witnesses `wit₁, wit₂` matching the same public statement `stmt` and any
+    challenge vector `chals : Fin R → Fin 3`, maps `wit₁`'s randomness space bijectively onto `wit₂`'s
+    randomness space so that all `R` full `OpenedBlindVcRep` views are **structurally identical**! -/
+def zkMultiRepViewEquiv
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (R : Nat) (stmt : BlindVcPublicStatement)
+    (wit₁ wit₂ : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (chals : Fin R → Fin 3) :
+    SimpleEquiv (Fin R → RepRandomness stmt.schema.arity stmt.treeDepth)
+                (Fin R → RepRandomness stmt.schema.arity stmt.treeDepth) :=
+  sePiCongrRight fun r =>
+    seTrans
+      (zkOpenedRepFullEquiv H prgExpand stmt wit₁ r.val (chals r))
+      (seSymm (zkOpenedRepFullEquiv H prgExpand stmt wit₂ r.val (chals r)))
+
+theorem zkMultiRepViewEquiv_indistinguishable
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (R : Nat) (stmt : BlindVcPublicStatement)
+    (wit₁ wit₂ : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (hValid₁ : BlindVcWitnessValid stmt wit₁)
+    (hValid₂ : BlindVcWitnessValid stmt wit₂)
+    (chals : Fin R → Fin 3)
+    (rands₁ : Fin R → RepRandomness stmt.schema.arity stmt.treeDepth) :
+    let rands₂ := (zkMultiRepViewEquiv H prgExpand R stmt wit₁ wit₂ chals).toFun rands₁
+    ∀ r : Fin R,
+      honestHybrid1Rep H prgExpand stmt wit₁ r.val (chals r) (rands₁ r) =
+        simulateOpenedBlindVcRep prgExpand stmt r.val (chals r)
+          ((zkOpenedRepFullEquiv H prgExpand stmt wit₁ r.val (chals r)).toFun (rands₁ r)) ∧
+      honestHybrid1Rep H prgExpand stmt wit₁ r.val (chals r) (rands₁ r) =
+        honestHybrid1Rep H prgExpand stmt wit₂ r.val (chals r) (rands₂ r) := by
+  intro rands₂ r
+  have h1 := zkOpenedRepFullEquiv_simulates H prgExpand stmt wit₁ hValid₁ r.val (chals r) (rands₁ r)
+  have h2 := zkOpenedRepFullEquiv_simulates H prgExpand stmt wit₂ hValid₂ r.val (chals r) (rands₂ r)
+  refine ⟨h1, ?_⟩
+  rw [h1, h2]
+  dsimp only [rands₂, zkMultiRepViewEquiv, sePiCongrRight, seTrans, seSymm]
+  rw [(zkOpenedRepFullEquiv H prgExpand stmt wit₂ r.val (chals r)).right_inv]
+
+def vecOfListPad : (n : Nat) → List UInt8 → Vec UInt8 n
+  | 0, _ => .nil
+  | n + 1, [] => .cons 0 (vecOfListPad n [])
+  | n + 1, b :: bs => .cons b (vecOfListPad n bs)
+
+private theorem vecOfListPad_toList :
+    ∀ {n : Nat} {bs : List UInt8},
+      bs.length = n → (vecOfListPad n bs).toList = bs
+  | 0, [], _ => rfl
+  | n + 1, b :: bs, hLen => by
+    simp only [List.length_cons, Nat.add_right_cancel_iff] at hLen
+    simp only [vecOfListPad, Vec.toList]
+    rw [vecOfListPad_toList hLen]
+
+private theorem buildHonestBlindVcTriple_views_and_outs
+    (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (seeds₁ seeds₂ salts₁ salts₂ : Fin 3 → Vec UInt8 32)
+    (attrCoins : Vec (Goldilocks × Goldilocks) stmt.schema.arity)
+    (hbCoins pbCoins : Lane4 × Lane4)
+    (mkCoins : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) stmt.treeDepth)
+    (gateCoins3 : Fin 3 → PartyGateCoins stmt.treeDepth)
+    (e : Fin 3)
+    (hsE : seeds₁ e = seeds₂ e)
+    (hsE1 : seeds₁ (vcNextParty3 e) = seeds₂ (vcNextParty3 e))
+    (htE : salts₁ e = salts₂ e)
+    (htE1 : salts₁ (vcNextParty3 e) = salts₂ (vcNextParty3 e)) :
+    let tr₁ := buildHonestBlindVcTriple stmt wit seeds₁ salts₁ attrCoins hbCoins pbCoins mkCoins gateCoins3
+    let tr₂ := buildHonestBlindVcTriple stmt wit seeds₂ salts₂ attrCoins hbCoins pbCoins mkCoins gateCoins3
+    tr₁.views e = tr₂.views e ∧
+    tr₁.views (vcNextParty3 e) = tr₂.views (vcNextParty3 e) ∧
+    tr₁.finalOuts = tr₂.finalOuts := by
+  dsimp only [buildHonestBlindVcTriple]
+  rw [hsE, hsE1, htE, htE1]
+  exact ⟨rfl, rfl, rfl⟩
+
+/-- Connect real-world PRG prover (`honestPrgTriple`, Hybrid 0) unconditionally to `honestHybrid1Rep`
+    and `simulateOpenedBlindVcRep`: for EVERY 32-byte hash `H` and EVERY `(seeds, salts)` triple,
+    opening `honestPrgTriple` at `e` equals `honestHybrid1Rep` (and hence `simulateOpenedBlindVcRep`
+    for valid witnesses) across all fields of `OpenedBlindVcRep`! -/
+theorem openBlindVcRep_honestPrgTriple_eq_hybrid1
+    {H : List UInt8 → List UInt8} (hH32 : ∀ m, (H m).length = 32)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (repIdx : Nat) (e : Fin 3)
+    (seeds salts : Fin 3 → Vec UInt8 32)
+    (attrCoins : Vec (Goldilocks × Goldilocks) stmt.schema.arity)
+    (hbCoins pbCoins : Lane4 × Lane4)
+    (mkCoins : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) stmt.treeDepth) :
+    let e1 := vcNextParty3 e
+    let e2 := vcUnopenedParty3 e
+    let tr := honestPrgTriple prgExpand stmt wit repIdx seeds salts attrCoins hbCoins pbCoins mkCoins
+    let gE := prgExpand stmt.treeDepth repIdx e (seeds e)
+    let gE1 := prgExpand stmt.treeDepth repIdx e1 (seeds e1)
+    let gU := prgExpand stmt.treeDepth repIdx e2 (seeds e2)
+    let tr₀ := buildHonestBlindVcTriple stmt wit
+      (mkParty3At e (seeds e) (seeds e1) (Vec.replicate 32 0))
+      (mkParty3At e (salts e) (salts e1) (Vec.replicate 32 0))
+      attrCoins hbCoins pbCoins mkCoins (mkParty3At e gE gE1 gU)
+    let rawComU := vcCommitPartyView H stmt.presNonce repIdx e2 (tr₀.views e2)
+      (vcPartyFinalOutAt tr₀.finalOuts e2)
+    let realComU := vcCommitPartyView H stmt.presNonce repIdx e2 (tr.views e2)
+      (vcPartyFinalOutAt tr.finalOuts e2)
+    openBlindVcRep H stmt.presNonce repIdx tr e =
+      honestHybrid1Rep H prgExpand stmt wit repIdx e
+        { seedE := seeds e
+          seedE1 := seeds e1
+          saltE := salts e
+          saltE1 := salts e1
+          attrShareCoins := attrCoins
+          holderBlindCoins := hbCoins
+          presBlindCoins := pbCoins
+          merkleStepCoins := mkCoins
+          gateCoins := gU
+          unopenedCommitCoins := xorBytesWithVec rawComU (vecOfListPad 32 realComU) } := by
+  intro e1 e2 tr gE gE1 gU tr₀ rawComU realComU
+  have hGateEq : (fun i => prgExpand stmt.treeDepth repIdx i (seeds i)) = mkParty3At e gE gE1 gU :=
+    (mkParty3At_eta e (fun i => prgExpand stmt.treeDepth repIdx i (seeds i))).symm
+  have hTrEq : tr = buildHonestBlindVcTriple stmt wit seeds salts attrCoins hbCoins pbCoins mkCoins
+      (mkParty3At e gE gE1 gU) := by
+    dsimp only [tr, honestPrgTriple]
+    rw [hGateEq]
+  obtain ⟨hvE, hvE1, hFo⟩ := buildHonestBlindVcTriple_views_and_outs stmt wit
+    seeds (mkParty3At e (seeds e) (seeds e1) (Vec.replicate 32 0))
+    salts (mkParty3At e (salts e) (salts e1) (Vec.replicate 32 0))
+    attrCoins hbCoins pbCoins mkCoins (mkParty3At e gE gE1 gU) e
+    (mkParty3At_e e (seeds e) (seeds e1) _).symm
+    (mkParty3At_next e (seeds e) (seeds e1) _).symm
+    (mkParty3At_e e (salts e) (salts e1) _).symm
+    (mkParty3At_next e (salts e) (salts e1) _).symm
+  have hReal32 : realComU.length = 32 := by
+    simp only [realComU, vcCommitPartyView.public_eq_1]
+    exact hH32 _
+  unfold openBlindVcRep honestHybrid1Rep
+  dsimp only [e1, e2, gE, gE1, gU, tr₀, rawComU]
+  rw [xorBytesWithVec_involutive, vecOfListPad_toList hReal32]
+  dsimp only [realComU, e1, e2]
+  rw [hTrEq, hvE, hvE1, hFo]
+
+/-- Every opened repetition of `honestPrgTriple` for a valid witness passes `verifyOpenedBlindVcRep = true`
+    (for arbitrary `H`, `prgExpand`, `seeds`, and `salts`). -/
+theorem openBlindVcRep_honestPrgTriple_verifies
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (hValid : BlindVcWitnessValid stmt wit)
+    (repIdx : Nat) (e : Fin 3)
+    (seeds salts : Fin 3 → Vec UInt8 32)
+    (attrCoins : Vec (Goldilocks × Goldilocks) stmt.schema.arity)
+    (hbCoins pbCoins : Lane4 × Lane4)
+    (mkCoins : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) stmt.treeDepth) :
+    verifyOpenedBlindVcRep prgExpand stmt.schema stmt.issuerEpoch stmt.treeDepth
+      stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
+      stmt.disclosedAttrs repIdx e
+      (openBlindVcRep H stmt.presNonce repIdx
+        (honestPrgTriple prgExpand stmt wit repIdx seeds salts attrCoins hbCoins pbCoins mkCoins) e) = true := by
+  let e1 := vcNextParty3 e
+  let e2 := vcUnopenedParty3 e
+  let gE := prgExpand stmt.treeDepth repIdx e (seeds e)
+  let gE1 := prgExpand stmt.treeDepth repIdx e1 (seeds e1)
+  let gU := prgExpand stmt.treeDepth repIdx e2 (seeds e2)
+  let hRand0 : RepRandomness stmt.schema.arity stmt.treeDepth :=
+    { seedE := seeds e
+      seedE1 := seeds e1
+      saltE := salts e
+      saltE1 := salts e1
+      attrShareCoins := attrCoins
+      holderBlindCoins := hbCoins
+      presBlindCoins := pbCoins
+      merkleStepCoins := mkCoins
+      gateCoins := gU
+      unopenedCommitCoins := Vec.replicate 32 0 }
+  let oReal := openBlindVcRep H stmt.presNonce repIdx
+    (honestPrgTriple prgExpand stmt wit repIdx seeds salts attrCoins hbCoins pbCoins mkCoins) e
+  let oHyb := honestHybrid1Rep H prgExpand stmt wit repIdx e hRand0
+  have hIgnoreUc : verifyOpenedBlindVcRep prgExpand stmt.schema stmt.issuerEpoch stmt.treeDepth
+      stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
+      stmt.disclosedAttrs repIdx e oReal =
+      verifyOpenedBlindVcRep prgExpand stmt.schema stmt.issuerEpoch stmt.treeDepth
+        stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
+        stmt.disclosedAttrs repIdx e { oReal with unopenedCommit := oHyb.unopenedCommit } := rfl
+  have hOpenedEq : { oReal with unopenedCommit := oHyb.unopenedCommit } = oHyb := by
+    have hGateEq : (fun i => prgExpand stmt.treeDepth repIdx i (seeds i)) = mkParty3At e gE gE1 gU :=
+      (mkParty3At_eta e (fun i => prgExpand stmt.treeDepth repIdx i (seeds i))).symm
+    obtain ⟨hvE, hvE1, hFo⟩ := buildHonestBlindVcTriple_views_and_outs stmt wit
+      seeds (mkParty3At e (seeds e) (seeds e1) (Vec.replicate 32 0))
+      salts (mkParty3At e (salts e) (salts e1) (Vec.replicate 32 0))
+      attrCoins hbCoins pbCoins mkCoins (mkParty3At e gE gE1 gU) e
+      (mkParty3At_e e (seeds e) (seeds e1) _).symm
+      (mkParty3At_next e (seeds e) (seeds e1) _).symm
+      (mkParty3At_e e (salts e) (salts e1) _).symm
+      (mkParty3At_next e (salts e) (salts e1) _).symm
+    dsimp only [oReal, oHyb, openBlindVcRep, honestHybrid1Rep, honestPrgTriple, hRand0, e1, e2, gE, gE1, gU]
+    rw [hGateEq, hvE, hvE1, hFo]
+  change verifyOpenedBlindVcRep prgExpand stmt.schema stmt.issuerEpoch stmt.treeDepth
+    stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
+    stmt.disclosedAttrs repIdx e oReal = true
+  rw [hIgnoreUc, hOpenedEq]
+  dsimp only [oHyb]
+  rw [zkOpenedRepFullEquiv_simulates H prgExpand stmt wit hValid repIdx e hRand0]
+  exact simulateOpenedBlindVcRep_verifies prgExpand stmt hValid.1 repIdx e _
+
+/-! #### 2-Phase Fiat-Shamir Prover (`proveBlindVcPresentation`), Flagship Theorem, `#tooth` & Inhabitedness -/
+
+/-- Per-repetition prover randomness `(seeds, salts, wire share coins)` for `proveBlindVcPresentation`. -/
+structure ProverRepCoins (arity treeDepth : Nat) where
+  seeds : Fin 3 → Vec UInt8 32
+  salts : Fin 3 → Vec UInt8 32
+  attrCoins : Vec (Goldilocks × Goldilocks) arity
+  hbCoins : Lane4 × Lane4
+  pbCoins : Lane4 × Lane4
+  mkCoins : Vec ((Goldilocks × Goldilocks) × (Lane6 × Lane6)) treeDepth
+
+def buildProverTriplesFrom
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (proverCoins : Nat → ProverRepCoins stmt.schema.arity stmt.treeDepth) :
+    Nat → Nat → List BlindVcRepTriple
+  | _, 0 => []
+  | repIdx, count + 1 =>
+    let c := proverCoins repIdx
+    honestPrgTriple prgExpand stmt wit repIdx c.seeds c.salts c.attrCoins c.hbCoins c.pbCoins c.mkCoins ::
+      buildProverTriplesFrom prgExpand stmt wit proverCoins (repIdx + 1) count
+
+def tripleRound1 (H : List UInt8 → List UInt8) (presNonce : Vec UInt8 32)
+    (repIdx : Nat) (tr : BlindVcRepTriple) : Triple3 (List UInt8) × VcRepFinalOuts3 :=
+  (Triple3.ofFn (fun i => vcCommitPartyView H presNonce repIdx i (tr.views i)
+     (vcPartyFinalOutAt tripleFinal i)),
+   tr.finalOuts)
+where
+  tripleFinal := tr.finalOuts
+
+def allTripleRound1From (H : List UInt8 → List UInt8) (presNonce : Vec UInt8 32) :
+    Nat → List BlindVcRepTriple → List (Triple3 (List UInt8) × VcRepFinalOuts3)
+  | _, [] => []
+  | repIdx, tr :: rest => tripleRound1 H presNonce repIdx tr ::
+      allTripleRound1From H presNonce (repIdx + 1) rest
+
+def openAllTriplesFrom (H : List UInt8 → List UInt8) (presNonce : Vec UInt8 32)
+    (trDigest : List UInt8) : Nat → List BlindVcRepTriple → List OpenedBlindVcRep
+  | _, [] => []
+  | repIdx, tr :: rest =>
+    openBlindVcRep H presNonce repIdx tr (deriveBlindVcChallengeAt H trDigest repIdx) ::
+      openAllTriplesFrom H presNonce trDigest (repIdx + 1) rest
+
+/-- Constructive 2-phase Fiat-Shamir prover (`prove_selective_disclosure_with_profile`, `blind_vc.rs:1960-2118`):
+    1. Executes all `profile.repetitions` 3-party ZKBoo instances from PRG seeds and commits all 3 party views;
+    2. Derives `"QSAG.FS.INIT/ABSORB/SQUEEZE.V1"` Fiat-Shamir challenges `e_r ∈ {0, 1, 2}` from the full Round-1 bundle;
+    3. Opens `(view[e_r], view[(e_r + 1) % 3], com[(e_r + 2) % 3], finalOuts)`. -/
+def proveBlindVcPresentation
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (profile : ZkSoundnessProfile)
+    (stmt : BlindVcPublicStatement)
+    (issuerRootTag : Vec UInt8 32)
+    (verifierChallenge : List UInt8)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (proverCoins : Nat → ProverRepCoins stmt.schema.arity stmt.treeDepth) :
+    BlindVcPresentation :=
+  let triples := buildProverTriplesFrom prgExpand stmt wit proverCoins 0 profile.repetitions
+  let allRound1 := allTripleRound1From H stmt.presNonce 0 triples
+  let trDigest := deriveBlindVcTranscriptDigest H verifierChallenge profile stmt.schema stmt.treeDepth
+    stmt.presNonce issuerRootTag stmt.issuerEpoch
+    stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
+    stmt.disclosedAttrs allRound1
+  { presentationNonce := stmt.presNonce
+    issuerEpoch := stmt.issuerEpoch
+    schemaId := stmt.schema.schemaId
+    accumulatorRoot := stmt.accumulatorRoot
+    issuerRootTag := issuerRootTag
+    verifierScopeLimbs := stmt.verifierScopeLimbs
+    disclosedAttrs := stmt.disclosedAttrs
+    presCommit := stmt.presCommit
+    scopeTag := stmt.scopeTag
+    openedReps := openAllTriplesFrom H stmt.presNonce trDigest 0 triples }
+
+private theorem buildProverTriplesFrom_length
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (proverCoins : Nat → ProverRepCoins stmt.schema.arity stmt.treeDepth) :
+    ∀ (repIdx count : Nat),
+      (buildProverTriplesFrom prgExpand stmt wit proverCoins repIdx count).length = count
+  | _, 0 => rfl
+  | repIdx, count + 1 => by
+    dsimp only [buildProverTriplesFrom, List.length_cons]
+    rw [buildProverTriplesFrom_length prgExpand stmt wit proverCoins (repIdx + 1) count]
+
+private theorem openAllTriplesFrom_length (H : List UInt8 → List UInt8)
+    (presNonce : Vec UInt8 32) (trDigest : List UInt8) :
+    ∀ (repIdx : Nat) (trs : List BlindVcRepTriple),
+      (openAllTriplesFrom H presNonce trDigest repIdx trs).length = trs.length
+  | _, [] => rfl
+  | repIdx, _ :: rest => by
+    dsimp only [openAllTriplesFrom, List.length_cons]
+    rw [openAllTriplesFrom_length H presNonce trDigest (repIdx + 1) rest]
+
+private theorem reconstructAllRepRound1_openAllTriplesFrom (H : List UInt8 → List UInt8)
+    (presNonce : Vec UInt8 32) (trDigest : List UInt8) :
+    ∀ (repIdx : Nat) (trs : List BlindVcRepTriple),
+      reconstructAllRepRound1 H presNonce repIdx (openAllTriplesFrom H presNonce trDigest repIdx trs) =
+        allTripleRound1From H presNonce repIdx trs
+  | _, [] => rfl
+  | repIdx, tr :: rest => by
+    dsimp only [openAllTriplesFrom, reconstructAllRepRound1, allTripleRound1From,
+      tripleRound1, tripleRound1.tripleFinal]
+    rw [reconstructRepRound1_openBlindVcRep,
+        reconstructAllRepRound1_openAllTriplesFrom H presNonce trDigest (repIdx + 1) rest]
+
+private theorem verifyAllBlindVcReps_proverTriples
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (hValid : BlindVcWitnessValid stmt wit)
+    (proverCoins : Nat → ProverRepCoins stmt.schema.arity stmt.treeDepth)
+    (trDigest : List UInt8) :
+    ∀ (repIdx count : Nat),
+      verifyAllBlindVcReps H prgExpand trDigest stmt.schema stmt.issuerEpoch stmt.treeDepth
+        stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
+        stmt.disclosedAttrs repIdx
+        (openAllTriplesFrom H stmt.presNonce trDigest repIdx
+          (buildProverTriplesFrom prgExpand stmt wit proverCoins repIdx count)) = true
+  | _, 0 => rfl
+  | repIdx, count + 1 => by
+    dsimp only [buildProverTriplesFrom, openAllTriplesFrom, verifyAllBlindVcReps]
+    rw [openBlindVcRep_honestPrgTriple_verifies H prgExpand stmt wit hValid repIdx
+          (deriveBlindVcChallengeAt H trDigest repIdx),
+        verifyAllBlindVcReps_proverTriples H prgExpand stmt wit hValid proverCoins trDigest (repIdx + 1) count]
+    rfl
+
+/-- **2-Phase Fiat-Shamir Prover Completeness (`proveBlindVcPresentation_verifies`)**:
+    For EVERY hash `H`, PRG `prgExpand`, soundness profile `profile`, and valid secret witness `wit`,
+    `proveBlindVcPresentation` produces `profile.repetitions` opened repetitions accepted by
+    `verifyBlindVcPresentation = true`! -/
+theorem proveBlindVcPresentation_verifies
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (profile : ZkSoundnessProfile)
+    (stmt : BlindVcPublicStatement)
+    (issuerRootTag : Vec UInt8 32)
+    (verifierChallenge : List UInt8)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (hValid : BlindVcWitnessValid stmt wit)
+    (proverCoins : Nat → ProverRepCoins stmt.schema.arity stmt.treeDepth) :
+    let pres := proveBlindVcPresentation H prgExpand profile stmt issuerRootTag verifierChallenge wit proverCoins
+    pres.openedReps.length = profile.repetitions ∧
+    verifyBlindVcPresentation H prgExpand profile stmt.schema stmt.treeDepth verifierChallenge pres = true := by
+  intro pres
+  have hLen : pres.openedReps.length = profile.repetitions := by
+    dsimp only [pres, proveBlindVcPresentation]
+    rw [openAllTriplesFrom_length, buildProverTriplesFrom_length]
+  refine ⟨hLen, ?_⟩
+  unfold verifyBlindVcPresentation
+  have hTopGuard :
+      (decide (pres.schemaId = stmt.schema.schemaId) &&
+       vcCheckDisclosedStrictAsc stmt.schema.arity pres.disclosedAttrs &&
+       decide (pres.openedReps.length = profile.repetitions)) = true := by
+    have hSid : pres.schemaId = stmt.schema.schemaId := rfl
+    have hDisc : pres.disclosedAttrs = stmt.disclosedAttrs := rfl
+    rw [hSid, decide_eq_true rfl, hDisc, hValid.1, decide_eq_true hLen]
+    rfl
+  rw [hTopGuard]
+  dsimp only [Bool.not_true, ↓reduceIte, pres, proveBlindVcPresentation]
+  rw [reconstructAllRepRound1_openAllTriplesFrom]
+  exact verifyAllBlindVcReps_proverTriples H prgExpand stmt wit hValid proverCoins _ 0 profile.repetitions
+
+/-- Verifier-enforced structural invariants extracted directly from `verifyBlindVcPresentation = true`
+    (strict ascending `Nodup` and `profile.repetitions` are checked inside the verifier). -/
+theorem verifyBlindVcPresentation_enforces_guards
+    {H : List UInt8 → List UInt8}
+    {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
+    {profile : ZkSoundnessProfile}
+    {expectedSchema : VcSchema} {treeDepth : Nat}
+    {verifierChallenge : List UInt8}
+    {pres : BlindVcPresentation}
+    (hVer : verifyBlindVcPresentation H prgExpand profile expectedSchema treeDepth verifierChallenge pres = true) :
+    pres.schemaId = expectedSchema.schemaId ∧
+    pres.openedReps.length = profile.repetitions ∧
+    (∀ p ∈ pres.disclosedAttrs, p.1 < expectedSchema.arity) ∧
+    (pres.disclosedAttrs.map Prod.fst).Nodup := by
+  unfold verifyBlindVcPresentation at hVer
+  cases hG :
+      (decide (pres.schemaId = expectedSchema.schemaId) &&
+       vcCheckDisclosedStrictAsc expectedSchema.arity pres.disclosedAttrs &&
+       decide (pres.openedReps.length = profile.repetitions)) with
+  | false => rw [hG] at hVer; cases hVer
+  | true =>
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hG
+    obtain ⟨hBounds, hNodup⟩ := vcCheckDisclosedStrictAsc_bounds_and_nodup hG.1.2
+    exact ⟨hG.1.1, hG.2, hBounds, hNodup⟩
+
+set_option exponentiation.threshold 1024 in
+/-- Verifier checks, prover completeness, commitment-bound special soundness,
+repetition parameter arithmetic, and hybrid-1 fixed-challenge simulation.
+The hiding component uses independent hidden tapes and an independently masked
+unopened commitment. This theorem does not prove the real-to-hybrid PRG and
+commitment-hiding hops, or adaptive ROM/QROM security. -/
+theorem blind_vc_zkboo_selective_disclosure_sound_and_hiding
+    {H : List UInt8 → List UInt8}
+    (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D) :
+    -- (1) Verifier-enforced schema, repetition count, `< arity` bounds, and `Nodup`
+    (∀ (profile : ZkSoundnessProfile) (expectedSchema : VcSchema) (treeDepth : Nat)
+       (verifierChallenge : List UInt8) (pres : BlindVcPresentation),
+      verifyBlindVcPresentation H prgExpand profile expectedSchema treeDepth verifierChallenge pres = true →
+      pres.schemaId = expectedSchema.schemaId ∧
+      pres.openedReps.length = profile.repetitions ∧
+      (∀ p ∈ pres.disclosedAttrs, p.1 < expectedSchema.arity) ∧
+      (pres.disclosedAttrs.map Prod.fst).Nodup) ∧
+    -- (2) Constructive 2-phase Fiat-Shamir prover completeness
+    (∀ (profile : ZkSoundnessProfile) (stmt : BlindVcPublicStatement)
+       (issuerRootTag : Vec UInt8 32) (verifierChallenge : List UInt8)
+       (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth),
+      BlindVcWitnessValid stmt wit →
+      ∀ proverCoins,
+        verifyBlindVcPresentation H prgExpand profile stmt.schema stmt.treeDepth verifierChallenge
+          (proveBlindVcPresentation H prgExpand profile stmt issuerRootTag verifierChallenge wit proverCoins) = true) ∧
+    -- (3) Round-1 commitment-bound 3-challenge special soundness (zero external `Nodup` premise)
+    (∀ (presNonce : Vec UInt8 32) (schema : VcSchema) (issuerEpoch : UInt64) (treeDepth : Nat)
+       (accRoot presCommit scopeTag : Lane6) (verifierScopeLimbs : Lane4)
+       (disclosed : List (Nat × Goldilocks)) (repIdx : Nat),
+      ∀ (o0 o1 o2 : OpenedBlindVcRep),
+        reconstructRepRound1 H presNonce repIdx o0 = reconstructRepRound1 H presNonce repIdx o1 →
+        reconstructRepRound1 H presNonce repIdx o1 = reconstructRepRound1 H presNonce repIdx o2 →
+        verifyOpenedBlindVcRep prgExpand schema issuerEpoch treeDepth
+          accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx 0 o0 = true →
+        verifyOpenedBlindVcRep prgExpand schema issuerEpoch treeDepth
+          accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx 1 o1 = true →
+        verifyOpenedBlindVcRep prgExpand schema issuerEpoch treeDepth
+          accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx 2 o2 = true →
+        (∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂) ∨
+        ∃ (attrs : List Goldilocks) (holderBlind presBlind : Lane4)
+          (leafCommit : Lane6) (boolSteps : List (Bool × Lane6)),
+          (disclosed.map Prod.fst).Nodup ∧
+          attrs.length = schema.arity ∧
+          (∀ p ∈ disclosed, p.1 < schema.arity ∧ attrs[p.1]? = some p.2) ∧
+          computeVcPoseidon2Commit schema attrs holderBlind vcAttrCommitTag = some leafCommit ∧
+          boolSteps.length = treeDepth ∧
+          evalVcMerklePathBool issuerEpoch 0 leafCommit boolSteps = accRoot ∧
+          computeVcPoseidon2Commit schema attrs presBlind vcPresCommitTag = some presCommit ∧
+          computeVcScopeTag schema.schemaId holderBlind verifierScopeLimbs = scopeTag) ∧
+    -- (4) Fixed-challenge survival count and repetition parameter arithmetic
+    ((∀ bad : Fin 3, ((List.finRange 3).filter (fun e => vcUnopenedParty3 e == bad)).length = 1 ∧
+       ((List.finRange 3).filter (fun e => vcUnopenedParty3 e != bad)).length = 2) ∧
+     ZkSoundnessProfile.classical128.repetitions = 219 ∧
+     ZkSoundnessProfile.quantum128.repetitions = 438 ∧
+     ratLe (2 ^ ZkSoundnessProfile.classical128.repetitions, 3 ^ ZkSoundnessProfile.classical128.repetitions) (1, 2 ^ 128) ∧
+     ratLe (1, 2 ^ 130) (2 ^ ZkSoundnessProfile.classical128.repetitions, 3 ^ ZkSoundnessProfile.classical128.repetitions) ∧
+     ratLe (2 ^ ZkSoundnessProfile.quantum128.repetitions, 3 ^ ZkSoundnessProfile.quantum128.repetitions) (1, 2 ^ 256)) ∧
+    -- (5) Full `OpenedBlindVcRep` simulation & multi-rep 2-witness indistinguishability
+    (∀ (R : Nat) (stmt : BlindVcPublicStatement)
+       (wit₁ wit₂ : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth),
+      BlindVcWitnessValid stmt wit₁ →
+      BlindVcWitnessValid stmt wit₂ →
+      ∀ (chals : Fin R → Fin 3) (rands₁ : Fin R → RepRandomness stmt.schema.arity stmt.treeDepth) (r : Fin R),
+        let rands₂ := (zkMultiRepViewEquiv H prgExpand R stmt wit₁ wit₂ chals).toFun rands₁
+        honestHybrid1Rep H prgExpand stmt wit₁ r.val (chals r) (rands₁ r) =
+          simulateOpenedBlindVcRep prgExpand stmt r.val (chals r)
+            ((zkOpenedRepFullEquiv H prgExpand stmt wit₁ r.val (chals r)).toFun (rands₁ r)) ∧
+        honestHybrid1Rep H prgExpand stmt wit₁ r.val (chals r) (rands₁ r) =
+          honestHybrid1Rep H prgExpand stmt wit₂ r.val (chals r) (rands₂ r)) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · intro profile expectedSchema treeDepth verifierChallenge pres hVer
+    exact verifyBlindVcPresentation_enforces_guards hVer
+  · intro profile stmt issuerRootTag verifierChallenge wit hValid proverCoins
+    exact (proveBlindVcPresentation_verifies H prgExpand profile stmt issuerRootTag verifierChallenge wit hValid proverCoins).2
+  · intro presNonce schema issuerEpoch treeDepth accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx
+      o0 o1 o2 hR1_01 hR1_12 hV0 hV1 hV2
+    exact verifyOpenedBlindVcRep_extract3_from_rewound hHLen hR1_01 hR1_12 hV0 hV1 hV2
+  · refine ⟨?_, zkSoundnessProfile_rom_vs_qrom_bounds.1, zkSoundnessProfile_rom_vs_qrom_bounds.2.1,
+      zkSoundnessProfile_rom_vs_qrom_bounds.2.2.2.1, zkSoundnessProfile_rom_vs_qrom_bounds.2.2.2.2.1,
+      zkSoundnessProfile_rom_vs_qrom_bounds.2.2.2.2.2⟩
+    intro bad
+    rcases fin3_eq_012 bad with rfl | rfl | rfl <;> decide
+  · intro R stmt wit₁ wit₂ hV1 hV2 chals rands₁ r
+    exact zkMultiRepViewEquiv_indistinguishable H prgExpand R stmt wit₁ wit₂ hV1 hV2 chals rands₁ r
+
+/-- **`#tooth` (`tooth_blind_vc_wrong_schema_or_challenge_rejected`)**:
+    Mutation-sensitivity witness proving that:
+    1. Wrong `schemaId` (`pres.schemaId ≠ expectedSchema.schemaId`) deterministically rejects;
+    2. Duplicate disclosed index (`pres.disclosedAttrs = [(0, v₁), (0, v₂)]`) deterministically rejects;
+    3. Profile downgrade (`pres.openedReps.length = 219` against `.quantum128` requiring `438`) deterministically rejects;
+    4. Wrong repetition challenge (`o.e ≠ expectedE`) deterministically rejects `verifyOpenedBlindVcRep`. -/
+theorem tooth_blind_vc_wrong_schema_or_challenge_rejected
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (expectedSchema : VcSchema) (treeDepth : Nat) (verifierChallenge : List UInt8) :
+    (∀ pres : BlindVcPresentation,
+      pres.schemaId ≠ expectedSchema.schemaId →
+      verifyBlindVcPresentation H prgExpand .quantum128 expectedSchema treeDepth verifierChallenge pres = false) ∧
+    (∀ (pres : BlindVcPresentation) (v₁ v₂ : Goldilocks),
+      pres.disclosedAttrs = [(0, v₁), (0, v₂)] →
+      verifyBlindVcPresentation H prgExpand .quantum128 expectedSchema treeDepth verifierChallenge pres = false) ∧
+    (∀ pres : BlindVcPresentation,
+      pres.openedReps.length = ZkSoundnessProfile.classical128.repetitions →
+      verifyBlindVcPresentation H prgExpand .quantum128 expectedSchema treeDepth verifierChallenge pres = false) ∧
+    (∀ (issuerEpoch : UInt64) (accRoot presCommit scopeTag : Lane6) (verifierScopeLimbs : Lane4)
+       (disclosed : List (Nat × Goldilocks)) (repIdx : Nat) (expectedE : Fin 3) (o : OpenedBlindVcRep),
+      o.e ≠ expectedE →
+      verifyOpenedBlindVcRep prgExpand expectedSchema issuerEpoch treeDepth
+        accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx expectedE o = false) := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro pres hNe
+    unfold verifyBlindVcPresentation
+    rw [decide_eq_false hNe]
+    rfl
+  · intro pres v₁ v₂ hDisc
+    unfold verifyBlindVcPresentation
+    have hAscFalse : vcCheckDisclosedStrictAsc expectedSchema.arity [(0, v₁), (0, v₂)] = false := by
+      unfold vcCheckDisclosedStrictAsc vcCheckDisclosedStrictAscAux
+      simp
+    rw [hDisc, hAscFalse]
+    simp
+  · intro pres hLen219
+    unfold verifyBlindVcPresentation
+    have hNe : pres.openedReps.length ≠ ZkSoundnessProfile.quantum128.repetitions := by
+      rw [hLen219]; decide
+    rw [decide_eq_false hNe]
+    simp
+  · intro issuerEpoch accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx expectedE o hNe
+    unfold verifyOpenedBlindVcRep
+    dsimp only
+    rw [decide_eq_false hNe]
+    rfl
+
+/-- Concrete 32-byte SP 800-185 (`0x04`-delimited) Keccak-f[1600] XOF evaluator:
+    on every non-empty domain tag `tag`, `vcKeccakSponge32 (cshake256FramedPreimage tag frames)`
+    equals `cshake256FramedBytes tag frames` byte-for-byte (`keccak.rs:291-295`). -/
+def vcKeccakSponge32 (pre : List UInt8) : List UInt8 :=
+  squeezeXofAux 32 (absorbPadded (padForRate pre 0x04))
+
+theorem vcKeccakSponge32_eq_cshake256FramedBytes {tag : List UInt8} (hNonEmpty : tag ≠ [])
+    (frames : List (List UInt8)) :
+    vcKeccakSponge32 (cshake256FramedPreimage tag frames) = cshake256FramedBytes tag frames := by
+  rw [cshake256FramedBytes_eq_sponge, ite_false_of hNonEmpty]
+  rfl
+
+theorem vcKeccakSponge32_length (pre : List UInt8) : (vcKeccakSponge32 pre).length = 32 := by
+  unfold vcKeccakSponge32
+  exact squeezeXofAux_length 32 _
+
+/-- **Concrete `Quantum128` (`438`-Repetition) Inhabitedness Witness (`blind_vc_presentation_inhabited`)**:
+    Instantiates the full 2-phase Fiat-Shamir prover & verifier over `vcKeccakSponge32`,
+    `"QSAG.VC.ZKBOO_R.V1"` `vcExpandPartyCoins`, `ZkSoundnessProfile.quantum128` (`438` repetitions),
+    `vcAccumulatorDepth = 20`, and non-empty selective disclosure `[(0, 42)]`
+    (with **ZERO** `fun _ _ _ => 0` constant-challenge mocks!). -/
+theorem blind_vc_presentation_inhabited :
+    ∃ (schema : VcSchema) (pres : BlindVcPresentation),
+      schema = ⟨1, 2, by decide, by decide⟩ ∧
+      pres.openedReps.length = 438 ∧
+      pres.disclosedAttrs = [(0, Goldilocks.ofNat 42)] ∧
+      verifyBlindVcPresentation vcKeccakSponge32 vcExpandPartyCoins .quantum128
+        schema vcAccumulatorDepth [0xA5, 0x5A] pres = true := by
+  let schema : VcSchema := ⟨1, 2, by decide, by decide⟩
+  let attrsVec : Vec Goldilocks 2 := .cons (Goldilocks.ofNat 42) (.cons (Goldilocks.ofNat 99) .nil)
+  let hb : Lane4 := ⟨Goldilocks.ofNat 7, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+  let pb : Lane4 := ⟨Goldilocks.ofNat 11, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+  let mkSteps : Vec (Bool × Lane6) vcAccumulatorDepth := Vec.replicate vcAccumulatorDepth (false, lane6Zero)
+  let ac := vcCommitChunks schema attrsVec.toList hb vcAttrCommitTag
+  let leaf : Lane6 := state12Rate6 (absorbRate6Sponge3 ac.1 ac.2.1 ac.2.2)
+  let pc := vcCommitChunks schema attrsVec.toList pb vcPresCommitTag
+  let presCom : Lane6 := state12Rate6 (absorbRate6Sponge3 pc.1 pc.2.1 pc.2.2)
+  let scopeLimbs : Lane4 := ⟨Goldilocks.ofNat 3, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+  let stmt : BlindVcPublicStatement :=
+    { schema := schema
+      treeDepth := vcAccumulatorDepth
+      presNonce := Vec.replicate 32 0x11
+      issuerEpoch := 1
+      accumulatorRoot := evalVcMerklePathBool 1 0 leaf mkSteps.toList
+      presCommit := presCom
+      scopeTag := computeVcScopeTag schema.schemaId hb scopeLimbs
+      verifierScopeLimbs := scopeLimbs
+      disclosedAttrs := [(0, Goldilocks.ofNat 42)] }
+  let wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth :=
+    { attrs := attrsVec
+      holderBlind := hb
+      presBlind := pb
+      merkleSteps := mkSteps }
+  have hValid : BlindVcWitnessValid stmt wit := by
+    refine ⟨?_, ?_, ⟨leaf, ?_, rfl⟩, ?_, rfl⟩
+    · simp [stmt, schema, vcCheckDisclosedStrictAsc, vcCheckDisclosedStrictAscAux]
+    · intro p hp
+      rcases List.mem_cons.mp hp with rfl | hNil
+      · simp only [wit, attrsVec, Vec.toList, List.getElem?_cons_zero]
+      · cases hNil
+    · dsimp only [stmt, wit]
+      unfold computeVcPoseidon2Commit
+      rw [ite_true_of (Vec.toList_length attrsVec)]
+    · dsimp only [stmt, wit]
+      unfold computeVcPoseidon2Commit
+      rw [ite_true_of (Vec.toList_length attrsVec)]
+  let zeroCoins : Nat → ProverRepCoins stmt.schema.arity stmt.treeDepth := fun _ =>
+    { seeds := fun i => Vec.replicate 32 (UInt8.ofNat (i.val + 1))
+      salts := fun i => Vec.replicate 32 (UInt8.ofNat (i.val + 17))
+      attrCoins := Vec.replicate 2 (Goldilocks.zero, Goldilocks.zero)
+      hbCoins := (lane4Zero, lane4Zero)
+      pbCoins := (lane4Zero, lane4Zero)
+      mkCoins := Vec.replicate vcAccumulatorDepth ((Goldilocks.zero, Goldilocks.zero), (lane6Zero, lane6Zero)) }
+  let pres := proveBlindVcPresentation vcKeccakSponge32 vcExpandPartyCoins .quantum128
+    stmt (Vec.replicate 32 0x22) [0xA5, 0x5A] wit zeroCoins
+  obtain ⟨hLen, hVer⟩ := proveBlindVcPresentation_verifies vcKeccakSponge32 vcExpandPartyCoins .quantum128
+    stmt (Vec.replicate 32 0x22) [0xA5, 0x5A] wit hValid zeroCoins
+  exact ⟨schema, pres, rfl, hLen, rfl, hVer⟩
+
+
+/-! ## Relying-party verification against an authenticated issuer context -/
+
+/-- What the relying party trusts before it sees a presentation. -/
+structure BlindVcTrustedContext where
+  accumulatorRoot : Lane6
+  issuerRootTag : Vec UInt8 32
+  issuerEpoch : UInt64
+  verifierScopeLimbs : Lane4
+
+/-- Presentation verifier for a relying party. The issuer context is supplied by the
+    verifier and compared before any transcript is derived, so a prover cannot present
+    membership in a tree of its own making. -/
+def verifyBlindVcPresentationTrusted
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (profile : ZkSoundnessProfile)
+    (trusted : BlindVcTrustedContext)
+    (expectedSchema : VcSchema) (treeDepth : Nat)
+    (verifierChallenge : List UInt8)
+    (pres : BlindVcPresentation) : Bool :=
+  decide (pres.accumulatorRoot = trusted.accumulatorRoot ∧
+    pres.issuerRootTag = trusted.issuerRootTag ∧
+    pres.issuerEpoch = trusted.issuerEpoch ∧
+    pres.verifierScopeLimbs = trusted.verifierScopeLimbs) &&
+  verifyBlindVcPresentation H prgExpand profile expectedSchema treeDepth verifierChallenge pres
+
+/-- An accepted presentation carries exactly the trusted context and satisfies the relation
+    verifier, so every soundness statement about `verifyBlindVcPresentation` applies to it
+    with the verifier's own root, issuer tag, epoch and scope. -/
+theorem verifyBlindVcPresentationTrusted_context
+    {H : List UInt8 → List UInt8}
+    {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
+    {profile : ZkSoundnessProfile} {trusted : BlindVcTrustedContext}
+    {expectedSchema : VcSchema} {treeDepth : Nat} {verifierChallenge : List UInt8}
+    {pres : BlindVcPresentation}
+    (h : verifyBlindVcPresentationTrusted H prgExpand profile trusted expectedSchema treeDepth
+      verifierChallenge pres = true) :
+    pres.accumulatorRoot = trusted.accumulatorRoot ∧
+    pres.issuerRootTag = trusted.issuerRootTag ∧
+    pres.issuerEpoch = trusted.issuerEpoch ∧
+    pres.verifierScopeLimbs = trusted.verifierScopeLimbs ∧
+    verifyBlindVcPresentation H prgExpand profile expectedSchema treeDepth
+      verifierChallenge pres = true := by
+  unfold verifyBlindVcPresentationTrusted at h
+  rw [Bool.and_eq_true] at h
+  obtain ⟨h1, h2, h3, h4⟩ := of_decide_eq_true h.1
+  exact ⟨h1, h2, h3, h4, h.2⟩
+
+/-- A presentation built over any other accumulator root is rejected, whatever proof it
+    carries. -/
+theorem tooth_verifyBlindVcPresentationTrusted_foreign_root
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (profile : ZkSoundnessProfile) (trusted : BlindVcTrustedContext)
+    (expectedSchema : VcSchema) (treeDepth : Nat) (verifierChallenge : List UInt8)
+    (pres : BlindVcPresentation)
+    (hRoot : pres.accumulatorRoot ≠ trusted.accumulatorRoot) :
+    verifyBlindVcPresentationTrusted H prgExpand profile trusted expectedSchema treeDepth
+      verifierChallenge pres = false := by
+  cases h : verifyBlindVcPresentationTrusted H prgExpand profile trusted expectedSchema
+      treeDepth verifierChallenge pres with
+  | false => rfl
+  | true => exact False.elim (hRoot (verifyBlindVcPresentationTrusted_context h).1)
+
+/-- The honest prover is accepted under the context of its own public statement. -/
+theorem proveBlindVcPresentation_verifies_trusted
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (profile : ZkSoundnessProfile)
+    (stmt : BlindVcPublicStatement)
+    (issuerRootTag : Vec UInt8 32)
+    (verifierChallenge : List UInt8)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth)
+    (hValid : BlindVcWitnessValid stmt wit)
+    (proverCoins : Nat → ProverRepCoins stmt.schema.arity stmt.treeDepth) :
+    verifyBlindVcPresentationTrusted H prgExpand profile
+      ⟨stmt.accumulatorRoot, issuerRootTag, stmt.issuerEpoch, stmt.verifierScopeLimbs⟩
+      stmt.schema stmt.treeDepth verifierChallenge
+      (proveBlindVcPresentation H prgExpand profile stmt issuerRootTag verifierChallenge wit
+        proverCoins) = true := by
+  obtain ⟨_, hVer⟩ := proveBlindVcPresentation_verifies H prgExpand profile stmt issuerRootTag
+    verifierChallenge wit hValid proverCoins
+  unfold verifyBlindVcPresentationTrusted
+  rw [hVer, Bool.and_true]
+  exact decide_eq_true ⟨rfl, rfl, rfl, rfl⟩
+
+theorem blindVcWitnessValid_iff (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth) :
+    BlindVcWitnessValid stmt wit ↔
+      (vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs = true ∧
+      (∀ p ∈ stmt.disclosedAttrs, wit.attrs.toList[p.1]? = some p.2) ∧
+      (∃ leaf : Lane6,
+        computeVcPoseidon2Commit stmt.schema wit.attrs.toList wit.holderBlind vcAttrCommitTag =
+          some leaf ∧
+        evalVcMerklePathBool stmt.issuerEpoch 0 leaf wit.merkleSteps.toList =
+          stmt.accumulatorRoot) ∧
+      computeVcPoseidon2Commit stmt.schema wit.attrs.toList wit.presBlind vcPresCommitTag =
+        some stmt.presCommit ∧
+      computeVcScopeTag stmt.schema.schemaId wit.holderBlind stmt.verifierScopeLimbs =
+        stmt.scopeTag) := Iff.rfl
+
+#tooth_pair verifyBlindVcPresentationTrusted_context vs tooth_verifyBlindVcPresentationTrusted_foreign_root
+
+#verify_constructive blind_vc_zkboo_selective_disclosure_sound_and_hiding
+
+
+end Qsag
+end

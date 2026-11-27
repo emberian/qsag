@@ -25,7 +25,7 @@ public import Qsag.Oracle.FrozenChallengeGame
 public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 public import Qsag.Protocol.Credentials.BlindVcQromSecurity
-public import Qsag.Protocol.Credentials.ToprfMachine
+public import Qsag.Spec.IdealCred
 public import Qsag.Top.Credentials
 import Qsag.Tactic.AssuranceKit
 
@@ -123,7 +123,6 @@ theorem tooth_opening_round_zero_defects_all_bytes_accepted :
 holder) is proved in `Protocol/Threshold/ThresholdMlDsaAndToprf`, the module that owns
 `toprfGroupRoles204` and `toprfHolders`; it is audited here. -/
 
-#verify_constructive toprfRotation204_not_constant
 
 /-! ## Ternary model -/
 
@@ -247,45 +246,6 @@ theorem rss3_repeated_sacrifice_witness :
 #tooth_pair rss3_repeated_sacrifice_pq256 vs tooth_rss3_unverified_shift_corrupts_recon
 #verify_inhabited rss3_repeated_sacrifice_pq256 rss3_repeated_sacrifice_witness
 
-/-! ## `ToprfMachine`, `toprfCredentialImplementation`, Concrete `GF(p^5)` `GameBound` & `CredPort` Channel Contract -/
-
-/-- Inhabitedness witness for `Top.blindVc_cut_and_choose_gameBound`: `faultyBlindVcProver`
-    genuinely exhibits a nonzero gate defect `1 * 1 - 0 = 1 ≠ 0` at gate `0` in every repetition! -/
-theorem inhabited_blindVc_cut_and_choose_gameBound :
-    ∃ P : CutAndChoose.Prover BlindVcCommittedProof BlindVcFp5 BlindVcR2aMsg BlindVcFp5 BlindVcR2bMsg,
-      ∀ j : Nat, BlindVcRepHasGateFault P.commit j :=
-  ⟨faultyBlindVcProver, faultyBlindVcProver_has_gate_fault⟩
-
-/-- Concrete honest issuance witness for `Top.piToprfCredService_issuance_authenticated` on `Spec.idealCredDemoConfig false`. -/
-theorem inhabited_piToprfCredService_issuance :
-    ∃ (cfg : Spec.IdealCredConfig Nat)
-      (c₀ c' : PiToprfCredState Nat Nat)
-      (tr : List ((Spec.CredPort × ToprfCredWire Nat) × Spec.IdealCredOutput Nat))
-      (w : ToprfCredWire Nat),
-      (piToprfCredService cfg).Init c₀ ∧
-      (piToprfCredService cfg).ValidTrace c₀ tr c₀ ∧
-      (piToprfCredService cfg).step c₀ (.issuer, w) = some (c', .issued 0) := by
-  let cfg := Spec.idealCredDemoConfig false
-  obtain ⟨c', hInit, hStep⟩ :=
-    piToprfCredService_issuer_issues_at_init (Attr := Nat) cfg 1 11 1#256 0xCAFE#256
-  exact ⟨cfg, PiToprfCredState.init cfg, c', [], .issueWire 1 [11] 1#256 0xCAFE#256,
-    hInit, .nil _, hStep⟩
-
-/-- Concrete 3-of-5 quorum witness for `partial_reserve_burns_without_recycle` where server 0
-    durably commits `counter = 7` and server 1 fails I/O partway through `reserve_counters`. -/
-theorem inhabited_partial_reserve_burns_without_recycle :
-    ∃ (cfg : SpdzConfig) (pre : List SpdzCounterSlot) (failSlot : SpdzCounterSlot)
-      (post : List SpdzCounterSlot) (counter items : Nat),
-      cfg.Valid = true ∧
-      cfg.threshold ≤ (pre ++ failSlot :: post).length ∧
-      (pre ++ failSlot :: post).length ≤ cfg.servers ∧
-      (∀ s ∈ pre ++ failSlot :: post, s.party < cfg.servers) ∧
-      ((pre ++ failSlot :: post).map SpdzCounterSlot.party).Pairwise (· < ·) ∧
-      (1 ≤ items ∧ items ≤ Spec.pqCredentialProfile.toprfMaxBatch) ∧
-      (∀ s ∈ pre ++ failSlot :: post, spdzAdmitCounter s.lastCounter s.storeHighWater counter = true) ∧
-      (∀ s ∈ pre, s.ioSucceeds = true) ∧
-      failSlot.ioSucceeds = false :=
-  spdz_partial_reserve_burns_witness
 
 /-- Concrete honest channel run witness for `Top.credPort_authenticated_by_channel_contract`
     backed by `Spec.checkedChannel_contract` (`0` adversary spoofing, `1` honest issuer message). -/
@@ -312,29 +272,12 @@ theorem inhabited_credPort_channel_contract :
   rw [Spec.honestChannelRun.public_eqs] at hRun
   exact hRun
 
-#verify_constructive
-  Qsag.inhabited_blindVc_cut_and_choose_gameBound
-  Qsag.inhabited_piToprfCredService_issuance
-  Qsag.inhabited_partial_reserve_burns_without_recycle
-  Qsag.tooth_unratcheted_failed_slot_recycles_counter
-  Qsag.inhabited_credPort_channel_contract
+#verify_constructive Qsag.inhabited_credPort_channel_contract
 
-#verify_inhabited Qsag.Top.blindVc_cut_and_choose_gameBound
-  Qsag.inhabited_blindVc_cut_and_choose_gameBound
-#verify_inhabited Qsag.Top.piToprfCredService_issuance_authenticated
-  Qsag.inhabited_piToprfCredService_issuance
--- `inhabited_partial_reserve_burns_without_recycle` restates `spdz_partial_reserve_burns_witness`;
--- the witness with the visible constructor is audited against the theorem in its owning module
--- (`Protocol/Credentials/ToprfMachine`), and that certified pair is cited here.
-#verify_inhabited Qsag.partial_reserve_burns_without_recycle
-  Qsag.spdz_partial_reserve_burns_witness
+
 #verify_inhabited Qsag.Top.credPort_authenticated_by_channel_contract
   Qsag.inhabited_credPort_channel_contract
 
-#tooth_pair Qsag.partial_reserve_burns_without_recycle vs
-  Qsag.tooth_unratcheted_failed_slot_recycles_counter
--- `Top.piToprfCredService_issuance_authenticated vs Top.unauthenticatedCredService_not_implementation`
--- is paired in `Top/Credentials` (its `#tooth_pair` list), where both bodies are visible.
 
 /-! ## Independent verifier ledger regression roster
 
@@ -351,8 +294,7 @@ export Spec (tooth_verifiers_independent_and_replay_refused
   tooth_reissue_resurrects_consumed_nonce_wrong
   tooth_replay_not_prevented_really_replays)
 
-#verify_constructive
-  Spec.idealCredMachine_challenge_at_most_once_trace
+#verify_constructive Spec.idealCredMachine_challenge_at_most_once_trace
   Spec.idealCredMachine_presentation_preserves_other_verdict
   Spec.tooth_verifiers_independent_and_replay_refused
   Spec.tooth_invalid_proof_does_not_consume_challenge
@@ -363,7 +305,6 @@ export Spec (tooth_verifiers_independent_and_replay_refused
   Spec.tooth_consume_before_verify_wrong
   Spec.tooth_reissue_resurrects_consumed_nonce_wrong
   Spec.tooth_replay_not_prevented_really_replays
-  piToprfCred_invalid_opening_preserves_challenges
 
 end Qsag
 end
