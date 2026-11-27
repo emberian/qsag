@@ -1,4 +1,5 @@
 module
+public import QsagWhirVerified.CanopyCount
 public import QsagWhirVerified.Canonical
 public import Qsag.Protocol.Aggregation.Aggregation
 public import Qsag.Protocol.Aggregation.ZkHemV2
@@ -7,13 +8,11 @@ public import Qsag.Protocol.Aggregation.PublicHemQuintic128
 public import Qsag.Protocol.Aggregation.QuinticMultiStageWhir
 import Qsag.Tactic.AssuranceKit
 /-!
-# `QsagWhirVerified.ProtocolWeld` — Full 54/54 Canonical Closure & Protocol-Level Quintic WHIR Welds
+# Protocol-level quintic WHIR refinements
 
-Completes the canonical `Qsag` refinement bridge between `QsagWhirVerified` (50 extracted Rust
-items and 4 loop helpers = 54 definitions in `QsagWhirVerified.Funs`) and the canonical quintic
-aggregation specifications:
+Relates the arithmetic and protocol checks to canonical quintic aggregation specifications.
 
-1. **100% Canonical `Qsag` Symbol Closure (54/54 `Funs.lean` Definitions):**
+1. **Canonical field and protocol operations**
    Welds every extracted constant, byte loader, canonical wire decoder, base & quintic `Fp5`
    ring/Frobenius operation, folding/bridge/sumcheck/Horner kernel, Canopy Merkle (`400`-bit &
    `Poseidon2-GL-w24`), quorum sum, `QSAGHQM2` envelope header, and `[16, 28]` quintic schedule
