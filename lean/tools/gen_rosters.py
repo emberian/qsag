@@ -88,7 +88,7 @@ infra = [m for m in ordered if is_infrastructure(m)]
 # every re-export module owns zero declarations in the compiled environment.
 check_only = {
     "Qsag.Tests.ApologyRetirementTeeth",
-    "Qsag.Tests.RecursiveAggregationTeeth",
+    "Qsag.Tests.QromCoherentOracleTests",
 }
 reexport = [m for m in ordered if not is_infrastructure(m) and (m in check_only or is_reexport(m))]
 proof = [m for m in ordered if m not in infra and m not in reexport]
