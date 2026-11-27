@@ -9,9 +9,11 @@
       "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.impl.ack_bitmap",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:2036 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs"
@@ -24,9 +26,11 @@
       "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.ack_count",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:2037 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs"
@@ -43,9 +47,11 @@
         "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:2038 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs"
@@ -58,9 +64,11 @@
       "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.impl.guard_key_commit",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1864 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
@@ -71,9 +79,14 @@
       "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.is_poisoned",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1762 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1885 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:2008 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:2039 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs",
@@ -87,9 +100,11 @@
       "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.n",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1949 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
@@ -107,7 +122,7 @@
         "aeneas/lean/QsagVerified/Proofs/RealSpecBeltWeld.lean"
       ],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1631 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1633 (assoc)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -123,10 +138,23 @@
       "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.next_epoch",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1068 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1098 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1304 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1316 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1710 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1742 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1745 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1810 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1840 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:2311 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:2636 (method-lexical)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -139,9 +167,11 @@
       "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.phase",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:2019 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -158,9 +188,12 @@
         "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1815 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1884 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs"
@@ -173,9 +206,12 @@
       "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.q",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1949 (method-lexical)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1952 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
@@ -190,9 +226,11 @@
         "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:2005 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs"
@@ -211,9 +249,11 @@
       "lean_weld_modules": [
         "aeneas/lean/QsagVerified/Proofs/RealSpecBeltWeld.lean"
       ],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1661 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "spec-welded",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -233,8 +273,8 @@
       "production_call_sites": [
         "crates/qsag-quorum/src/access.rs:480 (path)",
         "crates/qsag-quorum/src/access.rs:507 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1910 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1957 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1920 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1971 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -254,8 +294,8 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1651 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1857 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1653 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1867 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -271,10 +311,61 @@
       "lean_definition": "belt_latch_kernel.BeltLatchKernel.bind",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1085 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1246 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1428 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1471 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1478 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1483 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1506 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1509 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1525 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1536 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1540 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1557 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1569 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1575 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1584 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1595 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1603 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1612 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1618 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1624 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1628 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1637 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1651 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1658 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1666 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1670 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1678 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1684 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1689 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1693 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1706 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1710 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1719 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1753 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1795 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1796 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1799 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1854 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1890 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1891 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1896 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1897 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1913 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1914 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1915 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1923 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1930 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1945 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1990 (method-lexical)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs"
       ]
@@ -286,9 +377,13 @@
       "lean_definition": "belt_latch_kernel.BeltLatchKernel.impl.capacity_limit",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1078 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1184 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1219 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
@@ -299,9 +394,12 @@
       "lean_definition": "belt_latch_kernel.BeltLatchKernel.impl.has_in_flight",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1171 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1221 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs"
@@ -314,10 +412,22 @@
       "lean_definition": "belt_latch_kernel.BeltLatchKernel.impl.in_flight",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1222 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1476 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1515 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1530 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1554 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1607 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1724 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1801 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:2053 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:2144 (method-lexical)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs"
       ]
@@ -329,10 +439,21 @@
       "lean_definition": "belt_latch_kernel.BeltLatchKernel.is_wal_poisoned",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1004 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1129 (assoc)",
+        "crates/qsag-core/src/belt_latch.rs:1133 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1224 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
+      "status": "direct",
+      "test_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1474 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1512 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1528 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1529 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1553 (method-lexical)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs"
       ]
@@ -344,9 +465,11 @@
       "lean_definition": "belt_latch_kernel.BeltLatchKernel.new_empty",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1101 (assoc)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs"
@@ -359,10 +482,27 @@
       "lean_definition": "belt_latch_kernel.BeltLatchKernel.impl.next_epoch",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1181 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1189 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1220 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1476 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1513 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1516 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1531 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1555 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1606 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1615 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1621 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1640 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:1645 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:2052 (method-lexical)",
+        "crates/qsag-core/src/belt_latch.rs:2143 (method-lexical)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -376,7 +516,8 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/belt_latch.rs:1126 (path)"
+        "crates/qsag-core/src/belt_latch.rs:1113 (assoc)",
+        "crates/qsag-core/src/belt_latch.rs:1228 (assoc)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -393,13 +534,17 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::belt_latch_kernel::BeltLatchKernel::bind",
+        "edge": "definite"
+      },
       "same_named_production_fns": [],
-      "status": "unreferenced",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:363",
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:354",
       "extracted": true,
       "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::family_quarantined",
       "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.family_quarantined",
@@ -422,31 +567,16 @@
         "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-hd/src/zero_gate.rs:128 (method-lexical)"
-      ],
+      "production_call_sites": [],
       "same_named_production_fns": [],
-      "status": "direct-lexical",
+      "status": "proof-only",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:353",
-      "extracted": true,
-      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::frozen_peer_commitment",
-      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.frozen_peer_commitment",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:358",
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:349",
       "extracted": true,
       "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::modulus_q",
       "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.modulus_q",
@@ -467,11 +597,9 @@
         "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-hd/src/zero_gate.rs:45 (assoc)"
-      ],
+      "production_call_sites": [],
       "same_named_production_fns": [],
-      "status": "direct",
+      "status": "proof-only",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -486,34 +614,48 @@
         "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-hd/src/zero_gate.rs:117 (method-lexical)",
-        "crates/qsag-hd/src/zero_gate.rs:135 (method-lexical)"
-      ],
+      "production_call_sites": [],
       "same_named_production_fns": [],
-      "status": "direct-lexical",
+      "status": "proof-only",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:348",
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:344",
       "extracted": true,
       "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::phase",
       "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.phase",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::phase",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:343",
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:359",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::quarantine",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.quarantine",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:339",
       "extracted": true,
       "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::session_id",
       "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.session_id",
@@ -536,18 +678,16 @@
         "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-hd/src/zero_gate.rs:151 (method-lexical)"
-      ],
+      "production_call_sites": [],
       "same_named_production_fns": [],
-      "status": "direct-lexical",
+      "status": "proof-only",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:253",
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:249",
       "extracted": true,
       "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::abort_in_place",
       "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.abort_in_place",
@@ -568,11 +708,17 @@
       "extracted": true,
       "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::aborted",
       "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.impl.aborted",
-      "lean_proof_modules": [],
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecGuardBoundary.lean"
+      ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share_into",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -583,11 +729,15 @@
       "extracted": true,
       "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::attempt",
       "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.impl.attempt",
-      "lean_proof_modules": [],
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecGuardBoundary.lean"
+      ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/threshold_mldsa.rs:2085 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
@@ -616,11 +766,17 @@
       "extracted": true,
       "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::released",
       "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.impl.released",
-      "lean_proof_modules": [],
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecGuardBoundary.lean"
+      ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share_into",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -634,7 +790,8 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-cred/src/threshold_mldsa.rs:2577 (method-lexical)"
+        "crates/qsag-cred/src/threshold_mldsa.rs:2084 (method-lexical)",
+        "crates/qsag-cred/src/threshold_mldsa.rs:2595 (method-lexical)"
       ],
       "same_named_production_fns": [],
       "status": "direct-lexical",
@@ -655,8 +812,12 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share_into",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -744,7 +905,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:267",
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:263",
       "extracted": true,
       "function": "qsag_verified::cred_and_hd_guards::toprf_majority_of_3_goldilocks",
       "lean_definition": "cred_and_hd_guards.toprf_majority_of_3_goldilocks",
@@ -752,11 +913,9 @@
         "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-cred/src/toprf_engine.rs:208 (path)"
-      ],
+      "production_call_sites": [],
       "same_named_production_fns": [],
-      "status": "direct",
+      "status": "proof-only",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -770,7 +929,7 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/fips205.rs:293 (path)"
+        "crates/qsag-core/src/fips205.rs:297 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -791,7 +950,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/fips205.rs:289 (path)"
+        "crates/qsag-core/src/fips205.rs:293 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -829,7 +988,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/fips205.rs:305 (path)"
+        "crates/qsag-core/src/fips205.rs:309 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -850,7 +1009,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/fips205.rs:293 (path)"
+        "crates/qsag-core/src/fips205.rs:289 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -870,10 +1029,14 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::fips205::fips205_wots_chain",
+        "edge": "definite"
+      },
       "same_named_production_fns": [
-        "crates/qsag-core/src/fips205.rs:1033"
+        "crates/qsag-core/src/fips205.rs:1038"
       ],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -890,9 +1053,11 @@
         "aeneas/lean/QsagVerified/Proofs/Tsw.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/fips205.rs:2065 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -908,9 +1073,11 @@
         "aeneas/lean/QsagVerified/Proofs/Wots.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/fips205.rs:1151 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -926,9 +1093,11 @@
         "aeneas/lean/QsagVerified/Proofs/Tsw.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/tsw_baggy.rs:498 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -945,9 +1114,12 @@
         "aeneas/lean/QsagVerified/Proofs/Tsw.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/tsw_baggy.rs:580 (path)",
+        "crates/qsag-core/src/tsw_baggy.rs:611 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -964,8 +1136,12 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::fips205::fips205_wots_checksum",
+        "edge": "definite"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -981,323 +1157,8 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "proof-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:246",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::intermediate_mac_verified",
-      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.intermediate_mac_verified",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:286",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::is_quarantined",
-      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.is_quarantined",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:171 (method-lexical)",
-        "crates/qsag-fts/src/release_gate.rs:174 (method-lexical)",
-        "crates/qsag-fts/src/release_gate.rs:371 (method-lexical)"
-      ],
-      "same_named_production_fns": [],
-      "status": "direct-lexical",
-      "test_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:560 (method-lexical)",
-        "crates/qsag-fts/src/release_gate.rs:563 (method-lexical)"
-      ],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:263",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::new_spn48_evaluated",
-      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.new_spn48_evaluated",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/CallerContracts.lean",
-        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:148 (assoc)",
-        "crates/qsag-fts/src/release_gate.rs:227 (assoc)"
-      ],
-      "same_named_production_fns": [],
-      "status": "direct",
-      "test_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:548 (assoc)",
-        "crates/qsag-fts/src/release_gate.rs:577 (assoc)"
-      ],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:251",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::output_released",
-      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.output_released",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:256",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::quarantined",
-      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.quarantined",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:345",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::release_spn_output",
-      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.release_spn_output",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:320 (method-lexical)"
-      ],
-      "same_named_production_fns": [],
-      "status": "direct-lexical",
-      "test_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:566 (method-lexical)"
-      ],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:236",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::session_id",
-      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.session_id",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:162 (method-lexical)",
-        "crates/qsag-fts/src/release_gate.rs:334 (method-lexical)"
-      ],
-      "same_named_production_fns": [],
-      "status": "direct-lexical",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/opening_guard.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:241",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::spn_rounds_completed",
-      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.spn_rounds_completed",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:292",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::verify_intermediate_mac",
-      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.verify_intermediate_mac",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:163 (method-lexical)",
-        "crates/qsag-fts/src/release_gate.rs:280 (method-lexical)"
-      ],
-      "same_named_production_fns": [],
-      "status": "direct-lexical",
-      "test_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:558 (method-lexical)",
-        "crates/qsag-fts/src/release_gate.rs:589 (method-lexical)"
-      ],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:119",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::consume_epoch_once",
-      "lean_definition": "fts_spn_guard.FtsEpochGuard.consume_epoch_once",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "proof-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:84",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::epoch",
-      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.epoch",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:79",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::key_id",
-      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.key_id",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:89",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::max_epochs",
-      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.max_epochs",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:106",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::new_unused",
-      "lean_definition": "fts_spn_guard.FtsEpochGuard.new_unused",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-fts/src/parallel_mpc.rs:1340 (path)",
-        "crates/qsag-fts/src/sign_session.rs:146 (path)"
-      ],
-      "same_named_production_fns": [],
-      "status": "direct",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:99",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::poisoned",
-      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.poisoned",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:94",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::used",
-      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.used",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:56",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::FtsEpochPermit::into_binding",
-      "lean_definition": "fts_spn_guard.FtsEpochPermit.into_binding",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:202",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::wots_cs_verify_68_array",
-      "lean_definition": "fts_spn_guard.wots_cs_verify_68_array",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "proof-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:179",
-      "extracted": true,
-      "function": "qsag_verified::fts_spn_guard::wots_cs_verify_68_w5_sum136",
-      "lean_definition": "fts_spn_guard.wots_cs_verify_68_w5_sum136",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
       "reached_via": {
-        "caller": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::release_spn_output",
+        "caller": "qsag_verified::fips205::fips205_wots_checksum",
         "edge": "definite"
       },
       "same_named_production_fns": [],
@@ -1542,6 +1403,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
+        "crates/qsag-accel/src/poseidon2.rs:84 (path)",
         "crates/qsag-core/src/field/goldilocks.rs:244 (path)"
       ],
       "same_named_production_fns": [],
@@ -1619,7 +1481,6 @@
       "function": "qsag_verified::keccak::Shake256Sponge::absorb",
       "lean_definition": "keccak.Shake256Sponge.absorb",
       "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
         "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
         "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean",
         "aeneas/lean/QsagVerified/Proofs/Sponge.lean",
@@ -1674,11 +1535,13 @@
         "aeneas/lean/QsagVerified/Proofs/SpongeFraming.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-cred/src/toprf_engine.rs:266 (path)"
-      ],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::keccak::cshake256_32",
+        "edge": "definite"
+      },
       "same_named_production_fns": [],
-      "status": "direct",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs"
@@ -1690,7 +1553,6 @@
       "function": "qsag_verified::keccak::Shake256Sponge::new_shake256",
       "lean_definition": "keccak.Shake256Sponge.new_shake256",
       "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
         "aeneas/lean/QsagVerified/Proofs/Hash.lean",
         "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
         "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean",
@@ -1745,12 +1607,14 @@
         "aeneas/lean/QsagVerified/Proofs/SpongeFraming.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [
-        "crates/qsag-agg/src/sponge.rs:1161",
-        "crates/qsag-core/src/sponge/keccak.rs:670"
+      "production_call_sites": [
+        "crates/qsag-core/src/baggy.rs:1446 (path)"
       ],
-      "status": "proof-only",
+      "same_named_production_fns": [
+        "crates/qsag-agg/src/sponge.rs:739",
+        "crates/qsag-core/src/sponge/keccak.rs:599"
+      ],
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -1770,19 +1634,20 @@
       "lean_weld_modules": [
         "aeneas/lean/QsagVerified/Proofs/RealSpecKeccakWeld.lean"
       ],
-      "production_call_sites": [],
-      "reached_via": {
-        "caller": "qsag_verified::keccak::Shake256Sponge::new_cshake256",
-        "edge": "definite"
-      },
+      "production_call_sites": [
+        "crates/qsag-accel/src/keccak.rs:10 (re-export)",
+        "crates/qsag-accel/src/keccak.rs:222 (call)",
+        "crates/qsag-accel/src/keccak.rs:232 (call)",
+        "crates/qsag-accel/src/keccak.rs:243 (call)",
+        "crates/qsag-accel/src/keccak.rs:252 (call)"
+      ],
       "same_named_production_fns": [
-        "crates/qsag-accel/src/keccak.rs:32",
-        "crates/qsag-agg/src/sponge.rs:35",
-        "crates/qsag-core/src/sponge/keccak.rs:50",
         "crates/qsag-migrate/src/hem/hash.rs:1173"
       ],
-      "status": "reached",
-      "test_call_sites": [],
+      "status": "direct",
+      "test_call_sites": [
+        "crates/qsag-accel/src/keccak.rs:512 (call)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -1807,13 +1672,11 @@
       "lean_weld_modules": [
         "aeneas/lean/QsagVerified/Proofs/RealSpecKeccakWeld.lean"
       ],
-      "production_call_sites": [],
-      "reached_via": {
-        "caller": "qsag_verified::keccak::keccak_f1600",
-        "edge": "definite"
-      },
+      "production_call_sites": [
+        "crates/qsag-accel/src/keccak.rs:17 (call)"
+      ],
       "same_named_production_fns": [],
-      "status": "reached",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
@@ -1827,15 +1690,15 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:1119 (path)"
+        "crates/qsag-addr/src/lib.rs:1132 (path)"
       ],
       "same_named_production_fns": [
-        "crates/qsag-core/src/sponge/keccak.rs:680"
+        "crates/qsag-core/src/sponge/keccak.rs:609"
       ],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/audit_tests.rs:545 (path)",
-        "crates/qsag-addr/src/lib.rs:2019 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:543 (path)",
+        "crates/qsag-addr/src/lib.rs:2032 (path)",
         "crates/qsag-hd/tests/hybrid_framing.rs:29 (path)"
       ],
       "verified_crate_tests": [
@@ -1853,7 +1716,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:294 (method-lexical)"
+        "crates/qsag-policy/src/guard.rs:722 (method-lexical)"
       ],
       "same_named_production_fns": [],
       "status": "direct-lexical",
@@ -1889,7 +1752,6 @@
       "status": "test-only",
       "test_call_sites": [],
       "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
         "aeneas/qsag-verified/tests/opening_guard.rs"
       ]
     },
@@ -1903,9 +1765,8 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:236 (assoc)",
-        "crates/qsag-policy/src/lib.rs:1173 (path)",
-        "crates/qsag-quorum/src/party_node.rs:1663 (path)"
+        "crates/qsag-policy/src/guard.rs:720 (assoc)",
+        "crates/qsag-quorum/src/party_node.rs:1694 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -1924,13 +1785,12 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:295 (method-lexical)"
+        "crates/qsag-policy/src/guard.rs:724 (method-lexical)"
       ],
       "same_named_production_fns": [],
       "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
         "aeneas/qsag-verified/tests/opening_guard.rs"
       ]
     },
@@ -1941,11 +1801,9 @@
       "lean_definition": "opening_guard.OpeningReleasePermit.impl.openings",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:336 (method-lexical)"
-      ],
+      "production_call_sites": [],
       "same_named_production_fns": [],
-      "status": "direct-lexical",
+      "status": "test-only",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/opening_guard.rs"
@@ -1958,11 +1816,9 @@
       "lean_definition": "opening_guard.OpeningReleasePermit.impl.round_id",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:335 (method-lexical)"
-      ],
+      "production_call_sites": [],
       "same_named_production_fns": [],
-      "status": "direct-lexical",
+      "status": "test-only",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/opening_guard.rs"
@@ -1976,8 +1832,7 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-fts/src/release_gate.rs:162 (method-lexical)",
-        "crates/qsag-fts/src/release_gate.rs:334 (method-lexical)"
+        "crates/qsag-policy/src/guard.rs:742 (method-lexical)"
       ],
       "same_named_production_fns": [],
       "status": "direct-lexical",
@@ -1987,7 +1842,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:277",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:257",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::ack_count",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.ack_count",
@@ -1998,15 +1853,19 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::ack_count",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:419",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:399",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::authorize_shares",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.authorize_shares",
@@ -2016,15 +1875,19 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::authorize_shares",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:267",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:247",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::bound_epoch",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch",
@@ -2035,13 +1898,17 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::propose_or_retry_epoch",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:272",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:252",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::bound_msg_tag",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag",
@@ -2052,39 +1919,17 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::record_custodian_ack",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:232",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::f",
-      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.f",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
     {
       "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:242",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::global_liveness_mode",
-      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.global_liveness_mode",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:262",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::has_bound_epoch",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch",
@@ -2095,13 +1940,17 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::propose_or_retry_epoch",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:282",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:262",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::is_poisoned",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.is_poisoned",
@@ -2112,26 +1961,17 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::authorize_shares",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs",
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:252",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::max_jump_window",
-      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.max_jump_window",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
     },
     {
       "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:222",
@@ -2145,8 +1985,12 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::n",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
@@ -2172,15 +2016,19 @@
       "verified_crate_tests": []
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:247",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:232",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::next_epoch",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.next_epoch",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::next_epoch",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -2188,22 +2036,26 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:257",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:237",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::phase",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.phase",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::phase",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:289",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:269",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::propose_or_retry_epoch",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch",
@@ -2213,28 +2065,36 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::propose_or_retry_epoch",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:237",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:227",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::q",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.q",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::q",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "unreferenced",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:360",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:340",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::record_custodian_ack",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack",
@@ -2245,15 +2105,19 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::record_custodian_ack",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:488",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:468",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::step",
       "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.step",
@@ -2271,20 +2135,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:227",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::t",
-      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.t",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:750",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:730",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::authorize_open",
       "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open",
@@ -2292,51 +2143,77 @@
         "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/party_node.rs:1627 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:692",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:672",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_poisoned",
       "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.is_poisoned",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/party_node.rs:1011 (path)"
+        "crates/qsag-core/src/rss256.rs:1677 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:1682 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:2740 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:577 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:619 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:993 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:1038 (assoc)",
+        "crates/qsag-quorum/src/party_node.rs:1165 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:1623 (method-lexical)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
-      "test_call_sites": [],
+      "test_call_sites": [
+        "crates/qsag-core/src/rss256.rs:3262 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:3352 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:3354 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:3370 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:3405 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:1999 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:2030 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:2259 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:2297 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:2301 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:2302 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:2350 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:2366 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:2442 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:2453 (method-lexical)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs",
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:687",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:667",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_unverified",
       "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.is_unverified",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/party_node.rs:1020 (path)"
+        "crates/qsag-quorum/src/party_node.rs:1047 (method-lexical)"
       ],
       "same_named_production_fns": [],
-      "status": "direct",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:673",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:653",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::new_clean",
       "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.new_clean",
@@ -2345,10 +2222,10 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/rss256.rs:1614 (path)",
-        "crates/qsag-core/src/rss256.rs:1693 (path)",
-        "crates/qsag-quorum/src/party_node.rs:971 (path)",
-        "crates/qsag-quorum/src/party_node.rs:975 (path)"
+        "crates/qsag-core/src/rss256.rs:1614 (assoc)",
+        "crates/qsag-core/src/rss256.rs:1691 (assoc)",
+        "crates/qsag-quorum/src/party_node.rs:998 (assoc)",
+        "crates/qsag-quorum/src/party_node.rs:1002 (assoc)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2358,22 +2235,24 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:682",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:662",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::pending_relations",
       "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.impl.pending_relations",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/party_node.rs:1047 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:727",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:707",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::record_check_result",
       "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result",
@@ -2381,16 +2260,20 @@
         "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:1692 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:999 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:1610 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:697",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:677",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::stage_relations",
       "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations",
@@ -2398,16 +2281,18 @@
         "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/party_node.rs:1188 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:771",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:751",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::step",
       "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.step",
@@ -2415,55 +2300,19 @@
         "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:2749 (method-lexical)",
+        "crates/qsag-quorum/src/party_node.rs:1147 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:912",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::ancestor_kp",
-      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_kp",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:902",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::ancestor_layer",
-      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_layer",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:907",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::ancestor_tree",
-      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_tree",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:940",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:895",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::authorize_ancestor_derivation",
       "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation",
@@ -2471,54 +2320,63 @@
         "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/baggy.rs:1492 (method-lexical)",
+        "crates/qsag-core/src/baggy.rs:1512 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:917",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:872",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::expected_static_child_root",
       "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.expected_static_child_root",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/baggy.rs:1489 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:922",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:877",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::has_locked_codeword",
       "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.has_locked_codeword",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/baggy.rs:1495 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:932",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:887",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::is_poisoned",
       "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.is_poisoned",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/baggy.rs:1494 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs",
@@ -2526,48 +2384,24 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:897",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::key_params_tag",
-      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.key_params_tag",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:892",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::key_pk_tag",
-      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.key_pk_tag",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:927",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:882",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::locked_ancestor_codeword_tag",
       "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.locked_ancestor_codeword_tag",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/baggy.rs:1496 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:870",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:850",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::new_enrolled",
       "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.new_enrolled",
@@ -2576,7 +2410,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/baggy.rs:1473 (path)"
+        "crates/qsag-core/src/baggy.rs:1474 (assoc)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2586,30 +2420,17 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:612",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:592",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::digit_at",
       "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.digit_at",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:392 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:602",
-      "extracted": true,
-      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::digits",
-      "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.impl.digits",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -2618,6 +2439,23 @@
     {
       "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:582",
       "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::digits",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.impl.digits",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:306 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:562",
+      "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::from_digest_verified",
       "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.from_digest_verified",
       "lean_proof_modules": [
@@ -2625,7 +2463,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:306 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:311 (assoc)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2635,30 +2473,34 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:597",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:577",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::validated_digest",
       "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.impl.validated_digest",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:312 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:607",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:587",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::verified_sum",
       "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.impl.verified_sum",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:312 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -2674,18 +2516,18 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1398 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1400 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:3312 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:3321 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:3330 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:3339 (path)"
       ],
       "verified_crate_tests": []
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:548",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:528",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits",
       "lean_definition": "pants_and_quorum_guards.verified_wotsc256_extract_digits",
@@ -2704,7 +2546,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:559",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:539",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::verified_wotsc256_verify_sum",
       "lean_definition": "pants_and_quorum_guards.verified_wotsc256_verify_sum",
@@ -2725,7 +2567,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:537",
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:517",
       "extracted": true,
       "function": "qsag_verified::pants_and_quorum_guards::wotsc256_extract_digit",
       "lean_definition": "pants_and_quorum_guards.wotsc256_extract_digit",
@@ -2775,9 +2617,11 @@
         "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:53 (assoc)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
@@ -2811,9 +2655,11 @@
         "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:161 (assoc)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -2871,12 +2717,12 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:147 (method-lexical)"
+        "crates/qsag-addr/src/lib.rs:139 (method-lexical)"
       ],
       "same_named_production_fns": [],
       "status": "direct-lexical",
       "test_call_sites": [
-        "crates/qsag-addr/src/lib.rs:2161 (method-lexical)"
+        "crates/qsag-addr/src/lib.rs:2174 (method-lexical)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -2891,9 +2737,12 @@
         "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:88 (assoc)",
+        "crates/qsag-addr/src/lib.rs:230 (assoc)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -2908,9 +2757,15 @@
         "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:66 (method-lexical)",
+        "crates/qsag-addr/src/lib.rs:69 (method-lexical)",
+        "crates/qsag-addr/src/lib.rs:77 (method-lexical)",
+        "crates/qsag-addr/src/lib.rs:81 (method-lexical)",
+        "crates/qsag-addr/src/lib.rs:82 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -2923,10 +2778,15 @@
       "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.authority_pin",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/guard.rs:124 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:134 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1181 (method-lexical)"
+      ],
       "verified_crate_tests": []
     },
     {
@@ -2940,9 +2800,15 @@
         "aeneas/lean/QsagVerified/Proofs/RealSpecGuardBoundary.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/durable.rs:686 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:103 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:129 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:508 (method-lexical)",
+        "crates/qsag-policy/src/ledger.rs:226 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -2955,10 +2821,21 @@
       "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.cap_units",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/durable.rs:155 (method-lexical)",
+        "crates/qsag-policy/src/durable.rs:682 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:122 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:486 (method-lexical)",
+        "crates/qsag-policy/src/ledger.rs:191 (method-lexical)",
+        "crates/qsag-policy/src/ledger.rs:197 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-policy/src/durable.rs:744 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:472 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1179 (method-lexical)"
+      ],
       "verified_crate_tests": []
     },
     {
@@ -2968,10 +2845,21 @@
       "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.last_nonce",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/guard.rs:126 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:131 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-policy/src/durable.rs:746 (method-lexical)",
+        "crates/qsag-policy/src/durable.rs:765 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:471 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1058 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1065 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1182 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1209 (method-lexical)"
+      ],
       "verified_crate_tests": []
     },
     {
@@ -2985,10 +2873,10 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-policy/src/durable.rs:656 (path)",
-        "crates/qsag-policy/src/lib.rs:554 (path)",
-        "crates/qsag-policy/src/lib.rs:576 (path)",
-        "crates/qsag-policy/src/lib.rs:1573 (path)"
+        "crates/qsag-policy/src/durable.rs:684 (assoc)",
+        "crates/qsag-policy/src/guard.rs:98 (assoc)",
+        "crates/qsag-policy/src/guard.rs:120 (assoc)",
+        "crates/qsag-policy/src/ledger.rs:48 (assoc)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -3004,10 +2892,15 @@
       "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.policy_pin",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/guard.rs:123 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:133 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1180 (method-lexical)"
+      ],
       "verified_crate_tests": []
     },
     {
@@ -3020,9 +2913,12 @@
         "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/guard.rs:301 (method-lexical)",
+        "crates/qsag-policy/src/ledger.rs:144 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -3035,10 +2931,24 @@
       "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.spent_units",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/guard.rs:127 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:132 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:449 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:488 (method-lexical)",
+        "crates/qsag-policy/src/ledger.rs:190 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-policy/src/durable.rs:745 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:470 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:484 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1058 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1065 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1178 (method-lexical)",
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1209 (method-lexical)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
@@ -3050,10 +2960,18 @@
       "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.window_id",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/guard.rs:121 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:130 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:448 (method-lexical)",
+        "crates/qsag-policy/src/guard.rs:487 (method-lexical)",
+        "crates/qsag-policy/src/ledger.rs:189 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-policy/src/tests/quorum_ledger.rs:1177 (method-lexical)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
@@ -3068,13 +2986,13 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:676 (call)"
+        "crates/qsag-addr/src/lib.rs:689 (call)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/lib.rs:2020 (call)",
-        "crates/qsag-addr/src/lib.rs:2032 (call)"
+        "crates/qsag-addr/src/lib.rs:2033 (call)",
+        "crates/qsag-addr/src/lib.rs:2045 (call)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -3090,8 +3008,8 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-policy/src/lib.rs:258 (path)",
-        "crates/qsag-policy/src/lib.rs:909 (path)"
+        "crates/qsag-policy/src/guard.rs:453 (path)",
+        "crates/qsag-policy/src/lib.rs:272 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -3108,15 +3026,15 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:405 (path)"
+        "crates/qsag-addr/src/lib.rs:418 (path)"
       ],
       "same_named_production_fns": [
-        "crates/qsag-addr/src/lib.rs:280"
+        "crates/qsag-addr/src/lib.rs:293"
       ],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/audit_tests.rs:406 (path)",
-        "crates/qsag-addr/src/audit_tests.rs:447 (path)"
+        "crates/qsag-addr/src/audit_tests.rs:404 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:445 (path)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -3132,7 +3050,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:697 (call)"
+        "crates/qsag-addr/src/lib.rs:710 (call)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -3152,24 +3070,26 @@
         "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [
-        "crates/qsag-addr/src/lib.rs:239"
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:240 (path)"
       ],
-      "status": "proof-only",
+      "same_named_production_fns": [
+        "crates/qsag-addr/src/lib.rs:229"
+      ],
+      "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/audit_tests.rs:397 (path)",
-        "crates/qsag-addr/src/audit_tests.rs:447 (path)",
-        "crates/qsag-addr/src/audit_tests.rs:459 (path)",
-        "crates/qsag-addr/src/audit_tests.rs:466 (path)",
-        "crates/qsag-addr/src/audit_tests.rs:487 (path)"
+        "crates/qsag-addr/src/audit_tests.rs:395 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:445 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:457 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:464 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:485 (path)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:168",
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:163",
       "extracted": true,
       "function": "qsag_verified::rss_cut_session::RssCutGateSession::advance_round2_chi",
       "lean_definition": "rss_cut_session.RssCutGateSession.advance_round2_chi",
@@ -3180,16 +3100,18 @@
       "lean_weld_modules": [
         "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
       ],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:2730 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "spec-welded",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:215",
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:210",
       "extracted": true,
       "function": "qsag_verified::rss_cut_session::RssCutGateSession::advance_round3_verify_consistency",
       "lean_definition": "rss_cut_session.RssCutGateSession.advance_round3_verify_consistency",
@@ -3200,60 +3122,61 @@
       "lean_weld_modules": [
         "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
       ],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:2738 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "spec-welded",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:162",
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:157",
       "extracted": true,
       "function": "qsag_verified::rss_cut_session::RssCutGateSession::is_consistency_verified",
       "lean_definition": "rss_cut_session.RssCutGateSession.is_consistency_verified",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:2741 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:150",
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:145",
       "extracted": true,
       "function": "qsag_verified::rss_cut_session::RssCutGateSession::is_poisoned",
       "lean_definition": "rss_cut_session.RssCutGateSession.is_poisoned",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:1677 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:1682 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:2740 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-core/src/rss256.rs:3262 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:3352 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:3354 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:3370 (method-lexical)",
+        "crates/qsag-core/src/rss256.rs:3405 (method-lexical)"
+      ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/authenticated_belt.rs",
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:128",
-      "extracted": true,
-      "function": "qsag_verified::rss_cut_session::RssCutGateSession::mask_commitment",
-      "lean_definition": "rss_cut_session.RssCutGateSession.impl.mask_commitment",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:134",
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:129",
       "extracted": true,
       "function": "qsag_verified::rss_cut_session::RssCutGateSession::new_round1_committed",
       "lean_definition": "rss_cut_session.RssCutGateSession.new_round1_committed",
@@ -3266,7 +3189,7 @@
         "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
       ],
       "production_call_sites": [
-        "crates/qsag-core/src/rss256.rs:2706 (path)"
+        "crates/qsag-core/src/rss256.rs:2703 (assoc)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -3276,7 +3199,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:262",
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:257",
       "extracted": true,
       "function": "qsag_verified::rss_cut_session::RssCutGateSession::open_verified_cut",
       "lean_definition": "rss_cut_session.RssCutGateSession.open_verified_cut",
@@ -3288,23 +3211,29 @@
         "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
       ],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::rss_cut_session::RssCutGateSession::step",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "spec-welded",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:156",
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:151",
       "extracted": true,
       "function": "qsag_verified::rss_cut_session::RssCutGateSession::phase",
       "lean_definition": "rss_cut_session.RssCutGateSession.impl.phase",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:2742 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -3317,16 +3246,18 @@
       "lean_definition": "rss_cut_session.RssCutGateSession.impl.session_id",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:2743 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/opening_guard.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:306",
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:301",
       "extracted": true,
       "function": "qsag_verified::rss_cut_session::RssCutGateSession::step",
       "lean_definition": "rss_cut_session.RssCutGateSession.step",
@@ -3338,9 +3269,11 @@
       "lean_weld_modules": [
         "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
       ],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:2749 (method-lexical)"
+      ],
       "same_named_production_fns": [],
-      "status": "spec-welded",
+      "status": "direct-lexical",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -3356,8 +3289,8 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/rss256.rs:2700 (path)",
-        "crates/qsag-core/src/rss256.rs:2727 (path)"
+        "crates/qsag-core/src/rss256.rs:2697 (path)",
+        "crates/qsag-core/src/rss256.rs:2724 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -3367,7 +3300,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:560",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:556",
       "extracted": true,
       "function": "qsag_verified::threshold::EpochLatch::acquire_or_retry",
       "lean_definition": "threshold.EpochLatch.acquire_or_retry",
@@ -3375,46 +3308,70 @@
         "aeneas/lean/QsagVerified/Proofs/Epoch.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/tsw_baggy.rs:984 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:532",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:524",
+      "extracted": true,
+      "function": "qsag_verified::threshold::EpochLatch::from_cursor",
+      "lean_definition": "threshold.EpochLatch.from_cursor",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Epoch.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/tsw_baggy.rs:982 (path)",
+        "crates/qsag-cred/src/threshold_mldsa.rs:2283 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:504",
       "extracted": true,
       "function": "qsag_verified::threshold::EpochLatch::key_epoch_id",
       "lean_definition": "threshold.EpochLatch.impl.key_epoch_id",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/threshold_mldsa.rs:2292 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:535",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:507",
       "extracted": true,
       "function": "qsag_verified::threshold::EpochLatch::last_bound",
       "lean_definition": "threshold.EpochLatch.impl.last_bound",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/tsw_baggy.rs:1022 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:529",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:501",
       "extracted": true,
       "function": "qsag_verified::threshold::EpochLatch::max_epoch",
       "lean_definition": "threshold.EpochLatch.impl.max_epoch",
@@ -3429,7 +3386,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:541",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:513",
       "extracted": true,
       "function": "qsag_verified::threshold::EpochLatch::new",
       "lean_definition": "threshold.EpochLatch.new",
@@ -3437,24 +3394,30 @@
         "aeneas/lean/QsagVerified/Proofs/Epoch.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/threshold_mldsa.rs:2281 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:526",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:498",
       "extracted": true,
       "function": "qsag_verified::threshold::EpochLatch::next_epoch",
       "lean_definition": "threshold.EpochLatch.impl.next_epoch",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::next_epoch",
+        "edge": "lexical"
+      },
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -3462,7 +3425,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:251",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:250",
       "extracted": true,
       "function": "qsag_verified::threshold::dkg_beaver_frobenius_eval_gf256",
       "lean_definition": "threshold.dkg_beaver_frobenius_eval_gf256",
@@ -3479,7 +3442,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:264",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:263",
       "extracted": true,
       "function": "qsag_verified::threshold::dkg_beaver_frobenius_share_shamir_gf256",
       "lean_definition": "threshold.dkg_beaver_frobenius_share_shamir_gf256",
@@ -3494,22 +3457,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:287",
-      "extracted": true,
-      "function": "qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256",
-      "lean_definition": "threshold.dkg_verify_key_shares_boolean_bdoz_gf256",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:309",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:286",
       "extracted": true,
       "function": "qsag_verified::threshold::dkg_verify_shamir_2of3_key_bit_gf256",
       "lean_definition": "threshold.dkg_verify_shamir_2of3_key_bit_gf256",
@@ -3526,7 +3474,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:633",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:629",
       "extracted": true,
       "function": "qsag_verified::threshold::epoch_latch_advance",
       "lean_definition": "threshold.epoch_latch_advance",
@@ -3534,38 +3482,42 @@
         "aeneas/lean/QsagVerified/Proofs/Epoch.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/threshold_mldsa.rs:2362 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:416",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:393",
       "extracted": true,
       "function": "qsag_verified::threshold::rss_and_gate",
       "lean_definition": "threshold.rss_and_gate",
       "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+        "aeneas/lean/QsagVerified/Proofs/TowerArithmetic.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/keccak_mpc/rss_dzk.rs:518 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:432",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:403",
       "extracted": true,
       "function": "qsag_verified::threshold::rss_keccak_chi_lane",
       "lean_definition": "threshold.rss_keccak_chi_lane",
       "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+        "aeneas/lean/QsagVerified/Proofs/TowerArithmetic.lean"
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
@@ -3577,12 +3529,12 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:391",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:368",
       "extracted": true,
       "function": "qsag_verified::threshold::rss_not",
       "lean_definition": "threshold.rss_not",
       "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+        "aeneas/lean/QsagVerified/Proofs/TowerArithmetic.lean"
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
@@ -3594,55 +3546,46 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:402",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:379",
       "extracted": true,
       "function": "qsag_verified::threshold::rss_party_and_local",
       "lean_definition": "threshold.rss_party_and_local",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/keccak_mpc/rss_cluster.rs:142 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "unreferenced",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": []
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:375",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:352",
       "extracted": true,
       "function": "qsag_verified::threshold::rss_reconstruct",
       "lean_definition": "threshold.rss_reconstruct",
       "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+        "aeneas/lean/QsagVerified/Proofs/TowerArithmetic.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/keccak_mpc/rss_custody.rs:528 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:426",
-      "extracted": true,
-      "function": "qsag_verified::threshold::rss_reshare_views",
-      "lean_definition": "threshold.rss_reshare_views",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "unreferenced",
-      "test_call_sites": [],
-      "verified_crate_tests": []
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:365",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:342",
       "extracted": true,
       "function": "qsag_verified::threshold::rss_share_u64",
       "lean_definition": "threshold.rss_share_u64",
       "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+        "aeneas/lean/QsagVerified/Proofs/TowerArithmetic.lean"
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
@@ -3652,12 +3595,12 @@
       "verified_crate_tests": []
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:381",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:358",
       "extracted": true,
       "function": "qsag_verified::threshold::rss_xor",
       "lean_definition": "threshold.rss_xor",
       "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+        "aeneas/lean/QsagVerified/Proofs/TowerArithmetic.lean"
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
@@ -3669,7 +3612,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:202",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:201",
       "extracted": true,
       "function": "qsag_verified::threshold::shamir_degree_reduce_2of3_gf256",
       "lean_definition": "threshold.shamir_degree_reduce_2of3_gf256",
@@ -3686,7 +3629,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:49",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:48",
       "extracted": true,
       "function": "qsag_verified::threshold::shamir_eval_poly_gf256",
       "lean_definition": "threshold.shamir_eval_poly_gf256",
@@ -3694,9 +3637,11 @@
         "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/field/tower.rs:298 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -3704,7 +3649,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:60",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:59",
       "extracted": true,
       "function": "qsag_verified::threshold::shamir_eval_poly_goldilocks",
       "lean_definition": "threshold.shamir_eval_poly_goldilocks",
@@ -3712,9 +3657,11 @@
         "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/field/goldilocks.rs:591 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -3722,7 +3669,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:109",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:108",
       "extracted": true,
       "function": "qsag_verified::threshold::shamir_lagrange_at_zero_gf256",
       "lean_definition": "threshold.shamir_lagrange_at_zero_gf256",
@@ -3730,9 +3677,11 @@
         "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/preprocessing/coins_and_openings.rs:431 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -3740,15 +3689,17 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:173",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:172",
       "extracted": true,
       "function": "qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks",
       "lean_definition": "threshold.shamir_lagrange_at_zero_goldilocks",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/preprocessing/coins_and_openings.rs:576 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -3756,7 +3707,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:72",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:71",
       "extracted": true,
       "function": "qsag_verified::threshold::shamir_lagrange_weight_zero_gf256",
       "lean_definition": "threshold.shamir_lagrange_weight_zero_gf256",
@@ -3764,31 +3715,35 @@
         "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/field/tower.rs:323 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:133",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:132",
       "extracted": true,
       "function": "qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks",
       "lean_definition": "threshold.shamir_lagrange_weight_zero_goldilocks",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/field/goldilocks.rs:629 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/threshold.rs:25",
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:24",
       "extracted": true,
       "function": "qsag_verified::threshold::shamir_validate_points_gf256",
       "lean_definition": "threshold.shamir_validate_points_gf256",
@@ -3797,156 +3752,10 @@
         "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "proof-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:516",
-      "extracted": true,
-      "function": "qsag_verified::tower::BdozOpeningGuard2Lane::is_consumed",
-      "lean_definition": "tower.BdozOpeningGuard2Lane.is_consumed",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
-        "aeneas/qsag-verified/tests/opening_guard.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:507",
-      "extracted": true,
-      "function": "qsag_verified::tower::BdozOpeningGuard2Lane::new",
-      "lean_definition": "tower.BdozOpeningGuard2Lane.new",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/bdoz_consumption.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:522",
-      "extracted": true,
-      "function": "qsag_verified::tower::BdozOpeningGuard2Lane::verify_once",
-      "lean_definition": "tower.BdozOpeningGuard2Lane.verify_once",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/BdozConsumption.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "proof-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
-        "aeneas/qsag-verified/tests/opening_guard.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:68",
-      "extracted": true,
-      "function": "qsag_verified::tower::BdozVerifierSession2Lane::is_burned",
-      "lean_definition": "tower.BdozVerifierSession2Lane.is_burned",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:61",
-      "extracted": true,
-      "function": "qsag_verified::tower::BdozVerifierSession2Lane::new",
-      "lean_definition": "tower.BdozVerifierSession2Lane.new",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:377",
-      "extracted": true,
-      "function": "qsag_verified::tower::bdoz_commit_masked_tag",
-      "lean_definition": "tower.bdoz_commit_masked_tag",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
-        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "proof-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:408",
-      "extracted": true,
-      "function": "qsag_verified::tower::bdoz_fold_masked_value",
-      "lean_definition": "tower.bdoz_fold_masked_value",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "test-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:83",
-      "extracted": true,
-      "function": "qsag_verified::tower::ct_eq_bytes32",
-      "lean_definition": "tower.ct_eq_bytes32",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/Common.lean",
-        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean",
-        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean",
-        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean",
-        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean",
-        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean"
-      ],
-      "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:403 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:510 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:525 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:558 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1343 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1869 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1964 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:2014 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:2034 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:2322 (path)"
+        "crates/qsag-core/src/preprocessing/coins_and_openings.rs:208 (path)"
       ],
-      "same_named_production_fns": [
-        "crates/qsag-ass2/src/wire.rs:76"
-      ],
+      "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
@@ -3954,14 +3763,43 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:293",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:25",
+      "extracted": true,
+      "function": "qsag_verified::tower::ct_eq_bytes32",
+      "lean_definition": "tower.ct_eq_bytes32",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Common.lean",
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean",
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean",
+        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:405 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:512 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:527 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:560 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1345 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1879 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1978 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:2028 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:2052 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:2340 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:227",
       "extracted": true,
       "function": "qsag_verified::tower::embed_gf256_to_tower128",
       "lean_definition": "tower.embed_gf256_to_tower128",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
-        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean"
-      ],
+      "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
         "crates/qsag-core/src/field/tower.rs:213 (path)"
@@ -3975,29 +3813,33 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:230",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:155",
       "extracted": true,
       "function": "qsag_verified::tower::gf16_add",
       "lean_definition": "tower.gf16_add",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::tower::gf256_mul",
+        "edge": "definite"
+      },
       "same_named_production_fns": [],
-      "status": "test-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:236",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:161",
       "extracted": true,
       "function": "qsag_verified::tower::gf16_mul",
       "lean_definition": "tower.gf16_mul",
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/field/tower.rs:76 (path)"
+        "crates/qsag-core/src/field/tower.rs:77 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -4008,7 +3850,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:242",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:167",
       "extracted": true,
       "function": "qsag_verified::tower::gf256_add",
       "lean_definition": "tower.gf256_add",
@@ -4020,7 +3862,7 @@
         "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
       ],
       "production_call_sites": [
-        "crates/qsag-core/src/field/tower.rs:163 (path)"
+        "crates/qsag-core/src/field/tower.rs:169 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -4031,7 +3873,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:281",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:215",
       "extracted": true,
       "function": "qsag_verified::tower::gf256_frobenius_residual",
       "lean_definition": "tower.gf256_frobenius_residual",
@@ -4041,15 +3883,19 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::tower::gf256_is_boolean_frobenius",
+        "edge": "definite"
+      },
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "reached",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:273",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:207",
       "extracted": true,
       "function": "qsag_verified::tower::gf256_inv",
       "lean_definition": "tower.gf256_inv",
@@ -4058,9 +3904,11 @@
         "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/field/tower.rs:193 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
@@ -4068,7 +3916,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:256",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:190",
       "extracted": true,
       "function": "qsag_verified::tower::gf256_inv_or_zero",
       "lean_definition": "tower.gf256_inv_or_zero",
@@ -4077,7 +3925,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/field/tower.rs:115 (path)"
+        "crates/qsag-core/src/field/tower.rs:121 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -4087,7 +3935,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:287",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:221",
       "extracted": true,
       "function": "qsag_verified::tower::gf256_is_boolean_frobenius",
       "lean_definition": "tower.gf256_is_boolean_frobenius",
@@ -4096,16 +3944,19 @@
         "aeneas/lean/QsagVerified/Proofs/Gf256.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/dkg.rs:415 (path)",
+        "crates/qsag-core/src/dkg.rs:1377 (path)"
+      ],
       "same_named_production_fns": [],
-      "status": "proof-only",
+      "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:248",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:173",
       "extracted": true,
       "function": "qsag_verified::tower::gf256_mul",
       "lean_definition": "tower.gf256_mul",
@@ -4118,7 +3969,7 @@
       ],
       "production_call_sites": [
         "crates/qsag-core/src/field/tower.rs:42 (path)",
-        "crates/qsag-core/src/field/tower.rs:81 (path)"
+        "crates/qsag-core/src/field/tower.rs:84 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -4129,143 +3980,61 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:299",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:233",
       "extracted": true,
       "function": "qsag_verified::tower::tower128_add",
       "lean_definition": "tower.tower128_add",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
-        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean"
-      ],
+      "lean_proof_modules": [],
       "lean_weld_modules": [
         "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
       ],
       "production_call_sites": [
-        "crates/qsag-core/src/field/tower.rs:235 (path)"
+        "crates/qsag-core/src/field/tower.rs:234 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
-        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
-        "aeneas/qsag-verified/tests/unit_kat.rs"
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:305",
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:239",
       "extracted": true,
       "function": "qsag_verified::tower::tower128_mul",
       "lean_definition": "tower.tower128_mul",
       "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
         "aeneas/lean/QsagVerified/Proofs/ElfMirTriangles.lean",
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+        "aeneas/lean/QsagVerified/Proofs/TowerArithmetic.lean"
       ],
       "lean_weld_modules": [
         "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
       ],
       "production_call_sites": [
         "crates/qsag-core/src/field/tower.rs:53 (path)",
-        "crates/qsag-core/src/field/tower.rs:86 (path)"
+        "crates/qsag-core/src/field/tower.rs:91 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-core/src/field/tower.rs:735 (path)"
+        "crates/qsag-core/src/field/tower.rs:724 (path)"
       ],
       "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
         "aeneas/qsag-verified/tests/parity_qsag_core.rs",
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:320",
-      "extracted": true,
-      "function": "qsag_verified::tower::tower256_add",
-      "lean_definition": "tower.tower256_add",
-      "lean_proof_modules": [],
-      "lean_weld_modules": [
-        "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
-      ],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "spec-welded",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:329",
-      "extracted": true,
-      "function": "qsag_verified::tower::tower256_mul",
-      "lean_definition": "tower.tower256_mul",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
-      ],
-      "lean_weld_modules": [
-        "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
-      ],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "spec-welded",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:426",
-      "extracted": true,
-      "function": "qsag_verified::tower::verify_mac_2lane",
-      "lean_definition": "tower.verify_mac_2lane",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
-        "aeneas/lean/QsagVerified/Proofs/BdozConsumption.lean",
-        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "proof-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
-        "aeneas/qsag-verified/tests/unit_kat.rs"
-      ]
-    },
-    {
-      "defined_at": "aeneas/qsag-verified/src/tower.rs:468",
-      "extracted": true,
-      "function": "qsag_verified::tower::verify_mac_2lane_with_burn",
-      "lean_definition": "tower.verify_mac_2lane_with_burn",
-      "lean_proof_modules": [
-        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
-        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
-        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
-      ],
-      "lean_weld_modules": [],
-      "production_call_sites": [],
-      "same_named_production_fns": [],
-      "status": "proof-only",
-      "test_call_sites": [],
-      "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     }
   ],
   "method": "lexical; see scripts/gen_extraction_coverage.py",
   "summary": {
-    "direct": 57,
-    "direct-lexical": 16,
+    "direct": 82,
+    "direct-lexical": 56,
     "not_extracted": 0,
-    "proof-only": 60,
-    "reached": 14,
-    "spec-welded": 7,
-    "test-only": 52,
-    "total": 238,
-    "unreferenced": 32
+    "proof-only": 13,
+    "reached": 36,
+    "spec-welded": 0,
+    "test-only": 8,
+    "total": 197,
+    "unreferenced": 2
   }
 }

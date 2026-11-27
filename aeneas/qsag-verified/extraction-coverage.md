@@ -5,37 +5,39 @@ The analysis is lexical. Statuses are defined in the script docstring.
 
 | Status | Functions |
 |---|---|
-| direct | 57 |
-| direct-lexical | 16 |
-| reached | 14 |
-| spec-welded | 7 |
-| proof-only | 60 |
-| test-only | 52 |
-| unreferenced | 32 |
-| **total** | **238** |
+| direct | 82 |
+| direct-lexical | 56 |
+| reached | 36 |
+| spec-welded | 0 |
+| proof-only | 13 |
+| test-only | 8 |
+| unreferenced | 2 |
+| **total** | **197** |
 
 `pub fn`s with no definition in `Funs.lean`: 0.
 
-## direct (57)
+## direct (82)
 
 | Function | Production call sites | First |
 |---|---|---|
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::new_validated` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1631` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::new_validated` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1633` |
 | `qsag_verified::authenticated_belt::custodian_ack_tag` | 4 | `crates/qsag-quorum/src/access.rs:480` |
-| `qsag_verified::authenticated_belt::wal_receipt_tag` | 2 | `crates/qsag-quorum/src/quorum_jorts.rs:1651` |
-| `qsag_verified::belt_latch_kernel::BeltLatchKernel::recover` | 1 | `crates/qsag-core/src/belt_latch.rs:1126` |
-| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::new_awaiting_peer_commit` | 1 | `crates/qsag-hd/src/zero_gate.rs:45` |
+| `qsag_verified::authenticated_belt::wal_receipt_tag` | 2 | `crates/qsag-quorum/src/quorum_jorts.rs:1653` |
+| `qsag_verified::belt_latch_kernel::BeltLatchKernel::is_wal_poisoned` | 4 | `crates/qsag-core/src/belt_latch.rs:1004` |
+| `qsag_verified::belt_latch_kernel::BeltLatchKernel::new_empty` | 1 | `crates/qsag-core/src/belt_latch.rs:1101` |
+| `qsag_verified::belt_latch_kernel::BeltLatchKernel::recover` | 2 | `crates/qsag-core/src/belt_latch.rs:1113` |
 | `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::new_sealed` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2050` |
 | `qsag_verified::cred_and_hd_guards::check_mldsa44_norm_bounds` | 3 | `crates/qsag-cred/src/fips204_ntt.rs:934` |
 | `qsag_verified::cred_and_hd_guards::check_mldsa65_norm_bounds` | 3 | `crates/qsag-cred/src/fips204_ntt.rs:935` |
 | `qsag_verified::cred_and_hd_guards::mldsa44_sample_eta2_nibble_mod_q` | 1 | `crates/qsag-cred/src/fips204_ntt.rs:1135` |
-| `qsag_verified::cred_and_hd_guards::toprf_majority_of_3_goldilocks` | 1 | `crates/qsag-cred/src/toprf_engine.rs:208` |
-| `qsag_verified::fips205::Fips205Adrs::from_tree_u96` | 1 | `crates/qsag-core/src/fips205.rs:293` |
-| `qsag_verified::fips205::Fips205AdrsType::from_u32` | 1 | `crates/qsag-core/src/fips205.rs:289` |
-| `qsag_verified::fips205::decode_fips205_adrs` | 1 | `crates/qsag-core/src/fips205.rs:305` |
-| `qsag_verified::fips205::encode_fips205_adrs` | 1 | `crates/qsag-core/src/fips205.rs:293` |
-| `qsag_verified::fts_spn_guard::FtsDeferredMacSession::new_spn48_evaluated` | 2 | `crates/qsag-fts/src/release_gate.rs:148` |
-| `qsag_verified::fts_spn_guard::FtsEpochGuard::new_unused` | 2 | `crates/qsag-fts/src/parallel_mpc.rs:1340` |
+| `qsag_verified::fips205::Fips205Adrs::from_tree_u96` | 1 | `crates/qsag-core/src/fips205.rs:297` |
+| `qsag_verified::fips205::Fips205AdrsType::from_u32` | 1 | `crates/qsag-core/src/fips205.rs:293` |
+| `qsag_verified::fips205::decode_fips205_adrs` | 1 | `crates/qsag-core/src/fips205.rs:309` |
+| `qsag_verified::fips205::encode_fips205_adrs` | 1 | `crates/qsag-core/src/fips205.rs:289` |
+| `qsag_verified::fips205::fips205_wots_chain` | 1 | `crates/qsag-core/src/fips205.rs:2065` |
+| `qsag_verified::fips205::fips205_wots_checksum` | 1 | `crates/qsag-core/src/fips205.rs:1151` |
+| `qsag_verified::fips205::tsw_canonical_target_sum` | 1 | `crates/qsag-core/src/tsw_baggy.rs:498` |
+| `qsag_verified::fips205::tsw_check_target_sum` | 2 | `crates/qsag-core/src/tsw_baggy.rs:580` |
 | `qsag_verified::goldilocks::goldilocks_add` | 1 | `crates/qsag-core/src/field/goldilocks.rs:202` |
 | `qsag_verified::goldilocks::goldilocks_canon` | 1 | `crates/qsag-core/src/field/goldilocks.rs:111` |
 | `qsag_verified::goldilocks::goldilocks_ext2_add` | 1 | `crates/qsag-core/src/field/goldilocks.rs:459` |
@@ -47,245 +49,197 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::goldilocks::goldilocks_inv_or_zero` | 1 | `crates/qsag-core/src/field/goldilocks.rs:271` |
 | `qsag_verified::goldilocks::goldilocks_mul` | 1 | `crates/qsag-core/src/field/goldilocks.rs:228` |
 | `qsag_verified::goldilocks::goldilocks_neg` | 1 | `crates/qsag-core/src/field/goldilocks.rs:220` |
-| `qsag_verified::goldilocks::goldilocks_pow7` | 1 | `crates/qsag-core/src/field/goldilocks.rs:244` |
+| `qsag_verified::goldilocks::goldilocks_pow7` | 2 | `crates/qsag-accel/src/poseidon2.rs:84` |
 | `qsag_verified::goldilocks::goldilocks_reduce128` | 1 | `crates/qsag-core/src/field/goldilocks.rs:131` |
 | `qsag_verified::goldilocks::goldilocks_square` | 1 | `crates/qsag-core/src/field/goldilocks.rs:236` |
 | `qsag_verified::goldilocks::goldilocks_sub` | 1 | `crates/qsag-core/src/field/goldilocks.rs:211` |
-| `qsag_verified::keccak::Shake256Sponge::new_cshake256` | 1 | `crates/qsag-cred/src/toprf_engine.rs:266` |
-| `qsag_verified::keccak::shake256_32` | 1 | `crates/qsag-addr/src/lib.rs:1119` |
-| `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::new` | 3 | `crates/qsag-fts/src/release_gate.rs:236` |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_poisoned` | 1 | `crates/qsag-quorum/src/party_node.rs:1011` |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_unverified` | 1 | `crates/qsag-quorum/src/party_node.rs:1020` |
+| `qsag_verified::keccak::cshake256_32` | 1 | `crates/qsag-core/src/baggy.rs:1446` |
+| `qsag_verified::keccak::keccak_f1600` | 5 | `crates/qsag-accel/src/keccak.rs:10` |
+| `qsag_verified::keccak::keccak_f1600_round` | 1 | `crates/qsag-accel/src/keccak.rs:17` |
+| `qsag_verified::keccak::shake256_32` | 1 | `crates/qsag-addr/src/lib.rs:1132` |
+| `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::new` | 2 | `crates/qsag-policy/src/guard.rs:720` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_poisoned` | 9 | `crates/qsag-core/src/rss256.rs:1677` |
 | `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::new_clean` | 4 | `crates/qsag-core/src/rss256.rs:1614` |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::new_enrolled` | 1 | `crates/qsag-core/src/baggy.rs:1473` |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::from_digest_verified` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:306` |
-| `qsag_verified::pants_and_quorum_guards::validate_belt_quorum_config` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1398` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::new_enrolled` | 1 | `crates/qsag-core/src/baggy.rs:1474` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::from_digest_verified` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:311` |
+| `qsag_verified::pants_and_quorum_guards::validate_belt_quorum_config` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1400` |
 | `qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits` | 1 | `crates/qsag-core/src/wots_c.rs:80` |
 | `qsag_verified::pants_and_quorum_guards::verified_wotsc256_verify_sum` | 1 | `crates/qsag-core/src/wots_c.rs:79` |
-| `qsag_verified::policy_and_addr::StatefulVelocityGuard::new_window` | 4 | `crates/qsag-policy/src/durable.rs:656` |
-| `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | 1 | `crates/qsag-addr/src/lib.rs:676` |
-| `qsag_verified::policy_and_addr::checked_velocity_spend` | 2 | `crates/qsag-policy/src/lib.rs:258` |
-| `qsag_verified::policy_and_addr::decode_intent_128` | 1 | `crates/qsag-addr/src/lib.rs:405` |
-| `qsag_verified::policy_and_addr::derive_hybrid_transcript_digest` | 1 | `crates/qsag-addr/src/lib.rs:697` |
-| `qsag_verified::rss_cut_session::RssCutGateSession::new_round1_committed` | 1 | `crates/qsag-core/src/rss256.rs:2706` |
-| `qsag_verified::rss_cut_session::compute_rss_mask_commitment` | 2 | `crates/qsag-core/src/rss256.rs:2700` |
-| `qsag_verified::tower::ct_eq_bytes32` | 10 | `crates/qsag-quorum/src/quorum_jorts.rs:403` |
+| `qsag_verified::policy_and_addr::IntentAddressVersion::from_u8` | 1 | `crates/qsag-addr/src/lib.rs:53` |
+| `qsag_verified::policy_and_addr::IntentIdentityKind::from_u8` | 1 | `crates/qsag-addr/src/lib.rs:161` |
+| `qsag_verified::policy_and_addr::IntentSuiteTag::from_u16` | 2 | `crates/qsag-addr/src/lib.rs:88` |
+| `qsag_verified::policy_and_addr::StatefulVelocityGuard::new_window` | 4 | `crates/qsag-policy/src/durable.rs:684` |
+| `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | 1 | `crates/qsag-addr/src/lib.rs:689` |
+| `qsag_verified::policy_and_addr::checked_velocity_spend` | 2 | `crates/qsag-policy/src/guard.rs:453` |
+| `qsag_verified::policy_and_addr::decode_intent_128` | 1 | `crates/qsag-addr/src/lib.rs:418` |
+| `qsag_verified::policy_and_addr::derive_hybrid_transcript_digest` | 1 | `crates/qsag-addr/src/lib.rs:710` |
+| `qsag_verified::policy_and_addr::encode_intent_128` | 1 | `crates/qsag-addr/src/lib.rs:240` |
+| `qsag_verified::rss_cut_session::RssCutGateSession::new_round1_committed` | 1 | `crates/qsag-core/src/rss256.rs:2703` |
+| `qsag_verified::rss_cut_session::compute_rss_mask_commitment` | 2 | `crates/qsag-core/src/rss256.rs:2697` |
+| `qsag_verified::threshold::EpochLatch::acquire_or_retry` | 1 | `crates/qsag-core/src/tsw_baggy.rs:984` |
+| `qsag_verified::threshold::EpochLatch::from_cursor` | 2 | `crates/qsag-core/src/tsw_baggy.rs:982` |
+| `qsag_verified::threshold::EpochLatch::key_epoch_id` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2292` |
+| `qsag_verified::threshold::EpochLatch::last_bound` | 1 | `crates/qsag-core/src/tsw_baggy.rs:1022` |
+| `qsag_verified::threshold::EpochLatch::new` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2281` |
+| `qsag_verified::threshold::epoch_latch_advance` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2362` |
+| `qsag_verified::threshold::rss_and_gate` | 1 | `crates/qsag-core/src/keccak_mpc/rss_dzk.rs:518` |
+| `qsag_verified::threshold::rss_party_and_local` | 1 | `crates/qsag-core/src/keccak_mpc/rss_cluster.rs:142` |
+| `qsag_verified::threshold::rss_reconstruct` | 1 | `crates/qsag-core/src/keccak_mpc/rss_custody.rs:528` |
+| `qsag_verified::threshold::shamir_eval_poly_gf256` | 1 | `crates/qsag-core/src/field/tower.rs:298` |
+| `qsag_verified::threshold::shamir_eval_poly_goldilocks` | 1 | `crates/qsag-core/src/field/goldilocks.rs:591` |
+| `qsag_verified::threshold::shamir_lagrange_at_zero_gf256` | 1 | `crates/qsag-core/src/preprocessing/coins_and_openings.rs:431` |
+| `qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks` | 1 | `crates/qsag-core/src/preprocessing/coins_and_openings.rs:576` |
+| `qsag_verified::threshold::shamir_lagrange_weight_zero_gf256` | 1 | `crates/qsag-core/src/field/tower.rs:323` |
+| `qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks` | 1 | `crates/qsag-core/src/field/goldilocks.rs:629` |
+| `qsag_verified::threshold::shamir_validate_points_gf256` | 1 | `crates/qsag-core/src/preprocessing/coins_and_openings.rs:208` |
+| `qsag_verified::tower::ct_eq_bytes32` | 10 | `crates/qsag-quorum/src/quorum_jorts.rs:405` |
 | `qsag_verified::tower::embed_gf256_to_tower128` | 1 | `crates/qsag-core/src/field/tower.rs:213` |
-| `qsag_verified::tower::gf16_mul` | 1 | `crates/qsag-core/src/field/tower.rs:76` |
-| `qsag_verified::tower::gf256_add` | 1 | `crates/qsag-core/src/field/tower.rs:163` |
-| `qsag_verified::tower::gf256_inv_or_zero` | 1 | `crates/qsag-core/src/field/tower.rs:115` |
+| `qsag_verified::tower::gf16_mul` | 1 | `crates/qsag-core/src/field/tower.rs:77` |
+| `qsag_verified::tower::gf256_add` | 1 | `crates/qsag-core/src/field/tower.rs:169` |
+| `qsag_verified::tower::gf256_inv` | 1 | `crates/qsag-core/src/field/tower.rs:193` |
+| `qsag_verified::tower::gf256_inv_or_zero` | 1 | `crates/qsag-core/src/field/tower.rs:121` |
+| `qsag_verified::tower::gf256_is_boolean_frobenius` | 2 | `crates/qsag-core/src/dkg.rs:415` |
 | `qsag_verified::tower::gf256_mul` | 2 | `crates/qsag-core/src/field/tower.rs:42` |
-| `qsag_verified::tower::tower128_add` | 1 | `crates/qsag-core/src/field/tower.rs:235` |
+| `qsag_verified::tower::tower128_add` | 1 | `crates/qsag-core/src/field/tower.rs:234` |
 | `qsag_verified::tower::tower128_mul` | 2 | `crates/qsag-core/src/field/tower.rs:53` |
 
-## direct-lexical (16)
+## direct-lexical (56)
 
 | Function | Production call sites | First |
 |---|---|---|
-| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::freeze_peer_commitment` | 1 | `crates/qsag-hd/src/zero_gate.rs:128` |
-| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::open_local_residual` | 2 | `crates/qsag-hd/src/zero_gate.rs:117` |
-| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::verify_peer_opening` | 1 | `crates/qsag-hd/src/zero_gate.rs:151` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::ack_bitmap` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:2036` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::ack_count` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:2037` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::authorize_shares` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:2038` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::guard_key_commit` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1864` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::is_poisoned` | 4 | `crates/qsag-quorum/src/quorum_jorts.rs:1762` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::n` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1949` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::next_epoch` | 10 | `crates/qsag-quorum/src/quorum_jorts.rs:1068` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::phase` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:2019` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::propose_or_retry_epoch` | 2 | `crates/qsag-quorum/src/quorum_jorts.rs:1815` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::q` | 2 | `crates/qsag-quorum/src/quorum_jorts.rs:1949` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::record_custodian_ack` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:2005` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::step` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1661` |
+| `qsag_verified::belt_latch_kernel::BeltLatchKernel::bind` | 2 | `crates/qsag-core/src/belt_latch.rs:1085` |
+| `qsag_verified::belt_latch_kernel::BeltLatchKernel::capacity_limit` | 3 | `crates/qsag-core/src/belt_latch.rs:1078` |
+| `qsag_verified::belt_latch_kernel::BeltLatchKernel::has_in_flight` | 2 | `crates/qsag-core/src/belt_latch.rs:1171` |
+| `qsag_verified::belt_latch_kernel::BeltLatchKernel::in_flight` | 1 | `crates/qsag-core/src/belt_latch.rs:1222` |
+| `qsag_verified::belt_latch_kernel::BeltLatchKernel::next_epoch` | 3 | `crates/qsag-core/src/belt_latch.rs:1181` |
 | `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::abort_in_place` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2029` |
-| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::session_id` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2577` |
+| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::attempt` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2085` |
+| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::session_id` | 2 | `crates/qsag-cred/src/threshold_mldsa.rs:2084` |
 | `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share_into` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2082` |
-| `qsag_verified::fts_spn_guard::FtsDeferredMacSession::is_quarantined` | 3 | `crates/qsag-fts/src/release_gate.rs:171` |
-| `qsag_verified::fts_spn_guard::FtsDeferredMacSession::release_spn_output` | 1 | `crates/qsag-fts/src/release_gate.rs:320` |
-| `qsag_verified::fts_spn_guard::FtsDeferredMacSession::session_id` | 2 | `crates/qsag-fts/src/release_gate.rs:162` |
-| `qsag_verified::fts_spn_guard::FtsDeferredMacSession::verify_intermediate_mac` | 2 | `crates/qsag-fts/src/release_gate.rs:163` |
-| `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::absorb_opening` | 1 | `crates/qsag-fts/src/release_gate.rs:294` |
-| `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::verify_once` | 1 | `crates/qsag-fts/src/release_gate.rs:295` |
-| `qsag_verified::opening_guard::OpeningReleasePermit::openings` | 1 | `crates/qsag-fts/src/release_gate.rs:336` |
-| `qsag_verified::opening_guard::OpeningReleasePermit::round_id` | 1 | `crates/qsag-fts/src/release_gate.rs:335` |
-| `qsag_verified::opening_guard::OpeningReleasePermit::session_id` | 2 | `crates/qsag-fts/src/release_gate.rs:162` |
-| `qsag_verified::policy_and_addr::IntentSuiteTag::expected_identity_kind` | 1 | `crates/qsag-addr/src/lib.rs:147` |
+| `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::absorb_opening` | 1 | `crates/qsag-policy/src/guard.rs:722` |
+| `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::verify_once` | 1 | `crates/qsag-policy/src/guard.rs:724` |
+| `qsag_verified::opening_guard::OpeningReleasePermit::session_id` | 1 | `crates/qsag-policy/src/guard.rs:742` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::authorize_open` | 1 | `crates/qsag-quorum/src/party_node.rs:1627` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_unverified` | 1 | `crates/qsag-quorum/src/party_node.rs:1047` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::pending_relations` | 1 | `crates/qsag-quorum/src/party_node.rs:1047` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::record_check_result` | 3 | `crates/qsag-core/src/rss256.rs:1692` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::stage_relations` | 1 | `crates/qsag-quorum/src/party_node.rs:1188` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::step` | 2 | `crates/qsag-core/src/rss256.rs:2749` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::authorize_ancestor_derivation` | 2 | `crates/qsag-core/src/baggy.rs:1492` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::expected_static_child_root` | 1 | `crates/qsag-core/src/baggy.rs:1489` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::has_locked_codeword` | 1 | `crates/qsag-core/src/baggy.rs:1495` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::is_poisoned` | 1 | `crates/qsag-core/src/baggy.rs:1494` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::locked_ancestor_codeword_tag` | 1 | `crates/qsag-core/src/baggy.rs:1496` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::digit_at` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:392` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::digits` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:306` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::validated_digest` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:312` |
+| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::verified_sum` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:312` |
+| `qsag_verified::policy_and_addr::IntentSuiteTag::expected_identity_kind` | 1 | `crates/qsag-addr/src/lib.rs:139` |
+| `qsag_verified::policy_and_addr::IntentSuiteTag::to_u16` | 5 | `crates/qsag-addr/src/lib.rs:66` |
+| `qsag_verified::policy_and_addr::StatefulVelocityGuard::authority_pin` | 2 | `crates/qsag-policy/src/guard.rs:124` |
+| `qsag_verified::policy_and_addr::StatefulVelocityGuard::authorize_spend` | 5 | `crates/qsag-policy/src/durable.rs:686` |
+| `qsag_verified::policy_and_addr::StatefulVelocityGuard::cap_units` | 6 | `crates/qsag-policy/src/durable.rs:155` |
+| `qsag_verified::policy_and_addr::StatefulVelocityGuard::last_nonce` | 2 | `crates/qsag-policy/src/guard.rs:126` |
+| `qsag_verified::policy_and_addr::StatefulVelocityGuard::policy_pin` | 2 | `crates/qsag-policy/src/guard.rs:123` |
+| `qsag_verified::policy_and_addr::StatefulVelocityGuard::rotate_window` | 2 | `crates/qsag-policy/src/guard.rs:301` |
+| `qsag_verified::policy_and_addr::StatefulVelocityGuard::spent_units` | 5 | `crates/qsag-policy/src/guard.rs:127` |
+| `qsag_verified::policy_and_addr::StatefulVelocityGuard::window_id` | 5 | `crates/qsag-policy/src/guard.rs:121` |
+| `qsag_verified::rss_cut_session::RssCutGateSession::advance_round2_chi` | 1 | `crates/qsag-core/src/rss256.rs:2730` |
+| `qsag_verified::rss_cut_session::RssCutGateSession::advance_round3_verify_consistency` | 1 | `crates/qsag-core/src/rss256.rs:2738` |
+| `qsag_verified::rss_cut_session::RssCutGateSession::is_consistency_verified` | 1 | `crates/qsag-core/src/rss256.rs:2741` |
+| `qsag_verified::rss_cut_session::RssCutGateSession::is_poisoned` | 3 | `crates/qsag-core/src/rss256.rs:1677` |
+| `qsag_verified::rss_cut_session::RssCutGateSession::phase` | 1 | `crates/qsag-core/src/rss256.rs:2742` |
+| `qsag_verified::rss_cut_session::RssCutGateSession::session_id` | 1 | `crates/qsag-core/src/rss256.rs:2743` |
+| `qsag_verified::rss_cut_session::RssCutGateSession::step` | 1 | `crates/qsag-core/src/rss256.rs:2749` |
 
-## reached (14)
+## reached (36)
 
 | Function | Reached from | Edge |
 |---|---|---|
+| `qsag_verified::belt_latch_kernel::belt_latch_digits_eq` | `qsag_verified::belt_latch_kernel::BeltLatchKernel::bind` | definite |
+| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::phase` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::phase` | lexical |
+| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::aborted` | `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share_into` | lexical |
+| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::released` | `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share_into` | lexical |
+| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share` | `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share_into` | lexical |
 | `qsag_verified::fips205::Fips205AdrsType::to_u32` | `qsag_verified::fips205::encode_fips205_adrs` | lexical |
-| `qsag_verified::fts_spn_guard::wots_cs_verify_68_w5_sum136` | `qsag_verified::fts_spn_guard::FtsDeferredMacSession::release_spn_output` | definite |
+| `qsag_verified::fips205::fips205_f` | `qsag_verified::fips205::fips205_wots_chain` | definite |
+| `qsag_verified::fips205::wots_checksum_base16` | `qsag_verified::fips205::fips205_wots_checksum` | definite |
+| `qsag_verified::fips205::wots_extract_base16_digits` | `qsag_verified::fips205::fips205_wots_checksum` | definite |
 | `qsag_verified::keccak::Shake256Sponge::absorb` | `qsag_verified::authenticated_belt::custodian_ack_tag` | lexical |
 | `qsag_verified::keccak::Shake256Sponge::finalize` | `qsag_verified::keccak::Shake256Sponge::squeeze` | lexical |
+| `qsag_verified::keccak::Shake256Sponge::new_cshake256` | `qsag_verified::keccak::cshake256_32` | definite |
 | `qsag_verified::keccak::Shake256Sponge::new_shake256` | `qsag_verified::authenticated_belt::custodian_ack_tag` | definite |
 | `qsag_verified::keccak::Shake256Sponge::squeeze` | `qsag_verified::authenticated_belt::custodian_ack_tag` | lexical |
-| `qsag_verified::keccak::keccak_f1600` | `qsag_verified::keccak::Shake256Sponge::new_cshake256` | definite |
-| `qsag_verified::keccak::keccak_f1600_round` | `qsag_verified::keccak::keccak_f1600` | definite |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::ack_count` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::ack_count` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::authorize_shares` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::authorize_shares` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::bound_epoch` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::propose_or_retry_epoch` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::bound_msg_tag` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::record_custodian_ack` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::has_bound_epoch` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::propose_or_retry_epoch` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::is_poisoned` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::authorize_shares` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::n` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::n` | lexical |
 | `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::new_validated` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::new_validated` | definite |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::next_epoch` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::next_epoch` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::phase` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::phase` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::propose_or_retry_epoch` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::propose_or_retry_epoch` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::q` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::q` | lexical |
+| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::record_custodian_ack` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::record_custodian_ack` | lexical |
 | `qsag_verified::pants_and_quorum_guards::wotsc256_extract_digit` | `qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits` | definite |
 | `qsag_verified::policy_and_addr::HybridRoleTag::to_u8` | `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | lexical |
 | `qsag_verified::policy_and_addr::IntentAddressVersion::to_u8` | `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | lexical |
 | `qsag_verified::policy_and_addr::IntentIdentityKind::to_u8` | `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | lexical |
 | `qsag_verified::policy_and_addr::IntentSuiteTag::admits_identity_kind` | `qsag_verified::policy_and_addr::decode_intent_128` | lexical |
+| `qsag_verified::rss_cut_session::RssCutGateSession::open_verified_cut` | `qsag_verified::rss_cut_session::RssCutGateSession::step` | lexical |
+| `qsag_verified::threshold::EpochLatch::next_epoch` | `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::next_epoch` | lexical |
+| `qsag_verified::tower::gf16_add` | `qsag_verified::tower::gf256_mul` | definite |
+| `qsag_verified::tower::gf256_frobenius_residual` | `qsag_verified::tower::gf256_is_boolean_frobenius` | definite |
 
-## spec-welded (7)
-
-| Function | Lean welds | Lean proofs | Crate tests | Same-named production fns |
-|---|---|---|---|---|
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::step` | 1 | 3 | 1 | 0 |
-| `qsag_verified::rss_cut_session::RssCutGateSession::advance_round2_chi` | 1 | 2 | 1 | 0 |
-| `qsag_verified::rss_cut_session::RssCutGateSession::advance_round3_verify_consistency` | 1 | 2 | 1 | 0 |
-| `qsag_verified::rss_cut_session::RssCutGateSession::open_verified_cut` | 1 | 2 | 1 | 0 |
-| `qsag_verified::rss_cut_session::RssCutGateSession::step` | 1 | 3 | 1 | 0 |
-| `qsag_verified::tower::tower256_add` | 1 | 0 | 1 | 0 |
-| `qsag_verified::tower::tower256_mul` | 1 | 1 | 1 | 0 |
-
-## proof-only (60)
+## proof-only (13)
 
 | Function | Lean welds | Lean proofs | Crate tests | Same-named production fns |
 |---|---|---|---|---|
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::authorize_shares` | 0 | 3 | 1 | 0 |
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::propose_or_retry_epoch` | 0 | 3 | 1 | 0 |
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::record_custodian_ack` | 0 | 3 | 1 | 0 |
-| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share` | 0 | 3 | 1 | 0 |
-| `qsag_verified::fips205::fips205_f` | 0 | 1 | 2 | 1 |
-| `qsag_verified::fips205::fips205_wots_chain` | 0 | 2 | 2 | 0 |
-| `qsag_verified::fips205::fips205_wots_checksum` | 0 | 1 | 2 | 0 |
-| `qsag_verified::fips205::tsw_canonical_target_sum` | 0 | 1 | 2 | 0 |
-| `qsag_verified::fips205::tsw_check_target_sum` | 0 | 2 | 2 | 0 |
-| `qsag_verified::fips205::wots_checksum_base16` | 0 | 1 | 1 | 0 |
-| `qsag_verified::fips205::wots_extract_base16_digits` | 0 | 1 | 1 | 0 |
-| `qsag_verified::fts_spn_guard::FtsEpochGuard::consume_epoch_once` | 0 | 1 | 1 | 0 |
-| `qsag_verified::fts_spn_guard::wots_cs_verify_68_array` | 0 | 1 | 1 | 0 |
-| `qsag_verified::keccak::cshake256_32` | 0 | 1 | 2 | 2 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::ack_count` | 0 | 3 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::authorize_shares` | 0 | 2 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::bound_epoch` | 0 | 3 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::bound_msg_tag` | 0 | 3 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::has_bound_epoch` | 0 | 3 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::is_poisoned` | 0 | 3 | 2 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::n` | 0 | 3 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::propose_or_retry_epoch` | 0 | 2 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::record_custodian_ack` | 0 | 3 | 1 | 0 |
+| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::freeze_peer_commitment` | 0 | 1 | 1 | 0 |
+| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::new_awaiting_peer_commit` | 0 | 1 | 1 | 0 |
+| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::open_local_residual` | 0 | 1 | 1 | 0 |
+| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::verify_peer_opening` | 0 | 1 | 1 | 0 |
+| `qsag_verified::cred_and_hd_guards::toprf_majority_of_3_goldilocks` | 0 | 1 | 1 | 0 |
 | `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::step` | 0 | 2 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::authorize_open` | 0 | 1 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::record_check_result` | 0 | 1 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::stage_relations` | 0 | 1 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::step` | 0 | 1 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::authorize_ancestor_derivation` | 0 | 1 | 1 | 0 |
-| `qsag_verified::policy_and_addr::IntentAddressVersion::from_u8` | 0 | 1 | 0 | 0 |
-| `qsag_verified::policy_and_addr::IntentIdentityKind::from_u8` | 0 | 1 | 1 | 0 |
-| `qsag_verified::policy_and_addr::IntentSuiteTag::from_u16` | 0 | 1 | 1 | 0 |
-| `qsag_verified::policy_and_addr::IntentSuiteTag::to_u16` | 0 | 1 | 1 | 0 |
-| `qsag_verified::policy_and_addr::StatefulVelocityGuard::authorize_spend` | 0 | 3 | 1 | 0 |
-| `qsag_verified::policy_and_addr::StatefulVelocityGuard::rotate_window` | 0 | 2 | 1 | 0 |
-| `qsag_verified::policy_and_addr::encode_intent_128` | 0 | 1 | 1 | 1 |
-| `qsag_verified::threshold::EpochLatch::acquire_or_retry` | 0 | 1 | 1 | 0 |
-| `qsag_verified::threshold::EpochLatch::new` | 0 | 1 | 1 | 0 |
 | `qsag_verified::threshold::dkg_beaver_frobenius_eval_gf256` | 0 | 1 | 1 | 0 |
 | `qsag_verified::threshold::dkg_verify_shamir_2of3_key_bit_gf256` | 0 | 1 | 1 | 0 |
-| `qsag_verified::threshold::epoch_latch_advance` | 0 | 1 | 1 | 0 |
-| `qsag_verified::threshold::rss_and_gate` | 0 | 1 | 1 | 0 |
 | `qsag_verified::threshold::rss_keccak_chi_lane` | 0 | 1 | 1 | 0 |
 | `qsag_verified::threshold::rss_not` | 0 | 1 | 1 | 0 |
-| `qsag_verified::threshold::rss_reconstruct` | 0 | 1 | 1 | 0 |
 | `qsag_verified::threshold::rss_share_u64` | 0 | 1 | 0 | 0 |
 | `qsag_verified::threshold::rss_xor` | 0 | 1 | 1 | 0 |
 | `qsag_verified::threshold::shamir_degree_reduce_2of3_gf256` | 0 | 1 | 1 | 0 |
-| `qsag_verified::threshold::shamir_eval_poly_gf256` | 0 | 1 | 2 | 0 |
-| `qsag_verified::threshold::shamir_eval_poly_goldilocks` | 0 | 1 | 2 | 0 |
-| `qsag_verified::threshold::shamir_lagrange_at_zero_gf256` | 0 | 1 | 2 | 0 |
-| `qsag_verified::threshold::shamir_lagrange_weight_zero_gf256` | 0 | 1 | 1 | 0 |
-| `qsag_verified::threshold::shamir_validate_points_gf256` | 0 | 2 | 1 | 0 |
-| `qsag_verified::tower::BdozOpeningGuard2Lane::verify_once` | 0 | 1 | 2 | 0 |
-| `qsag_verified::tower::bdoz_commit_masked_tag` | 0 | 2 | 2 | 0 |
-| `qsag_verified::tower::gf256_frobenius_residual` | 0 | 2 | 1 | 0 |
-| `qsag_verified::tower::gf256_inv` | 0 | 2 | 2 | 0 |
-| `qsag_verified::tower::gf256_is_boolean_frobenius` | 0 | 2 | 1 | 0 |
-| `qsag_verified::tower::verify_mac_2lane` | 0 | 4 | 1 | 0 |
-| `qsag_verified::tower::verify_mac_2lane_with_burn` | 0 | 3 | 1 | 0 |
 
-## test-only (52)
+## test-only (8)
 
 | Function | Lean welds | Lean proofs | Crate tests | Same-named production fns |
 |---|---|---|---|---|
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::ack_bitmap` | 0 | 0 | 1 | 0 |
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::ack_count` | 0 | 0 | 1 | 0 |
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::is_poisoned` | 0 | 0 | 2 | 0 |
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::next_epoch` | 0 | 0 | 2 | 0 |
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::phase` | 0 | 0 | 1 | 0 |
-| `qsag_verified::belt_latch_kernel::BeltLatchKernel::bind` | 0 | 0 | 1 | 0 |
-| `qsag_verified::belt_latch_kernel::BeltLatchKernel::has_in_flight` | 0 | 0 | 1 | 0 |
-| `qsag_verified::belt_latch_kernel::BeltLatchKernel::in_flight` | 0 | 0 | 1 | 0 |
-| `qsag_verified::belt_latch_kernel::BeltLatchKernel::is_wal_poisoned` | 0 | 0 | 1 | 0 |
-| `qsag_verified::belt_latch_kernel::BeltLatchKernel::new_empty` | 0 | 0 | 1 | 0 |
-| `qsag_verified::belt_latch_kernel::BeltLatchKernel::next_epoch` | 0 | 0 | 2 | 0 |
 | `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::family_quarantined` | 0 | 0 | 1 | 0 |
-| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::phase` | 0 | 0 | 1 | 0 |
 | `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::session_id` | 0 | 0 | 1 | 0 |
-| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::aborted` | 0 | 0 | 1 | 0 |
-| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::released` | 0 | 0 | 1 | 0 |
-| `qsag_verified::fts_spn_guard::FtsEpochGuard::poisoned` | 0 | 0 | 1 | 0 |
-| `qsag_verified::fts_spn_guard::FtsEpochGuard::used` | 0 | 0 | 1 | 0 |
-| `qsag_verified::fts_spn_guard::FtsEpochPermit::into_binding` | 0 | 0 | 1 | 0 |
 | `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::absorbed` | 0 | 0 | 1 | 0 |
-| `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::is_consumed` | 0 | 0 | 2 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::next_epoch` | 0 | 0 | 2 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::phase` | 0 | 0 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::pending_relations` | 0 | 0 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::expected_static_child_root` | 0 | 0 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::has_locked_codeword` | 0 | 0 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::is_poisoned` | 0 | 0 | 2 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::locked_ancestor_codeword_tag` | 0 | 0 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::digit_at` | 0 | 0 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::digits` | 0 | 0 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::validated_digest` | 0 | 0 | 1 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::verified_sum` | 0 | 0 | 1 | 0 |
-| `qsag_verified::policy_and_addr::StatefulVelocityGuard::spent_units` | 0 | 0 | 1 | 0 |
-| `qsag_verified::policy_and_addr::StatefulVelocityGuard::window_id` | 0 | 0 | 1 | 0 |
-| `qsag_verified::rss_cut_session::RssCutGateSession::is_consistency_verified` | 0 | 0 | 1 | 0 |
-| `qsag_verified::rss_cut_session::RssCutGateSession::is_poisoned` | 0 | 0 | 2 | 0 |
-| `qsag_verified::rss_cut_session::RssCutGateSession::phase` | 0 | 0 | 1 | 0 |
-| `qsag_verified::rss_cut_session::RssCutGateSession::session_id` | 0 | 0 | 1 | 0 |
-| `qsag_verified::threshold::EpochLatch::key_epoch_id` | 0 | 0 | 1 | 0 |
-| `qsag_verified::threshold::EpochLatch::last_bound` | 0 | 0 | 1 | 0 |
+| `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::is_consumed` | 0 | 0 | 1 | 0 |
+| `qsag_verified::opening_guard::OpeningReleasePermit::openings` | 0 | 0 | 1 | 0 |
+| `qsag_verified::opening_guard::OpeningReleasePermit::round_id` | 0 | 0 | 1 | 0 |
 | `qsag_verified::threshold::EpochLatch::max_epoch` | 0 | 0 | 1 | 0 |
-| `qsag_verified::threshold::EpochLatch::next_epoch` | 0 | 0 | 2 | 0 |
 | `qsag_verified::threshold::dkg_beaver_frobenius_share_shamir_gf256` | 0 | 0 | 1 | 0 |
-| `qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256` | 0 | 0 | 1 | 0 |
-| `qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks` | 0 | 0 | 2 | 0 |
-| `qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks` | 0 | 0 | 1 | 0 |
-| `qsag_verified::tower::BdozOpeningGuard2Lane::is_consumed` | 0 | 0 | 2 | 0 |
-| `qsag_verified::tower::BdozOpeningGuard2Lane::new` | 0 | 0 | 1 | 0 |
-| `qsag_verified::tower::BdozVerifierSession2Lane::is_burned` | 0 | 0 | 1 | 0 |
-| `qsag_verified::tower::BdozVerifierSession2Lane::new` | 0 | 0 | 1 | 0 |
-| `qsag_verified::tower::bdoz_fold_masked_value` | 0 | 0 | 1 | 0 |
-| `qsag_verified::tower::gf16_add` | 0 | 0 | 1 | 0 |
 
-## unreferenced (32)
+## unreferenced (2)
 
 | Function | Lean welds | Lean proofs | Crate tests | Same-named production fns |
 |---|---|---|---|---|
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::guard_key_commit` | 0 | 0 | 0 | 0 |
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::n` | 0 | 0 | 0 | 0 |
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::q` | 0 | 0 | 0 | 0 |
-| `qsag_verified::belt_latch_kernel::BeltLatchKernel::capacity_limit` | 0 | 0 | 0 | 0 |
-| `qsag_verified::belt_latch_kernel::belt_latch_digits_eq` | 0 | 0 | 0 | 0 |
-| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::frozen_peer_commitment` | 0 | 0 | 0 | 0 |
 | `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::modulus_q` | 0 | 0 | 0 | 0 |
-| `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::attempt` | 0 | 0 | 0 | 0 |
-| `qsag_verified::fts_spn_guard::FtsDeferredMacSession::intermediate_mac_verified` | 0 | 0 | 0 | 0 |
-| `qsag_verified::fts_spn_guard::FtsDeferredMacSession::output_released` | 0 | 0 | 0 | 0 |
-| `qsag_verified::fts_spn_guard::FtsDeferredMacSession::quarantined` | 0 | 0 | 0 | 0 |
-| `qsag_verified::fts_spn_guard::FtsDeferredMacSession::spn_rounds_completed` | 0 | 0 | 0 | 0 |
-| `qsag_verified::fts_spn_guard::FtsEpochGuard::epoch` | 0 | 0 | 0 | 0 |
-| `qsag_verified::fts_spn_guard::FtsEpochGuard::key_id` | 0 | 0 | 0 | 0 |
-| `qsag_verified::fts_spn_guard::FtsEpochGuard::max_epochs` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::f` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::global_liveness_mode` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::max_jump_window` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::q` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::BeltQuorumCore::t` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::ancestor_kp` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::ancestor_layer` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::ancestor_tree` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::key_params_tag` | 0 | 0 | 0 | 0 |
-| `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::key_pk_tag` | 0 | 0 | 0 | 0 |
-| `qsag_verified::policy_and_addr::StatefulVelocityGuard::authority_pin` | 0 | 0 | 0 | 0 |
-| `qsag_verified::policy_and_addr::StatefulVelocityGuard::cap_units` | 0 | 0 | 0 | 0 |
-| `qsag_verified::policy_and_addr::StatefulVelocityGuard::last_nonce` | 0 | 0 | 0 | 0 |
-| `qsag_verified::policy_and_addr::StatefulVelocityGuard::policy_pin` | 0 | 0 | 0 | 0 |
-| `qsag_verified::rss_cut_session::RssCutGateSession::mask_commitment` | 0 | 0 | 0 | 0 |
-| `qsag_verified::threshold::rss_party_and_local` | 0 | 0 | 0 | 0 |
-| `qsag_verified::threshold::rss_reshare_views` | 0 | 0 | 0 | 0 |
+| `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::quarantine` | 0 | 0 | 0 | 0 |
 

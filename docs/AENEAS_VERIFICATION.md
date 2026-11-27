@@ -76,42 +76,42 @@ rendered `extraction-coverage.md`). The analysis is lexical: comments and litera
 type-checked, so `direct-lexical` and `reached` through a `.method(` edge are
 over-approximations.
 
-The manifest on disk classifies **238** functions, each with exactly one status:
+The manifest on disk classifies **197** functions, each with exactly one status:
 
 | Status | Functions | Meaning |
 | --- | ---: | --- |
-| `direct` | 57 | A non-test call site in `crates/**` names the function. |
-| `direct-lexical` | 16 | Only `.method(` call sites, in files whose `use` imports the receiver type. |
-| `reached` | 14 | Not called from `crates/**`, but called transitively inside `qsag-verified` by a function that is. |
-| **Production-called** | **87 (36.6%)** | |
-| `spec-welded` | 7 | No production path; a Lean weld refers to the definition. Relating a separate production implementation requires its own refinement to that specification. |
-| `proof-only` | 60 | No production path and no weld; only Lean proofs refer to it. |
-| `test-only` | 52 | Referred to by tests alone. |
-| `unreferenced` | 32 | Nothing refers to it. |
-| **Standalone library** | **151 (63.4%)** | |
-| **Total** | **238** | `pub fn`s with no definition in `Funs.lean`: 0. |
+| `direct` | 82 | A non-test call site in `crates/**` names the function. |
+| `direct-lexical` | 56 | Only `.method(` call sites, in files whose `use` imports the receiver type. |
+| `reached` | 36 | Not called from `crates/**`, but called transitively inside `qsag-verified` by a function that is. |
+| **Production-called** | **174 (88.3%)** | |
+| `spec-welded` | 0 | No production path; a Lean weld refers to the definition. |
+| `proof-only` | 13 | No production path and no weld; only Lean proofs refer to it. |
+| `test-only` | 8 | Referred to by tests alone. |
+| `unreferenced` | 2 | Nothing refers to it. |
+| **Standalone library** | **23 (11.7%)** | |
+| **Total** | **197** | `pub fn`s with no definition in `Funs.lean`: 0. |
 
 The production-called subtotal includes direct, direct-lexical and reached functions. The standalone subtotal includes the remaining four classes.
 
 | Source module | `direct` | `direct-lexical` | `reached` | `spec-welded` | `proof-only` | `test-only` | `unreferenced` | Total |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `authenticated_belt.rs` | 3 | 0 | 0 | 1 | 3 | 5 | 3 | 15 |
-| `belt_latch_kernel.rs` | 1 | 0 | 0 | 0 | 0 | 6 | 2 | 9 |
-| `cred_and_hd_guards.rs` | 6 | 6 | 0 | 0 | 1 | 5 | 3 | 21 |
-| `fips205.rs` | 4 | 0 | 1 | 0 | 7 | 0 | 0 | 12 |
-| `fts_spn_guard.rs` | 2 | 4 | 1 | 0 | 2 | 3 | 7 | 19 |
+| `authenticated_belt.rs` | 3 | 12 | 0 | 0 | 0 | 0 | 0 | 15 |
+| `belt_latch_kernel.rs` | 3 | 5 | 1 | 0 | 0 | 0 | 0 | 9 |
+| `cred_and_hd_guards.rs` | 4 | 4 | 4 | 0 | 5 | 2 | 2 | 21 |
+| `fips205.rs` | 8 | 0 | 4 | 0 | 0 | 0 | 0 | 12 |
 | `goldilocks.rs` | 15 | 0 | 0 | 0 | 0 | 0 | 0 | 15 |
-| `keccak.rs` | 2 | 0 | 6 | 0 | 1 | 0 | 0 | 9 |
-| `opening_guard.rs` | 1 | 5 | 0 | 0 | 0 | 2 | 0 | 8 |
-| `pants_and_quorum_guards.rs` | 8 | 0 | 2 | 0 | 15 | 11 | 10 | 46 |
-| `policy_and_addr.rs` | 5 | 1 | 4 | 0 | 7 | 2 | 4 | 23 |
-| `rss_cut_session.rs` | 2 | 0 | 0 | 4 | 0 | 4 | 1 | 11 |
-| `threshold.rs` | 0 | 0 | 0 | 0 | 17 | 8 | 2 | 27 |
-| `tower.rs` | 8 | 0 | 0 | 2 | 7 | 6 | 0 | 23 |
+| `keccak.rs` | 4 | 0 | 5 | 0 | 0 | 0 | 0 | 9 |
+| `opening_guard.rs` | 1 | 3 | 0 | 0 | 0 | 4 | 0 | 8 |
+| `pants_and_quorum_guards.rs` | 7 | 15 | 14 | 0 | 1 | 0 | 0 | 37 |
+| `policy_and_addr.rs` | 9 | 10 | 4 | 0 | 0 | 0 | 0 | 23 |
+| `rss_cut_session.rs` | 2 | 7 | 1 | 0 | 0 | 0 | 0 | 10 |
+| `threshold.rs` | 16 | 0 | 1 | 0 | 7 | 2 | 0 | 26 |
+| `tower.rs` | 10 | 0 | 2 | 0 | 0 | 0 | 0 | 12 |
 
-Production calls include Goldilocks, GF(256) and Tower128 arithmetic in `qsag-core`,
-Keccak entry points and protocol guards. The `threshold.rs` Shamir, DKG and
-`EpochLatch` functions are standalone. Verify the [manifest](../aeneas/qsag-verified/extraction-coverage.json)
+Production calls include Goldilocks, GF(16), GF(256) and Tower128 arithmetic in `qsag-core`,
+Keccak and FIPS 205/TSW entry points, Shamir/RSS helpers, and protocol guards (`BeltLatchKernel`,
+`VerifiedBeltQuorumGuard`, `RssCutReleaseGuard`, `StatefulVelocityGuard`, `MlDsaReleaseGate`).
+Verify the [manifest](../aeneas/qsag-verified/extraction-coverage.json)
 with `python3 scripts/gen_extraction_coverage.py --check`.
 
 `aeneas/qsag-whir-verified` has no such manifest. Its production linkage is the list of call
@@ -125,9 +125,9 @@ Both `aeneas/qsag-verified` and `aeneas/qsag-whir-verified` are zero-dependency
 
 | Package | Surface | Evidence and boundary |
 | --- | --- | --- |
-| `aeneas/qsag-verified` (differential-parity primitives) | Goldilocks and GoldilocksExt2; Wiedemann Gf16, Gf256, Tower128; Shamir evaluation and Lagrange reconstruction; Keccak-f[1600], SHAKE256, cSHAKE256; FIPS 205 ADRS, WOTS+, F, and TSW | `tests/parity_qsag_core.rs` compares executed cases bit-for-bit with `crates/qsag-core`. `tests/unit_kat.rs` includes NIST FIPS 202 and SP 800-185 known-answer tests. `QsagSpecWeld` proves universal equivalence of extracted Keccak-f[1600] and of the binary towers (GF(256), `Tower128`, `Tower256`) against `lean/Qsag`; `SpongeFraming` extends this to the emitted SHAKE256 and cSHAKE256 bytes (see below). |
-| `aeneas/qsag-verified` (protocol guards & custody weld) | `EpochLatch` with randomizer binding; `BdozVerifierSession2Lane` & `BdozOpeningGuard2Lane`; `VerifiedBeltQuorumGuard` (`authenticated_belt`); two-of-three `RssShare64` gates; `Tower256` | `QsagCustodyWeld` proves `RealSpecBeltWeld` against the custodian masks of `Qsag.JortsBeltLatchAndQuorumSwitching`, and in `AuthenticatedBeltAndRealSpecWeld` and `RealSpecGuardBoundary` that the extracted RSS cut session, `StatefulVelocityGuard`, `MlDsaReleaseGate` and `BeltLatchKernel` forward-simulate `Qsag.mirRssCutMachine`, `Qsag.mirVelocityMachine`, `Qsag.mirMlDsaReleaseMachine` and `Qsag.mirBeltLatchKernelMachine`. Crash-safe `EpochLatch` durability requires the caller to persist its write-ahead log before releasing a grant. |
-| `aeneas/qsag-whir-verified` | Canonical Quintic and GL24 decoding, CWYZ folding, terminal checks, quorum and wire envelopes | The production entry points above use kernels linked from the extracted crate. The Lean coverage gate checks all 54 generated symbols, including internal helpers. |
+| `aeneas/qsag-verified` (differential-parity primitives) | Goldilocks and GoldilocksExt2; Wiedemann Gf16, Gf256, Tower128; Shamir evaluation and Lagrange reconstruction; Keccak-f[1600], SHAKE256, cSHAKE256; FIPS 205 ADRS, WOTS+, F, and TSW | `tests/parity_qsag_core.rs` compares executed cases bit-for-bit with `crates/qsag-core`. `tests/unit_kat.rs` includes NIST FIPS 202 and SP 800-185 known-answer tests. `QsagSpecWeld` proves universal equivalence of extracted Keccak-f[1600] and of the binary towers (GF(256), `Tower128`) against `lean/Qsag`; `SpongeFraming` extends this to the emitted SHAKE256 and cSHAKE256 bytes (see below). |
+| `aeneas/qsag-verified` (protocol guards & custody weld) | `EpochLatch` with randomizer binding; `BeltLatchKernel`; `VerifiedBeltQuorumGuard` (`authenticated_belt`); `RssCutReleaseGuard` (`rss_cut_session`); two-of-three `RssShare64` gates | `QsagCustodyWeld` proves `RealSpecBeltWeld` against the custodian masks of `Qsag.JortsBeltLatchAndQuorumSwitching`, and in `AuthenticatedBeltAndRealSpecWeld` and `RealSpecGuardBoundary` that the extracted RSS cut session, `StatefulVelocityGuard`, `MlDsaReleaseGate` and `BeltLatchKernel` forward-simulate `Qsag.mirRssCutMachine`, `Qsag.mirVelocityMachine`, `Qsag.mirMlDsaReleaseMachine` and `Qsag.mirBeltLatchKernelMachine`. Crash-safe `EpochLatch` durability requires the caller to persist its write-ahead log before releasing a grant. |
+| `aeneas/qsag-whir-verified` | Canonical Quintic and GL24 decoding, Steiner multiproof counting, row-round and CWYZ fold payload checks, quorum and wire envelopes | The production entry points above use kernels linked from the extracted crate. The Lean coverage gate checks all 86 generated symbols, including internal helpers. |
 
 Goldilocks inversion has an exact modular-exponent specification and canonical output
 bound. Beyond the seven-input witness, `RealSpecFieldWeld.lean` proves the universal nonzero
@@ -137,11 +137,6 @@ Goldilocks field laws. The Keccak zero-state
 witness excludes a constant-zero implementation, without excluding every constant
 function or establishing cryptographic security.
 
-The BDOZ exports prove totality for arbitrary opening slices, exact single-opening
-and arbitrary-batch acceptance, rejection of incorrect MAC lanes, one-shot handle
-consumption (`BdozOpeningGuard2Lane.verify_once`), and irreversible burn with zeroed
-key lanes after rejection.
-
 ## Extraction and proof architecture
 
 `aeneas/extract.sh` and `aeneas/extract_whir.sh` invoke Rust checking, Charon MIR
@@ -149,15 +144,14 @@ extraction, and Aeneas with `-backend lean -split-files`, then record SHA-256
 manifests in `extraction-provenance.json`. `Types.lean` and `Funs.lean` in both
 workspaces are machine-generated artifacts; Rust changes require regeneration.
 
-- In `aeneas/lean`, `QsagVerified/Proofs/` holds 39 proof modules (`Common`, `Goldilocks`,
-  `Gf256`, `TowerBdoz`, `ShamirDkg`, `HashEpoch`, `Bdoz`, `Sponge`, `SpongeConformance`,
+- In `aeneas/lean`, `QsagVerified/Proofs/` holds the verified custody and arithmetic proof modules (`Common`, `Goldilocks`,
+  `Gf256`, `TowerBdoz`, `ShamirDkg`, `Epoch`, `Sponge`, `SpongeConformance`,
   `SpongeFraming`, the guard and belt custody modules, `MirWpKit`, `MirRefinementKit`,
   `ElfMirTriangles` and the `RealSpec*Weld` modules), plus the nine `KeccakWitness/` group files.
   They are re-exported through `QsagMirProofs.lean` and welded to `lean/Qsag` in
-  `QsagSpecWeld.lean` and `QsagCustodyWeld.lean`. `aeneas/lean/comparator.json` replays 71
-  theorems and 25 definitions of `QsagMirProofs` against `QsagVerifiedChallenge`. All 6/6
-  paranoid kernels accepted 4,145 exported declarations. The axiom audit covered
-  52 modules, 6,887 audited declarations and 2,917 theorems, with 0 rejected.
+  `QsagSpecWeld.lean` and `QsagCustodyWeld.lean`. `aeneas/lean/comparator.json` replays 68
+  theorems and 21 definitions against `QsagVerifiedChallenge`. All 6/6
+  paranoid kernels accepted 5,371 exported declarations across 46 project modules (2,327 declarations, 1,026 theorems, 0 rejected).
   - **`Proofs/MirWpKit.lean`** is the weakest-precondition layer over the Aeneas
     `Result` monad. `Result.wp r P` is total correctness (`r = .ok v` with `P v`);
     `Result.wlp r P Qerr` is fail-closed correctness (`.ok v` with `P v`, or `.fail e` with
@@ -189,12 +183,11 @@ workspaces are machine-generated artifacts; Rust changes require regeneration.
     `Qsag.cshake256Xof` of the concatenated input, for every customization), with the teeth
     `tooth_squeezing_not_absorbed`, `tooth_last_block_suffix_sensitive` and
     `tooth_multiblock_squeeze_permuted_beyond_136`.
-  - **`Proofs/RealSpecTowerWeld.lean`** identifies the following extracted Wiedemann-tower
+  - **`Proofs/RealSpecTowerWeld.lean`** identifies the extracted Wiedemann-tower
     additions and multiplications with the recursive field `Qsag.TowerElem k` of `Qsag.Math.Gf2Pow128` under
     `Qsag.unpackTower`: `gf256_add_refines_qsag`, `gf256_mul_refines_qsag` (`k = 3`),
-    `tower128_add_refines_qsag`, `tower128_mul_refines_qsag`, `tower128_mul_eq_zero_iff`
-    (`k = 7`), `tower256_add_refines_qsag`, `tower256_mul_refines_qsag` (`k = 8`), and
-    `tooth_tower256_generator_square`. The wide levels come from one level-generic Karatsuba
+    `tower128_add_refines_qsag`, `tower128_mul_refines_qsag`, and `tower128_mul_eq_zero_iff`
+    (`k = 7`). The wide levels come from a level-generic Karatsuba
     step instantiated at 16, 32, 64 and 128 bits; no level above GF(256) is checked by
     enumeration. See the manifest for the callers of each operation.
 
@@ -204,19 +197,8 @@ workspaces are machine-generated artifacts; Rust changes require regeneration.
     - `elf_mir_keccak_f1600_avx2_4x`: all four lanes equal the full 24-round `Qsag.keccakF1600` and extracted permutation after 6,661 modeled steps, with zero YMM state and clean upper-state flag. `keccak4xFullEntry` requires canonical round constants and disjoint state, constant-table, stack-scratch and saved-frame-pointer regions.
     - `elf_mir_gf256_gfni`: one 32-byte block (`rcx = 1`), 35 decoded steps, byte-for-byte agreement with `tower.gf256_mul`, termination and a clean upper-YMM flag, alongside the slice noninterference certificate.
     - `elf_mir_tower128_pclmul`: one product (`rcx = 1`), 50 steps, with the output equal to the initial accumulator plus the extracted `tower128_mul` result through the proved basis isomorphism. This is the `gf2_128_mul_acc_pclmul` symbol, not a complete BDOZ protocol theorem.
-- In `aeneas/lean-whir`, the 9 audited modules are `Aeneas`,
-  `QsagWhirVerified.{Types,Funs,Arithmetic,Proofs,Canonical,ProtocolWeld}`,
-  `QsagWhirSpecWeld` and `AuditWhirMirAxioms`. The census covers 2,160 audited
-  declarations and 1,185 theorems, with 0 rejected and 0 external model files.
-  `Arithmetic.lean` proves the quintic ring laws, Frobenius iteration, coset and
-  bridge identities, sumcheck hypercube sum and Horner equivalence.
-  `Proofs.lean` characterizes the generated functions. `Canonical.lean` and the
-  protocol welds connect 54/54 `Funs.lean` symbols to canonical `Qsag`
-  definitions, including `Qsag.QuinticGoldilocks`, GL24 digests, the public
-  verifier and the 13 deployed schedules. [Extraction and weld inventory](../aeneas/lean-whir/README.md)
-- `AuditWhirMirAxioms.lean` anchors 173 theorems. The WHIR comparator selects
-  103 challenge theorems and 10 definitions. All 6/6 paranoid kernels accepted
-  its 4,154 exported declarations. [WHIR comparator roster](../aeneas/lean-whir/comparator.json)
+- In `aeneas/lean-whir`, the 14 audited modules cover `QsagWhirVerified` (`707` project declarations and `461` theorems, `0` rejected, `0` external model files), connecting all 86 `Funs.lean` symbols to canonical `Qsag` definitions including `Qsag.QuinticGoldilocks`, GL24 digests, Steiner multiproof counting, the public row/CWYZ fold payload verifiers, and the 13 deployed schedules. [Extraction and weld inventory](../aeneas/lean-whir/README.md)
+- The WHIR comparator selects 141 challenge theorems and 19 definitions. All 6/6 paranoid kernels accepted its 4,829 exported declarations. [WHIR comparator roster](../aeneas/lean-whir/comparator.json)
 
 Every hand-written Lean file over 80 lines avoids file-wide `@[expose] public section`
 and stays within at most 12 `@[expose]` attributes (`scripts/check_lean_policy.py`).

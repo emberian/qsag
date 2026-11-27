@@ -1,6 +1,6 @@
 # MIR verification and canonical weld status
 
-Updated 2026-11-23. Statements delivered, how they were checked, and what is still open.
+The checked statements below describe the generated functions, their callers and the remaining refinement obligations.
 
 ## Layout
 
@@ -24,11 +24,10 @@ Fields.
 - Goldilocks add/sub/mul/inverse refine `Qsag.Goldilocks`; `goldilocks_inverse_mul_eq_one`
   gives `a * a⁻¹ = 1` in MIR for every nonzero residue, and `goldilocks_inv_none_iff_zero`
   pins the `Option` behaviour.
-- Binary towers: `gf256_mul_refines_qsag`, `tower128_mul_refines_qsag`,
-  `tower256_mul_refines_qsag` and the three addition welds identify every extracted tower
-  operation with `Qsag.towerMul` / `Qsag.towerAdd` at levels 3, 7 and 8. The wide levels come
-  from one level-generic Karatsuba step. `tower128_mul_eq_zero_iff`: the extracted product has
-  no zero divisors.
+- Binary tower multiplication in `gf256_mul_refines_qsag` and `tower128_mul_refines_qsag`
+  agrees with `Qsag.towerMul` at levels 3 and 7. The addition proofs identify the same
+  representation. `tower128_mul_eq_zero_iff` excludes zero divisors.
+
 
 Hashing.
 - The comparator now checks the full Keccak zero-state vector (lane 0
@@ -42,12 +41,6 @@ Hashing.
 - The 128-chain base-4 WOTS+C digit check equals `Qsag.checkTargetSum 4 128 192`.
 
 Guards (multi-turn, arbitrary request sequences including refusals).
-- `BdozConsumption`: the extracted one-shot opening API terminates on all inputs, clears
-  keys on every attempt, rejects every subsequent use, and accepts only the provisioned
-  session/round after actual MAC verification. Rust tests cover successful-use replay,
-  context mismatches, tag/MAC tampering, empty batches, and retries following rejection.
-- The comparator includes exact arbitrary-length BDOZ batch acceptance and canonical
-  Tower128 multiplication, including its zero-product characterization.
 - `BeltLatchKernel.lean`: the transition kernel of production `BeltLatch::bind`, with the
   durable write as an input. `belt_latch_bind_eq` (total, closed form);
   `belt_latch_epoch_binding_unique` (two accepted binds of one epoch carry the same digest,
@@ -59,9 +52,6 @@ Guards (multi-turn, arbitrary request sequences including refusals).
   least `q` distinct enrolled custodians with earlier accepted MAC-valid acknowledgments;
   two grants share more than `f` of them. `inhabited_belt_one_fault_multi_epoch` is the
   `n=3, t=2, f=1, q=3` two-epoch witness.
-- `MultiTurnMediationAndReachability.lean`: `bdoz_generated_loop_fold` and
-  `bdoz_verify_arbitrary_batch` give exact acceptance of the BDOZ verifier for batches of any
-  length; `bdoz_successful_trace_checks_every_batch` lifts it to traces.
 - `PolicyAndAddr.lean`: `checked_velocity_spend_spec`, the helper production admission calls.
 - `RealSpecGuardBoundary.lean`: `StatefulVelocityGuard::authorize_spend`,
   `MlDsaReleaseGate::try_release_z_share` and `BeltLatchKernel::bind` are total and compute
@@ -73,7 +63,7 @@ Guards (multi-turn, arbitrary request sequences including refusals).
   and `extractedBeltLatch_equivocation_free` are the `Qsag` multi-turn theorems restated on
   extracted traces. The velocity guard does not refine the burned-nonce policy model as a whole
   machine (`tooth_velocity_used_nonce_model_is_not_monotone_nonce`).
-- `CallerContracts.lean`: what unextracted callers must establish for ML-DSA, FTS and RSS
+- `CallerContracts.lean`: what unextracted callers must establish for ML-DSA and RSS
   releases, and a concrete RSS execution showing those contracts are not derivable from the
   guard alone.
 
@@ -120,8 +110,8 @@ theorem.
 `.fail .assertionFailure` for every input, and `shake256_absorb_ok_iff_absorbing` that a
 successful absorb implies the absorbing phase. Earlier extractions returned the state
 unchanged. `finalize` and `squeeze` stay idempotent and resumable after squeezing begins
-(`shake256_finalize_after_squeezing`). No function of the crate absorbs after squeezing; the
-only production use of the type is `new_cshake256(..).state` in `qsag-cred`.
+(`shake256_finalize_after_squeezing`). Production uses include the cSHAKE state in `qsag-cred` and the public-key tag in
+`qsag-core`’s waistband derivation.
 
 ## Coverage classification
 
@@ -129,33 +119,30 @@ only production use of the type is `new_cshake256(..).state` in `qsag-cred`.
   `scripts/gen_extraction_coverage.py`, `--check` fails when stale) classifies every `pub fn`
   of the crate: called from `crates/**`, reached from such a function, related to production
   only through a Lean weld to a shared `Qsag` specification, proved but not welded, used by
-  tests only, or unreferenced. Goldilocks and tower arithmetic are in the weld-only class:
-  production has its own implementations, tied to these by the specification welds and the
-  differential parity tests, not by a call.
+  tests only, or unreferenced. Receiver-method matches are lexical, including matches
+  inside the extracted crate. The report records the call sites and the inferred edges.
+- The scalar Goldilocks and binary tower operations used for Shamir evaluation and
+  interpolation have production callers. The degree checks over additional parties and
+  the optimized bitsliced paths remain part of the production implementation.
+- The production RSS participant constructs `RssCutGateSession` and consumes its cut-release
+  verdict in `qsag-core/src/rss256.rs`. Its proofs cover the transition sequence on one
+  initialized session. Preventing reuse of a discarded session ID requires a caller registry.
 
-## Validation and remaining work
+## Production reachability and kernel checks
 
-Linux release tests pass across the standalone verified crates (`qsag-verified` and quintic `Fp5`
-`qsag-whir-verified`) and production custody/aggregation crates, including no-default-feature
-checks and strict `-D warnings` Clippy checks. Both `aeneas/lean` (`Aeneas`, `QsagVerified`,
-`QsagMirProofs`, `QsagSpecWeld`, `QsagCustodyWeld`, `AuditMirAxioms`, `QsagVerifiedChallenge`)
-and `aeneas/lean-whir` (`QsagWhirVerified`, `QsagWhirSpecWeld`, `QsagWhirVerifiedChallenge`,
-`audit-whir-mir-axioms`, covering 54/54 extracted quintic `Fp5` and `QSAGHQM2` definitions) build
-cleanly under `lake build --wfail` against the unified `lean/` specification library.
+The inventory reports 197 public functions and zero missing extractions. It records 56 direct
+matches, 13 lexical method matches and 20 additional reachable functions. Another 5 have a
+specification theorem, 54 have only proof references, 37 have only test references and 12
+have no recorded reference. [Generated inventory](../qsag-verified/extraction-coverage.md)
 
-The repository source-policy scan (`scripts/check_lean_policy.py`) and SHA-256 provenance gate
-(`scripts/check_extraction_provenance.py` for both `qsag-verified` and `qsag-whir-verified`)
-pass with zero forbidden proof escapes and `≤ 12` `@[expose]` declarations per file. Full
-`import all` axiom censuses (`lake exe audit-mir-axioms`: `6,887` declarations, `2,917` theorems
-across `52` modules incl. `QsagCustodyWeld`, `0` rejected; `lake exe audit-whir-mir-axioms`:
-`2,160` declarations, `1,185` theorems, `173` anchored, `54/54` extracted symbols, `103` replayed
-theorems across `9` modules incl. `QsagWhirSpecWeld`, `0` rejected) certify `{propext, Quot.sound}`
-only, and `lake comparator --paranoid` passes `6/6` external kernels on all three packages
-(`lean/`: `16,829` declarations; `aeneas/lean/`: `4,145` declarations; `aeneas/lean-whir/`:
-`4,154` declarations — `18/18` paranoid kernel runs `Accept`).
+The MIR comparator selects 68 theorems and 21 definitions. The runtime audit counts 2,327
+project declarations, including 1,026 theorems, across 46 modules. It checks 14,456 kernel
+constants in the transitive closure, with zero rejected dependencies. [Manifest](comparator.json)
 
-Still open: the cSHAKE constructor proof; concurrent production scheduler refinement;
-the private M-gate Round-2 stream; and workspace-wide adoption of anchored recovery APIs.
+## Remaining obligations
+
+Open work includes the cSHAKE constructor proof, concurrent production scheduler refinement,
+the private M-gate Round-2 stream and workspace-wide adoption of anchored recovery APIs.
 Production output mediation relies on Rust privacy and move semantics plus verified guard
 transitions, not an extraction of the complete asynchronous scheduler. Public DKG containers
 remain for existing callers; their secret element fields are opaque and their drops wipe.
