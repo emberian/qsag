@@ -469,7 +469,252 @@ def decode (words : Array UInt32) : Option Image :=
       (543, [
         ⟨253,[]⟩ ]) ]⟩ ]
 
-theorem p2_decoded : decode poseidon2Perm12SpvWords = some p2 := by kernel_rfl
+/-! The raw scanner checks the entire word stream against the instruction
+    sequence reconstructed from the image. Replay the module header in bounded
+    sections and prove collection of every function body by induction over
+    its basic blocks. This keeps each individual kernel conversion small. -/
+
+private def blockInst (i : Inst) := i.op != 55 && i.op != 248 && i.op != 56
+
+private def bodyWords (bs : List (Nat × List Inst)) : List Inst :=
+  bs.flatMap fun (l,is) => ⟨248,[l]⟩ :: is
+
+private def reverseBlocks (bs : List (Nat × List Inst)) :=
+  (bs.map fun (l,is) => (l,is.reverse)).reverse
+
+private theorem collectInst (m : Image) (id : Nat) (ps : List Nat) (l : Nat) (acc : List Inst)
+    (bs : List (Nat × List Inst)) (i : Inst) (rest : List Inst) (h : blockInst i = true) :
+    collect m (some ⟨id,ps,(l,acc)::bs⟩) (i::rest) =
+    collect m (some ⟨id,ps,(l,i::acc)::bs⟩) rest := by
+  obtain ⟨op,args⟩ := i
+  simp [blockInst] at h
+  conv => lhs; unfold collect; dsimp only
+  split <;> simp_all <;> subst_vars <;> rfl
+
+private theorem collectPlain (m : Image) (id : Nat) (ps : List Nat) (l : Nat)
+    (bs : List (Nat × List Inst)) (rest : List Inst) (is acc : List Inst)
+    (h : is.all blockInst = true) :
+    collect m (some ⟨id,ps,(l,acc)::bs⟩) (is ++ rest) =
+    collect m (some ⟨id,ps,(l,is.reverse ++ acc)::bs⟩) rest := by
+  induction is generalizing acc with
+  | nil => rfl
+  | cons i is ih =>
+    obtain ⟨hi,ht⟩ := Bool.and_eq_true_iff.mp h
+    simp only [List.cons_append,collectInst m id ps l acc bs i _ hi,ih (i::acc) ht,
+      List.reverse_cons,List.append_assoc,List.nil_append]
+
+private theorem collectBlocks (m : Image) (id : Nat) (ps : List Nat) (rest : List Inst)
+    (bs acc : List (Nat × List Inst)) (h : bs.all (fun b => b.2.all blockInst) = true) :
+    collect m (some ⟨id,ps,acc⟩) (bodyWords bs ++ rest) =
+    collect m (some ⟨id,ps,reverseBlocks bs ++ acc⟩) rest := by
+  induction bs generalizing acc with
+  | nil => rfl
+  | cons b bs ih =>
+    obtain ⟨l,is⟩ := b
+    obtain ⟨hi,ht⟩ := Bool.and_eq_true_iff.mp h
+    change collect m (some ⟨id,ps,acc⟩) (⟨248,[l]⟩ :: ((is ++ bodyWords bs) ++ rest)) = _
+    rw [List.append_assoc]
+    change collect m (some ⟨id,ps,(l,[])::acc⟩) (is ++ (bodyWords bs ++ rest)) = _
+    simp only [collectPlain m id ps l acc _ is [] hi,List.append_nil,ih _ ht,
+        reverseBlocks,List.map_cons,List.reverse_cons,List.append_assoc,List.singleton_append]
+
+private theorem collectFunctionBody (m : Image) (f : Fn) (rest : List Inst)
+    (h : f.blocks.all (fun b => b.2.all blockInst) = true) :
+    collect m (some {f with blocks := []}) (bodyWords f.blocks ++ ⟨56,[]⟩ :: rest) =
+      collect {m with functions := f :: m.functions} none rest := by
+  obtain ⟨id,ps,bs⟩ := f
+  rw [collectBlocks _ _ _ _ _ _ h,List.append_nil]
+  change collect {m with functions := closeFn ⟨id,ps,reverseBlocks bs⟩ :: m.functions} none rest = _
+  simp [closeFn,reverseBlocks,List.map_reverse,List.map_map,Function.comp_def]
+
+private structure FnTypes where
+  result : Nat
+  control : Nat
+  signature : Nat
+  params : List (Nat × Nat)
+
+private def parameterWords (ps : List (Nat × Nat)) : List Inst :=
+  ps.map fun (t,id) => ⟨55,[t,id]⟩
+
+private def functionWords (tf : FnTypes × Fn) : List Inst :=
+  let (t,f) := tf
+  ⟨54,[t.result,f.id,t.control,t.signature]⟩ :: (parameterWords t.params ++
+      (bodyWords f.blocks ++ [⟨56,[]⟩]))
+
+private def encodeOk (tf : FnTypes × Fn) : Bool :=
+  (tf.1.params.map Prod.snd == tf.2.params) && tf.2.blocks.all (fun b => b.2.all blockInst)
+
+private theorem collectParams (m : Image) (id : Nat) (acc : List Nat)
+    (rest : List Inst) (ts : List (Nat × Nat)) :
+    collect m (some ⟨id,acc,[]⟩) (parameterWords ts ++ rest) =
+      collect m (some ⟨id,acc ++ ts.map Prod.snd,[]⟩) rest := by
+  induction ts generalizing acc with
+  | nil => simp [parameterWords]
+  | cons t ts ih =>
+    change collect m (some ⟨id,acc ++ [t.2],[]⟩) (parameterWords ts ++ rest) = _
+    rw [ih]
+    simp [List.append_assoc]
+
+private theorem collectOneFunction (m : Image) (tf : FnTypes × Fn) (rest : List Inst)
+    (ok : encodeOk tf = true) :
+    collect m none (functionWords tf ++ rest) =
+      collect {m with functions := tf.2 :: m.functions} none rest := by
+  obtain ⟨t,⟨id,ps,bs⟩⟩ := tf
+  obtain ⟨params,body⟩ := Bool.and_eq_true_iff.mp ok
+  have hp : t.params.map Prod.snd = ps := by simpa using params
+  change collect m (some ⟨id,[],[]⟩) ((parameterWords t.params ++
+    (bodyWords bs ++ [⟨56,[]⟩])) ++ rest) = _
+  rw [List.append_assoc,List.append_assoc,collectParams m id [] _ t.params, List.nil_append,hp]
+  exact collectFunctionBody m ⟨id,ps,bs⟩ rest body
+
+private theorem collectFunctions (m : Image) (fs : List (FnTypes × Fn)) (rest : List Inst)
+    (ok : fs.all encodeOk = true) :
+    collect m none (fs.flatMap functionWords ++ rest) =
+      collect {m with functions := (fs.map Prod.snd).reverse ++ m.functions} none rest := by
+  induction fs generalizing m with
+  | nil => rfl
+  | cons f fs ih =>
+    obtain ⟨hf,ht⟩ := Bool.and_eq_true_iff.mp ok
+    rw [List.flatMap_cons,List.append_assoc,collectOneFunction _ _ _ hf,ih _ ht]
+    simp [List.append_assoc]
+
+/-- Function signatures contain the result and parameter type IDs elided by
+    the executable image. The raw scanner checks them alongside all operands. -/
+private def p2Signatures : List FnTypes := [
+  ⟨2,0,3,[]⟩,
+  ⟨6,0,8,[(7,9)]⟩,
+  ⟨6,0,12,[(7,13),(7,14)]⟩,
+  ⟨6,0,12,[(7,17),(7,18)]⟩,
+  ⟨6,0,8,[(7,21)]⟩,
+  ⟨6,0,12,[(7,24),(7,25)]⟩,
+  ⟨6,0,12,[(7,28),(7,29)]⟩,
+  ⟨6,0,8,[(7,32)]⟩,
+  ⟨6,0,37,[(7,38),(36,39)]⟩,
+  ⟨6,0,8,[(7,42)]⟩,
+  ⟨2,0,45,[(7,46),(7,47),(7,48),(7,49)]⟩,
+  ⟨2,0,55,[(54,56)]⟩,
+  ⟨2,0,55,[(54,59)]⟩ ]
+
+private def p2Bodies := p2Signatures.zip p2.functions
+
+/-- One complete section of the word image. Section boundaries are justified by
+    the checked equality with the parser on the complete shipped module. -/
+private def p2Section (off len : Nat) : List Inst :=
+  (scan len ((poseidon2Perm12SpvWords.toList.drop off).take len)).getD []
+
+private def p2Header (entry workSize scalar composite global builtin width arr ptr : Nat) : Image :=
+  { entry := entry, localSize := p2.localSize.take workSize, scalars := p2.scalars.take scalar,
+    composites := p2.composites.take composite, globals := p2.globals.take global,
+    builtins := p2.builtins.take builtin, widths := p2.widths.take width,
+    arrays := p2.arrays.take arr, pointers := p2.pointers.take ptr }
+
+private theorem p2Section00 (rest : List Inst) :
+    collect {} none ((p2Section 5 147) ++ rest) =
+      collect (p2Header 4 3 0 0 0 0 0 0 0) none rest := by kernel_rfl
+
+private theorem p2Section01 (rest : List Inst) :
+    collect (p2Header 4 3 0 0 0 0 0 0 0) none ((p2Section 152 136) ++ rest) =
+      collect (p2Header 4 3 0 0 0 0 0 0 0) none rest := by kernel_rfl
+
+private theorem p2Section02 (rest : List Inst) :
+    collect (p2Header 4 3 0 0 0 0 0 0 0) none ((p2Section 288 116) ++ rest) =
+      collect (p2Header 4 3 0 0 0 0 0 0 0) none rest := by kernel_rfl
+
+private theorem p2Section03 (rest : List Inst) :
+    collect (p2Header 4 3 0 0 0 0 0 0 0) none ((p2Section 404 124) ++ rest) =
+      collect (p2Header 4 3 0 0 0 0 0 0 0) none rest := by kernel_rfl
+
+private theorem p2Section04 (rest : List Inst) :
+    collect (p2Header 4 3 0 0 0 0 0 0 0) none ((p2Section 528 123) ++ rest) =
+      collect (p2Header 4 3 0 0 0 0 0 0 0) none rest := by kernel_rfl
+
+private theorem p2Section05 (rest : List Inst) :
+    collect (p2Header 4 3 0 0 0 0 0 0 0) none ((p2Section 651 137) ++ rest) =
+      collect (p2Header 4 3 0 0 0 0 0 0 0) none rest := by kernel_rfl
+
+private theorem p2Section06 (rest : List Inst) :
+    collect (p2Header 4 3 0 0 0 0 0 0 0) none ((p2Section 788 125) ++ rest) =
+      collect (p2Header 4 3 0 0 0 2 0 0 0) none rest := by kernel_rfl
+
+private theorem p2Section07 (rest : List Inst) :
+    collect (p2Header 4 3 0 0 0 2 0 0 0) none ((p2Section 913 134) ++ rest) =
+      collect (p2Header 4 3 18 0 0 2 3 1 3) none rest := by kernel_rfl
+
+private theorem p2Section08 (rest : List Inst) :
+    collect (p2Header 4 3 18 0 0 2 3 1 3) none ((p2Section 1047 138) ++ rest) =
+      collect (p2Header 4 3 36 0 3 2 3 2 9) none rest := by kernel_rfl
+
+private theorem p2Section09 (rest : List Inst) :
+    collect (p2Header 4 3 36 0 3 2 3 2 9) none ((p2Section 1185 160) ++ rest) =
+      collect (p2Header 4 3 68 0 3 2 3 2 9) none rest := by kernel_rfl
+
+private theorem p2Section10 (rest : List Inst) :
+    collect (p2Header 4 3 68 0 3 2 3 2 9) none ((p2Section 1345 203) ++ rest) =
+      collect (p2Header 4 3 97 1 3 2 3 3 10) none rest := by kernel_rfl
+
+private theorem p2Section11 (rest : List Inst) :
+    collect (p2Header 4 3 97 1 3 2 3 3 10) none ((p2Section 1548 179) ++ rest) =
+      collect (p2Header 4 3 127 2 3 2 3 3 11) none rest := by kernel_rfl
+
+private theorem p2Section12 (rest : List Inst) :
+    collect (p2Header 4 3 127 2 3 2 3 3 11) none ((p2Section 1727 147) ++ rest) =
+      collect (p2Header 4 3 145 4 3 2 3 3 11) none rest := by kernel_rfl
+
+private def p2ModulePrefix : List Inst := [
+  (p2Section 5 147),
+  (p2Section 152 136),
+  (p2Section 288 116),
+  (p2Section 404 124),
+  (p2Section 528 123),
+  (p2Section 651 137),
+  (p2Section 788 125),
+  (p2Section 913 134),
+  (p2Section 1047 138),
+  (p2Section 1185 160),
+  (p2Section 1345 203),
+  (p2Section 1548 179),
+  (p2Section 1727 147)
+  ].flatten
+
+private theorem p2Parsed : scan 5473 (poseidon2Perm12SpvWords.toList.drop 5) =
+    some (p2ModulePrefix ++ p2Bodies.flatMap functionWords) := by kernel_rfl
+
+private theorem p2HeaderCollected (rest : List Inst) :
+    collect {} none (p2ModulePrefix ++ rest) =
+      collect {p2 with functions := []} none rest := by
+  simp only [p2ModulePrefix,List.flatten_cons,List.flatten_nil,List.append_assoc,List.nil_append]
+  rw [p2Section00, p2Section01, p2Section02, p2Section03, p2Section04, p2Section05, p2Section06,
+    p2Section07, p2Section08, p2Section09, p2Section10, p2Section11, p2Section12]
+  kernel_rfl
+
+
+private theorem p2BodyChecks : p2Bodies.all encodeOk = true := by decide +kernel
+
+private theorem p2Collect :
+    collect {} none (p2ModulePrefix ++ p2Bodies.flatMap functionWords) = some p2 := by
+  rw [p2HeaderCollected,← List.append_nil (p2Bodies.flatMap functionWords),
+    collectFunctions _ _ _ p2BodyChecks]
+  have all : p2Bodies.map Prod.snd = p2.functions := by kernel_rfl
+  rw [all]
+  change some {p2 with functions := (p2.functions.reverse ++ []).reverse} = _
+  simp
+
+private theorem decode_scanned (ws : Array UInt32) (gen bound : UInt32) (n : Nat)
+    (rest : List UInt32) (insts : List Inst)
+    (header : ws.toList = 0x07230203 :: 0x10500 :: gen :: bound :: 0 :: rest)
+    (length : rest.length = n) (parsed : scan n rest = some insts) :
+    decode ws = collect {} none insts := by
+  unfold decode
+  rw [header]
+  simp only [and_self, ↓reduceIte, length, parsed]
+
+private theorem p2HeaderBytes : poseidon2Perm12SpvWords.toList =
+    0x07230203 :: 0x10500 :: 0x8000b :: 0x369 :: 0 :: poseidon2Perm12SpvWords.toList.drop 5 := by kernel_rfl
+
+private theorem p2PayloadLength : (poseidon2Perm12SpvWords.toList.drop 5).length = 5473 := by kernel_rfl
+
+theorem p2_decoded : decode poseidon2Perm12SpvWords = some p2 :=
+  (decode_scanned _ _ _ _ _ _ p2HeaderBytes p2PayloadLength p2Parsed).trans p2Collect
 
 @[expose] def ntt : Image where
   entry := 4
