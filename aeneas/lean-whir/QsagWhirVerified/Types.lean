@@ -64,4 +64,30 @@ structure Qsaghqm2Header where
   active_signers : Std.U64
   payload_len : Std.U64
 
+/-- [qsag_whir_verified::CwyzFoldChals]
+    Source: 'src/lib.rs', lines 935:0-940:1
+    Visibility: public -/
+structure CwyzFoldChals where
+  phi : Fp5
+  theta : Fp5
+  alpha : Fp5
+  beta : Fp5
+
+/-- [qsag_whir_verified::StageEnvelope]
+    Source: 'src/lib.rs', lines 1012:0-1016:1
+    Visibility: public -/
+structure StageEnvelope where
+  step_vars : Std.U32
+  log_leaves : Std.U32
+  indices : Slice Std.Usize
+
+/-- [qsag_whir_verified::PayloadStages]
+    Source: 'src/lib.rs', lines 1060:0-1065:1
+    Visibility: public -/
+structure PayloadStages where
+  first : StageEnvelope
+  second : StageEnvelope
+  third : StageEnvelope
+  fourth : Option StageEnvelope
+
 end qsag_whir_verified

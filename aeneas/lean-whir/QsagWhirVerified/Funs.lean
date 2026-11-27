@@ -865,8 +865,861 @@ def verify_quintic_schedule_envelope
             else let i ← early_stop_vars + folded_vars_sum
                  ok (i = log_cells)
 
+/-- [qsag_whir_verified::has_bytes_at]:
+    Source: 'src/lib.rs', lines 660:0-662:1 -/
+def has_bytes_at
+  (bytes : Slice Std.U8) (off : Std.Usize) (width : Std.Usize) :
+  Result Bool
+  := do
+  let i := Slice.len bytes
+  if width <= i
+  then let i1 := Slice.len bytes
+       let i2 ← i1 - width
+       ok (off <= i2)
+  else ok false
+
+/-- [qsag_whir_verified::load_le_u64_slice]:
+    Source: 'src/lib.rs', lines 665:0-679:1
+    Visibility: public -/
+def load_le_u64_slice
+  (bytes : Slice Std.U8) (off : Std.Usize) : Result (Option Std.U64) := do
+  let b ← has_bytes_at bytes off 8#usize
+  if b
+  then
+    let i ← Slice.index_usize bytes off
+    let i1 ← lift (UScalar.cast .U64 i)
+    let i2 ← off + 1#usize
+    let i3 ← Slice.index_usize bytes i2
+    let i4 ← lift (UScalar.cast .U64 i3)
+    let i5 ← i4 <<< 8#i32
+    let i6 ← lift (i1 ||| i5)
+    let i7 ← off + 2#usize
+    let i8 ← Slice.index_usize bytes i7
+    let i9 ← lift (UScalar.cast .U64 i8)
+    let i10 ← i9 <<< 16#i32
+    let i11 ← lift (i6 ||| i10)
+    let i12 ← off + 3#usize
+    let i13 ← Slice.index_usize bytes i12
+    let i14 ← lift (UScalar.cast .U64 i13)
+    let i15 ← i14 <<< 24#i32
+    let i16 ← lift (i11 ||| i15)
+    let i17 ← off + 4#usize
+    let i18 ← Slice.index_usize bytes i17
+    let i19 ← lift (UScalar.cast .U64 i18)
+    let i20 ← i19 <<< 32#i32
+    let i21 ← lift (i16 ||| i20)
+    let i22 ← off + 5#usize
+    let i23 ← Slice.index_usize bytes i22
+    let i24 ← lift (UScalar.cast .U64 i23)
+    let i25 ← i24 <<< 40#i32
+    let i26 ← lift (i21 ||| i25)
+    let i27 ← off + 6#usize
+    let i28 ← Slice.index_usize bytes i27
+    let i29 ← lift (UScalar.cast .U64 i28)
+    let i30 ← i29 <<< 48#i32
+    let i31 ← lift (i26 ||| i30)
+    let i32 ← off + 7#usize
+    let i33 ← Slice.index_usize bytes i32
+    let i34 ← lift (UScalar.cast .U64 i33)
+    let i35 ← i34 <<< 56#i32
+    let i36 ← lift (i31 ||| i35)
+    ok (some i36)
+  else ok none
+
+/-- [qsag_whir_verified::decode_canonical_u64_at]:
+    Source: 'src/lib.rs', lines 681:0-686:1
+    Visibility: public -/
+def decode_canonical_u64_at
+  (bytes : Slice Std.U8) (off : Std.Usize) : Result (Option Std.U64) := do
+  let o ← load_le_u64_slice bytes off
+  match o with
+  | none => ok none
+  | some word => decode_canonical_u64 word
+
+/-- [qsag_whir_verified::decode_canonical_fp5_at]:
+    Source: 'src/lib.rs', lines 689:0-709:1
+    Visibility: public -/
+def decode_canonical_fp5_at
+  (bytes : Slice Std.U8) (off : Std.Usize) : Result (Option Fp5) := do
+  let b ← has_bytes_at bytes off 40#usize
+  if b
+  then
+    let o ← load_le_u64_slice bytes off
+    match o with
+    | none => ok none
+    | some l0 =>
+      let i ← off + 8#usize
+      let o1 ← load_le_u64_slice bytes i
+      match o1 with
+      | none => ok none
+      | some l1 =>
+        let i1 ← off + 16#usize
+        let o2 ← load_le_u64_slice bytes i1
+        match o2 with
+        | none => ok none
+        | some l2 =>
+          let i2 ← off + 24#usize
+          let o3 ← load_le_u64_slice bytes i2
+          match o3 with
+          | none => ok none
+          | some l3 =>
+            let i3 ← off + 32#usize
+            let o4 ← load_le_u64_slice bytes i3
+            match o4 with
+            | none => ok none
+            | some l4 => decode_canonical_fp5_limbs l0 l1 l2 l3 l4
+  else ok none
+
+/-- [qsag_whir_verified::decode_canonical_gl24_at]:
+    Source: 'src/lib.rs', lines 712:0-738:1
+    Visibility: public -/
+def decode_canonical_gl24_at
+  (bytes : Slice Std.U8) (off : Std.Usize) : Result (Option Gl24Digest) := do
+  let b ← has_bytes_at bytes off 56#usize
+  if b
+  then
+    let o ← load_le_u64_slice bytes off
+    match o with
+    | none => ok none
+    | some l0 =>
+      let i ← off + 8#usize
+      let o1 ← load_le_u64_slice bytes i
+      match o1 with
+      | none => ok none
+      | some l1 =>
+        let i1 ← off + 16#usize
+        let o2 ← load_le_u64_slice bytes i1
+        match o2 with
+        | none => ok none
+        | some l2 =>
+          let i2 ← off + 24#usize
+          let o3 ← load_le_u64_slice bytes i2
+          match o3 with
+          | none => ok none
+          | some l3 =>
+            let i3 ← off + 32#usize
+            let o4 ← load_le_u64_slice bytes i3
+            match o4 with
+            | none => ok none
+            | some l4 =>
+              let i4 ← off + 40#usize
+              let o5 ← load_le_u64_slice bytes i4
+              match o5 with
+              | none => ok none
+              | some l5 =>
+                let i5 ← off + 48#usize
+                let o6 ← load_le_u64_slice bytes i5
+                match o6 with
+                | none => ok none
+                | some l6 => decode_canonical_gl24_limbs l0 l1 l2 l3 l4 l5 l6
+  else ok none
+
+/-- [qsag_whir_verified::sibling_path_below_join]: loop body 0:
+    Source: 'src/lib.rs', lines 744:4-747:5 -/
+@[rust_loop_body]
+def sibling_path_below_join_loop.body
+  (difference : Std.U64) (height : Std.U64) :
+  Result (ControlFlow (Std.U64 × Std.U64) Std.U64)
+  := do
+  if difference > 1#u64
+  then
+    let difference1 ← difference >>> 1#i32
+    let height1 ← height + 1#u64
+    ok (cont (difference1, height1))
+  else ok (done height)
+
+/-- [qsag_whir_verified::sibling_path_below_join]: loop 0:
+    Source: 'src/lib.rs', lines 744:4-747:5 -/
+@[rust_loop]
+def sibling_path_below_join_loop
+  (difference : Std.U64) (height : Std.U64) : Result Std.U64 := do
+  loop
+    (fun (difference1, height1) => sibling_path_below_join_loop.body
+      difference1 height1)
+    (difference, height)
+
+/-- [qsag_whir_verified::sibling_path_below_join]:
+    Source: 'src/lib.rs', lines 742:0-749:1 -/
+@[reducible]
+def sibling_path_below_join (difference : Std.U64) : Result Std.U64 := do
+  sibling_path_below_join_loop difference 0#u64
+
+/-- [qsag_whir_verified::compute_steiner_multiproof_siblings]: loop body 0:
+    Source: 'src/lib.rs', lines 1:0-774:5
+    Visibility: public -/
+@[rust_loop_body]
+def compute_steiner_multiproof_siblings_loop.body
+  (indices : Slice Std.Usize) (limit : Std.Usize) (previous : Std.Usize)
+  (siblings : Std.Usize) (i : Std.Usize) (valid : Bool) :
+  Result (ControlFlow (Std.Usize × Std.Usize × Std.Usize × Bool) (Std.Usize
+    × Bool))
+  := do
+  if valid
+  then
+    let i1 := Slice.len indices
+    if i < i1
+    then
+      let leaf ← Slice.index_usize indices i
+      let valid1 ←
+        if previous < leaf
+        then if leaf < limit
+             then ok (siblings != 0#usize)
+             else ok false
+        else ok false
+      let (previous1, siblings1) ←
+        if valid1
+        then
+          do
+          let i2 ← siblings - 1#usize
+          let i3 ← lift (previous ^^^ leaf)
+          let i4 ← lift (UScalar.cast .U64 i3)
+          let i5 ← sibling_path_below_join i4
+          let i6 ← lift (UScalar.cast .Usize i5)
+          let siblings2 ← i2 + i6
+          ok (leaf, siblings2)
+        else ok (previous, siblings)
+      let i2 ← i + 1#usize
+      ok (cont (previous1, siblings1, i2, valid1))
+    else ok (done (siblings, valid))
+  else ok (done (siblings, valid))
+
+/-- [qsag_whir_verified::compute_steiner_multiproof_siblings]: loop 0:
+    Source: 'src/lib.rs', lines 1:0-774:5
+    Visibility: public -/
+@[rust_loop]
+def compute_steiner_multiproof_siblings_loop
+  (indices : Slice Std.Usize) (limit : Std.Usize) (previous : Std.Usize)
+  (siblings : Std.Usize) (i : Std.Usize) (valid : Bool) :
+  Result (Std.Usize × Bool)
+  := do
+  loop
+    (fun (previous1, siblings1, i1, valid1) =>
+      compute_steiner_multiproof_siblings_loop.body indices limit previous1
+      siblings1 i1 valid1)
+    (previous, siblings, i, valid)
+
+/-- [qsag_whir_verified::compute_steiner_multiproof_siblings]:
+    Source: 'src/lib.rs', lines 754:0-776:1
+    Visibility: public -/
+def compute_steiner_multiproof_siblings
+  (log_leaves : Std.U32) (indices : Slice Std.Usize) :
+  Result (Option Std.Usize)
+  := do
+  if log_leaves > MAX_CANOPY_LOG_LEAVES
+  then ok none
+  else
+    let b ← core.slice.Slice.is_empty indices
+    if b
+    then ok none
+    else
+      let limit ← 1#usize <<< log_leaves
+      let previous ← Slice.index_usize indices 0#usize
+      if previous >= limit
+      then ok none
+      else
+        let siblings ← lift (UScalar.cast .Usize log_leaves)
+        let (siblings1, valid) ←
+          compute_steiner_multiproof_siblings_loop indices limit previous
+            siblings 1#usize true
+        if valid
+        then ok (some siblings1)
+        else ok none
+
+/-- [qsag_whir_verified::row_interpolation_weight]:
+    Source: 'src/lib.rs', lines 779:0-787:1 -/
+def row_interpolation_weight (i : Std.Usize) : Result Std.U64 := do
+  match i.val with
+  | 0 => ok 877958875724369725#u64
+  | 8 => ok 877958875724369725#u64
+  | 1 => ok 11423073063619626521#u64
+  | 7 => ok 11423073063619626521#u64
+  | 2 => ok 6136104450867767979#u64
+  | 6 => ok 6136104450867767979#u64
+  | 3 => ok 6174535167679048363#u64
+  | 5 => ok 6174535167679048363#u64
+  | _ => ok 6116889092462127787#u64
+
+/-- [qsag_whir_verified::verify_deg8_row_sumcheck_round_at]: loop body 0:
+    Source: 'src/lib.rs', lines 1:0-829:1
+    Visibility: public -/
+@[rust_loop_body]
+def verify_deg8_row_sumcheck_round_at_loop.body
+  (payload : Slice Std.U8) (off : Std.Usize) (claim : Fp5) (challenge : Fp5)
+  (first : Fp5) (sum : Fp5) (product : Fp5) (i : Std.Usize) :
+  Result (ControlFlow (Fp5 × Fp5 × Fp5 × Std.Usize) (Option Fp5))
+  := do
+  if i < 9#usize
+  then
+    let i1 ← 40#usize * i
+    let i2 ← off + i1
+    let o ← decode_canonical_fp5_at payload i2
+    match o with
+    | none => ok (done none)
+    | some value =>
+      if i = 0#usize
+      then
+        let first1 ← copy_fp5 value
+        let weight ← row_interpolation_weight i
+        let f ← copy_fp5 challenge
+        let i3 ← lift (UScalar.cast .U64 i)
+        let f1 ← fp5_from_base i3
+        let factor ← fp5_sub f f1
+        let f2 ← copy_fp5 factor
+        let f3 ← fp5_mul sum f2
+        let f4 ← copy_fp5 product
+        let f5 ← fp5_scale value weight
+        let f6 ← fp5_mul f4 f5
+        let sum1 ← fp5_add f3 f6
+        let product1 ← fp5_mul product factor
+        let i4 ← i + 1#usize
+        ok (cont (first1, sum1, product1, i4))
+      else
+        if i = 1#usize
+        then
+          let f ← copy_fp5 first
+          let f1 ← copy_fp5 value
+          let f2 ← fp5_add f f1
+          let f3 ← copy_fp5 claim
+          let b ← fp5_eq f2 f3
+          if b
+          then
+            let weight ← row_interpolation_weight i
+            let f4 ← copy_fp5 challenge
+            let i3 ← lift (UScalar.cast .U64 i)
+            let f5 ← fp5_from_base i3
+            let factor ← fp5_sub f4 f5
+            let f6 ← copy_fp5 factor
+            let f7 ← fp5_mul sum f6
+            let f8 ← copy_fp5 product
+            let f9 ← fp5_scale value weight
+            let f10 ← fp5_mul f8 f9
+            let sum1 ← fp5_add f7 f10
+            let product1 ← fp5_mul product factor
+            let i4 ← i + 1#usize
+            ok (cont (first, sum1, product1, i4))
+          else ok (done none)
+        else
+          let weight ← row_interpolation_weight i
+          let f ← copy_fp5 challenge
+          let i3 ← lift (UScalar.cast .U64 i)
+          let f1 ← fp5_from_base i3
+          let factor ← fp5_sub f f1
+          let f2 ← copy_fp5 factor
+          let f3 ← fp5_mul sum f2
+          let f4 ← copy_fp5 product
+          let f5 ← fp5_scale value weight
+          let f6 ← fp5_mul f4 f5
+          let sum1 ← fp5_add f3 f6
+          let product1 ← fp5_mul product factor
+          let i4 ← i + 1#usize
+          ok (cont (first, sum1, product1, i4))
+  else ok (done (some sum))
+
+/-- [qsag_whir_verified::verify_deg8_row_sumcheck_round_at]: loop 0:
+    Source: 'src/lib.rs', lines 1:0-829:1
+    Visibility: public -/
+@[rust_loop]
+def verify_deg8_row_sumcheck_round_at_loop
+  (payload : Slice Std.U8) (off : Std.Usize) (claim : Fp5) (challenge : Fp5)
+  (first : Fp5) (sum : Fp5) (product : Fp5) (i : Std.Usize) :
+  Result (Option Fp5)
+  := do
+  loop
+    (fun (first1, sum1, product1, i1) =>
+      verify_deg8_row_sumcheck_round_at_loop.body payload off claim challenge
+      first1 sum1 product1 i1)
+    (first, sum, product, i)
+
+/-- [qsag_whir_verified::verify_deg8_row_sumcheck_round_at]:
+    Source: 'src/lib.rs', lines 792:0-829:1
+    Visibility: public -/
+def verify_deg8_row_sumcheck_round_at
+  (payload : Slice Std.U8) (off : Std.Usize) (claim : Fp5) (challenge : Fp5) :
+  Result (Option Fp5)
+  := do
+  let b ← has_bytes_at payload off 360#usize
+  if b
+  then
+    let first ← fp5_zero
+    let product ← fp5_one
+    verify_deg8_row_sumcheck_round_at_loop payload off claim challenge first
+      first product 0#usize
+  else ok none
+
+/-- [qsag_whir_verified::verify_qsaghqm2_row_rounds_at]: loop body 0:
+    Source: 'src/lib.rs', lines 843:4-856:1
+    Visibility: public -/
+@[rust_loop_body]
+def verify_qsaghqm2_row_rounds_at_loop.body
+  (payload : Slice Std.U8) (off : Std.Usize) (challenges : Slice Fp5)
+  (claim : Fp5) (i : Std.Usize) :
+  Result (ControlFlow (Fp5 × Std.Usize) (Option Fp5))
+  := do
+  let i1 := Slice.len challenges
+  if i < i1
+  then
+    let i2 ← 360#usize * i
+    let i3 ← off + i2
+    let f ← Slice.index_usize challenges i
+    let f1 ← copy_fp5 f
+    let o ← verify_deg8_row_sumcheck_round_at payload i3 claim f1
+    match o with
+    | none => ok (done none)
+    | some next => let i4 ← i + 1#usize
+                   ok (cont (next, i4))
+  else ok (done (some claim))
+
+/-- [qsag_whir_verified::verify_qsaghqm2_row_rounds_at]: loop 0:
+    Source: 'src/lib.rs', lines 843:4-856:1
+    Visibility: public -/
+@[rust_loop]
+def verify_qsaghqm2_row_rounds_at_loop
+  (payload : Slice Std.U8) (off : Std.Usize) (challenges : Slice Fp5)
+  (claim : Fp5) (i : Std.Usize) :
+  Result (Option Fp5)
+  := do
+  loop
+    (fun (claim1, i1) => verify_qsaghqm2_row_rounds_at_loop.body payload off
+      challenges claim1 i1)
+    (claim, i)
+
+/-- [qsag_whir_verified::verify_qsaghqm2_row_rounds_at]:
+    Source: 'src/lib.rs', lines 833:0-856:1
+    Visibility: public -/
+def verify_qsaghqm2_row_rounds_at
+  (payload : Slice Std.U8) (off : Std.Usize) (challenges : Slice Fp5) :
+  Result (Option Fp5)
+  := do
+  let i := Slice.len challenges
+  if i > 20#usize
+  then ok none
+  else
+    let i1 := Slice.len challenges
+    let i2 ← 360#usize * i1
+    let b ← has_bytes_at payload off i2
+    if b
+    then
+      let claim ← fp5_zero
+      verify_qsaghqm2_row_rounds_at_loop payload off challenges claim 0#usize
+    else ok none
+
+/-- [qsag_whir_verified::block_end]:
+    Source: 'src/lib.rs', lines 860:0-866:1 -/
+def block_end
+  (len : Std.Usize) (off : Std.Usize) (count : Std.Usize) (width : Std.Usize) :
+  Result (Option Std.Usize)
+  := do
+  if width = 0#usize
+  then ok none
+  else
+    if off > len
+    then ok none
+    else
+      let i ← len - off
+      let i1 ← i / width
+      if count > i1
+      then ok none
+      else let i2 ← count * width
+           let i3 ← off + i2
+           ok (some i3)
+
+/-- [qsag_whir_verified::canonical_words_between]: loop body 0:
+    Source: 'src/lib.rs', lines 873:4-880:1 -/
+@[rust_loop_body]
+def canonical_words_between_loop.body
+  (bytes : Slice Std.U8) («end» : Std.Usize) (off : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  if off < «end»
+  then
+    let o ← decode_canonical_u64_at bytes off
+    match o with
+    | none => ok (done false)
+    | some _ => let off1 ← off + 8#usize
+                ok (cont off1)
+  else ok (done true)
+
+/-- [qsag_whir_verified::canonical_words_between]: loop 0:
+    Source: 'src/lib.rs', lines 873:4-880:1 -/
+@[rust_loop]
+def canonical_words_between_loop
+  (bytes : Slice Std.U8) (off : Std.Usize) («end» : Std.Usize) :
+  Result Bool
+  := do
+  loop
+    (fun off1 => canonical_words_between_loop.body bytes «end» off1)
+    off
+
+/-- [qsag_whir_verified::canonical_words_between]:
+    Source: 'src/lib.rs', lines 869:0-880:1 -/
+def canonical_words_between
+  (bytes : Slice Std.U8) (off : Std.Usize) («end» : Std.Usize) :
+  Result Bool
+  := do
+  let i := Slice.len bytes
+  if «end» > i
+  then ok false
+  else
+    if off > «end»
+    then ok false
+    else
+      let i1 ← «end» - off
+      let i2 ← i1 % 8#usize
+      if i2 != 0#usize
+      then ok false
+      else canonical_words_between_loop bytes off «end»
+
+/-- [qsag_whir_verified::qsaghqm2_digest_block_end]:
+    Source: 'src/lib.rs', lines 883:0-898:1
+    Visibility: public -/
+def qsaghqm2_digest_block_end
+  (bytes : Slice Std.U8) (off : Std.Usize) (count : Std.Usize) (tag : Std.U8) :
+  Result (Option Std.Usize)
+  := do
+  if tag = QSAGHQM2_PROFILE_TURBO400
+  then let i := Slice.len bytes
+       block_end i off count 50#usize
+  else
+    if tag = QSAGHQM2_PROFILE_GL24
+    then
+      let i := Slice.len bytes
+      let o ← block_end i off count 56#usize
+      match o with
+      | none => ok none
+      | some «end» =>
+        let b ← canonical_words_between bytes off «end»
+        if b
+        then ok o
+        else ok none
+    else ok none
+
+/-- [qsag_whir_verified::qsaghqm2_opening_bounds]:
+    Source: 'src/lib.rs', lines 903:0-932:1
+    Visibility: public -/
+def qsaghqm2_opening_bounds
+  (bytes : Slice Std.U8) (off : Std.Usize) (indices : Slice Std.Usize)
+  (log_leaves : Std.U32) (step_vars : Std.U32) (base : Bool) (tag : Std.U8) :
+  Result (Option (Std.Usize × Std.Usize))
+  := do
+  if step_vars > MAX_QUINTIC_LOG_CELLS
+  then ok none
+  else
+    let o ← compute_steiner_multiproof_siblings log_leaves indices
+    match o with
+    | none => ok none
+    | some siblings =>
+      let width ← if base
+                    then ok 8#usize
+                    else ok 40#usize
+      let i := Slice.len bytes
+      let i1 ← 1#usize <<< step_vars
+      let o1 ← block_end i 0#usize i1 width
+      match o1 with
+      | none => ok none
+      | some fiber_width =>
+        let i2 := Slice.len bytes
+        let i3 := Slice.len indices
+        let o2 ← block_end i2 off i3 fiber_width
+        match o2 with
+        | none => ok none
+        | some split =>
+          let b ← canonical_words_between bytes off split
+          if b
+          then
+            let o3 ← qsaghqm2_digest_block_end bytes split siblings tag
+            match o3 with
+            | none => ok none
+            | some «end» => ok (some (split, «end»))
+          else ok none
+
+/-- [qsag_whir_verified::verify_qsaghqm2_cwyz_fold_at]:
+    Source: 'src/lib.rs', lines 952:0-978:1
+    Visibility: public -/
+def verify_qsaghqm2_cwyz_fold_at
+  (payload : Slice Std.U8) (off : Std.Usize) (claim : Fp5)
+  (chals : CwyzFoldChals) :
+  Result (Option Fp5)
+  := do
+  let b ← has_bytes_at payload off 200#usize
+  if b
+  then
+    let o ← decode_canonical_fp5_at payload off
+    match o with
+    | none => ok none
+    | some value =>
+      let i ← off + 40#usize
+      let o1 ← decode_canonical_fp5_at payload i
+      match o1 with
+      | none => ok none
+      | some value1 =>
+        let i1 ← off + 80#usize
+        let o2 ← decode_canonical_fp5_at payload i1
+        match o2 with
+        | none => ok none
+        | some value2 =>
+          let i2 ← off + 120#usize
+          let o3 ← decode_canonical_fp5_at payload i2
+          match o3 with
+          | none => ok none
+          | some value3 =>
+            let i3 ← off + 160#usize
+            let o4 ← decode_canonical_fp5_at payload i3
+            match o4 with
+            | none => ok none
+            | some value4 =>
+              let f ←
+                cwyz_bridge_claim_step_fp5 value value1 value2 value3 value4
+                  claim chals.phi chals.theta chals.alpha chals.beta
+              ok (some f)
+  else ok none
+
+/-- [qsag_whir_verified::verify_qsaghqm2_cwyz_folds_at]: loop body 0:
+    Source: 'src/lib.rs', lines 992:4-1009:1
+    Visibility: public -/
+@[rust_loop_body]
+def verify_qsaghqm2_cwyz_folds_at_loop.body
+  (payload : Slice Std.U8) (off : Std.Usize) (fold_chals : Slice CwyzFoldChals)
+  (claim : Fp5) (i : Std.Usize) :
+  Result (ControlFlow (Fp5 × Std.Usize) (Option Fp5))
+  := do
+  let i1 := Slice.len fold_chals
+  if i < i1
+  then
+    let c ← Slice.index_usize fold_chals i
+    let f ← copy_fp5 c.phi
+    let f1 ← copy_fp5 c.theta
+    let f2 ← copy_fp5 c.alpha
+    let f3 ← copy_fp5 c.beta
+    let i2 ← 200#usize * i
+    let i3 ← off + i2
+    let o ←
+      verify_qsaghqm2_cwyz_fold_at payload i3 claim
+        { phi := f, theta := f1, alpha := f2, beta := f3 }
+    match o with
+    | none => ok (done none)
+    | some value => let i4 ← i + 1#usize
+                    ok (cont (value, i4))
+  else ok (done (some claim))
+
+/-- [qsag_whir_verified::verify_qsaghqm2_cwyz_folds_at]: loop 0:
+    Source: 'src/lib.rs', lines 992:4-1009:1
+    Visibility: public -/
+@[rust_loop]
+def verify_qsaghqm2_cwyz_folds_at_loop
+  (payload : Slice Std.U8) (off : Std.Usize) (claim : Fp5)
+  (fold_chals : Slice CwyzFoldChals) (i : Std.Usize) :
+  Result (Option Fp5)
+  := do
+  loop
+    (fun (claim1, i1) => verify_qsaghqm2_cwyz_folds_at_loop.body payload off
+      fold_chals claim1 i1)
+    (claim, i)
+
+/-- [qsag_whir_verified::verify_qsaghqm2_cwyz_folds_at]:
+    Source: 'src/lib.rs', lines 981:0-1009:1
+    Visibility: public -/
+def verify_qsaghqm2_cwyz_folds_at
+  (payload : Slice Std.U8) (off : Std.Usize) (claim : Fp5)
+  (fold_chals : Slice CwyzFoldChals) :
+  Result (Option Fp5)
+  := do
+  let i := Slice.len fold_chals
+  let i1 ← lift (UScalar.cast .Usize MAX_QUINTIC_LOG_CELLS)
+  if i > i1
+  then ok none
+  else
+    let i2 := Slice.len payload
+    let i3 := Slice.len fold_chals
+    let o ← block_end i2 off i3 200#usize
+    match o with
+    | none => ok none
+    | some _ =>
+      verify_qsaghqm2_cwyz_folds_at_loop payload off claim fold_chals 0#usize
+
+/-- [qsag_whir_verified::fp5_block_end]:
+    Source: 'src/lib.rs', lines 1018:0-1025:1 -/
+def fp5_block_end
+  (bytes : Slice Std.U8) (off : Std.Usize) (count : Std.Usize) :
+  Result (Option Std.Usize)
+  := do
+  let i := Slice.len bytes
+  let o ← block_end i off count 40#usize
+  match o with
+  | none => ok none
+  | some value =>
+    let b ← canonical_words_between bytes off value
+    if b
+    then ok o
+    else ok none
+
+/-- [qsag_whir_verified::qsaghqm2_stage_end]:
+    Source: 'src/lib.rs', lines 1029:0-1057:1 -/
+def qsaghqm2_stage_end
+  (bytes : Slice Std.U8) (off : Std.Usize) (stage : StageEnvelope)
+  (base : Bool) (terminal_count : Std.Usize) (tag : Std.U8) :
+  Result (Option Std.Usize)
+  := do
+  if stage.step_vars = 0#u32
+  then ok none
+  else
+    if stage.step_vars > 6#u32
+    then ok none
+    else
+      let i ← lift (UScalar.cast .Usize stage.step_vars)
+      let i1 ← 5#usize * i
+      let o ← fp5_block_end bytes off i1
+      match o with
+      | none => ok none
+      | some value =>
+        if terminal_count = 0#usize
+        then
+          let o1 ← qsaghqm2_digest_block_end bytes value 1#usize tag
+          match o1 with
+          | none => ok none
+          | some value1 =>
+            let o2 ← fp5_block_end bytes value1 2#usize
+            match o2 with
+            | none => ok none
+            | some value2 =>
+              let o3 ←
+                qsaghqm2_opening_bounds bytes value2 stage.indices
+                  stage.log_leaves stage.step_vars base tag
+              match o3 with
+              | none => ok none
+              | some value3 => let (_, «end») := value3
+                               ok (some «end»)
+        else
+          let o1 ← fp5_block_end bytes value terminal_count
+          match o1 with
+          | none => ok none
+          | some value1 =>
+            let o2 ←
+              qsaghqm2_opening_bounds bytes value1 stage.indices
+                stage.log_leaves stage.step_vars base tag
+            match o2 with
+            | none => ok none
+            | some value2 => let (_, «end») := value2
+                             ok (some «end»)
+
+/-- [qsag_whir_verified::payload_schedule_ok]:
+    Source: 'src/lib.rs', lines 1067:0-1080:1 -/
+def payload_schedule_ok
+  (rows : Std.Usize) (early : Std.U32) (a : Std.U32) (b : Std.U32)
+  (c : Std.U32) (extra : Std.U32) (count : Std.U32) :
+  Result Bool
+  := do
+  if rows > 20#usize
+  then ok false
+  else
+    if a > 6#u32
+    then ok false
+    else
+      if b > 6#u32
+      then ok false
+      else
+        if c > 6#u32
+        then ok false
+        else
+          if extra > 6#u32
+          then ok false
+          else
+            let i ← lift (UScalar.cast .U32 rows)
+            let i1 ← i + 8#u32
+            let i2 ← a + b
+            let i3 ← i2 + c
+            let i4 ← i3 + extra
+            verify_quintic_schedule_envelope i1 early i4 count
+
+/-- [qsag_whir_verified::verify_qsaghqm2_multiproof_and_rounds]:
+    Source: 'src/lib.rs', lines 1085:0-1157:1
+    Visibility: public -/
+def verify_qsaghqm2_multiproof_and_rounds
+  (payload : Slice Std.U8) (tag : Std.U8) (row_challenges : Slice Fp5)
+  (early_stop_vars : Std.U32) (stages : PayloadStages) :
+  Result (Option Fp5)
+  := do
+  let (o, extra, count) ←
+    match stages.fourth with
+    | none => ok (none, 0#u32, 3#u32)
+    | some se => ok (stages.fourth, se.step_vars, 4#u32)
+  if early_stop_vars > 8#u32
+  then ok none
+  else
+    let i := Slice.len row_challenges
+    let b ←
+      payload_schedule_ok i early_stop_vars stages.first.step_vars
+        stages.second.step_vars stages.third.step_vars extra count
+    if b
+    then
+      let o1 ← qsaghqm2_digest_block_end payload 0#usize 1#usize tag
+      match o1 with
+      | none => ok none
+      | some value =>
+        let o2 ← verify_qsaghqm2_row_rounds_at payload value row_challenges
+        match o2 with
+        | none => ok none
+        | some _ =>
+          let i1 := Slice.len payload
+          let i2 := Slice.len row_challenges
+          let o3 ← block_end i1 value i2 360#usize
+          match o3 with
+          | none => ok none
+          | some value1 =>
+            let o4 ← fp5_block_end payload value1 256#usize
+            match o4 with
+            | none => ok none
+            | some value2 =>
+              let o5 ← fp5_block_end payload value2 5#usize
+              match o5 with
+              | none => ok none
+              | some value3 =>
+                let o6 ←
+                  qsaghqm2_stage_end payload value3 stages.first true 0#usize
+                    tag
+                match o6 with
+                | none => ok none
+                | some value4 =>
+                  let o7 ←
+                    qsaghqm2_stage_end payload value4 stages.second false
+                      0#usize tag
+                  match o7 with
+                  | none => ok none
+                  | some value5 =>
+                    let i3 ← 1#usize <<< early_stop_vars
+                    let terminal ← i3 + 2#usize
+                    match o with
+                    | none =>
+                      let o8 ←
+                        qsaghqm2_stage_end payload value5 stages.third false
+                          terminal tag
+                      match o8 with
+                      | none => ok none
+                      | some value6 =>
+                        let i4 := Slice.len payload
+                        if value6 = i4
+                        then ok o2
+                        else ok none
+                    | some se =>
+                      let o8 ←
+                        qsaghqm2_stage_end payload value5 stages.third false
+                          0#usize tag
+                      match o8 with
+                      | none => ok none
+                      | some value6 =>
+                        let o9 ←
+                          qsaghqm2_stage_end payload value6 se false terminal
+                            tag
+                        match o9 with
+                        | none => ok none
+                        | some value7 =>
+                          let i4 := Slice.len payload
+                          if value7 = i4
+                          then ok o2
+                          else ok none
+    else ok none
+
 end qsag_whir_verified
 
 public section
-#export_eqns qsag_whir_verified.GOLDILOCKS_P qsag_whir_verified.MAX_U64_WORD qsag_whir_verified.FP5_NONRESIDUE_W qsag_whir_verified.FROBENIUS_ZETA5_1 qsag_whir_verified.FROBENIUS_ZETA5_2 qsag_whir_verified.FROBENIUS_ZETA5_3 qsag_whir_verified.FROBENIUS_ZETA5_4 qsag_whir_verified.QSAGHQM2_PROFILE_TURBO400 qsag_whir_verified.QSAGHQM2_PROFILE_GL24 qsag_whir_verified.MIN_QUINTIC_LOG_CELLS qsag_whir_verified.MAX_QUINTIC_LOG_CELLS qsag_whir_verified.MAX_CANOPY_LOG_LEAVES qsag_whir_verified.copy_fp5 qsag_whir_verified.load_le_u64_40 qsag_whir_verified.load_le_u64_56 qsag_whir_verified.decode_canonical_u64 qsag_whir_verified.decode_canonical_fp5_limbs qsag_whir_verified.decode_canonical_fp5 qsag_whir_verified.decode_canonical_gl24_limbs qsag_whir_verified.decode_canonical_gl24_digest qsag_whir_verified.add qsag_whir_verified.sub qsag_whir_verified.mul qsag_whir_verified.fp5_zero qsag_whir_verified.fp5_one qsag_whir_verified.fp5_from_base qsag_whir_verified.fp5_eq qsag_whir_verified.fp5_add qsag_whir_verified.fp5_sub qsag_whir_verified.fp5_neg qsag_whir_verified.fp5_scale qsag_whir_verified.fp5_mul qsag_whir_verified.fp5_frobenius qsag_whir_verified.affine_combine_fp5 qsag_whir_verified.duet_fold_fp5 qsag_whir_verified.verify_affine_duet_fold_step_fp5 qsag_whir_verified.cwyz_duet_fold_fp5 qsag_whir_verified.verify_cwyz_duet_fold_step_fp5 qsag_whir_verified.cwyz_bridge_claim_step_fp5 qsag_whir_verified.verify_cwyz_bridge_claim_step_fp5 qsag_whir_verified.eval_quadratic_sumcheck_wire_fp5 qsag_whir_verified.eval_fp5_univariate_at_base_loop.body qsag_whir_verified.eval_fp5_univariate_at_base_loop qsag_whir_verified.eval_fp5_univariate_at_base qsag_whir_verified.verify_fp5_univariate_at_base_pin qsag_whir_verified.verify_ood_pin_eq_fp5 qsag_whir_verified.canonical_query_group_idx qsag_whir_verified.step_merkle_pair_order_400 qsag_whir_verified.step_merkle_pair_order_gl24 qsag_whir_verified.checked_quorum_sum_loop.body qsag_whir_verified.checked_quorum_sum_loop qsag_whir_verified.checked_quorum_sum qsag_whir_verified.verify_qsaghqm2_header qsag_whir_verified.verify_quintic_schedule_envelope
+#export_eqns qsag_whir_verified.GOLDILOCKS_P qsag_whir_verified.MAX_U64_WORD qsag_whir_verified.FP5_NONRESIDUE_W qsag_whir_verified.FROBENIUS_ZETA5_1 qsag_whir_verified.FROBENIUS_ZETA5_2 qsag_whir_verified.FROBENIUS_ZETA5_3 qsag_whir_verified.FROBENIUS_ZETA5_4 qsag_whir_verified.QSAGHQM2_PROFILE_TURBO400 qsag_whir_verified.QSAGHQM2_PROFILE_GL24 qsag_whir_verified.MIN_QUINTIC_LOG_CELLS qsag_whir_verified.MAX_QUINTIC_LOG_CELLS qsag_whir_verified.MAX_CANOPY_LOG_LEAVES qsag_whir_verified.copy_fp5 qsag_whir_verified.load_le_u64_40 qsag_whir_verified.load_le_u64_56 qsag_whir_verified.decode_canonical_u64 qsag_whir_verified.decode_canonical_fp5_limbs qsag_whir_verified.decode_canonical_fp5 qsag_whir_verified.decode_canonical_gl24_limbs qsag_whir_verified.decode_canonical_gl24_digest qsag_whir_verified.add qsag_whir_verified.sub qsag_whir_verified.mul qsag_whir_verified.fp5_zero qsag_whir_verified.fp5_one qsag_whir_verified.fp5_from_base qsag_whir_verified.fp5_eq qsag_whir_verified.fp5_add qsag_whir_verified.fp5_sub qsag_whir_verified.fp5_neg qsag_whir_verified.fp5_scale qsag_whir_verified.fp5_mul qsag_whir_verified.fp5_frobenius qsag_whir_verified.affine_combine_fp5 qsag_whir_verified.duet_fold_fp5 qsag_whir_verified.verify_affine_duet_fold_step_fp5 qsag_whir_verified.cwyz_duet_fold_fp5 qsag_whir_verified.verify_cwyz_duet_fold_step_fp5 qsag_whir_verified.cwyz_bridge_claim_step_fp5 qsag_whir_verified.verify_cwyz_bridge_claim_step_fp5 qsag_whir_verified.eval_quadratic_sumcheck_wire_fp5 qsag_whir_verified.eval_fp5_univariate_at_base_loop.body qsag_whir_verified.eval_fp5_univariate_at_base_loop qsag_whir_verified.eval_fp5_univariate_at_base qsag_whir_verified.verify_fp5_univariate_at_base_pin qsag_whir_verified.verify_ood_pin_eq_fp5 qsag_whir_verified.canonical_query_group_idx qsag_whir_verified.step_merkle_pair_order_400 qsag_whir_verified.step_merkle_pair_order_gl24 qsag_whir_verified.checked_quorum_sum_loop.body qsag_whir_verified.checked_quorum_sum_loop qsag_whir_verified.checked_quorum_sum qsag_whir_verified.verify_qsaghqm2_header qsag_whir_verified.verify_quintic_schedule_envelope qsag_whir_verified.has_bytes_at qsag_whir_verified.load_le_u64_slice qsag_whir_verified.decode_canonical_u64_at qsag_whir_verified.decode_canonical_fp5_at qsag_whir_verified.decode_canonical_gl24_at qsag_whir_verified.sibling_path_below_join_loop.body qsag_whir_verified.sibling_path_below_join_loop qsag_whir_verified.sibling_path_below_join qsag_whir_verified.compute_steiner_multiproof_siblings_loop.body qsag_whir_verified.compute_steiner_multiproof_siblings_loop qsag_whir_verified.compute_steiner_multiproof_siblings qsag_whir_verified.row_interpolation_weight qsag_whir_verified.verify_deg8_row_sumcheck_round_at_loop.body qsag_whir_verified.verify_deg8_row_sumcheck_round_at_loop qsag_whir_verified.verify_deg8_row_sumcheck_round_at qsag_whir_verified.verify_qsaghqm2_row_rounds_at_loop.body qsag_whir_verified.verify_qsaghqm2_row_rounds_at_loop qsag_whir_verified.verify_qsaghqm2_row_rounds_at qsag_whir_verified.block_end qsag_whir_verified.canonical_words_between_loop.body qsag_whir_verified.canonical_words_between_loop qsag_whir_verified.canonical_words_between qsag_whir_verified.qsaghqm2_digest_block_end qsag_whir_verified.qsaghqm2_opening_bounds qsag_whir_verified.verify_qsaghqm2_cwyz_fold_at qsag_whir_verified.verify_qsaghqm2_cwyz_folds_at_loop.body qsag_whir_verified.verify_qsaghqm2_cwyz_folds_at_loop qsag_whir_verified.verify_qsaghqm2_cwyz_folds_at qsag_whir_verified.fp5_block_end qsag_whir_verified.qsaghqm2_stage_end qsag_whir_verified.payload_schedule_ok qsag_whir_verified.verify_qsaghqm2_multiproof_and_rounds
 end
