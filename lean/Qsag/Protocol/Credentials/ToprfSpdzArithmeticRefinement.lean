@@ -1,39 +1,9 @@
 module
-/-
-# Qsag.Protocol.Credentials.ToprfSpdzArithmeticRefinement — Share-Level SPDZ Arithmetic of the TOPRF
 
-Model of `crates/qsag-cred/src/voprf_spdz.rs` (`evaluate_inner`, `SpdzPreparedSession::sbox`)
-below the gate layer of `piToprfCredService`. The servers hold Lagrange shares of the PRF key and
-of the `GF(p²)` MAC key, evaluate `Poseidon2` on authenticated shares with one `Π_pow7` tuple per
-S-box round against an adversary that adds an error to every opened value and every MAC
-residual, open the blinded residuals (`MacBlind.macBlindPure`), and release the value
-reconstructed from the opened output shares.
-
-## Scope
-
-Proved:
-* `spdzEval_sound_or_mac_forgery`, `piToprfRealSpdz_sound_or_mac_forgery`: an accepted evaluation
-  reconstructs `evalAlgebraicOprf k x`, or an error lane of the adversary satisfies
-  `d ≠ 0 ∧ m = α · d`, or a corrupt randomizer cancels an honest blinding randomizer.
-* `evalFooled_macKey_unique`, `spdz_mac_forgery_game_bound`, `goldilocksExt2_card_bits`: for one
-  evaluation and an adversary fixed before the MAC key is sampled (its errors are functions of
-  the values opened so far), at most one of the `p²` keys is fooled, and `2^127.99 < p² < 2^128`.
-* `spdzEval_macKey_zero_leakage`, `piToprfRealSpdz_macKey_zero_leakage`: for an adversary none of
-  whose nonzero error lanes is a forgery point of either of two MAC keys, the transcript of one
-  evaluation has the same distribution over the honest blinding randomizers under both keys.
-* `piToprfRealSpdzGuarded_dataRefines`: outside the bad event `realSpdzBad` the machine refines
-  `Spec.idealCredMachine` when `cfg.oprf pt = evalAlgebraicOprf k (enc pt)`.
-* Issuance: `piToprfRealSpdz_issue_accept_checks`, `piToprfRealSpdz_issue_binding_or_collision`.
-
-Not proved:
-* A bound on the probability that a corrupt randomizer cancels an honest one, and the composition
-  of the one-evaluation key bound over several evaluations under one MAC key.
-* The preprocessing: `ServersValid` and `SessionValid` are hypotheses. The corrupt randomizers
-  are functions of the lane index only, which is what commit-before-open provides.
-* Hiding or collision resistance of `RealSpdzParams.commit`, what `LimboSdOpeningWire.verify33`
-  certifies about the issuance proof, and pseudorandomness of `evalAlgebraicOprf`.
--/
-public import Qsag.Protocol.Credentials.ToprfMachine
+public import Qsag.Spec.IdealCred
+public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
+public import Qsag.Protocol.Credentials.BlindVcQromSecurity
+public import Qsag.Protocol.Credentials.RepetitionCutAndChoose
 public import Qsag.Protocol.Threshold.MacBlind
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Oracle.ProbPkgBridge
@@ -41,6 +11,28 @@ public import Qsag.Math.Tactic.CommRing
 import Qsag.Tactic.AssuranceKit
 
 public section
+namespace Qsag
+/-- One opened SPDZ value with the quorum's summed MAC share on it. -/
+structure SpdzMacOpening where
+  val : Goldilocks
+  mac : GoldilocksExt2
+  deriving DecidableEq, Repr
+
+/-- What the online phases put on the wire for one evaluation: the context the quorum bound, the
+    client's raw masked-difference word, and the three MAC-carrying openings (`"toprf_spdz_input_bind"`
+    dual-copy difference, `"toprf_spdz_circuit"`, `"toprf_spdz_output"`), plus the two pad-masked
+    copies of the output. It carries data only; no field is a verdict. -/
+structure SpdzOnlineTranscript where
+  context : Spec.ToprfTicket
+  requestWord : Nat
+  inputBind : SpdzMacOpening
+  circuit : SpdzMacOpening
+  output : SpdzMacOpening
+  outputCopyA : Goldilocks
+  outputCopyB : Goldilocks
+  deriving DecidableEq, Repr
+end Qsag
+
 namespace Qsag.SpdzToprf
 
 open CommRingOps
@@ -1657,22 +1649,6 @@ theorem spdzEval_macKey_zero_leakage {cardF : Nat}
 
 end Leakage
 
-/-! ## 7. The machine: the gate layer of `piToprfCredService` over share-level arithmetic -/
-
-/-- What an issuance carries besides the attributes and the commitment tag: the opening of the
-    attribute commitment and the 33-repetition cut-and-choose opening of the issuance proof. -/
-structure IssuanceTranscript where
-  salt : BitVec 256
-  opening : LimboSdOpeningWire
-
-/-- Wires of the real machine. `base` carries the wires of `piToprfCredService` other than
-    evaluation and issuance; `evalReal` carries the adversary of the share-level evaluation
-    instead of a transcript of openings; `issueReal` carries an issuance transcript. -/
-inductive RealSpdzWire (Attr : Type) where
-  | base (w : ToprfCredWire Attr)
-  | evalReal (ticket : Spec.ToprfTicket) (input : Spec.Bytes) (adv : EvalTamper)
-  | issueReal (holder : Nat) (attrs : List Attr) (newRoot : Spec.Digest256) (tag : BitVec 256)
-      (tr : IssuanceTranscript)
 
 /-- Public parameters: the encoding of a TOPRF point into the four input lanes and the
     attribute commitment function. -/
@@ -1680,12 +1656,6 @@ structure RealSpdzParams (Attr : Type) where
   enc : Spec.ToprfPoint → Lane4
   commit : List Attr → BitVec 256 → BitVec 256
 
-/-- State of the real machine: the gate layer's state, the servers' shares of the PRF key and of
-    the MAC key, and the unused preprocessed sessions. -/
-structure RealSpdzState (Attr : Type) (n : Nat) where
-  svc : PiToprfCredState Attr Lane4
-  servers : SpdzServers n
-  sessions : List (SpdzSession n)
 
 /-- The opening handed to the gate layer's three MAC slots: the all-zero opening, whose MAC
     equation `0 = α · 0` holds under every key. The MAC equations of the evaluation are checked
@@ -1694,231 +1664,17 @@ def zeroTranscript (t : Spec.ToprfTicket) : SpdzOnlineTranscript :=
   ⟨t, 0, ⟨Goldilocks.zero, GoldilocksExt2.zero⟩, ⟨Goldilocks.zero, GoldilocksExt2.zero⟩,
     ⟨Goldilocks.zero, GoldilocksExt2.zero⟩, Goldilocks.zero, Goldilocks.zero⟩
 
-def baseAllowed {Attr : Type} : ToprfCredWire Attr → Bool
-  | .evalToprfWire _ _ _ => false
-  | .issueWire _ _ _ _ => false
-  | _ => true
-
-/-- The gate-layer wire a real wire stands for. -/
-def RealSpdzWire.toBase {Attr : Type} : RealSpdzWire Attr → ToprfCredWire Attr
-  | .base w => w
-  | .evalReal t input _ => .evalToprfWire t input (zeroTranscript t)
-  | .issueReal h attrs newRoot tag _ => .issueWire h attrs newRoot tag
 
 /-- The TOPRF point of an evaluation command. -/
 def evalPoint {Attr : Type} : Spec.CredCommand Attr → Spec.ToprfPoint
   | .evalToprf t input => ⟨t.keyId, t.epoch, input⟩
   | _ => ⟨[], 0, []⟩
 
-/-- The input lanes of an evaluation wire: the encoding of the point of the command the wire
-    denotes. -/
-def realEvalInput {Attr : Type} (P : RealSpdzParams Attr) (t : Spec.ToprfTicket)
-    (input : Spec.Bytes) : Lane4 :=
-  P.enc (evalPoint
-    (ToprfCredWire.evalToprfWire (Attr := Attr) t input (zeroTranscript t)).toCommand)
 
 def outcomeStep {S Out : Type} : StepOutcome S Out Unit → Option (S × Out)
   | .ok s out => some (s, out)
   | .err _ _ => none
 
-section Machine
-variable {Attr : Type} [DecidableEq Attr] {n : Nat}
-
-/-- Hand one wire to the gate layer. -/
-def gateOutcome (cfg : Spec.IdealCredConfig Lane4) (c : RealSpdzState Attr n)
-    (port : Spec.CredPort) (w : ToprfCredWire Attr) :
-    StepOutcome (RealSpdzState Attr n) (Spec.IdealCredOutput Lane4) Unit :=
-  match (piToprfCredService cfg).step c.svc (port, w) with
-  | some r => .ok { c with svc := r.1 } r.2
-  | none => .err { c with svc := (piToprfCredService cfg).errStep c.svc (port, w) } ()
-
-/-- Release of an accepted share-level evaluation: the gate layer must accept the ticket; the
-    released value is `y`, the value reconstructed from the opened output shares. -/
-def evalFinish (c : RealSpdzState Attr n) (rest : List (SpdzSession n)) (y : Lane4)
-    (errSvc : PiToprfCredState Attr Lane4) :
-    Option (PiToprfCredState Attr Lane4 × Spec.IdealCredOutput Lane4) →
-      StepOutcome (RealSpdzState Attr n) (Spec.IdealCredOutput Lane4) Unit
-  | some (svc', .toprfEvaluated _) => .ok { c with svc := svc', sessions := rest } (.toprfEvaluated y)
-  | some _ => .err { c with sessions := rest } ()
-  | none => .err { c with svc := errSvc, sessions := rest } ()
-
-/-- An evaluation consumes the next preprocessed session, runs the share-level evaluation at the
-    encoded point, and releases only if every blinded MAC residual opened to zero. -/
-def evalOutcome (cfg : Spec.IdealCredConfig Lane4) (P : RealSpdzParams Attr)
-    (c : RealSpdzState Attr n) (port : Spec.CredPort) (t : Spec.ToprfTicket)
-    (input : Spec.Bytes) (adv : EvalTamper) :
-    List (SpdzSession n) → StepOutcome (RealSpdzState Attr n) (Spec.IdealCredOutput Lane4) Unit
-  | [] => .err c ()
-  | sess :: rest =>
-    if (spdzEval c.servers sess (realEvalInput P t input) adv).accept then
-      evalFinish c rest (spdzEval c.servers sess (realEvalInput P t input) adv).out
-        ((piToprfCredService cfg).errStep c.svc (port, .evalToprfWire t input (zeroTranscript t)))
-        ((piToprfCredService cfg).step c.svc (port, .evalToprfWire t input (zeroTranscript t)))
-    else .err { c with sessions := rest } ()
-
-/-- Transition of the real machine. -/
-def realSpdzOutcome (cfg : Spec.IdealCredConfig Lane4) (P : RealSpdzParams Attr)
-    (c : RealSpdzState Attr n) (port : Spec.CredPort) :
-    RealSpdzWire Attr → StepOutcome (RealSpdzState Attr n) (Spec.IdealCredOutput Lane4) Unit
-  | .base b => if baseAllowed b then gateOutcome cfg c port b else .err c ()
-  | .issueReal h attrs newRoot tag tr =>
-    if tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true then
-      gateOutcome cfg c port (.issueWire h attrs newRoot tag)
-    else .err c ()
-  | .evalReal t input adv => evalOutcome cfg P c port t input adv c.sessions
-
-/-- **The real SPDZ TOPRF machine.** Its state holds the servers' shares of the PRF key and of
-    the MAC key; an accepted evaluation releases the value reconstructed from the opened output
-    shares of `spdzEval`; an accepted issuance opened its attribute commitment and passed the
-    cut-and-choose opening check. Every other wire is the gate layer's. -/
-def piToprfRealSpdzMachine (cfg : Spec.IdealCredConfig Lane4) (P : RealSpdzParams Attr)
-    (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n)) :
-    Spec.Machine (RealSpdzState Attr n) (Spec.CredPort × RealSpdzWire Attr)
-      (Spec.IdealCredOutput Lane4) where
-  Init c := (piToprfCredService cfg).Init c.svc ∧ c.servers = servers₀ ∧ c.sessions = sessions₀
-  step c inp := outcomeStep (realSpdzOutcome cfg P c inp.1 inp.2)
-  errStep c inp := (realSpdzOutcome cfg P c inp.1 inp.2).nextState
-
-/-- The evaluation wire consumes the current preprocessing queue. -/
-theorem realSpdzMachine_eval_step (cfg : Spec.IdealCredConfig Lane4) (P : RealSpdzParams Attr)
-    (servers : SpdzServers n) (sessions : List (SpdzSession n))
-    (c : RealSpdzState Attr n) (port : Spec.CredPort) (t : Spec.ToprfTicket)
-    (input : Spec.Bytes) (adv : EvalTamper) :
-    (piToprfRealSpdzMachine cfg P servers sessions).step c (port, .evalReal t input adv) =
-      outcomeStep (evalOutcome cfg P c port t input adv c.sessions) := by
-  simp only [piToprfRealSpdzMachine, realSpdzOutcome]
-
-theorem gateOutcome_ok {cfg : Spec.IdealCredConfig Lane4} {c c' : RealSpdzState Attr n}
-    {port : Spec.CredPort} {w : ToprfCredWire Attr} {out : Spec.IdealCredOutput Lane4}
-    (h : gateOutcome cfg c port w = .ok c' out) :
-    (Spec.idealCredMachine cfg).step c.svc.abs (port, w.toCommand) = some (c'.svc.abs, out) ∧
-      c'.servers = c.servers ∧ c'.sessions = c.sessions := by
-  unfold gateOutcome at h
-  cases hS : (piToprfCredService cfg).step c.svc (port, w) with
-  | none => rw [hS] at h; cases h
-  | some r =>
-    rw [hS] at h
-    injection h with hc ho
-    subst hc
-    subst ho
-    exact ⟨piToprfCredService_accept_ok cfg (c' := r.1) (out := r.2) hS, rfl, rfl⟩
-
-theorem gateOutcome_err {cfg : Spec.IdealCredConfig Lane4} {c c' : RealSpdzState Attr n}
-    {port : Spec.CredPort} {w : ToprfCredWire Attr} {u : Unit}
-    (h : gateOutcome cfg c port w = .err c' u) :
-    c'.svc.abs = c.svc.abs ∧ c'.servers = c.servers ∧ c'.sessions = c.sessions := by
-  unfold gateOutcome at h
-  cases hS : (piToprfCredService cfg).step c.svc (port, w) with
-  | some r => rw [hS] at h; cases h
-  | none =>
-    rw [hS] at h
-    injection h with hc
-    subst hc
-    exact ⟨piToprfCredService_reject_ok cfg hS, rfl, rfl⟩
-
-omit [DecidableEq Attr] in
-theorem evalFinish_ok {c c' : RealSpdzState Attr n} {rest : List (SpdzSession n)} {y : Lane4}
-    {errSvc : PiToprfCredState Attr Lane4}
-    {r : Option (PiToprfCredState Attr Lane4 × Spec.IdealCredOutput Lane4)}
-    {out : Spec.IdealCredOutput Lane4} (h : evalFinish c rest y errSvc r = .ok c' out) :
-    ∃ svc' v, r = some (svc', .toprfEvaluated v) ∧
-      c' = { c with svc := svc', sessions := rest } ∧ out = .toprfEvaluated y := by
-  cases r with
-  | none => cases h
-  | some p =>
-    obtain ⟨svc', o⟩ := p
-    cases o with
-    | toprfEvaluated v =>
-      injection h with hc ho
-      exact ⟨svc', v, rfl, hc.symm, ho.symm⟩
-    | issued _ => cases h
-    | epochAdvanced _ => cases h
-    | presentationVerdict _ => cases h
-    | challengeIssued _ => cases h
-    | challengeRefused => cases h
-    | toprfApproved => cases h
-    | corrupted => cases h
-
-omit [DecidableEq Attr] in
-theorem evalFinish_err {c c' : RealSpdzState Attr n} {rest : List (SpdzSession n)} {y : Lane4}
-    {errSvc : PiToprfCredState Attr Lane4}
-    {r : Option (PiToprfCredState Attr Lane4 × Spec.IdealCredOutput Lane4)} {u : Unit}
-    (h : evalFinish c rest y errSvc r = .err c' u) :
-    (c'.svc = c.svc ∨ (r = none ∧ c'.svc = errSvc)) ∧ c'.servers = c.servers ∧
-      c'.sessions = rest := by
-  cases r with
-  | none =>
-    injection h with hc
-    subst hc
-    exact ⟨Or.inr ⟨rfl, rfl⟩, rfl, rfl⟩
-  | some p =>
-    obtain ⟨svc', o⟩ := p
-    cases o with
-    | toprfEvaluated v => cases h
-    | issued _ => injection h with hc; subst hc; exact ⟨Or.inl rfl, rfl, rfl⟩
-    | epochAdvanced _ => injection h with hc; subst hc; exact ⟨Or.inl rfl, rfl, rfl⟩
-    | presentationVerdict _ => injection h with hc; subst hc; exact ⟨Or.inl rfl, rfl, rfl⟩
-    | challengeIssued _ => injection h with hc; subst hc; exact ⟨Or.inl rfl, rfl, rfl⟩
-    | challengeRefused => injection h with hc; subst hc; exact ⟨Or.inl rfl, rfl, rfl⟩
-    | toprfApproved => injection h with hc; subst hc; exact ⟨Or.inl rfl, rfl, rfl⟩
-    | corrupted => injection h with hc; subst hc; exact ⟨Or.inl rfl, rfl, rfl⟩
-
-/-- A rejected wire leaves the gate layer's abstraction and the servers' shares unchanged, and
-    never adds a session. -/
-theorem realSpdzOutcome_err_inv {cfg : Spec.IdealCredConfig Lane4} {P : RealSpdzParams Attr}
-    {c c' : RealSpdzState Attr n} {port : Spec.CredPort} {w : RealSpdzWire Attr} {u : Unit}
-    (h : realSpdzOutcome cfg P c port w = .err c' u) :
-    c'.svc.abs = c.svc.abs ∧ c'.servers = c.servers ∧ ∀ s ∈ c'.sessions, s ∈ c.sessions := by
-  cases w with
-  | base b =>
-    simp only [realSpdzOutcome] at h
-    cases hb : baseAllowed b with
-    | false =>
-      simp only [hb, Bool.false_eq_true, ↓reduceIte] at h
-      injection h with hc
-      subst hc
-      exact ⟨rfl, rfl, fun _ hs => hs⟩
-    | true =>
-      simp only [hb, ↓reduceIte] at h
-      obtain ⟨h1, h2, h3⟩ := gateOutcome_err h
-      exact ⟨h1, h2, fun s hs => h3 ▸ hs⟩
-  | issueReal hd attrs newRoot tag tr =>
-    simp only [realSpdzOutcome] at h
-    by_cases hChk : tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true
-    · rw [ite_eq_left_of_eq_true _ _ (eq_true hChk)] at h
-      obtain ⟨h1, h2, h3⟩ := gateOutcome_err h
-      exact ⟨h1, h2, fun s hs => h3 ▸ hs⟩
-    · rw [ite_eq_right_of_eq_false _ _ (eq_false hChk)] at h
-      injection h with hc
-      subst hc
-      exact ⟨rfl, rfl, fun _ hs => hs⟩
-  | evalReal t input adv =>
-    simp only [realSpdzOutcome] at h
-    cases hL : c.sessions with
-    | nil =>
-      rw [hL] at h
-      injection h with hc
-      subst hc
-      exact ⟨rfl, rfl, fun _ hs => hL ▸ hs⟩
-    | cons sess rest =>
-      rw [hL] at h
-      simp only [evalOutcome] at h
-      cases hAcc : (spdzEval c.servers sess (realEvalInput P t input) adv).accept with
-      | false =>
-        simp only [hAcc, Bool.false_eq_true, ↓reduceIte] at h
-        injection h with hc
-        subst hc
-        exact ⟨rfl, rfl, fun s hs => List.mem_cons_of_mem _ hs⟩
-      | true =>
-        simp only [hAcc, ↓reduceIte] at h
-        obtain ⟨hSvc, h2, h3⟩ := evalFinish_err h
-        refine ⟨?_, h2, fun s hs => List.mem_cons_of_mem _ (h3 ▸ hs)⟩
-        rcases hSvc with hSame | ⟨hNone, hErr⟩
-        · rw [hSame]
-        · rw [hErr]
-          exact piToprfCredService_reject_ok cfg hNone
-
-end Machine
 
 /-! ### The bad event, the guarded machine and its refinement -/
 
@@ -1965,448 +1721,6 @@ def evalBadOf (srv : SpdzServers n) (x : Lane4) (adv : EvalTamper) :
 
 end Bad
 
-section Guarded
-variable {Attr : Type} [DecidableEq Attr] {n : Nat}
-
-/-- The bad event of a step: an evaluation wire whose share-level evaluation is in
-    `evalBadEvent`. -/
-def realSpdzBad (P : RealSpdzParams Attr) (c : RealSpdzState Attr n) : RealSpdzWire Attr → Bool
-  | .evalReal t input adv => evalBadOf c.servers (realEvalInput P t input) adv c.sessions
-  | _ => false
-
-def guardedOutcome (cfg : Spec.IdealCredConfig Lane4) (P : RealSpdzParams Attr)
-    (c : RealSpdzState Attr n) (port : Spec.CredPort) (w : RealSpdzWire Attr) :
-    StepOutcome (RealSpdzState Attr n) (Spec.IdealCredOutput Lane4) Unit :=
-  if realSpdzBad P c w then .err { c with sessions := c.sessions.tail } ()
-  else realSpdzOutcome cfg P c port w
-
-/-- The real machine restricted to steps outside the bad event. -/
-def piToprfRealSpdzGuarded (cfg : Spec.IdealCredConfig Lane4) (P : RealSpdzParams Attr)
-    (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n)) :
-    Spec.Machine (RealSpdzState Attr n) (Spec.CredPort × RealSpdzWire Attr)
-      (Spec.IdealCredOutput Lane4) where
-  Init c := (piToprfCredService cfg).Init c.svc ∧ c.servers = servers₀ ∧ c.sessions = sessions₀
-  step c inp := outcomeStep (guardedOutcome cfg P c inp.1 inp.2)
-  errStep c inp := (guardedOutcome cfg P c inp.1 inp.2).nextState
-
-/-- Outside the bad event the guarded machine and the real machine take the same step. -/
-theorem piToprfRealSpdzGuarded_step_eq (cfg : Spec.IdealCredConfig Lane4)
-    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
-    (c : RealSpdzState Attr n) (port : Spec.CredPort) (w : RealSpdzWire Attr)
-    (hBad : realSpdzBad P c w = false) :
-    (piToprfRealSpdzGuarded cfg P servers₀ sessions₀).step c (port, w) =
-      (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c (port, w) := by
-  show outcomeStep (guardedOutcome cfg P c port w) = outcomeStep (realSpdzOutcome cfg P c port w)
-  unfold guardedOutcome
-  simp only [hBad, Bool.false_eq_true, ↓reduceIte]
-
-/-- The simulation relation: the gate layer's abstraction is the ideal state, which satisfies the
-    ideal invariant; the servers hold a valid sharing of the key `k`; every unused session is
-    valid. -/
-structure RealSpdzRel (cfg : Spec.IdealCredConfig Lane4) (k : Lane4)
-    (c : RealSpdzState Attr n) (a : Spec.IdealCredState Attr Lane4) : Prop where
-  abs : c.svc.abs = a
-  inv : Spec.IdealCredInv cfg a
-  servers : ServersValid c.servers k
-  sessions : ∀ s ∈ c.sessions, SessionValid c.servers s
-
-/-- An accepted step outside the bad event is a step of `Spec.idealCredMachine` with the same
-    output, when the ideal function is the algebraic PRF under the shared key. -/
-theorem realSpdzOutcome_ok_inv {cfg : Spec.IdealCredConfig Lane4} {P : RealSpdzParams Attr}
-    {c c' : RealSpdzState Attr n} {port : Spec.CredPort} {w : RealSpdzWire Attr}
-    {out : Spec.IdealCredOutput Lane4} (k : Lane4)
-    (hOprf : ∀ pt, cfg.oprf pt = evalAlgebraicOprf k (P.enc pt))
-    (hInv : Spec.IdealCredInv cfg c.svc.abs) (hSrv : ServersValid c.servers k)
-    (hSess : ∀ s ∈ c.sessions, SessionValid c.servers s)
-    (hBad : realSpdzBad P c w = false)
-    (h : realSpdzOutcome cfg P c port w = .ok c' out) :
-    (Spec.idealCredMachine cfg).step c.svc.abs (port, w.toBase.toCommand) =
-        some (c'.svc.abs, out) ∧
-      c'.servers = c.servers ∧ ∀ s ∈ c'.sessions, s ∈ c.sessions := by
-  cases w with
-  | base b =>
-    simp only [realSpdzOutcome] at h
-    cases hb : baseAllowed b with
-    | false =>
-      simp only [hb, Bool.false_eq_true, ↓reduceIte] at h
-      cases h
-    | true =>
-      simp only [hb, ↓reduceIte] at h
-      obtain ⟨h1, h2, h3⟩ := gateOutcome_ok h
-      exact ⟨h1, h2, fun s hs => h3 ▸ hs⟩
-  | issueReal hd attrs newRoot tag tr =>
-    simp only [realSpdzOutcome] at h
-    by_cases hChk : tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true
-    · rw [ite_eq_left_of_eq_true _ _ (eq_true hChk)] at h
-      obtain ⟨h1, h2, h3⟩ := gateOutcome_ok h
-      exact ⟨h1, h2, fun s hs => h3 ▸ hs⟩
-    · rw [ite_eq_right_of_eq_false _ _ (eq_false hChk)] at h
-      cases h
-  | evalReal t input adv =>
-    simp only [realSpdzOutcome] at h
-    simp only [realSpdzBad] at hBad
-    cases hL : c.sessions with
-    | nil =>
-      rw [hL] at h
-      cases h
-    | cons sess rest =>
-      rw [hL] at h hBad
-      simp only [evalOutcome] at h
-      cases hAcc : (spdzEval c.servers sess (realEvalInput P t input) adv).accept with
-      | false =>
-        simp only [hAcc, Bool.false_eq_true, ↓reduceIte] at h
-        cases h
-      | true =>
-        simp only [hAcc, ↓reduceIte] at h
-        obtain ⟨svc', v, hS, hc, ho⟩ := evalFinish_ok h
-        subst hc
-        subst ho
-        have hIdeal := piToprfCredService_accept_ok cfg hS
-        obtain ⟨t', input', hCmd⟩ := Spec.idealCredStep_output_command hIdeal
-        have hExec := (Spec.idealCredStep_inv hIdeal).2
-        rw [hCmd] at hExec
-        have hv : v = cfg.oprf ⟨t'.keyId, t'.epoch, input'⟩ := by
-          rcases (Spec.credExec_evalToprf_inv hExec).2 with ⟨o, hMem, _, hOut⟩ | ⟨_, hOut⟩
-          · rw [Spec.IdealCredOutput.toprfEvaluated.inj hOut]
-            exact hInv.table_graph _ hMem
-          · exact Spec.IdealCredOutput.toprfEvaluated.inj hOut
-        have hOutEq := spdzEval_out_of_not_bad c.servers sess k _ adv hSrv
-          (hSess sess (by rw [hL]; exact List.mem_cons_self ..)) hAcc hBad
-        have hIn : realEvalInput P t input = P.enc ⟨t'.keyId, t'.epoch, input'⟩ := by
-          unfold realEvalInput
-          rw [hCmd]
-          rfl
-        refine ⟨?_, rfl, fun s hs => List.mem_cons_of_mem _ hs⟩
-        show (Spec.idealCredMachine cfg).step c.svc.abs
-          (port, (ToprfCredWire.evalToprfWire t input (zeroTranscript t)).toCommand) =
-            some (svc'.abs, .toprfEvaluated
-              (spdzEval c.servers sess (realEvalInput P t input) adv).out)
-        rw [hOutEq, hIn, ← hOprf, ← hv]
-        exact hIdeal
-
-/-- **Refinement on runs outside the bad event.** With the ideal function instantiated as
-    `evalAlgebraicOprf k ∘ enc` for the key `k` the servers share, the guarded real machine is
-    simulated by `Spec.idealCredMachine`: every accepted step is an ideal step on the command the
-    wire denotes, with the same output; in particular every released TOPRF value, reconstructed
-    from output shares, is the value the ideal functionality releases. -/
-def piToprfRealSpdzGuarded_dataRefines (cfg : Spec.IdealCredConfig Lane4)
-    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
-    (k : Lane4) (hOprf : ∀ pt, cfg.oprf pt = evalAlgebraicOprf k (P.enc pt))
-    (hSrv₀ : ServersValid servers₀ k) (hSess₀ : ∀ s ∈ sessions₀, SessionValid servers₀ s) :
-    Spec.DataRefines (piToprfRealSpdzGuarded cfg P servers₀ sessions₀)
-      (Spec.idealCredMachine cfg)
-      (fun inp => some (inp.1, inp.2.toBase.toCommand)) id where
-  Rel := RealSpdzRel cfg k
-  absInit c := c.svc.abs
-  init_ok := by
-    intro c₀ hInit
-    obtain ⟨hSvc, hServ, hSessEq⟩ := hInit
-    have hAbs := piToprfCredService_init_abs cfg hSvc
-    have hInv : Spec.IdealCredInv cfg (Spec.IdealCredState.empty (Attr := Attr) cfg) :=
-      Spec.idealCredInv_reachable ⟨_, [], rfl, .nil _⟩
-    refine ⟨hAbs, rfl, ?_, ?_, ?_⟩
-    · rw [hAbs]; exact hInv
-    · rw [hServ]; exact hSrv₀
-    · rw [hServ, hSessEq]; exact hSess₀
-  sim_visible := by
-    intro c c' a inp out j hRel hStep hVis
-    have hj := Option.some.inj hVis
-    subst hj
-    have hStep' : outcomeStep (guardedOutcome cfg P c inp.1 inp.2) = some (c', out) := hStep
-    unfold guardedOutcome at hStep'
-    cases hBad : realSpdzBad P c inp.2 with
-    | true =>
-      simp only [hBad, ↓reduceIte] at hStep'
-      cases hStep'
-    | false =>
-      simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hStep'
-      cases hO : realSpdzOutcome cfg P c inp.1 inp.2 with
-      | err c'' u =>
-        rw [hO] at hStep'
-        cases hStep'
-      | ok c'' out'' =>
-        rw [hO] at hStep'
-        injection hStep' with hPair
-        obtain ⟨hc, ho⟩ := Prod.mk.inj hPair
-        subst hc
-        subst ho
-        have hInv : Spec.IdealCredInv cfg c.svc.abs := by rw [hRel.abs]; exact hRel.inv
-        obtain ⟨hIdeal, hServ, hSub⟩ :=
-          realSpdzOutcome_ok_inv k hOprf hInv hRel.servers hRel.sessions hBad hO
-        refine ⟨c''.svc.abs, ?_, rfl, ?_, ?_, ?_⟩
-        · rw [← hRel.abs]; exact hIdeal
-        · exact Spec.idealCredInv_exec hInv (Spec.idealCredStep_inv hIdeal).2
-        · rw [hServ]; exact hRel.servers
-        · intro s hs
-          rw [hServ]
-          exact hRel.sessions s (hSub s hs)
-  sim_internal := by
-    intro c c' a inp out _ _ hVis
-    cases hVis
-  sim_reject := by
-    intro c a inp hRel hNone
-    have hNone' : outcomeStep (guardedOutcome cfg P c inp.1 inp.2) = none := hNone
-    show RealSpdzRel cfg k (guardedOutcome cfg P c inp.1 inp.2).nextState a
-    cases hG : guardedOutcome cfg P c inp.1 inp.2 with
-    | ok c'' o =>
-      rw [hG] at hNone'
-      cases hNone'
-    | err c'' u =>
-      show RealSpdzRel cfg k c'' a
-      unfold guardedOutcome at hG
-      cases hBad : realSpdzBad P c inp.2 with
-      | true =>
-        simp only [hBad, ↓reduceIte] at hG
-        injection hG with hc
-        subst hc
-        exact ⟨hRel.abs, hRel.inv, hRel.servers,
-          fun s hs => hRel.sessions s (List.mem_of_mem_tail hs)⟩
-      | false =>
-        simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hG
-        obtain ⟨h1, h2, h3⟩ := realSpdzOutcome_err_inv hG
-        refine ⟨h1.trans hRel.abs, hRel.inv, ?_, ?_⟩
-        · rw [h2]; exact hRel.servers
-        · intro s hs
-          rw [h2]
-          exact hRel.sessions s (h3 s hs)
-
-/-- **Arithmetic soundness dichotomy of the real machine
-    (`piToprfRealSpdz_sound_or_mac_forgery`).** In a state whose servers hold a valid sharing of
-    the key `k` and whose sessions are valid, every accepted evaluation step consumed the next
-    session and released the value reconstructed from the opened output shares, and that value
-    is `evalAlgebraicOprf k` at the encoded point, unless one of the adversary's error lanes is
-    a SPDZ MAC forgery `d ≠ 0 ∧ m = α · d` or it cancelled an honest blinding randomizer. -/
-theorem piToprfRealSpdz_sound_or_mac_forgery (cfg : Spec.IdealCredConfig Lane4)
-    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
-    {c c' : RealSpdzState Attr n} {port : Spec.CredPort} {t : Spec.ToprfTicket}
-    {input : Spec.Bytes} {adv : EvalTamper} {out : Spec.IdealCredOutput Lane4} (k : Lane4)
-    (hSrv : ServersValid c.servers k) (hSess : ∀ s ∈ c.sessions, SessionValid c.servers s)
-    (hStep : (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
-      (port, .evalReal t input adv) = some (c', out)) :
-    ∃ sess rest, c.sessions = sess :: rest ∧ c'.sessions = rest ∧
-      out = .toprfEvaluated (spdzEval c.servers sess (realEvalInput P t input) adv).out ∧
-      ((spdzEval c.servers sess (realEvalInput P t input) adv).out =
-          evalAlgebraicOprf k (realEvalInput P t input) ∨
-        (∃ d m, (d, m) ∈ spdzErrorLanes c.servers sess (realEvalInput P t input) adv ∧
-          d ≠ zero ∧ m = mul c.servers.macKey (GoldilocksExt2.ofBase d)) ∨
-        blindDegenerate adv.rCorrupt 0 sess.rHonest = true) := by
-  have h : outcomeStep (evalOutcome cfg P c port t input adv c.sessions) = some (c', out) := hStep
-  cases hL : c.sessions with
-  | nil =>
-    rw [hL] at h
-    cases h
-  | cons sess rest =>
-    rw [hL] at h
-    simp only [evalOutcome] at h
-    cases hAcc : (spdzEval c.servers sess (realEvalInput P t input) adv).accept with
-    | false =>
-      simp only [hAcc, Bool.false_eq_true, ↓reduceIte] at h
-      cases h
-    | true =>
-      simp only [hAcc, ↓reduceIte] at h
-      cases hO : evalFinish c rest (spdzEval c.servers sess (realEvalInput P t input) adv).out
-          ((piToprfCredService cfg).errStep c.svc
-            (port, .evalToprfWire t input (zeroTranscript t)))
-          ((piToprfCredService cfg).step c.svc
-            (port, .evalToprfWire t input (zeroTranscript t))) with
-      | err c'' u =>
-        rw [hO] at h
-        cases h
-      | ok c'' out'' =>
-        rw [hO] at h
-        injection h with hPair
-        obtain ⟨hc, ho⟩ := Prod.mk.inj hPair
-        subst hc
-        subst ho
-        obtain ⟨svc', v, _, hc', ho'⟩ := evalFinish_ok hO
-        subst hc'
-        exact ⟨sess, rest, rfl, rfl, ho',
-          spdzEval_sound_or_mac_forgery c.servers sess k _ adv hSrv
-            (hSess sess (by rw [hL]; exact List.mem_cons_self ..)) hAcc⟩
-
-omit [DecidableEq Attr] in
-/-- What the bad event of a step says: the wire is an evaluation whose share-level run was
-    accepted while the adversary forged a MAC lane or cancelled an honest randomizer. -/
-theorem realSpdzBad_spec {P : RealSpdzParams Attr} {c : RealSpdzState Attr n}
-    {w : RealSpdzWire Attr} (hBad : realSpdzBad P c w = true) :
-    ∃ t input adv sess rest, w = .evalReal t input adv ∧ c.sessions = sess :: rest ∧
-      (spdzEval c.servers sess (realEvalInput P t input) adv).accept = true ∧
-      ((∃ d m, (d, m) ∈ spdzErrorLanes c.servers sess (realEvalInput P t input) adv ∧
-          d ≠ zero ∧ m = mul c.servers.macKey (GoldilocksExt2.ofBase d)) ∨
-        blindDegenerate adv.rCorrupt 0 sess.rHonest = true) := by
-  cases w with
-  | base b => cases hBad
-  | issueReal hd attrs newRoot tag tr => cases hBad
-  | evalReal t input adv =>
-    simp only [realSpdzBad] at hBad
-    cases hL : c.sessions with
-    | nil =>
-      rw [hL] at hBad
-      cases hBad
-    | cons sess rest =>
-      rw [hL] at hBad
-      have hB : evalBadEvent c.servers sess (realEvalInput P t input) adv = true := hBad
-      unfold evalBadEvent at hB
-      obtain ⟨hAcc, hOr⟩ := Bool.and_eq_true_iff.mp hB
-      refine ⟨t, input, adv, sess, rest, rfl, rfl, hAcc, ?_⟩
-      rcases Bool.or_eq_true_iff.mp hOr with hF | hD
-      · obtain ⟨p, hMem, hp⟩ := List.any_eq_true.mp hF
-        obtain ⟨hNe, hEq⟩ := Bool.and_eq_true_iff.mp hp
-        refine Or.inl ⟨p.1, p.2, hMem, fun h0 => ?_, of_decide_eq_true hEq⟩
-        rw [decide_eq_true h0] at hNe
-        cases hNe
-      · exact Or.inr hD
-
-/-! ### Issuance: commitment opening and cut-and-choose check -/
-
-/-- An accepted issuance opened its commitment tag to the stored attributes, passed the
-    33-repetition cut-and-choose opening check, and is an ideal issuance step. -/
-theorem piToprfRealSpdz_issue_accept_checks (cfg : Spec.IdealCredConfig Lane4)
-    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
-    {c c' : RealSpdzState Attr n} {port : Spec.CredPort} {holder : Nat} {attrs : List Attr}
-    {newRoot : Spec.Digest256} {tag : BitVec 256} {tr : IssuanceTranscript}
-    {out : Spec.IdealCredOutput Lane4}
-    (hStep : (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
-      (port, .issueReal holder attrs newRoot tag tr) = some (c', out)) :
-    tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true ∧
-      (Spec.idealCredMachine cfg).step c.svc.abs
-        (port, (ToprfCredWire.issueWire holder attrs newRoot tag).toCommand) =
-          some (c'.svc.abs, out) := by
-  have h : outcomeStep (if tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true then
-      gateOutcome cfg c port (.issueWire holder attrs newRoot tag) else .err c ()) =
-      some (c', out) := hStep
-  by_cases hChk : tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true
-  · rw [ite_eq_left_of_eq_true _ _ (eq_true hChk)] at h
-    cases hO : gateOutcome cfg c port (.issueWire holder attrs newRoot tag) with
-    | err c'' u =>
-      rw [hO] at h
-      cases h
-    | ok c'' out'' =>
-      rw [hO] at h
-      injection h with hPair
-      obtain ⟨hc, ho⟩ := Prod.mk.inj hPair
-      subst hc
-      subst ho
-      exact ⟨hChk.1, hChk.2, (gateOutcome_ok hO).1⟩
-  · rw [ite_eq_right_of_eq_false _ _ (eq_false hChk)] at h
-    cases h
-
-/-- Two accepted issuances under one commitment tag store the same attributes, or exhibit a
-    collision of the commitment function. -/
-theorem piToprfRealSpdz_issue_binding_or_collision (cfg : Spec.IdealCredConfig Lane4)
-    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
-    {c₁ c₁' c₂ c₂' : RealSpdzState Attr n} {port₁ port₂ : Spec.CredPort} {h₁ h₂ : Nat}
-    {attrs₁ attrs₂ : List Attr} {root₁ root₂ : Spec.Digest256} {tag : BitVec 256}
-    {tr₁ tr₂ : IssuanceTranscript} {out₁ out₂ : Spec.IdealCredOutput Lane4}
-    (hStep₁ : (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c₁
-      (port₁, .issueReal h₁ attrs₁ root₁ tag tr₁) = some (c₁', out₁))
-    (hStep₂ : (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c₂
-      (port₂, .issueReal h₂ attrs₂ root₂ tag tr₂) = some (c₂', out₂)) :
-    attrs₁ = attrs₂ ∨
-      (attrs₁ ≠ attrs₂ ∧ P.commit attrs₁ tr₁.salt = P.commit attrs₂ tr₂.salt) := by
-  have e₁ := (piToprfRealSpdz_issue_accept_checks cfg P servers₀ sessions₀ hStep₁).1
-  have e₂ := (piToprfRealSpdz_issue_accept_checks cfg P servers₀ sessions₀ hStep₂).1
-  by_cases hEq : attrs₁ = attrs₂
-  · exact Or.inl hEq
-  · exact Or.inr ⟨hEq, e₁.symm.trans e₂⟩
-
-/-- `#tooth` An issuance whose tag is not the commitment to the submitted attributes under the
-    opened salt is refused. -/
-theorem tooth_forged_issuance_commitment_rejected (cfg : Spec.IdealCredConfig Lane4)
-    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
-    (c : RealSpdzState Attr n) (port : Spec.CredPort) (holder : Nat) (attrs : List Attr)
-    (newRoot : Spec.Digest256) (tag : BitVec 256) (tr : IssuanceTranscript)
-    (hForged : tag ≠ P.commit attrs tr.salt) :
-    (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
-      (port, .issueReal holder attrs newRoot tag tr) = none := by
-  show outcomeStep (if tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true then
-      gateOutcome cfg c port (.issueWire holder attrs newRoot tag) else .err c ()) = none
-  rw [ite_eq_right_of_eq_false _ _ (eq_false (fun hChk => hForged hChk.1))]
-  rfl
-
-/-- `#tooth` An issuance whose cut-and-choose opening fails `verify33` is refused. -/
-theorem tooth_issuance_failed_opening_rejected (cfg : Spec.IdealCredConfig Lane4)
-    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
-    (c : RealSpdzState Attr n) (port : Spec.CredPort) (holder : Nat) (attrs : List Attr)
-    (newRoot : Spec.Digest256) (tag : BitVec 256) (tr : IssuanceTranscript)
-    (hBadOpening : tr.opening.verify33 = false) :
-    (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
-      (port, .issueReal holder attrs newRoot tag tr) = none := by
-  show outcomeStep (if tag = P.commit attrs tr.salt ∧ tr.opening.verify33 = true then
-      gateOutcome cfg c port (.issueWire holder attrs newRoot tag) else .err c ()) = none
-  rw [ite_eq_right_of_eq_false _ _ (eq_false (fun hChk => by
-    rw [hBadOpening] at hChk
-    exact Bool.noConfusion hChk.2))]
-  rfl
-
-/-- The gate layer's evaluation and issuance wires, which carry no shares and no issuance
-    transcript, are refused by the real machine. -/
-theorem piToprfRealSpdz_fiat_wires_refused (cfg : Spec.IdealCredConfig Lane4)
-    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
-    (c : RealSpdzState Attr n)
-    (port : Spec.CredPort) (t : Spec.ToprfTicket) (input : Spec.Bytes)
-    (online : SpdzOnlineTranscript) (holder : Nat) (attrs : List Attr)
-    (newRoot : Spec.Digest256) (tag : BitVec 256) :
-    (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
-        (port, .base (.evalToprfWire t input online)) = none ∧
-      (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
-        (port, .base (.issueWire holder attrs newRoot tag)) = none :=
-  ⟨rfl, rfl⟩
-
-/-- An honest issuance is accepted at an initial state: the issuer's wire with the commitment to
-    one attribute and the honest zero-defect opening issues credential `0`. -/
-theorem piToprfRealSpdz_honest_issuance_accepted (cfg : Spec.IdealCredConfig Lane4)
-    (P : RealSpdzParams Attr) (servers₀ : SpdzServers n) (sessions₀ : List (SpdzSession n))
-    (holder : Nat) (attr0 : Attr) (newRoot : Spec.Digest256) (salt : BitVec 256) :
-    ∃ c₀ c' : RealSpdzState Attr n,
-      (piToprfRealSpdzMachine cfg P servers₀ sessions₀).Init c₀ ∧
-      (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c₀
-        (.issuer, .issueReal holder [attr0] newRoot (P.commit [attr0] salt)
-          ⟨salt, LimboSdOpeningWire.honest 0⟩) = some (c', .issued 0) := by
-  obtain ⟨svc', hInit, hSvc⟩ := piToprfCredService_issuer_issues_at_init (Attr := Attr) cfg
-    holder attr0 newRoot (P.commit [attr0] salt)
-  refine ⟨⟨PiToprfCredState.init cfg, servers₀, sessions₀⟩,
-    ⟨svc', servers₀, sessions₀⟩, ⟨hInit, rfl, rfl⟩, ?_⟩
-  show outcomeStep (if P.commit [attr0] salt = P.commit [attr0] salt ∧
-      (LimboSdOpeningWire.honest 0).verify33 = true then
-      gateOutcome cfg ⟨PiToprfCredState.init cfg, servers₀, sessions₀⟩ .issuer
-        (.issueWire holder [attr0] newRoot (P.commit [attr0] salt)) else .err _ ()) = _
-  rw [ite_eq_left_of_eq_true _ _ (eq_true ⟨rfl, LimboSdOpeningWire.honest_verify33 0⟩)]
-  unfold gateOutcome
-  dsimp only
-  rw [hSvc]
-  rfl
-
-omit [DecidableEq Attr] in
-/-- **The adversary's view of an evaluation step is independent of the MAC key
-    (`piToprfRealSpdz_macKey_zero_leakage`).** Two states of the real machine with the same
-    value plane and MAC keys `α₁`, `α₂`: for an adversary none of whose nonzero error lanes is a
-    forgery point of either key, every observable of the transcript of the next evaluation
-    (opened values, blinded residuals, accept bit, reconstructed output) has the same sum over
-    the honest parties' uniform blinding randomizers in both states. -/
-theorem piToprfRealSpdz_macKey_zero_leakage {cardF : Nat}
-    (enum : SimpleEquiv (Fin cardF) GoldilocksExt2)
-    {c₁ c₂ : RealSpdzState Attr n} {sess₁ sess₂ : SpdzSession n}
-    {rest₁ rest₂ : List (SpdzSession n)} (k x : Lane4) (adv : EvalTamper)
-    (hL₁ : c₁.sessions = sess₁ :: rest₁) (hL₂ : c₂.sessions = sess₂ :: rest₂)
-    (hSrv₁ : ServersValid c₁.servers k) (hSrv₂ : ServersValid c₂.servers k)
-    (hSess₁ : ∀ s ∈ c₁.sessions, SessionValid c₁.servers s)
-    (hSess₂ : ∀ s ∈ c₂.sessions, SessionValid c₂.servers s)
-    (hPlane : SameValuePlane c₁.servers c₂.servers sess₁ sess₂)
-    (hNo₁ : ∀ d m, (d, m) ∈ spdzErrorLanes c₁.servers sess₁ x adv → d ≠ zero →
-      m ≠ mul c₁.servers.macKey (GoldilocksExt2.ofBase d))
-    (hNo₂ : ∀ d m, (d, m) ∈ spdzErrorLanes c₁.servers sess₁ x adv → d ≠ zero →
-      m ≠ mul c₂.servers.macKey (GoldilocksExt2.ofBase d))
-    (obs : SpdzEval → Nat) :
-    nsum enum ((spdzFinal c₁.servers sess₁ x adv).resid.flatMap ext2Lanes).length
-        (fun rs => obs (spdzEval c₁.servers ⟨sess₁.tuples, rs⟩ x adv)) =
-      nsum enum ((spdzFinal c₁.servers sess₁ x adv).resid.flatMap ext2Lanes).length
-        (fun rs => obs (spdzEval c₂.servers ⟨sess₂.tuples, rs⟩ x adv)) :=
-  spdzEval_macKey_zero_leakage enum k x adv hSrv₁ hSrv₂
-    (hSess₁ sess₁ (by rw [hL₁]; exact List.mem_cons_self ..))
-    (hSess₂ sess₂ (by rw [hL₂]; exact List.mem_cons_self ..)) hPlane hNo₁ hNo₂ obs
-
-end Guarded
 
 /-! ## 8. Completeness, the load-bearing MAC check, and satisfiable hypotheses -/
 
@@ -2702,34 +2016,6 @@ theorem tooth_unchecked_release_is_wrong (srv : SpdzServers n) (sess : SpdzSessi
 
 end Complete
 
-/-- `#tooth` **The real machine refuses a tampered output share.** At a state whose next session
-    is valid for servers holding a valid sharing of `k` under a nonzero MAC key, the evaluation
-    wire whose adversary shifts the output opening by one is refused, unless the corrupt
-    randomizer cancels an honest blinding randomizer. -/
-theorem tooth_machine_tampered_output_refused {Attr : Type} [DecidableEq Attr] {n : Nat}
-    (cfg : Spec.IdealCredConfig Lane4) (P : RealSpdzParams Attr) (servers₀ : SpdzServers n)
-    (sessions₀ : List (SpdzSession n)) (c : RealSpdzState Attr n) (port : Spec.CredPort)
-    (t : Spec.ToprfTicket) (input : Spec.Bytes) (rC : Nat → GoldilocksExt2) (k : Lane4)
-    (sess : SpdzSession n) (rest : List (SpdzSession n)) (hL : c.sessions = sess :: rest)
-    (hSrv : ServersValid c.servers k) (hSess : SessionValid c.servers sess)
-    (hT : sess.tuples.length = poseidonRounds.length) (hKey : c.servers.macKey ≠ zero)
-    (hDeg : blindDegenerate rC 0 sess.rHonest = false) :
-    (piToprfRealSpdzMachine cfg P servers₀ sessions₀).step c
-      (port, .evalReal t input ⟨outputTamper one, rC⟩) = none := by
-  have hAcc := tooth_tampered_output_share_rejected c.servers sess k (realEvalInput P t input) rC
-    hSrv hSess hT hKey hDeg
-  show outcomeStep (evalOutcome cfg P c port t input ⟨outputTamper one, rC⟩ c.sessions) = none
-  rw [hL]
-  show outcomeStep
-    (if (spdzEval c.servers sess (realEvalInput P t input) ⟨outputTamper one, rC⟩).accept = true
-      then evalFinish c rest
-        (spdzEval c.servers sess (realEvalInput P t input) ⟨outputTamper one, rC⟩).out
-        ((piToprfCredService cfg).errStep c.svc
-          (port, .evalToprfWire t input (zeroTranscript t)))
-        ((piToprfCredService cfg).step c.svc (port, .evalToprfWire t input (zeroTranscript t)))
-      else .err { c with sessions := rest } ()) = none
-  rw [ite_eq_right_of_eq_false _ _ (eq_false (fun hA => Bool.noConfusion (hAcc.symm.trans hA)))]
-  rfl
 
 /-! ### A dealer: the hypotheses are jointly satisfiable -/
 
@@ -2880,8 +2166,7 @@ theorem witness_tamper_teeth (k : Lane4) :
 
 /-! ## 9. Audits -/
 
-#verify_constructive
-  Qsag.SpdzToprf.linSum_congr
+#verify_constructive Qsag.SpdzToprf.linSum_congr
   Qsag.SpdzToprf.linSum_add
   Qsag.SpdzToprf.linSum_mul_left
   Qsag.SpdzToprf.additive_zero
@@ -2978,23 +2263,7 @@ theorem witness_tamper_teeth (k : Lane4) :
   Qsag.SpdzToprf.stLane_sub
   Qsag.SpdzToprf.residLanes_samePattern
   Qsag.SpdzToprf.spdzEval_macKey_zero_leakage
-  Qsag.SpdzToprf.gateOutcome_ok
-  Qsag.SpdzToprf.gateOutcome_err
-  Qsag.SpdzToprf.evalFinish_ok
-  Qsag.SpdzToprf.evalFinish_err
-  Qsag.SpdzToprf.realSpdzOutcome_err_inv
   Qsag.SpdzToprf.spdzEval_out_of_not_bad
-  Qsag.SpdzToprf.piToprfRealSpdzGuarded_step_eq
-  Qsag.SpdzToprf.realSpdzOutcome_ok_inv
-  Qsag.SpdzToprf.piToprfRealSpdz_sound_or_mac_forgery
-  Qsag.SpdzToprf.realSpdzBad_spec
-  Qsag.SpdzToprf.piToprfRealSpdz_issue_accept_checks
-  Qsag.SpdzToprf.piToprfRealSpdz_issue_binding_or_collision
-  Qsag.SpdzToprf.tooth_forged_issuance_commitment_rejected
-  Qsag.SpdzToprf.tooth_issuance_failed_opening_rejected
-  Qsag.SpdzToprf.piToprfRealSpdz_fiat_wires_refused
-  Qsag.SpdzToprf.piToprfRealSpdz_honest_issuance_accepted
-  Qsag.SpdzToprf.piToprfRealSpdz_macKey_zero_leakage
   Qsag.SpdzToprf.spnValRun_opened_length
   Qsag.SpdzToprf.spnValRun_trace_errors_zero
   Qsag.SpdzToprf.spnValRun_trace_shift_zero
@@ -3007,7 +2276,6 @@ theorem witness_tamper_teeth (k : Lane4) :
   Qsag.SpdzToprf.spdzEval_honest_complete
   Qsag.SpdzToprf.tooth_tampered_output_share_rejected
   Qsag.SpdzToprf.tooth_unchecked_release_is_wrong
-  Qsag.SpdzToprf.tooth_machine_tampered_output_refused
   Qsag.SpdzToprf.recSum_single
   Qsag.SpdzToprf.aggShare_single
   Qsag.SpdzToprf.dealer_macKey
@@ -3019,18 +2287,12 @@ theorem witness_tamper_teeth (k : Lane4) :
   Qsag.SpdzToprf.blindDegenerate_replicate_one
   Qsag.SpdzToprf.witness_tamper_teeth
 
-#verify_kernel Qsag.SpdzToprf.piToprfRealSpdzGuarded_dataRefines
 
 #tooth_pair Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery vs
   Qsag.SpdzToprf.tooth_tampered_output_share_rejected
 #tooth_pair Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery vs
   Qsag.SpdzToprf.tooth_unchecked_release_is_wrong
-#tooth_pair Qsag.SpdzToprf.piToprfRealSpdz_sound_or_mac_forgery vs
-  Qsag.SpdzToprf.tooth_machine_tampered_output_refused
-#tooth_pair Qsag.SpdzToprf.piToprfRealSpdz_issue_accept_checks vs
-  Qsag.SpdzToprf.tooth_forged_issuance_commitment_rejected
-#tooth_pair Qsag.SpdzToprf.piToprfRealSpdz_issue_accept_checks vs
-  Qsag.SpdzToprf.tooth_issuance_failed_opening_rejected
+
 
 #verify_inhabited Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery
   Qsag.SpdzToprf.witness_spdzEval_accepted
@@ -3039,7 +2301,7 @@ theorem witness_tamper_teeth (k : Lane4) :
 #verify_inhabited Qsag.SpdzToprf.tooth_tampered_output_share_rejected
   Qsag.SpdzToprf.witness_tamper_teeth
 
-#export_eqns outcomeStep evalOutcome evalFooled SessionValid poseidonRounds
+#export_eqns outcomeStep evalFooled SessionValid poseidonRounds
 
 end Qsag.SpdzToprf
 end

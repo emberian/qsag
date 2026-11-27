@@ -422,9 +422,6 @@ def plainMerkleAst (leaf : Nat → MpcExpr) : Nat → Nat → MpcExpr
   | h + 1, label => .openAndPlainMerkleParent
       (plainMerkleAst leaf h (2 * label)) (plainMerkleAst leaf h (2 * label + 1))
 
-def buildParallelSeededAst (rounds h w : Nat) : MpcExpr :=
-  plainMerkleAst (fun label => parallelChainAst rounds w
-    (cubePrfAst rounds (.xorLin (.secretShare 0) (.pubInput label)))) h 0
 
 def internalChainedAst (rounds w : Nat) : Nat → MpcExpr → MpcExpr
   | 0, x => x
@@ -456,12 +453,6 @@ private theorem plainMerkleAst_depth (leaf : Nat → MpcExpr) (d : Nat)
   | zero => exact hd label
   | succ h ih => simp [plainMerkleAst, MpcExpr.beaverDepth, ih]
 
-theorem buildParallelSeededAst_depth (rounds h w : Nat) :
-    (buildParallelSeededAst rounds h w).beaverDepth = rounds * (1 + w) := by
-  apply plainMerkleAst_depth
-  intro label
-  simp [parallelChainAst_depth, cubePrfAst_depth, MpcExpr.beaverDepth,
-    Nat.mul_add]
 
 private theorem internalChainedAst_depth (rounds w h : Nat) (x : MpcExpr) :
     (internalChainedAst rounds w h x).beaverDepth = x.beaverDepth + rounds * h * w := by
@@ -475,27 +466,6 @@ theorem buildInternalChainedAst_depth (rounds h w : Nat) :
     (buildInternalChainedAst rounds h w).beaverDepth = rounds * h * w := by
   simp [buildInternalChainedAst, internalChainedAst_depth, MpcExpr.beaverDepth]
 
-/-- Structural depth, height invariance, strict separation, and the 82-round profile. -/
-theorem parallelSeededFts_mpc_depth_independent_of_height :
-    (∀ rounds h₁ h₂ w,
-      (buildParallelSeededAst rounds h₁ w).beaverDepth = rounds * (1 + w) ∧
-      (buildParallelSeededAst rounds h₁ w).beaverDepth =
-        (buildParallelSeededAst rounds h₂ w).beaverDepth) ∧
-    (∀ rounds h w, 1 ≤ rounds → 2 ≤ h → 2 ≤ w →
-      (buildParallelSeededAst rounds h w).beaverDepth <
-        (buildInternalChainedAst rounds h w).beaverDepth) ∧
-    ((buildParallelSeededAst 82 15 5).beaverDepth = 492 ∧
-      (buildInternalChainedAst 82 15 5).beaverDepth = 6150) := by
-  refine ⟨?_, ?_, ?_⟩
-  · intro rounds h₁ h₂ w
-    simp only [buildParallelSeededAst_depth, and_self]
-  · intro rounds h w hr hh hw
-    rw [buildParallelSeededAst_depth, buildInternalChainedAst_depth, Nat.mul_assoc]
-    have h2w := Nat.mul_le_mul_right w hh
-    have hlt : 1 + w < h * w := by omega
-    exact Nat.mul_lt_mul_of_pos_left hlt (by omega)
-  · rw [buildParallelSeededAst_depth, buildInternalChainedAst_depth]
-    decide
 
 /-! ## 3. Strict `Bech32m` (`0x2bc830a3`) vs Legacy `Bech32` (`1`) & GF(32) BCH Syndrome Soundness -/
 
@@ -4305,11 +4275,7 @@ theorem samplerSum_split (r a b : Nat) : ∀ n,
       rw [Nat.min_eq_right hn, Nat.min_eq_right hs, hd]
       simp [Nat.add_mul, Nat.add_assoc]
 
-/-- The defining finite sum for twice TV, scaled by `2^64 * p`. Each term
-uses the exact fiber multiplicity established by `reducedWordPreimages_complete`.
-Marked `noncomputable` (matching `QuarticExt4.wordPool` and `Preprocessing.oddVaultChallengeSupport`)
-so Lean's C code generator does not eagerly iterate `samplerSum` over `goldilocksPrime` (`2^64 - 2^32 + 1`)
-during module initialization in `spec-oracle`. -/
+
 noncomputable def reducedWordTvSum : Nat :=
   samplerSum goldilocksPrime (fun x =>
     let count := if x < 2 ^ 32 - 1 then 2 else 1

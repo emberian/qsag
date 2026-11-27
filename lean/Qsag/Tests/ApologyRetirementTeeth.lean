@@ -71,12 +71,8 @@ set_option autoImplicit false
   Qsag.SpdzToprf.tooth_tampered_output_share_rejected
 #tooth_pair Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery vs
   Qsag.SpdzToprf.tooth_unchecked_release_is_wrong
-#tooth_pair Qsag.SpdzToprf.piToprfRealSpdz_sound_or_mac_forgery vs
-  Qsag.SpdzToprf.tooth_machine_tampered_output_refused
-#tooth_pair Qsag.SpdzToprf.piToprfRealSpdz_issue_accept_checks vs
-  Qsag.SpdzToprf.tooth_forged_issuance_commitment_rejected
-#tooth_pair Qsag.SpdzToprf.piToprfRealSpdz_issue_accept_checks vs
-  Qsag.SpdzToprf.tooth_issuance_failed_opening_rejected
+
+
 #verify_inhabited Qsag.SpdzToprf.spdzEval_sound_or_mac_forgery
   Qsag.SpdzToprf.witness_spdzEval_accepted
 #verify_inhabited Qsag.SpdzToprf.spdz_mac_forgery_game_bound
