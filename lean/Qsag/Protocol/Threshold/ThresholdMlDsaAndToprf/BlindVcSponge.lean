@@ -555,3 +555,576 @@ theorem vcMerkleStepArith_one (epoch : UInt64) (layer : Nat) (cur sib : Lane6) :
     congr 1; omega
   simp only [hL, hR]
 
+theorem evalVcMerklePathFrom_eq_bool (epoch : UInt64) :
+    ∀ (layer : Nat) (cur : Lane6) (steps : List (Goldilocks × Lane6)),
+      (∀ p ∈ steps, p.1 = Goldilocks.zero ∨ p.1 = Goldilocks.one) →
+      ∃ boolSteps : List (Bool × Lane6),
+        boolSteps.length = steps.length ∧
+        evalVcMerklePathFrom epoch layer cur steps =
+          evalVcMerklePathBool epoch layer cur boolSteps
+  | _, cur, [], _ => ⟨[], rfl, rfl⟩
+  | layer, cur, (b, sib) :: rest, hAll => by
+    have hb := hAll (b, sib) (.head rest)
+    have hRest : ∀ p ∈ rest, p.1 = Goldilocks.zero ∨ p.1 = Goldilocks.one :=
+      fun p hp => hAll p (.tail _ hp)
+    rcases hb with rfl | rfl
+    · obtain ⟨bs, hLen, hEq⟩ :=
+        evalVcMerklePathFrom_eq_bool epoch (layer + 1) (vcMerkleHashPair cur sib epoch layer) rest hRest
+      refine ⟨(false, sib) :: bs, by simp [hLen], ?_⟩
+      dsimp only [evalVcMerklePathFrom, evalVcMerklePathBool]
+      rw [vcMerkleStepArith_zero, hEq]
+    · obtain ⟨bs, hLen, hEq⟩ :=
+        evalVcMerklePathFrom_eq_bool epoch (layer + 1) (vcMerkleHashPair sib cur epoch layer) rest hRest
+      refine ⟨(true, sib) :: bs, by simp [hLen], ?_⟩
+      dsimp only [evalVcMerklePathFrom, evalVcMerklePathBool]
+      rw [vcMerkleStepArith_one, hEq]
+
+/-- Actual permutation inputs on the three-chunk, zero-capacity sponge path. -/
+def spongeTrace204 (chunks : Lane6 × Lane6 × Lane6) (r : Fin 3) : Poseidon2State12 :=
+  let s1 := mkState12Of6 chunks.1 lane6Zero
+  let p1 := poseidon2Perm12 s1
+  let s2 := mkState12Of6 (lane6Add (state12Rate6 p1) chunks.2.1) (state12Cap6 p1)
+  let p2 := poseidon2Perm12 s2
+  let s3 := mkState12Of6 (lane6Add (state12Rate6 p2) chunks.2.2) (state12Cap6 p2)
+  match r.val with | 0 => s1 | 1 => s2 | _ => s3
+
+/-- Collision extraction retaining reachability from the supplied sponge
+messages. Unrestricted rate/capacity collisions are not assumed hard. -/
+def absorbRate6Sponge3_reachable_collision204
+    {c0₁ c1₁ c2₁ c0₂ c1₂ c2₂ : Lane6}
+    (hNe : (c0₁, c1₁, c2₁) ≠ (c0₂, c1₂, c2₂))
+    (hDig : state12Rate6 (absorbRate6Sponge3 c0₁ c1₁ c2₁) =
+            state12Rate6 (absorbRate6Sponge3 c0₂ c1₂ c2₂)) :
+    { r : Fin 3 // Poseidon2Perm12Sponge6Collision
+      (spongeTrace204 (c0₁, c1₁, c2₁) r) (spongeTrace204 (c0₂, c1₂, c2₂) r) } := by
+  let s1₁ := mkState12Of6 c0₁ lane6Zero
+  let s1₂ := mkState12Of6 c0₂ lane6Zero
+  let p1₁ := poseidon2Perm12 s1₁
+  let p1₂ := poseidon2Perm12 s1₂
+  let s2₁ := mkState12Of6 (lane6Add (state12Rate6 p1₁) c1₁) (state12Cap6 p1₁)
+  let s2₂ := mkState12Of6 (lane6Add (state12Rate6 p1₂) c1₂) (state12Cap6 p1₂)
+  let p2₁ := poseidon2Perm12 s2₁
+  let p2₂ := poseidon2Perm12 s2₂
+  let s3₁ := mkState12Of6 (lane6Add (state12Rate6 p2₁) c2₁) (state12Cap6 p2₁)
+  let s3₂ := mkState12Of6 (lane6Add (state12Rate6 p2₂) c2₂) (state12Cap6 p2₂)
+  if h3 : s3₁ = s3₂ then
+    if h2 : s2₁ = s2₂ then
+      have hp2 : p2₁ = p2₂ := congrArg poseidon2Perm12 h2
+      have hRate3 : lane6Add (state12Rate6 p2₁) c2₁ = lane6Add (state12Rate6 p2₂) c2₂ := by
+        have hr := congrArg state12Rate6 h3
+        rwa [state12Rate6_mk, state12Rate6_mk] at hr
+      rw [hp2] at hRate3
+      have hc2 : c2₁ = c2₂ := lane6Add_left_cancel hRate3
+      if h1 : s1₁ = s1₂ then
+        have hp1 : p1₁ = p1₂ := congrArg poseidon2Perm12 h1
+        have hRate2 : lane6Add (state12Rate6 p1₁) c1₁ = lane6Add (state12Rate6 p1₂) c1₂ := by
+          have hr := congrArg state12Rate6 h2
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        rw [hp1] at hRate2
+        have hc1 : c1₁ = c1₂ := lane6Add_left_cancel hRate2
+        have hc0 : c0₁ = c0₂ := by
+          have hr := congrArg state12Rate6 h1
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        exact False.elim (hNe (by rw [hc0, hc1, hc2]))
+      else
+        have hCap1 : state12Cap6 p1₁ = state12Cap6 p1₂ := by
+          have hc := congrArg state12Cap6 h2
+          rwa [state12Cap6_mk, state12Cap6_mk] at hc
+        refine ⟨⟨0, by decide⟩, ?_⟩
+        simpa only [spongeTrace204] using
+          (show Poseidon2Perm12Sponge6Collision s1₁ s1₂ from ⟨h1, Or.inr hCap1⟩)
+    else
+      have hCap2 : state12Cap6 p2₁ = state12Cap6 p2₂ := by
+        have hc := congrArg state12Cap6 h3
+        rwa [state12Cap6_mk, state12Cap6_mk] at hc
+      refine ⟨⟨1, by decide⟩, ?_⟩
+      simpa only [spongeTrace204] using
+        (show Poseidon2Perm12Sponge6Collision s2₁ s2₂ from ⟨h2, Or.inr hCap2⟩)
+  else
+    refine ⟨⟨2, by decide⟩, ?_⟩
+    simpa only [spongeTrace204] using
+      (show Poseidon2Perm12Sponge6Collision s3₁ s3₂ from ⟨h3, Or.inl hDig⟩)
+
+
+/-- Binding failure reduces to two reachable states on the paths of the actual
+well-formed credential openings. This is a reduction, not an assertion of
+collision resistance for arbitrary halves of a public permutation. -/
+def blindVcReachableBinding204
+    (schema₁ schema₂ : VcSchema) (attrs₁ attrs₂ : List Goldilocks)
+    (blind₁ blind₂ : Lane4) (tag : UInt64) (c : Lane6)
+    (h1 : computeVcPoseidon2Commit schema₁ attrs₁ blind₁ tag = some c)
+    (h2 : computeVcPoseidon2Commit schema₂ attrs₂ blind₂ tag = some c)
+    (hne : (schema₁, attrs₁, blind₁) ≠ (schema₂, attrs₂, blind₂)) :
+    { r : Fin 3 // Poseidon2Perm12Sponge6Collision
+      (spongeTrace204 (vcCommitChunks schema₁ attrs₁ blind₁ tag) r)
+      (spongeTrace204 (vcCommitChunks schema₂ attrs₂ blind₂ tag) r) } := by
+  have hl1 := (blind_vc_commit_binding_reduces_to_sponge12_collision.1
+    schema₁ attrs₁ blind₁ tag c h1).2.1
+  have hl2 := (blind_vc_commit_binding_reduces_to_sponge12_collision.1
+    schema₂ attrs₂ blind₂ tag c h2).2.1
+  apply absorbRate6Sponge3_reachable_collision204
+  · intro he
+    obtain ⟨hs, ha, hb⟩ := vcCommitChunks_injective hl1 hl2 he
+    exact hne (by rw [hs, ha, hb])
+  · unfold computeVcPoseidon2Commit at h1 h2
+    rw [ite_true_of hl1] at h1
+    rw [ite_true_of hl2] at h2
+    exact (Option.some.inj h1).trans (Option.some.inj h2).symm
+
+theorem evalVcMerklePathBool_nil (epoch : UInt64) (layer : Nat) (cur : Lane6) :
+    evalVcMerklePathBool epoch layer cur [] = cur := by rfl
+
+theorem evalVcMerklePathBool_cons_false (epoch : UInt64) (layer : Nat) (cur sib : Lane6)
+    (rest : List (Bool × Lane6)) :
+    evalVcMerklePathBool epoch layer cur ((false, sib) :: rest) =
+      evalVcMerklePathBool epoch (layer + 1) (vcMerkleHashPair cur sib epoch layer) rest := by rfl
+
+theorem evalVcMerklePathBool_cons_true (epoch : UInt64) (layer : Nat) (cur sib : Lane6)
+    (rest : List (Bool × Lane6)) :
+    evalVcMerklePathBool epoch layer cur ((true, sib) :: rest) =
+      evalVcMerklePathBool epoch (layer + 1) (vcMerkleHashPair sib cur epoch layer) rest := by rfl
+
+theorem vcMerkleHashPair_eq (left right : Lane6) (epoch : UInt64) (layer : Nat) :
+    vcMerkleHashPair left right epoch layer =
+      state12Rate6 (absorbRate6Sponge3 (vcMerkleChunks left right epoch layer).1
+        (vcMerkleChunks left right epoch layer).2.1 (vcMerkleChunks left right epoch layer).2.2) := by
+  rfl
+
+/-- The two children are the first two rate chunks of a Merkle node preimage. -/
+theorem vcMerkleChunks_children_inj {l r l' r' : Lane6} {epoch : UInt64} {layer : Nat}
+    (h : vcMerkleChunks l r epoch layer = vcMerkleChunks l' r' epoch layer) : l = l' ∧ r = r' :=
+  ⟨congrArg Prod.fst h, congrArg (fun p => p.2.1) h⟩
+
+set_option exponentiation.threshold 1024 in
+/-- **Rate-6 / Capacity-6 Width-12 `sponge12` 6-Limb Coherence (`blindVc_sponge12_rate6_cap6_six_limb_coherence`)**:
+    Locks `BlindVcCollisionFinder` directly to `crates/qsag-cred/src/blind_vc.rs:43, 137-268`:
+    1. `vcMaxAttrs = 32` (`MAX_VC_ATTRS = 32`); on the 3-block ZKBoo circuit (`schema : VcSchema`,
+       `1 ≤ schema.arity ≤ 6`), `computeVcPoseidon2Commit` accepts iff `attrs.length = schema.arity`,
+       absorbs `schema.arity` at `c2.x0` and `10*` pad `1` at `c2.x1` into `absorbRate6Sponge3`
+       (with 6 zero-initialized capacity lanes), and squeezes 6 limbs (`Lane6`, `> 2^383` states);
+    2. `computeVcScopeTag` absorbs two 6-limb blocks plus the full-block `10*` pad `⟨1, 0, 0, 0, 0, 0⟩`
+       (`N = 12` multiple of rate `6`) into `absorbRate6Sponge3` and squeezes 6 limbs (`Lane6`);
+    3. `vcMerkleHashPair` absorbs left/right 6-limb child digests plus 4 domain limbs and `10*` pad `1`
+       at `c2.x4` (`N = 16`) into `absorbRate6Sponge3` and squeezes 6 limbs (`Lane6`). -/
+theorem blindVc_sponge12_rate6_cap6_six_limb_coherence
+    (schema : VcSchema) (attrs : List Goldilocks) (blind scopeLimbs : Lane4)
+    (tag epoch : UInt64) (left right : Lane6) (layer : Nat) :
+    ((attrs.length = schema.arity →
+        (vcCommitChunks schema attrs blind tag).2.2 =
+          ⟨Goldilocks.ofNat schema.arity, Goldilocks.one,
+           Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ ∧
+        computeVcPoseidon2Commit schema attrs blind tag =
+          some (state12Rate6 (absorbRate6Sponge3
+            (vcCommitChunks schema attrs blind tag).1
+            (vcCommitChunks schema attrs blind tag).2.1
+            (vcCommitChunks schema attrs blind tag).2.2))) ∧
+     (attrs.length ≠ schema.arity → computeVcPoseidon2Commit schema attrs blind tag = none)) ∧
+    ((vcScopeChunks schema.schemaId blind scopeLimbs).2.2 =
+        ⟨Goldilocks.one, Goldilocks.zero, Goldilocks.zero,
+         Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ ∧
+     computeVcScopeTag schema.schemaId blind scopeLimbs =
+        state12Rate6 (absorbRate6Sponge3
+          (vcScopeChunks schema.schemaId blind scopeLimbs).1
+          (vcScopeChunks schema.schemaId blind scopeLimbs).2.1
+          (vcScopeChunks schema.schemaId blind scopeLimbs).2.2)) ∧
+    ((vcMerkleChunks left right epoch layer).2.2.x4 = Goldilocks.one ∧
+     (vcMerkleChunks left right epoch layer).2.2.x5 = Goldilocks.zero ∧
+     vcMerkleHashPair left right epoch layer =
+        state12Rate6 (absorbRate6Sponge3 left right
+          (vcMerkleChunks left right epoch layer).2.2)) ∧
+    state12Cap6 (mkState12Of6 (vcCommitChunks schema attrs blind tag).1 lane6Zero) = lane6Zero ∧
+    2 ^ 383 < goldilocksPrime ^ 6 := by
+  refine ⟨⟨fun hEq => ⟨rfl, ?_⟩, fun hNe => ?_⟩, ⟨rfl, rfl⟩, ⟨rfl, rfl, rfl⟩, rfl, by decide⟩
+  · unfold computeVcPoseidon2Commit; simp only [hEq, ↓reduceIte]
+  · unfold computeVcPoseidon2Commit; simp only [hNe, ↓reduceIte]
+
+/-! ## Multi-Block `MAX_VC_ATTRS = 32` `sponge12` Commitment & `"QSAG.MLDSA.NONCE_BURN.V2"` Parity -/
+
+/-- Structural 6-limb rate-block chunker for `sponge12` (`blind_vc.rs:137-154`). -/
+def limbsToLane6Blocks : List Goldilocks → List Lane6
+  | [] => []
+  | [x0] => [⟨x0, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩]
+  | [x0, x1] => [⟨x0, x1, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩]
+  | [x0, x1, x2] => [⟨x0, x1, x2, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩]
+  | [x0, x1, x2, x3] => [⟨x0, x1, x2, x3, Goldilocks.zero, Goldilocks.zero⟩]
+  | [x0, x1, x2, x3, x4] => [⟨x0, x1, x2, x3, x4, Goldilocks.zero⟩]
+  | x0 :: x1 :: x2 :: x3 :: x4 :: x5 :: rest =>
+    ⟨x0, x1, x2, x3, x4, x5⟩ :: limbsToLane6Blocks rest
+
+private def stripLastLane6 : Lane6 → List Goldilocks
+  | ⟨x0, x1, x2, x3, x4, x5⟩ =>
+    if x5 ≠ Goldilocks.zero then [x0, x1, x2, x3, x4]
+    else if x4 ≠ Goldilocks.zero then [x0, x1, x2, x3]
+    else if x3 ≠ Goldilocks.zero then [x0, x1, x2]
+    else if x2 ≠ Goldilocks.zero then [x0, x1]
+    else if x1 ≠ Goldilocks.zero then [x0]
+    else []
+
+private def decodePad1Blocks : List Lane6 → List Goldilocks
+  | [] => []
+  | [last] => stripLastLane6 last
+  | c :: b :: rest => [c.x0, c.x1, c.x2, c.x3, c.x4, c.x5] ++ decodePad1Blocks (b :: rest)
+
+private theorem limbsToLane6Blocks_pad1_nonempty :
+    ∀ xs : List Goldilocks, limbsToLane6Blocks (xs ++ [Goldilocks.one]) ≠ []
+  | [] | [_] | [_, _] | [_, _, _] | [_, _, _, _] | [_, _, _, _, _] => by simp [limbsToLane6Blocks]
+  | _ :: _ :: _ :: _ :: _ :: _ :: _ => by simp [limbsToLane6Blocks]
+
+private theorem decodePad1Blocks_limbsToLane6Blocks :
+    ∀ xs : List Goldilocks, decodePad1Blocks (limbsToLane6Blocks (xs ++ [Goldilocks.one])) = xs
+  | [] => by decide
+  | [x0] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | [x0, x1] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | [x0, x1, x2] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | [x0, x1, x2, x3] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | [x0, x1, x2, x3, x4] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | x0 :: x1 :: x2 :: x3 :: x4 :: x5 :: rest => by
+    have hNe := limbsToLane6Blocks_pad1_nonempty rest
+    have ih := decodePad1Blocks_limbsToLane6Blocks rest
+    simp only [List.cons_append, limbsToLane6Blocks]
+    cases hBlk : limbsToLane6Blocks (rest ++ [Goldilocks.one]) with
+    | nil => exact absurd hBlk hNe
+    | cons b bs =>
+      rw [hBlk] at ih
+      simp only [decodePad1Blocks, ih]
+      rfl
+
+theorem limbsToLane6Blocks_pad1_injective {xs ys : List Goldilocks}
+    (hEq : limbsToLane6Blocks (xs ++ [Goldilocks.one]) = limbsToLane6Blocks (ys ++ [Goldilocks.one])) :
+    xs = ys := by
+  have hDec := congrArg decodePad1Blocks hEq
+  rwa [decodePad1Blocks_limbsToLane6Blocks, decodePad1Blocks_limbsToLane6Blocks] at hDec
+
+/-- Multi-block Width-12 (`rate = 6, capacity = 6`) `sponge12` absorption from state `st`. -/
+def sponge12AbsorbFrom (st : Poseidon2State12) : List Lane6 → Poseidon2State12
+  | [] => st
+  | c :: cs =>
+    let stNext := poseidon2Perm12 (mkState12Of6 (lane6Add (state12Rate6 st) c) (state12Cap6 st))
+    sponge12AbsorbFrom stNext cs
+
+/-- Multi-block `sponge12` starting from the all-zero 12-limb state (`blind_vc.rs:137-154`). -/
+def absorbRate6SpongeBlocks (blocks : List Lane6) : Poseidon2State12 :=
+  sponge12AbsorbFrom (mkState12Of6 lane6Zero lane6Zero) blocks
+
+private def sponge12Rev : List Lane6 → Poseidon2State12
+  | [] => mkState12Of6 lane6Zero lane6Zero
+  | c :: prevRev =>
+    let prev := sponge12Rev prevRev
+    poseidon2Perm12 (mkState12Of6 (lane6Add (state12Rate6 prev) c) (state12Cap6 prev))
+
+private theorem sponge12AbsorbFrom_append (st : Poseidon2State12) :
+    ∀ (as bs : List Lane6),
+      sponge12AbsorbFrom st (as ++ bs) = sponge12AbsorbFrom (sponge12AbsorbFrom st as) bs
+  | [], _ => rfl
+  | _ :: as, bs => sponge12AbsorbFrom_append _ as bs
+
+private theorem absorbRate6SpongeBlocks_eq_rev :
+    ∀ bs : List Lane6, absorbRate6SpongeBlocks bs = sponge12Rev bs.reverse
+  | [] => rfl
+  | c :: cs => by
+    unfold absorbRate6SpongeBlocks at *
+    have hRev : (c :: cs).reverse = cs.reverse ++ [c] := List.reverse_cons
+    rw [hRev]
+    have hInd : ∀ r : List Lane6,
+        sponge12Rev r = sponge12AbsorbFrom (mkState12Of6 lane6Zero lane6Zero) r.reverse := by
+      intro r
+      induction r with
+      | nil => rfl
+      | cons d ds ih =>
+        simp only [List.reverse_cons, sponge12AbsorbFrom_append, ← ih]
+        rfl
+    rw [hInd (cs.reverse ++ [c]), List.reverse_append, List.reverse_singleton,
+        List.reverse_reverse, List.singleton_append]
+
+private theorem lane6Add_zero_left (c : Lane6) : lane6Add lane6Zero c = c := by
+  have hz : ∀ x : Goldilocks, Goldilocks.zero.add x = x := fun x => LawfulCommRing.zero_add x
+  rcases c with ⟨x0, x1, x2, x3, x4, x5⟩
+  simp only [lane6Add, lane6Zero, hz]
+
+theorem absorbRate6SpongeBlocks_three_eq (c0 c1 c2 : Lane6) :
+    absorbRate6SpongeBlocks [c0, c1, c2] = absorbRate6Sponge3 c0 c1 c2 := by
+  dsimp only [absorbRate6SpongeBlocks, sponge12AbsorbFrom, absorbRate6Sponge3]
+  rw [state12Rate6_mk, state12Cap6_mk, lane6Add_zero_left]
+
+/-- Non-initial sponge permutation input whose output capacity vanishes (`6` Goldilocks zeros, `< 2^-383`). -/
+def Poseidon2Perm12ZeroCapRoot (st : Poseidon2State12) : Prop :=
+  state12Cap6 (poseidon2Perm12 st) = lane6Zero
+
+private theorem sponge12Rev_cap_collision_or_zero_root :
+    ∀ {r₁ r₂ : List Lane6},
+      r₁ ≠ r₂ →
+      state12Cap6 (sponge12Rev r₁) = state12Cap6 (sponge12Rev r₂) →
+      (∃ stA stB : Poseidon2State12, Poseidon2Perm12Sponge6Collision stA stB) ∨
+      (∃ st : Poseidon2State12, Poseidon2Perm12ZeroCapRoot st)
+  | [], [], hNe, _ => False.elim (hNe rfl)
+  | [], c₂ :: t₂, _, hCap => by
+    dsimp only [sponge12Rev, state12Cap6_mk] at hCap
+    exact Or.inr ⟨_, hCap.symm⟩
+  | c₁ :: t₁, [], _, hCap => by
+    dsimp only [sponge12Rev, state12Cap6_mk] at hCap
+    exact Or.inr ⟨_, hCap⟩
+  | c₁ :: t₁, c₂ :: t₂, hNe, hCap => by
+    let p₁ := sponge12Rev t₁
+    let p₂ := sponge12Rev t₂
+    let s₁ := mkState12Of6 (lane6Add (state12Rate6 p₁) c₁) (state12Cap6 p₁)
+    let s₂ := mkState12Of6 (lane6Add (state12Rate6 p₂) c₂) (state12Cap6 p₂)
+    if hs : s₁ = s₂ then
+      have hCapPrev : state12Cap6 p₁ = state12Cap6 p₂ := by
+        have hc := congrArg state12Cap6 hs
+        rwa [state12Cap6_mk, state12Cap6_mk] at hc
+      if ht : t₁ = t₂ then
+        subst ht
+        have hRate : lane6Add (state12Rate6 p₁) c₁ = lane6Add (state12Rate6 p₁) c₂ := by
+          have hr := congrArg state12Rate6 hs
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        exact False.elim (hNe (congrArg (· :: t₁) (lane6Add_left_cancel hRate)))
+      else
+        exact sponge12Rev_cap_collision_or_zero_root ht hCapPrev
+    else
+      exact Or.inl ⟨s₁, s₂, hs, Or.inr hCap⟩
+
+theorem absorbRate6SpongeBlocks_collision_reduction {bs₁ bs₂ : List Lane6}
+    (hNe₁ : bs₁ ≠ []) (hNe₂ : bs₂ ≠ []) (hDiff : bs₁ ≠ bs₂)
+    (hDig : state12Rate6 (absorbRate6SpongeBlocks bs₁) =
+            state12Rate6 (absorbRate6SpongeBlocks bs₂)) :
+    (∃ stA stB : Poseidon2State12, Poseidon2Perm12Sponge6Collision stA stB) ∨
+    (∃ st : Poseidon2State12, Poseidon2Perm12ZeroCapRoot st) := by
+  rw [absorbRate6SpongeBlocks_eq_rev, absorbRate6SpongeBlocks_eq_rev] at hDig
+  have hrNe₁ : bs₁.reverse ≠ [] := fun h => hNe₁ (by simpa using congrArg List.reverse h)
+  have hrNe₂ : bs₂.reverse ≠ [] := fun h => hNe₂ (by simpa using congrArg List.reverse h)
+  have hrDiff : bs₁.reverse ≠ bs₂.reverse :=
+    fun h => hDiff (by simpa using congrArg List.reverse h)
+  match hR1 : bs₁.reverse, hR2 : bs₂.reverse with
+  | [], _ => exact False.elim (hrNe₁ hR1)
+  | _, [] => exact False.elim (hrNe₂ hR2)
+  | c₁ :: t₁, c₂ :: t₂ =>
+    rw [hR1, hR2] at hDig hrDiff
+    let p₁ := sponge12Rev t₁
+    let p₂ := sponge12Rev t₂
+    let s₁ := mkState12Of6 (lane6Add (state12Rate6 p₁) c₁) (state12Cap6 p₁)
+    let s₂ := mkState12Of6 (lane6Add (state12Rate6 p₂) c₂) (state12Cap6 p₂)
+    if hs : s₁ = s₂ then
+      have hCapPrev : state12Cap6 p₁ = state12Cap6 p₂ := by
+        have hc := congrArg state12Cap6 hs
+        rwa [state12Cap6_mk, state12Cap6_mk] at hc
+      if ht : t₁ = t₂ then
+        subst ht
+        have hRate : lane6Add (state12Rate6 p₁) c₁ = lane6Add (state12Rate6 p₁) c₂ := by
+          have hr := congrArg state12Rate6 hs
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        exact False.elim (hrDiff (congrArg (· :: t₁) (lane6Add_left_cancel hRate)))
+      else
+        exact sponge12Rev_cap_collision_or_zero_root ht hCapPrev
+    else
+      exact Or.inl ⟨s₁, s₂, hs, Or.inl hDig⟩
+
+/-- Zero-pad attribute limbs to `max attrs.length 6` slots (`padded[..attrs.len.max(6)]`, `blind_vc.rs:178-179`). -/
+def vcPadAttrs (attrs : List Goldilocks) : List Goldilocks :=
+  attrs ++ List.replicate (6 - attrs.length) Goldilocks.zero
+
+/-- 7-limb metadata & blind trailer `[blind[0..4], schema_lo, schema_hi + tag, arity]` (`blind_vc.rs:180-185`). -/
+def vcCommitTrailerLimbs (schemaId : UInt64) (arity : Nat) (blind : Lane4) (tag : UInt64) :
+    List Goldilocks :=
+  [blind.x0, blind.x1, blind.x2, blind.x3,
+   vcSchemaLo schemaId, vcSchemaHiWithTag schemaId tag, Goldilocks.ofNat arity]
+
+/-- Rate-6 `Lane6` block sequence absorbed by `compute_vc_poseidon2_commit` (`blind_vc.rs:159-190`). -/
+def vcCommitFullBlocks (schemaId : UInt64) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) :
+    List Lane6 :=
+  limbsToLane6Blocks
+    (vcPadAttrs attrs ++ vcCommitTrailerLimbs schemaId attrs.length blind tag ++ [Goldilocks.one])
+
+/-- **Full `MAX_VC_ATTRS = 32` `Poseidon2` Credential Commitment (`computeVcPoseidon2CommitFull`)**:
+    Matches `blind_vc.rs:159-190`: accepts iff `1 ≤ attrs.length ≤ vcMaxAttrs` (`= 32`), pads small
+    attribute vectors to 6 slots while absorbing all `7..32` attributes into rate-6 / capacity-6
+    `absorbRate6SpongeBlocks`, and squeezes the 6-limb digest `Lane6`. -/
+def computeVcPoseidon2CommitFull
+    (schemaId : UInt64) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) : Option Lane6 :=
+  if decide (1 ≤ attrs.length ∧ attrs.length ≤ vcMaxAttrs) then
+    some (state12Rate6 (absorbRate6SpongeBlocks (vcCommitFullBlocks schemaId attrs blind tag)))
+  else
+    none
+
+/-- Exact equivalence between `computeVcPoseidon2CommitFull` (`1 ≤ arity ≤ 32`) and the 3-block
+    ZKBoo `computeVcPoseidon2Commit` whenever `schema : VcSchema` (`1 ≤ schema.arity ≤ 6`) and
+    `attrs.length = schema.arity`. -/
+theorem computeVcPoseidon2CommitFull_eq_small
+    (schema : VcSchema) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64)
+    (hLen : attrs.length = schema.arity) :
+    computeVcPoseidon2CommitFull schema.schemaId attrs blind tag =
+      computeVcPoseidon2Commit schema attrs blind tag := by
+  have hPos : 1 ≤ attrs.length := hLen ▸ schema.hArityPos
+  have hLe6 : attrs.length ≤ 6 := hLen ▸ schema.hArityLe
+  have hLe32 : attrs.length ≤ vcMaxAttrs := Nat.le_trans hLe6 (by decide)
+  have hRange : decide (1 ≤ attrs.length ∧ attrs.length ≤ vcMaxAttrs) = true :=
+    decide_eq_true ⟨hPos, hLe32⟩
+  unfold computeVcPoseidon2CommitFull computeVcPoseidon2Commit
+  rw [hRange]
+  simp only [hLen, ↓reduceIte]
+  congr 1
+  have hBlks : vcCommitFullBlocks schema.schemaId attrs blind tag =
+      [(vcCommitChunks schema attrs blind tag).1,
+       (vcCommitChunks schema attrs blind tag).2.1,
+       (vcCommitChunks schema attrs blind tag).2.2] := by
+    unfold vcCommitFullBlocks vcPadAttrs vcCommitTrailerLimbs vcCommitChunks
+    rw [← hLen]
+    match attrs, hPos, hLe6 with
+    | [a0], _, _ => rfl
+    | [a0, a1], _, _ => rfl
+    | [a0, a1, a2], _, _ => rfl
+    | [a0, a1, a2, a3], _, _ => rfl
+    | [a0, a1, a2, a3, a4], _, _ => rfl
+    | [a0, a1, a2, a3, a4, a5], _, _ => rfl
+    | _ :: _ :: _ :: _ :: _ :: _ :: _ :: _, _, h6 => simp at h6
+  rw [hBlks, absorbRate6SpongeBlocks_three_eq]
+
+private theorem vcCommitFullBlocks_injective
+    {sid₁ sid₂ : UInt64} {attrs₁ attrs₂ : List Goldilocks} {blind₁ blind₂ : Lane4} {tag : UInt64}
+    (hLe₁ : attrs₁.length ≤ vcMaxAttrs) (hLe₂ : attrs₂.length ≤ vcMaxAttrs)
+    (hEq : vcCommitFullBlocks sid₁ attrs₁ blind₁ tag = vcCommitFullBlocks sid₂ attrs₂ blind₂ tag) :
+    sid₁ = sid₂ ∧ attrs₁ = attrs₂ ∧ blind₁ = blind₂ := by
+  unfold vcCommitFullBlocks at hEq
+  have hMsgEq := limbsToLane6Blocks_pad1_injective hEq
+  have hRevEq := congrArg List.reverse hMsgEq
+  simp only [vcCommitTrailerLimbs, List.reverse_append, List.reverse_cons, List.reverse_nil,
+    List.nil_append, List.cons_append] at hRevEq
+  injection hRevEq with hAr t1
+  injection t1 with hHi t2
+  injection t2 with hLo t3
+  injection t3 with hb3 t4
+  injection t4 with hb2 t5
+  injection t5 with hb1 t6
+  injection t6 with hb0 hPadRevEq
+  have hp32 : vcMaxAttrs < goldilocksPrime := by decide
+  have hLt₁ : attrs₁.length < goldilocksPrime := Nat.lt_of_le_of_lt hLe₁ hp32
+  have hLt₂ : attrs₂.length < goldilocksPrime := Nat.lt_of_le_of_lt hLe₂ hp32
+  have hLenEq : attrs₁.length = attrs₂.length := by
+    have hv := congrArg Goldilocks.val hAr
+    simp only [Goldilocks.ofNat_val, Nat.mod_eq_of_lt hLt₁, Nat.mod_eq_of_lt hLt₂] at hv
+    exact hv
+  have hSid : sid₁ = sid₂ := vcSchema_limbs_injective hLo hHi
+  have hBlind : blind₁ = blind₂ := Lane4.ext hb0 hb1 hb2 hb3
+  have hPadEq : vcPadAttrs attrs₁ = vcPadAttrs attrs₂ := by
+    simpa only [List.reverse_reverse] using congrArg List.reverse hPadRevEq
+  unfold vcPadAttrs at hPadEq
+  have hAttrs : attrs₁ = attrs₂ := (List.append_inj hPadEq hLenEq).1
+  exact ⟨hSid, hAttrs, hBlind⟩
+
+/-- **Full `1 ≤ arity ≤ 32` `BlindVC` Commitment Acceptance & Sponge Binding
+    (`computeVcPoseidon2CommitFull_arity32_binding`)**:
+    1. `vcMaxAttrs = 32` (`MAX_VC_ATTRS = 32`); `computeVcPoseidon2CommitFull` accepts iff
+       `1 ≤ attrs.length ∧ attrs.length ≤ 32` (including full 32-attribute credentials);
+    2. Any two distinct openings `(sid₁, attrs₁, blind₁) ≠ (sid₂, attrs₂, blind₂)` yielding `some c`
+       constructively exhibit either `Poseidon2Perm12Sponge6Collision` or `Poseidon2Perm12ZeroCapRoot`. -/
+theorem computeVcPoseidon2CommitFull_arity32_binding :
+    vcMaxAttrs = 32 ∧
+    (∀ (sid : UInt64) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64),
+      (computeVcPoseidon2CommitFull sid attrs blind tag).isSome = true ↔
+        1 ≤ attrs.length ∧ attrs.length ≤ 32) ∧
+    (∀ (sid₁ sid₂ : UInt64) (attrs₁ attrs₂ : List Goldilocks)
+       (blind₁ blind₂ : Lane4) (tag : UInt64) (c : Lane6),
+      computeVcPoseidon2CommitFull sid₁ attrs₁ blind₁ tag = some c →
+      computeVcPoseidon2CommitFull sid₂ attrs₂ blind₂ tag = some c →
+      (sid₁, attrs₁, blind₁) ≠ (sid₂, attrs₂, blind₂) →
+      (∃ stA stB : Poseidon2State12, Poseidon2Perm12Sponge6Collision stA stB) ∨
+      (∃ st : Poseidon2State12, Poseidon2Perm12ZeroCapRoot st)) := by
+  refine ⟨rfl, ?_, ?_⟩
+  · intro sid attrs blind tag
+    unfold computeVcPoseidon2CommitFull vcMaxAttrs
+    if h : 1 ≤ attrs.length ∧ attrs.length ≤ 32 then
+      simp [h]
+    else
+      simp [h]
+  · intro sid₁ sid₂ attrs₁ attrs₂ blind₁ blind₂ tag c h1 h2 hNe
+    unfold computeVcPoseidon2CommitFull at h1 h2
+    cases hOk1 : decide (1 ≤ attrs₁.length ∧ attrs₁.length ≤ vcMaxAttrs) with
+    | false => rw [hOk1] at h1; cases h1
+    | true =>
+      cases hOk2 : decide (1 ≤ attrs₂.length ∧ attrs₂.length ≤ vcMaxAttrs) with
+      | false => rw [hOk2] at h2; cases h2
+      | true =>
+        rw [hOk1] at h1
+        rw [hOk2] at h2
+        simp only [↓reduceIte, Option.some.injEq] at h1 h2
+        have hb1 := (of_decide_eq_true hOk1).2
+        have hb2 := (of_decide_eq_true hOk2).2
+        have hBlkDiff : vcCommitFullBlocks sid₁ attrs₁ blind₁ tag ≠
+            vcCommitFullBlocks sid₂ attrs₂ blind₂ tag := by
+          intro hEq
+          obtain ⟨hs, ha, hbl⟩ := vcCommitFullBlocks_injective hb1 hb2 hEq
+          exact hNe (by rw [hs, ha, hbl])
+        exact absorbRate6SpongeBlocks_collision_reduction
+          (limbsToLane6Blocks_pad1_nonempty _)
+          (limbsToLane6Blocks_pad1_nonempty _)
+          hBlkDiff (h1.trans h2.symm)
+
+/-- **`#tooth` (`tooth_computeVcPoseidon2CommitFull_rejects_arity33`)**:
+    `computeVcPoseidon2CommitFull` rejects attribute lists exceeding `vcMaxAttrs = 32` (`= none`). -/
+theorem tooth_computeVcPoseidon2CommitFull_rejects_arity33 :
+    ∃ (sid : UInt64) (attrs : List Goldilocks) (blind : Lane4),
+      vcMaxAttrs < attrs.length ∧
+      computeVcPoseidon2CommitFull sid attrs blind vcAttrCommitTag = none := by
+  refine ⟨0, List.replicate 33 Goldilocks.one,
+    ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, by decide, ?_⟩
+  unfold computeVcPoseidon2CommitFull vcMaxAttrs
+  simp
+
+#tooth_pair computeVcPoseidon2CommitFull_arity32_binding vs tooth_computeVcPoseidon2CommitFull_rejects_arity33
+
+theorem vcSmallMaxAttrs_eq : vcSmallMaxAttrs = 6 := by rfl
+
+#verify_constructive vcSmallMaxAttrs_eq
+
+#verify_constructive computeVcPoseidon2CommitFull_eq_small computeVcPoseidon2CommitFull_arity32_binding
+
+#export_eqns mkState12Of6 state12Rate6 state12Cap6 lane6Zero vcMerkleStepArith vcMerkleHashPair vcMerkleChunks
+
+#export_eqns vcAttrAt
+
+#export_eqns vcCommitChunks vcScopeChunks computeVcScopeTag
+
+@[expose] def seRefl (α : Type) : SimpleEquiv α α where
+  toFun x := x
+  invFun x := x
+  left_inv _ := rfl
+  right_inv _ := rfl
+
+@[expose] def seSymm {α β : Type} (e : SimpleEquiv α β) : SimpleEquiv β α where
+  toFun := e.invFun
+  invFun := e.toFun
+  left_inv := e.right_inv
+  right_inv := e.left_inv
+
+@[expose] def seTrans {α β γ : Type} (e₁ : SimpleEquiv α β) (e₂ : SimpleEquiv β γ) : SimpleEquiv α γ where
+  toFun x := e₂.toFun (e₁.toFun x)
+  invFun z := e₁.invFun (e₂.invFun z)
+  left_inv x := by rw [e₂.left_inv, e₁.left_inv]
+  right_inv z := by rw [e₁.right_inv, e₂.right_inv]
+
+@[expose] def seDepProd {α₁ α₂ β₁ β₂ : Type}
+    (eqA : SimpleEquiv α₁ α₂)
+    (eqB : α₁ → SimpleEquiv β₁ β₂) :
+    SimpleEquiv (α₁ × β₁) (α₂ × β₂) where
+  toFun p := (eqA.toFun p.1, (eqB p.1).toFun p.2)
+  invFun q :=
+    let a := eqA.invFun q.1
+    (a, (eqB a).invFun q.2)
+  left_inv := fun ⟨a, b⟩ => by
+    dsimp only
+    rw [eqA.left_inv a, (eqB a).left_inv b]
+  right_inv := fun ⟨c, d⟩ => by
+    dsimp only
+    rw [eqA.right_inv c, (eqB (eqA.invFun c)).right_inv d]
+
+end Qsag
+end
