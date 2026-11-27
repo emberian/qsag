@@ -11,19 +11,12 @@ The Layer-1 modules `Coding.WelchBerlekampDecoder`, `Oracle.BlockCompressedOracl
 and `Oracle.ConstructiveQuantumHilbert` state their results for an arbitrary field, answer width
 or amplitude ring. This module instantiates them at the parameters the deployment uses.
 
-* `goldilocks_welch_berlekamp_decoder`: over the Goldilocks field the Welch–Berlekamp decoder is
-  sound for every word, complete and equal to the specification decoder `gsDecodeList` inside
-  the unique-decoding radius, and runs in at most `wbOpBound n` field operations.
+* `goldilocks_welch_berlekamp_eq_spec_decoder` relates unique-radius decoding to the specification.
 * `block256_fourier_database_support`: for a `Qsag.QuantumAdv` with 256-bit oracle answers, the
   Fourier database component with more than `t` nonzero blocks vanishes after `t` queries.
 * `block256_prefix_merkle_extraction_bound`: with 256-bit digests, the oracles under which an
   accepted Merkle opening differs from the one extracted from the Phase-1 query log number at
   most `(d + Q₂ + Q₁) (3 Q₁ + 1) / 2^256` of all oracles. This is a classical query bound.
-* `weighted_compression_ideal_permutation_margin`: the compression function of the two-way
-  lazy ideal-permutation game is `poseidon2CompressWeighted` when the permutation is
-  `poseidon2Perm12`, and against a lazily sampled permutation of the `p^12` states preimage and
-  collision probabilities are at most `2^-128` for `Q ≤ 2^56` classical two-way queries. The
-  bounds are about the lazily sampled permutation, not about `poseidon2Perm12`.
 * `two_way_transposition_average_o2h`: the averaged two-way transposition hybrid `8 q² n ‖ψ‖²`.
 * `cliffordT_measure_reprogram_rbr_step`: the measure-and-reprogram round-by-round step for
   adversaries with amplitudes in `ℚ(√2, i)` (`CyclotomicEight`), the ring that holds the exact
@@ -45,24 +38,6 @@ namespace Qsag.Top.Foundations
 
 set_option autoImplicit false
 set_option exponentiation.threshold 2048
-
-open Qsag.WelchBerlekamp in
-/-- **Welch–Berlekamp decoding over Goldilocks.** For every received word: an accepted output is
-    a codeword within distance `e`; on a domain of distinct points with `k + 2 e ≤ n` every
-    codeword within distance `e` is the output; the operation count is at most
-    `2 (n + 2)³ + 5 (n + 2)²`. -/
-theorem goldilocks_welch_berlekamp_decoder (k e : Nat) (domain : List Goldilocks)
-    (word : Goldilocks → Goldilocks) :
-    (∀ Q : List Goldilocks, wbDecode k e domain word = some Q →
-      IsTrimmed Q ∧ Q.length ≤ k ∧
-        domain.length ≤ agreeCount word Q domain + e ∧ k + 2 * e ≤ domain.length) ∧
-    (domain.Nodup → k + 2 * e ≤ domain.length →
-      ∀ P : List Goldilocks, IsTrimmed P → P.length ≤ k →
-        domain.length ≤ agreeCount word P domain + e → wbDecode k e domain word = some P) ∧
-    (wbDecodeT k e domain word).cost ≤ 2 * (domain.length + 2) ^ 3 + 5 * (domain.length + 2) ^ 2 :=
-  ⟨fun Q h => wbDecode_sound k e domain word Q h,
-   fun hDom hRad P hT hK hA => wbDecode_complete k e domain word hDom hRad P hT hK hA,
-   wbDecode_ops_poly k e domain word⟩
 
 open Qsag.WelchBerlekamp in
 /-- Inside the unique-decoding radius the Goldilocks Welch–Berlekamp decoder returns the list of
@@ -96,28 +71,6 @@ theorem block256_prefix_merkle_extraction_bound {cardX Q₁ Q₂ : Nat} {St Chal
         (fun H => if prefixFailure A L lvl d H ch = true then 1 else 0) ≤
       ((d + Q₂ + Q₁) * (3 * Q₁ + 1)) * (2 ^ 256) ^ cardX :=
   prefix_extraction_failure_bound A L lvl d hLvl ch
-
-/-- **Weighted feed-forward compression in the two-way ideal-permutation model.** The
-    compression function of the lazy game, evaluated with `poseidon2Perm12`, is
-    `poseidon2CompressWeighted`. With a lazily sampled permutation of the `p^12` Goldilocks
-    states in place of `poseidon2Perm12`, every adversary making `Q ≤ 2^56` forward-plus-inverse
-    queries finds a preimage of a given digest, respectively a collision, with probability at
-    most `2^-128`. -/
-theorem weighted_compression_ideal_permutation_margin :
-    (∀ s : Poseidon2State12,
-      qipmWeightedComp s (poseidon2Perm12 s) = poseidon2CompressWeighted s) ∧
-    (∀ (A : TwoWayQipmAdv Poseidon2State12 Poseidon2State12) (y : Lane4) (Q : Nat)
-        (hQ : Q ≤ 2 ^ 56),
-      atLeastBits 128 (qipmPreimageProb qipmGoldStates (fun _ => true) qipmWeightedComp y A Q
-        (Nat.le_of_succ_le (qipmGoldStates_budget_ok Q hQ)))) ∧
-    (∀ (A : TwoWayQipmAdv Poseidon2State12 (Poseidon2State12 × Poseidon2State12)) (Q : Nat)
-        (hQ : Q ≤ 2 ^ 56),
-      atLeastBits 128 (qipmCollisionProb qipmGoldStates (fun _ => true) qipmWeightedComp A Q
-        (qipmGoldStates_budget_ok Q hQ))) :=
-  ⟨fun s => (qipmWeightedCompress_def poseidon2Perm12 s).symm.trans
-      (congrFun qipmWeightedCompress_poseidon2Perm12 s),
-   fun A y Q hQ => qipm_lazy_ideal_perm_weighted_feedforward_preimage_128_at_2pow56 A y Q hQ,
-   fun A Q hQ => qipm_lazy_ideal_perm_weighted_feedforward_collision_128_at_2pow56 A Q hQ⟩
 
 /-- **Averaged two-way transposition hybrid.** For a `q`-query quantum adversary with
     superposition access to a permutation `π` of `n` points and its inverse `ρ`, the squared
@@ -161,11 +114,9 @@ theorem cliffordT_measure_reprogram_rbr_step {cardX cardY cardAnc : Nat} {Y : Ty
   qrom_measure_reprogram_rbr_step_over G Adv H proj chal isDoomed flipsToLive badCard hRbr
 
 #verify_constructive
-  Qsag.Top.Foundations.goldilocks_welch_berlekamp_decoder
   Qsag.Top.Foundations.goldilocks_welch_berlekamp_eq_spec_decoder
   Qsag.Top.Foundations.block256_fourier_database_support
   Qsag.Top.Foundations.block256_prefix_merkle_extraction_bound
-  Qsag.Top.Foundations.weighted_compression_ideal_permutation_margin
   Qsag.Top.Foundations.two_way_transposition_average_o2h
   Qsag.Top.Foundations.cliffordT_measure_reprogram_rbr_step
 

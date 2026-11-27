@@ -207,70 +207,70 @@ theorem slhDsaW16_pq_qrom_global_slot_budget_lt_2_neg_128 {qSign qEval : Nat}
 def BaggyPrimitiveAssumptions {q : Nat} (E : SigningExperiment q) (suite : TweakableHashSuite)
     (cover prim : Spec.RatBound) : Prop := Nonempty (SigningPrimitiveBounds E false suite baggyProdParams cover prim)
 
-theorem baggyProd_stateless_exec_euf_cma_bound {q : Nat} (E : SigningExperiment q) (suite : TweakableHashSuite)
+theorem baggyProd_stateless_exec_euf_cma_bound_of_primitive_bounds {q : Nat} (E : SigningExperiment q) (suite : TweakableHashSuite)
     (cover prim : Spec.RatBound) (H : BaggyPrimitiveAssumptions E suite cover prim) :
     Spec.GameBound (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb
       (globalSlotBudget baggyProdParams q cover prim) := by
   obtain ⟨h⟩ := H
-  exact hulsing_closed_multihop_euf_cma_bound E false suite baggyProdParams baggy128f_productionWellFormed
+  exact hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds E false suite baggyProdParams baggy128f_productionWellFormed
     (by rw [baggyProdParams, baggy128fParams_eq]; decide) cover prim h
 
-#verify_constructive baggyProd_stateless_exec_euf_cma_bound
+#verify_constructive baggyProd_stateless_exec_euf_cma_bound_of_primitive_bounds
 
-theorem jortsProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem jortsProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^96)
     (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero (classical256PrimEps qEval)) :
     (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
-  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E true suite jortsProdParams
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds E true suite jortsProdParams
     jortsPoseidon2_productionWellFormed (by rw [jortsProdParams, jortsPoseidon2Params_eq]; decide) _ _ H)
     (jortsProd_classical_global_slot_budget_lt_2_neg_128 hq he)
 
-theorem jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^48)
     (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero (pqQrom256PrimEps qEval)) :
     (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
-  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E true suite jortsProdParams
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds E true suite jortsProdParams
     jortsPoseidon2_productionWellFormed (by rw [jortsProdParams, jortsPoseidon2Params_eq]; decide) _ _ H)
     (jortsProd_pq_qrom_global_slot_budget_lt_2_neg_128 hq he)
 
-theorem baggyProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem baggyProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^80)
     (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2^131, Nat.two_pow_pos 131⟩ (classical256PrimEps qEval)) :
     (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
-  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E false suite baggyProdParams
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds E false suite baggyProdParams
     baggy128f_productionWellFormed (by rw [baggyProdParams, baggy128fParams_eq]; decide) _ _ H)
     (baggyProd_classical_global_slot_budget_lt_2_neg_128 hq he)
 
-theorem baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^40)
     (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2^131, Nat.two_pow_pos 131⟩ (pqQrom256PrimEps qEval)) :
     (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
-  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E false suite baggyProdParams
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds E false suite baggyProdParams
     baggy128f_productionWellFormed (by rw [baggyProdParams, baggy128fParams_eq]; decide) _ _ H)
     (baggyProd_pq_qrom_global_slot_budget_lt_2_neg_128 hq he)
 
-theorem corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2^12) (he : qEval ≤ 2^40)
     (H : SigningPrimitiveBounds E false suite corduroyProdParams ⟨1, 2^131, Nat.two_pow_pos 131⟩ (pqQrom256PrimEps qEval)) :
     (ExecStatelessEufCmaGame E.pos suite corduroyProdParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
-  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E false suite corduroyProdParams
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds E false suite corduroyProdParams
     corduroyCustody128_productionWellFormed (by rw [corduroyProdParams, corduroyCustody128Params_eq]; decide) _ _ H)
     (corduroyProd_pq_qrom_global_slot_budget_lt_2_neg_128 hq he)
 
-theorem slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2^16) (he : qEval ≤ 2^25)
     (H : SigningPrimitiveBounds E false suite slhDsaW16StatelessParams ⟨1, 2^131, Nat.two_pow_pos 131⟩ (pqQrom256PrimEps qEval)) :
     (ExecStatelessEufCmaGame E.pos suite slhDsaW16StatelessParams E.keygen E.adversary).winProb.lt ⟨1, 2^128, Nat.two_pow_pos 128⟩ :=
-  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound E false suite slhDsaW16StatelessParams
+  Spec.RatBound.lt_of_le_of_lt (hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds E false suite slhDsaW16StatelessParams
     slhDsaW16StatelessParams_geometry.1 (by exact slhDsaW16StatelessParams_geometry.2.2.2.2) _ _ H)
     (slhDsaW16_pq_qrom_global_slot_budget_lt_2_neg_128 hq he)
 
-#verify_constructive jortsProd_classical_exec_euf_cma_lt_2_neg_128
-  jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128
-  baggyProd_classical_exec_euf_cma_lt_2_neg_128
-  baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128
-  corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128
-  slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128
+#verify_constructive jortsProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds
+  jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds
+  baggyProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds
+  baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds
+  corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds
+  slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds
 
 /-! ## §2. NIST FIPS 205 `SLH-DSA-SHAKE-128s` & `128f` Exact Interleaved `ITSR` & `< 2^{-128}` Bounds -/
 
@@ -670,10 +670,10 @@ theorem inhabited_baggyProd_stateless_exec_euf_cma :
       Spec.GameBound (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb
         (globalSlotBudget baggyProdParams 0 Spec.RatBound.one Spec.RatBound.one) := by
   let h := baggyUnitBounds witnessExperiment cshake256Suite
-  exact ⟨witnessExperiment, cshake256Suite, ⟨h⟩, baggyProd_stateless_exec_euf_cma_bound _ _ _ _ ⟨h⟩⟩
+  exact ⟨witnessExperiment, cshake256Suite, ⟨h⟩, baggyProd_stateless_exec_euf_cma_bound_of_primitive_bounds _ _ _ _ ⟨h⟩⟩
 
 #verify_constructive advDist_one inhabited_baggyProd_stateless_exec_euf_cma
-#verify_inhabited baggyProd_stateless_exec_euf_cma_bound inhabited_baggyProd_stateless_exec_euf_cma
+#verify_inhabited baggyProd_stateless_exec_euf_cma_bound_of_primitive_bounds inhabited_baggyProd_stateless_exec_euf_cma
 
 theorem inhabited_baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 :
     ∃ (q qEval : Nat) (E : SigningExperiment q) (suite : TweakableHashSuite),
@@ -682,10 +682,10 @@ theorem inhabited_baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 :
       (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt ⟨1,2^128,Nat.two_pow_pos 128⟩ := by
   let H := emptyForgeryBaggyPrimitiveBounds witnessExperiment (fun _ => rfl) ⟨1,2^131,Nat.two_pow_pos 131⟩ (pqQrom256PrimEps 1)
   exact ⟨0, 1, witnessExperiment, signingWitnessSuite, by decide, by decide, ⟨H⟩,
-    baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 _ _ (by decide) (by decide) H⟩
+    baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds _ _ (by decide) (by decide) H⟩
 
 #verify_constructive inhabited_baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128
-#verify_inhabited baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 inhabited_baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128
+#verify_inhabited baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds inhabited_baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128
 
 theorem inhabited_baggyProd_classical_exec_euf_cma_lt_2_neg_128 :
     ∃ (q qEval : Nat) (E : SigningExperiment q) (suite : TweakableHashSuite),
@@ -694,10 +694,10 @@ theorem inhabited_baggyProd_classical_exec_euf_cma_lt_2_neg_128 :
       (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt ⟨1,2^128,Nat.two_pow_pos 128⟩ := by
   let H := emptyForgeryBaggyPrimitiveBounds witnessExperiment (fun _ => rfl) ⟨1,2^131,Nat.two_pow_pos 131⟩ (classical256PrimEps 1)
   exact ⟨0, 1, witnessExperiment, signingWitnessSuite, by decide, by decide, ⟨H⟩,
-    baggyProd_classical_exec_euf_cma_lt_2_neg_128 _ _ (by decide) (by decide) H⟩
+    baggyProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds _ _ (by decide) (by decide) H⟩
 
 #verify_constructive inhabited_baggyProd_classical_exec_euf_cma_lt_2_neg_128
-#verify_inhabited baggyProd_classical_exec_euf_cma_lt_2_neg_128 inhabited_baggyProd_classical_exec_euf_cma_lt_2_neg_128
+#verify_inhabited baggyProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds inhabited_baggyProd_classical_exec_euf_cma_lt_2_neg_128
 
 /-- Joint inhabitedness witness for `jortsProd_pq_qrom_budget_lt_2_neg_128`. -/
 theorem inhabited_jortsProd_pq_qrom_budget :

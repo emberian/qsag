@@ -1,25 +1,5 @@
 module
-/-
-# Qsag.Protocol.Signing.ProductionParamRefinement — Production Parameter Profiles, `RandomizedSigScheme` Refinement, QROM Bridges & Ideal-Slot Multi-Hop EUF-CMA Engine
 
-Establishes the shared parameter accounting, hedged randomized signing machine refinement, QROM
-isometry/birthday/hiding bridges, and multi-hop (`PRF_msg` + `PRF` + slot extraction) EUF-CMA
-engine instantiated across `Jorts`, `Baggy`, `Corduroy`, and `SLH-DSA` in
-`ProductionJortsBaggyBounds`:
-
-1. **Canonical Production Parameter Profiles & Kernel-Verified Accounting (§1):**
-   * `jortsProdParams` (`jortsPoseidon2Params`), `baggyProdParams` (`baggy128fParams`),
-     `PorsFpSecurity.BaggySha3_128f`, `corduroyProdParams` (`corduroyCustody128Params`),
-     `fips205SlhDsa128sParams` (`slhDsaShake128s`), and `fips205SlhDsa128fParams` (`slhDsaShake128f`).
-   * Instantiates `Spec.RandomizedSigScheme` (`productionRandomizedSigScheme`) and proves forward
-     simulation (`productionLatchedRandomizedSigner_refines_idealSign`) and stateful epoch
-     monotonicity (`productionLatchedRandomizedSigner_trace_safe`).
-2. **Classical (`256`-Bit) & Post-Quantum (`QROM` / Grover) Primitive Budgets & QROM Bridges (§2):**
-   * `classical256PrimEps` and `pqQrom256PrimEps`, bridged to `hidingAdv_le_deployed`,
-     `unifiedTreeGame_birthday_le`, and `publicSpnCoherentQuery_isometry`.
-3. **Multi-Hop (`Hop 1` `PRF_msg` + `Hop 2` `PRF` + Ideal-PRF Slot Extraction) Engine (§3):**
-   * `hulsing_multiHop_idealSlot_euf_cma_bound`.
--/
 
 public import Qsag.Protocol.Signing.HulsingFullOverlay
 public import Qsag.Protocol.Signing.PorsFpSecurity
@@ -287,17 +267,6 @@ theorem qrom_unifiedTree_birthday_le_pqQrom256PrimEps {LeafBlock Digest32 : Type
       _ ≤ (8 * (Q + 1) ^ 2) * deployedCardGoldilocks4 :=
             Nat.mul_le_mul_right _ (qrom_quad_dominates Q).2.2
 
-/-- **QROM Coherent Public-SPN Isometry & `2^48`-Query Grover Regime Bridge.**
-    Combines `publicSpnCoherentQuery_isometry` and `publicSpnCoherentQuery_involutive` with
-    `pqQrom256PrimEps qEval < 2^{-128}` across all `qEval ≤ 2^48`. -/
-theorem qrom_publicSpnCoherentQuery_isometry_bridge {anc : Nat}
-    (p : PublicPermutation PublicSpnState) (state : QVec (2 ^ 257) 256 anc)
-    {qEval : Nat} (hq : qEval ≤ 2 ^ 48) :
-    QVec.stateNormSq (publicSpnCoherentQuery p state) = QVec.stateNormSq state ∧
-    publicSpnCoherentQuery p (publicSpnCoherentQuery p state) = state ∧
-    (pqQrom256PrimEps qEval).lt ⟨1, 2 ^ 128, by decide⟩ :=
-  ⟨publicSpnCoherentQuery_isometry p state, publicSpnCoherentQuery_involutive p state,
-    Spec.RatBound.lt_of_le_of_lt (pqQrom256PrimEps_mono hq) (by decide +kernel)⟩
 
 /-! ## §3. Multi-Hop (`Hop 1` `PRF_msg` + `Hop 2` `PRF` + Ideal-PRF Slot Extraction) EUF-CMA Engine -/
 
@@ -705,8 +674,7 @@ theorem inhabited_productionLatchedRandomizedSigner_trace_safe :
   Qsag.productionLatchedRandomizedSigner_refines_idealSign
   Qsag.reassocHop2CoinSplit
 
-#verify_constructive
-  Qsag.jortsProdParams_accounting
+#verify_constructive Qsag.jortsProdParams_accounting
   Qsag.baggyProdParams_accounting
   Qsag.corduroyProdParams_accounting
   Qsag.fips205ProdParams_accounting
@@ -716,7 +684,6 @@ theorem inhabited_productionLatchedRandomizedSigner_trace_safe :
   Qsag.pqQrom256PrimEps_mono
   Qsag.qrom_hidingAdv_deployed_le_pqQrom256PrimEps
   Qsag.qrom_unifiedTree_birthday_le_pqQrom256PrimEps
-  Qsag.qrom_publicSpnCoherentQuery_isometry_bridge
   Qsag.idealPrfItsrWin_of_forsTrees_zero
   Qsag.hulsing_multiHop_idealSlot_euf_cma_bound
   Qsag.tooth_pq_grover_2pow64_exceeds_128bit_bound
@@ -730,8 +697,7 @@ theorem inhabited_productionLatchedRandomizedSigner_trace_safe :
   Qsag.productionLatchedRandomizedSigner_trace_safe
   Qsag.inhabited_productionLatchedRandomizedSigner_trace_safe
 
-#tooth_pair Qsag.qrom_publicSpnCoherentQuery_isometry_bridge vs
-  Qsag.tooth_pq_grover_2pow64_exceeds_128bit_bound
+
 #tooth_pair Qsag.productionLatchedRandomizedSigner_trace_safe vs
   Qsag.tooth_unlatched_stateful_signer_reuses_epoch
 #tooth_pair Qsag.jortsProdParams_accounting vs

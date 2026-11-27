@@ -18,8 +18,7 @@ Top-level composition module (zero `import all`) connecting:
 3. Encoding separation of the `cSHAKE256` customization tags (`Oracle.Sponge`: the complete
    padded block sequences absorbed under different `QSAG.*` tags differ; this is a statement
    about encodings, not about disjoint permutation queries and not a sponge or
-   ideal-permutation security reduction) and polynomial-basis SPN tweakable chain evaluation
-   (`Oracle.Spn` + `Math.Gf2Pow128`), and
+   ideal-permutation security reduction),
 4. Constant-time assembly / translation-validation / speculative-safety guarantees
    (`ElfFunctionalEquiv`, `ConstantTimeIsa`, `SydTvTranslationValidation`, `FaultAndSpeculativeSafety`),
 5. Production signer and verifier refinement for both fixed-`optRand` `Spec.SigScheme`
@@ -57,7 +56,7 @@ public import Qsag.Protocol.Threshold.ProductionCoinReduction
 public import Qsag.Oracle.Sponge
 public import Qsag.Oracle.SpongeTwoWayIndifferentiability
 public import Qsag.Spec.CorruptibleSignSimulation
-public import Qsag.Oracle.Spn
+public import Qsag.Oracle.PublicPermutation
 public import Qsag.Oracle.Qrom
 public import Qsag.Protocol.Signing.SignatureOutputAndCacheLaws
 public import Qsag.Machine.ElfFunctionalEquiv
@@ -78,7 +77,7 @@ set_option autoImplicit false
 
 `production_euf_cma_gameBound` decomposes any winning run of `prodEufCmaWin` into the three
 extractor events (`prodItsrEvent`, `prodTcrEvent`, `prodPreEvent`) via
-`Spec.event_le_three_reductions`. Section 7 composes the conditional multi-hop reduction. `hulsing_closed_multihop_euf_cma_bound` bounds the executable game by the PRF,
+`Spec.event_le_three_reductions`. Section 7 composes the conditional multi-hop reduction. `hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds` bounds the executable game by the PRF,
 ITSR, open-seed TCR, PRE, and UD losses and the stateless randomizer-guess probability.
 The profile theorems in `ProductionJortsBaggyBounds` specialize this bound. The FIPS 205 theorems bound their separate numerical budgets. -/
 
@@ -195,174 +194,6 @@ theorem waistbandCache_preserves_multiturn_traces
     (hAdmits : (waistbandCachedSignMachine suite params sk maxGrind topL).AdmitsTrace tr) :
     (statelessReferenceSignMachine suite params sk maxGrind).AdmitsTrace tr :=
   (waistbandCache_refines_stateless suite params sk maxGrind topL hTopL).preserve_admitsTrace hAdmits
-
-/-! ## 3. Customization-Tag Encoding Separation, SPN Polynomial-Basis Bridge, and Constant-Time ISA Safety -/
-
-/-- **Customization-Tag Encoding Separation + Polynomial-Basis SPN + Five-Way `𝔽_{2^{128}}`
-    Agreement (`sponge_and_spn_poly_basis_composition`)**:
-    Connects `Qsag.qsag_tags_sponge_encodings_ne` (`Oracle.Sponge`),
-    `Qsag.rustParallelChainStep_eq_tower` (`Oracle.Spn`), and
-    `Math.gf2Pow128_five_way_mul_agreement`. The first two conjuncts say that the complete
-    padded `cSHAKE256` block sequences absorbed under the `CANOPY.LEAF`, `CANOPY.NODE` and
-    `FS` tags are different for all payloads. They do not say that the permutation queries
-    made while absorbing them are disjoint, and they are not a sponge or ideal-permutation
-    indifferentiability statement. -/
-theorem sponge_and_spn_poly_basis_composition
-    (m₁ m₂ : List UInt8)
-    (hash32 : List UInt8 → List (List UInt8) → Nat → List UInt8)
-    (pkSeed : List UInt8) (epoch chainIdx : Nat) (step : UInt8) (cur : List UInt8)
-    (a b : BitVec 128) :
-    Qsag.absorbPayload 136 Qsag.domCshake256 (Qsag.cshakePrefix [] Qsag.qsagTagCanopyLeaf ++ m₁) ≠
-      Qsag.absorbPayload 136 Qsag.domCshake256 (Qsag.cshakePrefix [] Qsag.qsagTagCanopyNode ++ m₂) ∧
-    Qsag.absorbPayload 136 Qsag.domCshake256 (Qsag.cshakePrefix [] Qsag.qsagTagCanopyLeaf ++ m₁) ≠
-      Qsag.absorbPayload 136 Qsag.domCshake256 (Qsag.cshakePrefix [] Qsag.qsagTagFiatShamir ++ m₂) ∧
-    Qsag.rustParallelChainStep hash32 pkSeed epoch chainIdx step cur =
-      Qsag.rustLanesToBytes32 (Qsag.psiTower128Pair
-        (Qsag.spnDaviesMeyer48 Qsag.gf128MdsATower Qsag.gf128MdsBTower
-          (fun i => Qsag.polyToTower128Pair
-            (Qsag.rustSpnRoundConstants hash32
-              (Qsag.rustDeriveChainTweak hash32 pkSeed epoch chainIdx step) i))
-          (Qsag.polyToTower128Pair (Qsag.rustBytes32ToLanes cur)))) ∧
-    (Qsag.Math.Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits =
-      Qsag.SimdBinaryEquiv.fastRemainder (Qsag.pclmulqdqFourProduct256 a b) := by
-  obtain ⟨hD1, hD2, _⟩ := Qsag.qsag_tags_sponge_encodings_ne m₁ m₂
-  have hSpn := Qsag.rustParallelChainStep_eq_tower hash32 pkSeed epoch chainIdx step cur
-  obtain ⟨_, _, _, hClmul, _⟩ := Qsag.Math.gf2Pow128_five_way_mul_agreement a b
-  exact ⟨hD1, hD2, hSpn, hClmul⟩
-
-/-- **Translation-Validated Zeroization & Constant-Time Stack-Return Non-Interference
-    (`isa_zeroize_and_ret_ct_composition`)**:
-    Composes `SydTv.ctMemzeroX86PosCert_flattened` (Sewell-style cut-graph loop translation validation
-    for x86-64 `ct_memzero` with matching leakage trace) with `ConstantTimeIsa.checkX86RetStackPop_sound`
-    (public `rsp` stack-return leakage non-interference). -/
-theorem isa_zeroize_and_ret_ct_composition
-    (sLoop : Qsag.X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64)
-    (memPol : BitVec 64 → Qsag.ConstantTimeIsa.SecLabel)
-    (τ τ' : Qsag.ConstantTimeIsa.X86TaintState) (pc : Nat)
-    (hCheck : Qsag.ConstantTimeIsa.checkX86RetStackPop τ = some τ')
-    (s₁ s₂ : Qsag.ConstantTimeIsa.X86State)
-    (hLow : Qsag.ConstantTimeIsa.X86LowEq memPol τ s₁ s₂)
-    (hRetPub : memPol (s₁.gpr .rsp) = .pub) :
-    Qsag.SydTv.FlattenedLoopRefines (Qsag.SydTv.ctMemzeroX86PosCert sLoop n hn hbound) ∧
-    (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₁).2 =
-      (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₂).2 :=
-  ⟨Qsag.SydTv.ctMemzeroX86PosCert_flattened sLoop n hn hbound,
-   (Qsag.ConstantTimeIsa.checkX86RetStackPop_sound memPol τ τ' pc hCheck s₁ s₂ hLow hRetPub).1⟩
-
-/-- ISA zeroization/return composition with an explicit hardware timing contract (`L-Ex-3`). -/
-theorem isa_zeroize_ret_and_hardware_ct
-    (sLoop : Qsag.X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64)
-    (memPol : BitVec 64 → Qsag.ConstantTimeIsa.SecLabel)
-    (τ τ' : Qsag.ConstantTimeIsa.X86TaintState) (pc : Nat)
-    (hCheck : Qsag.ConstantTimeIsa.checkX86RetStackPop τ = some τ')
-    (s₁ s₂ : Qsag.ConstantTimeIsa.X86State)
-    (hLow : Qsag.ConstantTimeIsa.X86LowEq memPol τ s₁ s₂)
-    (hRetPub : memPol (s₁.gpr .rsp) = .pub)
-    {Op Data Obs : Type} (hardware : Qsag.Spec.DitHardwareContract Op Data Obs)
-    (tr₁ tr₂ : List (Op × Data)) (hOps : tr₁.map Prod.fst = tr₂.map Prod.fst) :
-    Qsag.SydTv.FlattenedLoopRefines (Qsag.SydTv.ctMemzeroX86PosCert sLoop n hn hbound) ∧
-    (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₁).2 =
-      (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₂).2 ∧
-    tr₁.map (fun e => hardware.observe Qsag.Spec.ExecMode.constantTimeSafe e.1 e.2) =
-      tr₂.map (fun e => hardware.observe Qsag.Spec.ExecMode.constantTimeSafe e.1 e.2) := by
-  obtain ⟨hz, hr⟩ := isa_zeroize_and_ret_ct_composition
-    sLoop n hn hbound memPol τ τ' pc hCheck s₁ s₂ hLow hRetPub
-  exact ⟨hz, hr, hardware.trace_data_independent _ rfl tr₁ tr₂ hOps⟩
-
-/-! ## 4. Adaptive Tree Query Budgets, Prefix-Free Frontier FTS, and Production Coin Toss -/
-
-/-- **Adaptive Tree Query Budgets, Prefix-Free Frontier FTS, and Coin-Toss Composition
-    (`adaptive_within_and_compact1122_signing_chain`)**:
-    Composes `ProdAdaptiveTcrReduction` (`evalProdAdaptiveTree_budgets`, `corduroyCustody128_target_pool_budget`),
-    `AdvancedMpcAndCreds.frontierAntichain_paths_prefixFree`,
-    `HybridSecurity.all_frontier_profiles`, and
-    `ProductionCoinReduction` (`program_bound`, `honest_concrete`). -/
-theorem adaptive_within_and_compact1122_signing_chain
-    {qh qs_max : Nat}
-    {α : Type} (rawHash : List UInt8 → List UInt8)
-    (signOracle : Qsag.ProdSigningQuery → Option Qsag.PqHashSig)
-    {prog : Qsag.ProdAdaptiveTree α} (hDual : Qsag.ProdDualBounded qh qs_max prog)
-    (antichain : Qsag.FrontierAntichain)
-    (fProf : Qsag.HybridSecurity.FrontierProfile)
-    (coinCtx : Qsag.ProductionCoinContext)
-    (coinEntries : List Qsag.ProductionCoinReduction.Entry)
-    (hCoinHonest : ∀ e ∈ coinEntries, e.opened = e.share) :
-    ((Qsag.evalProdAdaptiveTree rawHash signOracle prog).2.1.length ≤ qh ∧
-     (Qsag.evalProdAdaptiveTree rawHash signOracle prog).2.2.length ≤ qs_max ∧
-     Qsag.corduroyCustody128Params.productionWellFormed = true ∧
-     Qsag.prodPathTargetCount Qsag.corduroyCustody128Params (2 ^ 12) = 35690) ∧
-    (Qsag.IsPrefixFreeAntichain antichain.paths ∧
-     ((Qsag.HybridSecurity.frontierParams fProf).len + 1) *
-       (Qsag.HybridSecurity.frontierParams fProf).nodeBytes +
-       ((Qsag.HybridSecurity.frontierParams fProf).counterBits + 7) / 8 =
-       Qsag.HybridSecurity.frontierWireBytes fProf) ∧
-    (Qsag.QueryBounded (coinEntries.length + (coinEntries.length + 1))
-       (Qsag.ProductionCoinReduction.program coinCtx coinEntries) ∧
-     Qsag.ProductionCoinReduction.run Qsag.ProductionCoinReduction.concrete coinCtx coinEntries =
-       some (Qsag.productionCoinDerive coinCtx
-         (Qsag.ProductionCoinReduction.combinedShares coinEntries 0))) := by
-  have hTree := Qsag.evalProdAdaptiveTree_budgets rawHash signOracle hDual
-  obtain ⟨_, _, hCordWf, _⟩ := Qsag.corduroy_real_profiles_audit
-  obtain ⟨hCordPool, _⟩ := Qsag.corduroyCustody128_target_pool_budget
-  have hPf := Qsag.frontierAntichain_paths_prefixFree antichain
-  obtain ⟨hWire, _⟩ := Qsag.HybridSecurity.all_frontier_profiles fProf
-  exact ⟨⟨hTree.1, hTree.2, hCordWf, hCordPool⟩,
-         ⟨hPf, hWire⟩,
-         ⟨Qsag.ProductionCoinReduction.program_bound coinCtx coinEntries,
-          Qsag.ProductionCoinReduction.honest_concrete coinCtx coinEntries hCoinHonest⟩⟩
-
-/-! ## 5. Public-Permutation QROM Game, Salted Preprocessing, SPN Cryptanalysis, and x86 Strict Cosim -/
-
-set_option exponentiation.threshold 512 in
-/-- **Public-Permutation QROM Isometry, Salted Preprocessing, 48-Round SPN Hull, and Strict x86 Cosim
-    (`public_spn_qrom_differential_walsh_and_isa_cosim`)**:
-    Composes the public-permutation feed-forward (`Oracle.Spn`) and coherent-query isometry
-    (`Oracle.Qrom`),
-    `PreprocessingGame.freshSalt_node_requests_bound` (`Protocol.Signing.PreprocessingSeedSeparation`),
-    `spn48_davies_meyer_committed_pair_collision_count_le` and
-    `walsh_trail_product_below_parseval_floor` (`Oracle.Spn`), and
-    `IsaCosim.run_verified_code_is_strict`. -/
-theorem public_spn_qrom_differential_walsh_and_isa_cosim
-    {anc q kSalt : Nat}
-    (hash32 : List UInt8 → List (List UInt8) → Nat → List UInt8)
-    (addr : Qsag.PublicChainAddress) (cur : List UInt8)
-    (perm : Qsag.PublicPermutation Qsag.PublicSpnState)
-    (qState : Qsag.QVec (2 ^ 257) 256 anc)
-    (spnAdv : Qsag.PublicSpnPreimageAdversary anc q)
-    (challenge : Qsag.PublicSpnState)
-    (seeds : Fin kSalt → List UInt8) (suite : Qsag.TweakableHashSuite) (adrs : Qsag.HashAdrs)
-    (table : List (Fin kSalt × ((List UInt8 × List UInt8) × (List UInt8 × List UInt8))))
-    (mds : Qsag.ValidSpnMdsPair 7) (keys : List Qsag.Tower128) (hNd : keys.Nodup)
-    (s₁ s₂ : Qsag.Tower128 × Qsag.Tower128) (hNe : s₁ ≠ s₂)
-    (fuel : Nat) (code : List UInt8) (x86St : Qsag.X86State) (flags : IsaCosim.Flags)
-    (decodedProg : List (Qsag.DecodedInstr Qsag.X86Instr))
-    (hDec : Qsag.decodeX86Stream code = some decodedProg) :
-    (Qsag.rustParallelChainStep hash32 addr.pkSeed addr.epoch.val addr.chainIdx.val addr.step cur =
-      Qsag.rustLanesToBytes32
-        (Qsag.publicSpnFeedForward (Qsag.publicChainPermutation hash32 addr)
-          (Qsag.rustBytes32ToLanes cur)) ∧
-     Qsag.QVec.stateNormSq (Qsag.publicSpnCoherentQuery perm qState) = Qsag.QVec.stateNormSq qState ∧
-     (Qsag.Spec.RatBound.ofBudget
-       (Qsag.publicSpnPreimageProbability perm spnAdv challenge)).le
-       (Qsag.Spec.RatBound.ofBudget Qsag.RatBound.one)) ∧
-    (Qsag.qsum kSalt
-       (Qsag.PreprocessingGame.tableWin (fun salt pair => decide
-         (pair.1 ≠ pair.2 ∧
-           Qsag.thNodeH suite (seeds salt) adrs pair.1.1 pair.1.2 =
-           Qsag.thNodeH suite (seeds salt) adrs pair.2.1 pair.2.2)) table) ≤ table.length) ∧
-    (Qsag.spnDmCollisionCount keys mds.mdsA mds.mdsB s₁ s₂ ≤
-       36 * (keys.length * keys.length) * (keys.length * keys.length) ^ 46 ∧
-     36 ^ 72 * 2 ^ 256 < (2 ^ 128) ^ 72 ∧
-     IsaCosim.run fuel code x86St flags = IsaCosim.runWith false fuel code x86St flags) := by
-  have hFeed := Qsag.rustParallelChainStep_eq_publicFeedForward hash32 addr cur
-  have hIso := Qsag.publicSpnCoherentQuery_isometry perm qState
-  have hProbLe := (Qsag.Spec.RatBound.ofBudget_le_iff _ Qsag.RatBound.one).mpr
-    (Qsag.publicSpnPreimageProbability_le_one perm spnAdv challenge)
-  exact ⟨⟨hFeed, hIso, hProbLe⟩,
-         Qsag.PreprocessingGame.freshSalt_node_requests_bound seeds suite adrs table,
-         ⟨Qsag.spn48_davies_meyer_committed_pair_collision_count_le mds keys hNd s₁ s₂ hNe,
-          Qsag.walsh_trail_product_below_parseval_floor,
-          IsaCosim.run_verified_code_is_strict fuel code x86St flags decodedProg hDec⟩⟩
 
 /-! ## 6. The Epoch-Latched Production Signer Refines `Spec.idealSignMachine` -/
 
@@ -677,8 +508,7 @@ theorem fips205_slhDsa128f_concrete_security_lt_2_neg_128
   Qsag.Spec.latchedCorruptibleSigner_run_projects_to_ideal
   Qsag.Spec.latchedCorruptibleSigner_unexposed_run_safe
 
-#verify_constructive
-  Qsag.Top.production_euf_cma_gameBound
+#verify_constructive Qsag.Top.production_euf_cma_gameBound
   Qsag.Top.productionLatchedSigner_trace_safe
   Qsag.Top.poly257MultiLeaf_closed_adaptive_forger_bound
   Qsag.Top.inhabited_poly257MultiLeaf_closed_adaptive_forger_bound
@@ -690,10 +520,6 @@ theorem fips205_slhDsa128f_concrete_security_lt_2_neg_128
   Qsag.Top.fips205_slhDsa128s_concrete_security_lt_2_neg_128
   Qsag.Top.fips205_slhDsa128f_concrete_security_lt_2_neg_128
   Qsag.Top.waistbandCache_preserves_multiturn_traces
-  Qsag.Top.sponge_and_spn_poly_basis_composition
-  Qsag.Top.isa_zeroize_and_ret_ct_composition
-  Qsag.Top.adaptive_within_and_compact1122_signing_chain
-  Qsag.Top.public_spn_qrom_differential_walsh_and_isa_cosim
 
 #verify_inhabited
   Qsag.Top.poly257MultiLeaf_closed_adaptive_forger_bound
@@ -1141,68 +967,68 @@ theorem smDtOpenSeedTcrHard_implies_smDtTcrHard
     Spec.SmDtTcrHard (fun c => 𝒜 (precommitOnOpen false c)) th seedLen q ε :=
   _root_.Qsag.smDtOpenSeedTcrHard_implies_smDtTcrHard hard
 
-theorem hulsing_closed_multihop_euf_cma_bound {q : Nat} (E : SigningExperiment q) (latchOn : Bool)
+theorem hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds {q : Nat} (E : SigningExperiment q) (latchOn : Bool)
     (suite : TweakableHashSuite) (p : PqHashParams) (wf : p.productionWellFormed = true)
     (trees : p.forsTrees ≤ 2 ^ 32) (cover prim : Spec.RatBound)
     (H : SigningPrimitiveBounds E latchOn suite p cover prim) :
     Spec.GameBound (execEufCmaGameWith latchOn E.pos suite p E.keygen E.adversary).winProb
       (globalSlotBudget p q cover prim) :=
-  _root_.Qsag.hulsing_closed_multihop_euf_cma_bound E latchOn suite p wf trees cover prim H
+  _root_.Qsag.hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds E latchOn suite p wf trees cover prim H
 
-theorem baggyProd_stateless_exec_euf_cma_bound {q : Nat} (E : SigningExperiment q)
+theorem baggyProd_stateless_exec_euf_cma_bound_of_primitive_bounds {q : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (cover prim : Spec.RatBound)
     (H : BaggyPrimitiveAssumptions E suite cover prim) :
     Spec.GameBound (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb
       (globalSlotBudget baggyProdParams q cover prim) :=
-  _root_.Qsag.baggyProd_stateless_exec_euf_cma_bound E suite cover prim H
+  _root_.Qsag.baggyProd_stateless_exec_euf_cma_bound_of_primitive_bounds E suite cover prim H
 
-theorem jortsProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem jortsProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 96)
     (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero
       (classical256PrimEps qEval)) :
     (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt
       ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
-  _root_.Qsag.jortsProd_classical_exec_euf_cma_lt_2_neg_128 E suite hq he H
+  _root_.Qsag.jortsProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds E suite hq he H
 
-theorem jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 48)
     (H : SigningPrimitiveBounds E true suite jortsProdParams Spec.RatBound.zero
       (pqQrom256PrimEps qEval)) :
     (ExecEufCmaGame E.pos suite jortsProdParams E.keygen E.adversary).winProb.lt
       ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
-  _root_.Qsag.jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128 E suite hq he H
+  _root_.Qsag.jortsProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds E suite hq he H
 
-theorem baggyProd_classical_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem baggyProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 80)
     (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
       (classical256PrimEps qEval)) :
     (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt
       ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
-  _root_.Qsag.baggyProd_classical_exec_euf_cma_lt_2_neg_128 E suite hq he H
+  _root_.Qsag.baggyProd_classical_exec_euf_cma_lt_2_neg_128_of_primitive_bounds E suite hq he H
 
-theorem baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 40)
     (H : SigningPrimitiveBounds E false suite baggyProdParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
       (pqQrom256PrimEps qEval)) :
     (ExecStatelessEufCmaGame E.pos suite baggyProdParams E.keygen E.adversary).winProb.lt
       ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
-  _root_.Qsag.baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 E suite hq he H
+  _root_.Qsag.baggyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds E suite hq he H
 
-theorem corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 12) (he : qEval ≤ 2 ^ 40)
     (H : SigningPrimitiveBounds E false suite corduroyProdParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
       (pqQrom256PrimEps qEval)) :
     (ExecStatelessEufCmaGame E.pos suite corduroyProdParams E.keygen E.adversary).winProb.lt
       ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
-  _root_.Qsag.corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128 E suite hq he H
+  _root_.Qsag.corduroyProd_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds E suite hq he H
 
-theorem slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128 {q qEval : Nat} (E : SigningExperiment q)
+theorem slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds {q qEval : Nat} (E : SigningExperiment q)
     (suite : TweakableHashSuite) (hq : q ≤ 2 ^ 16) (he : qEval ≤ 2 ^ 25)
     (H : SigningPrimitiveBounds E false suite slhDsaW16StatelessParams ⟨1, 2 ^ 131, Nat.two_pow_pos 131⟩
       (pqQrom256PrimEps qEval)) :
     (ExecStatelessEufCmaGame E.pos suite slhDsaW16StatelessParams E.keygen E.adversary).winProb.lt
       ⟨1, 2 ^ 128, Nat.two_pow_pos 128⟩ :=
-  _root_.Qsag.slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128 E suite hq he H
+  _root_.Qsag.slhDsaW16_pq_qrom_exec_euf_cma_lt_2_neg_128_of_primitive_bounds E suite hq he H
 -- END COMPARATOR ROSTER
 
 end Qsag.Top

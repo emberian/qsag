@@ -3360,7 +3360,7 @@ private theorem budget_collect (base prim : Spec.RatBound) (k : Nat) :
   ac_rfl
 
 /-- Executable EUF-CMA reduction to five primitive notions, on the actual keygen and adaptive adversary. -/
-theorem hulsing_closed_multihop_euf_cma_bound {q : Nat} (E : SigningExperiment q) (latchOn : Bool)
+theorem hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds {q : Nat} (E : SigningExperiment q) (latchOn : Bool)
     (suite : TweakableHashSuite) (p : PqHashParams) (wf : p.productionWellFormed = true)
     (trees : p.forsTrees ≤ 2^32) (cover prim : Spec.RatBound)
     (H : SigningPrimitiveBounds E latchOn suite p cover prim) :
@@ -3388,7 +3388,7 @@ theorem hulsing_closed_multihop_euf_cma_bound {q : Nat} (E : SigningExperiment q
     (fun _ => idealPrfBreakEvents_fst_of _ _ _ _ _ _ _) (fun _ => idealPrfBreakEvents_snd_of _ _ _ _ _ _ _)
     H.prfMsg H.prfSec coverB H.tcr preB) (budget_collect base prim _)
 
-#verify_constructive budget_collect hulsing_closed_multihop_euf_cma_bound
+#verify_constructive budget_collect hulsing_closed_multihop_euf_cma_bound_of_primitive_bounds
 
 /-- A zero-query adversary used to test joint reachability of the primitive hypotheses. -/
 def emptySigningForgery {qh : Nat} : SeedWithheldEufCmaAdv qh 0 :=
