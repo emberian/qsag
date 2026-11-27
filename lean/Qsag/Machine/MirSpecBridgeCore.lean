@@ -441,67 +441,6 @@ theorem mc_ct_memzero_wipes_secret_share_window (m : UInt64 → UInt8) :
         (show 0 < 32 by decide) (show 3 * 32 + 2 ≤ 98 by decide)
     exact ⟨hHalt, hZero, fun a ha => hPres a (hOutside a ha)⟩
 
-/-- **Bridge 1C (`mc_goldilocks_kernels_refine_field_and_toprf`)**:
-    Connects the compiled `.rlib` `qsag_asm_goldilocks_{add,sub,mul}_ct` x86-64 and AArch64 kernels
-    directly to canonical `Goldilocks` field operations (`Goldilocks.add`, `Goldilocks.sub`,
-    `Goldilocks.mul`) AND composes with `ThresholdMlDsaAndToprf.toprf_2of5_corrects_one_malicious_server`
-    so hardware field outputs feed 1-Byzantine 2-of-5 TOPRF evaluation and finalization. -/
-theorem mc_goldilocks_kernels_refine_field_and_toprf
-    (a b : Goldilocks)
-    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64) (i j bad : Fin 5)
-    (hCtx : ctx.length < 2 ^ 20) :
-    let ua : UInt64 := UInt64.ofNat a.val
-    let ub : UInt64 := UInt64.ofNat b.val
-    (∃ slAdd pAdd slSub pSub slMulX pMulX slMulA pMulA,
-      findSliceByNameBytes currentX86ExtractedSlices goldAddX86Name = some slAdd ∧
-      decodeX86Stream slAdd.code = some pAdd ∧
-      findSliceByNameBytes currentX86ExtractedSlices goldSubX86Name = some slSub ∧
-      decodeX86Stream slSub.code = some pSub ∧
-      findSliceByNameBytes currentX86ExtractedSlices goldMulX86Name = some slMulX ∧
-      decodeX86Stream slMulX.code = some pMulX ∧
-      findSliceByNameBytes currentAarch64ExtractedSlices goldMulArmName = some slMulA ∧
-      decodeArm64Stream slMulA.code = some pMulA ∧
-      ((runX86 pAdd 25 (x86Init ua ub 0 0 0)).1.gpr.get 0).toNat = (Goldilocks.add a b).val ∧
-      ((runX86 pSub 31 (x86Init ua ub 0 0 0)).1.gpr.get 0).toNat = (Goldilocks.sub a b).val ∧
-      ((runX86 pMulX 33 (x86Init ua ub 0 0 0)).1.gpr.get 0).toNat = (Goldilocks.mul a b).val ∧
-      ((runArm64 pMulA 30 (armInit ua ub 0)).1.gpr.get 0).toNat = (Goldilocks.mul a b).val) ∧
-    (∀ (masks : ToprfPerm12Masks) (keyShares inputShares : Fin 5 → Lane4)
-       (serverOut : Fin 5 → Option (Fin 5 → Lane4)),
-      (∀ p : Fin 5, p ≠ bad →
-        serverOut p = some (fun c => (toprfEvalPerm12 masks (toprfInitPrfState keyShares inputShares) c).b0)) →
-      clientFinalizeLane4 serverOut =
-        some (toprfPlaintext (sumLane4Shares5 keyShares) (sumLane4Shares5 inputShares))) := by
-  intro ua ub
-  have h64 : (2 : Nat) ^ 64 = 18446744073709551616 := rfl
-  have haNat : ua.toNat = a.val := by
-    dsimp only [ua]
-    rw [UInt64.toNat_ofNat', h64]
-    have haLt := Goldilocks.val_lt_two_pow_64 a
-    omega
-  have hbNat : ub.toNat = b.val := by
-    dsimp only [ub]
-    rw [UInt64.toNat_ofNat', h64]
-    have hbLt := Goldilocks.val_lt_two_pow_64 b
-    omega
-  refine ⟨?_, (toprf_2of5_corrects_one_malicious_server H ctx layer i j hCtx bad).2.2⟩
-  obtain ⟨slA, pA, hfA, hdA, hSpecA⟩ := current_goldilocks_add_ct_x86_64_mc_refines
-  obtain ⟨slS, pS, hfS, hdS, hSpecS⟩ := current_goldilocks_sub_ct_x86_64_mc_refines
-  obtain ⟨slMX, pMX, hfMX, hdMX, hSpecMX⟩ := current_goldilocks_mul_ct_x86_64_mc_refines
-  obtain ⟨slMA, pMA, hfMA, hdMA, hSpecMA⟩ := current_goldilocks_mul_ct_aarch64_mc_refines
-  refine ⟨slA, pA, slS, pS, slMX, pMX, slMA, pMA, hfA, hdA, hfS, hdS, hfMX, hdMX, hfMA, hdMA, ?_⟩
-  have hAdd := (hSpecA (x86Init ua ub 0 0 0) 25 rfl rfl (Nat.le_refl 25)).2.1
-  have hSub := (hSpecS (x86Init ua ub 0 0 0) 31 rfl rfl (Nat.le_refl 31)).2.1
-  have hMulX := (hSpecMX (x86Init ua ub 0 0 0) 33 rfl rfl (Nat.le_refl 33)).2.1
-  have hMulA := (hSpecMA (armInit ua ub 0) 30 rfl rfl (Nat.le_refl 30)).2.1
-  have hG7 : (x86Init ua ub 0 0 0).gpr.get 7 = ua := rfl
-  have hG6 : (x86Init ua ub 0 0 0).gpr.get 6 = ub := rfl
-  have hA0 : (armInit ua ub 0).gpr.get 0 = ua := rfl
-  have hA1 : (armInit ua ub 0).gpr.get 1 = ub := rfl
-  rw [hG7, hG6, haNat, hbNat, ← Goldilocks.add_val] at hAdd
-  rw [hG7, hG6, haNat, hbNat, Nat.mod_eq_of_lt b.isLt, ← Goldilocks.sub_val] at hSub
-  rw [hG7, hG6, haNat, hbNat, ← Goldilocks.mul_val] at hMulX
-  rw [hA0, hA1, haNat, hbNat, ← Goldilocks.mul_val] at hMulA
-  exact ⟨hAdd, hSub, hMulX, hMulA⟩
 
 /-! ## §2. Fixed-Width `UInt64` Policy Guard $\to$ `CustodySuiteFull` Multi-Turn Velocity Bridge -/
 
