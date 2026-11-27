@@ -1,7 +1,7 @@
 module
+public import QsagVerified.Proofs.MirRefinementKit
 import all QsagVerified.Funs
 public import QsagVerified.Proofs.CredAndHdGuards
-public import QsagVerified.Proofs.FtsSpnGuard
 public import QsagVerified.Proofs.RssCutSession
 public import QsagVerified.Proofs.MultiTurnMediationAndReachability
 
@@ -11,11 +11,12 @@ public import QsagVerified.Proofs.MultiTurnMediationAndReachability
 These contracts state the obligations of unextracted callers. They do not assert that
 receiving a Boolean establishes polynomial norms, durable storage, or MAC correctness.
 `PolicyAndAddr` checks amounts, pins and monotone nonces directly; its pins still require
-trusted provisioning. `TowerBdoz` evaluates its supplied field operands directly; the
+trusted provisioning. `TowerArithmetic` evaluates its supplied field operands directly; the
 relation of those operands to the caller's wire transcript remains a caller obligation.
 The HD guard checks supplied commitments/residuals, not the derivation of those residuals.
 The authenticated belt computes its own tags; key provisioning is `BeltProvisionedKeys`.
 -/
+
 public section
 namespace qsag_verified.proofs
 open Aeneas Aeneas.Std Result
@@ -53,28 +54,6 @@ theorem mldsa_release_under_caller_contract
   have h := hc p hp
   exact ⟨h.zNorm hz, h.r0Norm hr, h.w1Match hw, h.commitmentBound hu, hout⟩
 
-/-- Zero residuals imply the external MAC relation only under this caller contract. -/
-def FtsResidualContract (Holds : Array Std.U8 32#usize → Prop) : FtsMacStepInput → Prop
-  | .verifyMac sid lo hi => lo = 0#u128 → hi = 0#u128 → Holds sid
-  | _ => True
-
-/-- Multi-turn semantic FTS release safety explicitly separates the reported round
-count from evidence that all rounds and the external MAC relation were computed. -/
-theorem fts_release_under_caller_contract
-    (Holds : Array Std.U8 32#usize → Prop) (RoundsComplete : Prop)
-    (sid : Array Std.U8 32#usize) (rounds : Std.U8) (lo hi : Std.U128)
-    (s t : fts_spn_guard.FtsDeferredMacSession)
-    (turns : List (MirTurn FtsMacStepInput FtsMacStepOutput fts_spn_guard.FtsGuardError))
-    (hn : fts_spn_guard.FtsDeferredMacSession.new_spn48_evaluated sid rounds lo hi = .ok s)
-    (ht : MirTrace (adaptStateResult mirFtsMacStep) s turns t)
-    (hrounds : rounds = 48#u8 → RoundsComplete)
-    (hc : ∀ p ∈ mirAcceptedPairs turns, FtsResidualContract Holds p.1) :
-    ∀ inp outLo outHi, (inp, .outputReleased outLo outHi) ∈ mirAcceptedPairs turns →
-      RoundsComplete ∧ Holds sid ∧ outLo = lo ∧ outHi = hi := by
-  intro inp outLo outHi hp
-  obtain ⟨hr, hl, hh, hm, _⟩ :=
-    (fts_spn_output_implies_intermediate_mac_ok sid rounds lo hi s t turns hn ht).2.1 inp outLo outHi hp
-  exact ⟨hrounds hr, hc _ hm rfl rfl, hl, hh⟩
 
 /-- The RSS guard checks scalar zeros; their semantic meaning is provided by the caller. -/
 def RssResidualContract (Holds : Array Std.U8 32#usize → Prop) : rss_cut_session.RssCutStepInput → Prop

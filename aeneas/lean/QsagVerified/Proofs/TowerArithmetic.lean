@@ -17,7 +17,7 @@ set_option maxHeartbeats 4000000
 attribute [-simp] BitVec.getLsbD_eq_getElem
 attribute [local simp] UScalar.val UScalarTy.numBits
 
-/-! ## Wide binary towers and replicated-sharing gates -/
+/-! ## Totality of binary tower arithmetic -/
 
 private theorem mul_t3_total (a b : Std.U8) : ∃ c, tower.mul_t3 a b = .ok c :=
   ⟨_, rfl⟩
@@ -62,7 +62,6 @@ private theorem mul_t4_total (a b : Std.U16) : ∃ c, tower.mul_t4 a b = .ok c :
   rfl
 
 
-
 private theorem scale_x_t4_total (a : Std.U16) : ∃ c, tower.scale_x_t4 a = .ok c := by
   let hi : Std.U8 := UScalar.cast .U8 ((⟨a.bv >>> 8⟩ : Std.U16) &&& 255#u16)
   obtain ⟨sx, hs⟩ := scale_x_t3_total hi
@@ -79,7 +78,6 @@ private theorem scale_x_t4_total (a : Std.U16) : ∃ c, tower.scale_x_t4 a = .ok
   apply bind_ok_step (lift_eq_ok _)
   apply bind_ok_step (lift_eq_ok _)
   rfl
-
 
 
 private theorem mul_t5_total (a b : Std.U32) : ∃ c, tower.mul_t5 a b = .ok c := by
@@ -120,7 +118,6 @@ private theorem mul_t5_total (a b : Std.U32) : ∃ c, tower.mul_t5 a b = .ok c :
   rfl
 
 
-
 private theorem scale_x_t5_total (a : Std.U32) : ∃ c, tower.scale_x_t5 a = .ok c := by
   let hi : Std.U16 := UScalar.cast .U16 ((⟨a.bv >>> 16⟩ : Std.U32) &&& 65535#u32)
   obtain ⟨sx, hs⟩ := scale_x_t4_total hi
@@ -137,7 +134,6 @@ private theorem scale_x_t5_total (a : Std.U32) : ∃ c, tower.scale_x_t5 a = .ok
   apply bind_ok_step (lift_eq_ok _)
   apply bind_ok_step (lift_eq_ok _)
   rfl
-
 
 
 private theorem mul_t6_total (a b : Std.U64) : ∃ c, tower.mul_t6 a b = .ok c := by
@@ -178,7 +174,6 @@ private theorem mul_t6_total (a b : Std.U64) : ∃ c, tower.mul_t6 a b = .ok c :
   rfl
 
 
-
 private theorem scale_x_t6_total (a : Std.U64) : ∃ c, tower.scale_x_t6 a = .ok c := by
   let hi : Std.U32 := UScalar.cast .U32 ((⟨a.bv >>> 32⟩ : Std.U64) &&& 4294967295#u64)
   obtain ⟨sx, hs⟩ := scale_x_t5_total hi
@@ -195,7 +190,6 @@ private theorem scale_x_t6_total (a : Std.U64) : ∃ c, tower.scale_x_t6 a = .ok
   apply bind_ok_step (lift_eq_ok _)
   apply bind_ok_step (lift_eq_ok _)
   rfl
-
 
 
 /-- `tower128_mul` (7-level Wiedemann binary tower `GF(2^128)` Karatsuba multiplication)
@@ -239,8 +233,6 @@ theorem tower128_mul_total (a b : tower.Tower128) :
   rfl
 
 
-
-
 /-! Independent pure Wiedemann arithmetic. These definitions use only scalar
 bit operations and smaller pure field operations; none calls extracted MIR.
 The stored basis obeys X² = 1 + αX, not X² = X + α. -/
@@ -250,7 +242,7 @@ The stored basis obeys X² = 1 + αX, not X² = X + α. -/
   hi ||| ⟨(lo ^^^ pureScaleXT2 hi).bv <<< 4⟩
 
 private theorem mul_t3_eq_independent (a b : Std.U8) :
-    tower.mul_t3 a b = .ok (pureGf256Mul a b) := by rfl
+    tower.mul_t3 a b = .ok (pureGf256Mul a b) := gf256_mul_eq_pure a b
 private theorem scale_x_t3_eq_independent (a : Std.U8) :
     tower.scale_x_t3 a = .ok (pureScaleXT3 a) := by rfl
 
@@ -604,52 +596,6 @@ theorem tower128_mul_small_vectors :
     pureTower128Mul 1#u128 7#u128 = 7#u128 ∧
     pureTower128Mul 2#u128 2#u128 = 3#u128 := by decide
 
-/--  `verify_mac_2lane` strictly rejects empty opening slices (`&[] -> .ok false`). -/
-theorem verify_mac_2lane_rejects_empty
-    (alpha_lanes : Array tower.Tower128 2#usize)
-    (batch : tower.BdozCommittedBatchOpening2Lane) :
-    tower.verify_mac_2lane alpha_lanes batch ⟨[], by decide⟩ = .ok false := by
-  simp [tower.verify_mac_2lane, core.slice.Slice.is_empty]
-
-/--  Stateful BDOZ 2-Lane Verifier Session Burn & Secret Key Zeroization Theorem:
-    1. Once `session.burned = true`, `verify_mac_2lane_with_burn` unconditionally rejects and
-       outputs zeroed `alpha_lanes = [0, 0]`.
-    2. Whenever `verify_mac_2lane_with_burn` returns `false` on ANY opening batch, the returned
-       session has `burned = true` and `alpha_lanes = [0, 0]` (preventing selective-failure
-       oracles on `Δ`). -/
-theorem verify_mac_2lane_burn_irreversible
-    (session : tower.BdozVerifierSession2Lane)
-    (batch : tower.BdozCommittedBatchOpening2Lane)
-    (openings : Slice tower.BdozWireOpening2Lane) :
-    (session.burned = true →
-      tower.verify_mac_2lane_with_burn session batch openings =
-        .ok ({ alpha_lanes := Array.make 2#usize [0#u128, 0#u128], burned := true }, false)) ∧
-    (∀ session',
-      tower.verify_mac_2lane_with_burn session batch openings = .ok (session', false) →
-        session'.burned = true ∧
-        session'.alpha_lanes = Array.make 2#usize [0#u128, 0#u128]) := by
-  refine ⟨?_, ?_⟩
-  · intro hb
-    unfold tower.verify_mac_2lane_with_burn
-    simp [hb]
-  · intro session' hres
-    unfold tower.verify_mac_2lane_with_burn at hres
-    by_cases hb : session.burned = true
-    · simp [hb] at hres
-      rcases hres with ⟨rfl, _⟩
-      exact ⟨rfl, rfl⟩
-    · simp [hb, Bind.bind, Result.bind] at hres
-      cases hmac : tower.verify_mac_2lane session.alpha_lanes batch openings with
-      | fail e => simp [hmac] at hres
-      | div => simp [hmac] at hres
-      | ok ok1 =>
-        simp [hmac] at hres
-        cases ok1 with
-        | true => simp at hres
-        | false =>
-          simp at hres
-          subst hres
-          exact ⟨rfl, rfl⟩
 
 /-! ## Section 4: Pillar E — 2-of-3 Replicated Secret Sharing (`RSS`) Gate Homomorphism -/
 
@@ -693,7 +639,7 @@ private theorem allOnes64_bit (i : Nat) (hi : i < 64) :
   | n + 64, hi => exact False.elim (Nat.not_lt_of_ge (Nat.le_add_left 64 n) hi)
 
 /-- Over Aeneas-extracted `threshold.rss_keccak_chi_lane`, reconstructing the output share equals
-    the exact Keccak-f[1600] $\chi$ non-linear lane formula `va ^^^ ((~~~ vb) &&& vc)`. -/
+    the Keccak-f[1600] $\chi$ equation `va ^^^ ((~~~ vb) &&& vc)`. -/
 theorem rss_keccak_chi_lane_spec
     (a b c : threshold.RssShare64) (seeds : threshold.RssZeroSeeds64) :
     ∃ (out : threshold.RssShare64) (va vb vc vout : Std.U64),
@@ -732,45 +678,6 @@ theorem rss_keccak_chi_lane_spec
       BitVec.getLsbD_xor, BitVec.not_def, BitVec.getLsbD_xor, allOnes64_bit i hi]
     cases b.x0.bv.getLsbD i <;> cases b.x1.bv.getLsbD i <;> cases b.x2.bv.getLsbD i <;> rfl
   rw [hrec, hvand_eq, hand_eq, ← hvnb_eq, hnot]
-
-private theorem scale_x_t7_total (a : Std.U128) : ∃ c, tower.scale_x_t7 a = .ok c := by
-  let hi : Std.U64 := UScalar.cast .U64 ((⟨a.bv >>> 64⟩ : Std.U128) &&& 18446744073709551615#u128)
-  obtain ⟨sx, hs⟩ := scale_x_t6_total hi
-  have ha : (a >>> 64#i32 : Result Std.U128) = .ok ⟨a.bv >>> 64⟩ := rfl
-  refine ⟨⟨(UScalar.cast .U128 hi).bv ||| ((UScalar.cast .U128 ((UScalar.cast .U64 (a &&& 18446744073709551615#u128)) ^^^ sx)).bv <<< 64)⟩, ?_⟩
-  unfold tower.scale_x_t7
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step ha
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step hs
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  rfl
-
-
-
-theorem tower256_mul_total (a b : tower.Tower256) :
-    ∃ c, tower.tower256_mul a b = .ok c := by
-  obtain ⟨p, hp⟩ := tower128_mul_total a.lo b.lo
-  obtain ⟨q, hq⟩ := tower128_mul_total a.hi b.hi
-  obtain ⟨r, hr⟩ := tower128_mul_total (a.lo ^^^ a.hi) (b.lo ^^^ b.hi)
-  obtain ⟨sx, hs⟩ := scale_x_t7_total q
-  refine ⟨⟨p ^^^ q, r ^^^ p ^^^ q ^^^ sx⟩, ?_⟩
-  unfold tower.tower256_mul
-  apply bind_ok_step hp
-  apply bind_ok_step hq
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step hr
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step (lift_eq_ok _)
-  apply bind_ok_step hs
-  apply bind_ok_step (lift_eq_ok _)
-  rfl
 
 
 theorem rss_reconstruct_share_roundtrip (secret m0 m1 : Std.U64) :
