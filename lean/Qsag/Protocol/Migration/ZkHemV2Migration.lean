@@ -43,7 +43,7 @@ public import Qsag.Spec.IdealMigrate
 public import Qsag.Spec.Refines
 public import Qsag.Math.CurvePrimeCerts
 public import Qsag.Protocol.Aggregation.ZkHemV2
-public import Qsag.Protocol.Aggregation.ZkHemV2ScheduleCert
+public import Qsag.Protocol.Aggregation.ZkHemV2PackedFiberCerts
 import Qsag.Math.Tactic.CommRing
 import Qsag.Tactic.AssuranceKit
 
@@ -789,7 +789,7 @@ theorem zkHemV2_r1cs_single_transcript_extract_or_qrom_128_break {D : Type} [Dec
     (verifyProof : ZkHemV2MigrationSubmission D → Bool)
     (extract : StraightLineExtractor D)
     (env : WhirEnv QuinticGoldilocks) (M : MerkleSetup D QuinticGoldilocks) (dfltRoot : D)
-    (sc : WhirScheduleCert env (zkHemV2ProdSched logCells) 400)
+    (sc : ZkHemV2Packed.SeededScheduleCert env logCells)
     (codec : FsCodec (SuccinctRoundMsg D (WhirPub QuinticGoldilocks))
       (zkHemV2ProdSched logCells).numRounds cardX)
     (aux : Fin cardX → List (QuinticGoldilocks × List D))
@@ -866,7 +866,7 @@ theorem zkHemV2_r1cs_single_transcript_extract_or_qrom_128_break {D : Type} [Dec
       rw [hOwnB] at hOwnTrue
       exact Bool.false_ne_true hOwnTrue
     exact .inr ⟨hNotInLang, fun hRoots A hMerkle =>
-      zkHemV2_deployed_succinct_qrom_soundness_128 logCells hLo hHi hQ env M dfltRoot
+      ZkHemV2Packed.zkHemV2_deployed_succinct_qrom_soundness_128 logCells hLo hHi hQ env M dfltRoot
         sc codec aux (claimOf sub) (fun _ => sub.proof.initRoot) tblOf
         hNotInLang hRoots A hMerkle⟩
 
@@ -877,7 +877,7 @@ theorem zkHemV2_whir_settlement_false_statement_lt_128 {D : Type} [DecidableEq D
     {cardX cardAnc Q : Nat} (logCells : Nat)
     (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (hQ : Q ≤ 2 ^ 64)
     (env : WhirEnv QuinticGoldilocks) (M : MerkleSetup D QuinticGoldilocks) (dfltRoot : D)
-    (sc : WhirScheduleCert env (zkHemV2ProdSched logCells) 400)
+    (sc : ZkHemV2Packed.SeededScheduleCert env logCells)
     (codec : FsCodec (SuccinctRoundMsg D (WhirPub QuinticGoldilocks))
       (zkHemV2ProdSched logCells).numRounds cardX)
     (aux : Fin cardX → List (QuinticGoldilocks × List D))
@@ -944,7 +944,7 @@ theorem zkHemV2_whir_settlement_false_statement_lt_128 {D : Type} [DecidableEq D
       obtain ⟨st', out⟩ := pair
       have hv := (zkHemV2MigrationMachine_step_eq_some _ _ _ hs).1
       simp only [settled, hs, Option.isSome_some, hv, ↓reduceIte, Nat.le_refl]
-  have hBudget := zkHemV2_deployed_succinct_qrom_soundness_128 logCells hLo hHi hQ env M
+  have hBudget := ZkHemV2Packed.zkHemV2_deployed_succinct_qrom_soundness_128 logCells hLo hHi hQ env M
     dfltRoot sc codec aux (claimOf sub) (fun _ => sub.proof.initRoot) tblOf hx hRoots A hMerkle
   exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right _ hMass) hBudget
 
@@ -1223,6 +1223,11 @@ theorem inhabited_preIronwood02_forgery :
   Qsag.ZkHemV2Migration.tooth_nullifierRegistry_register_refuses_second_nullifier
 #tooth_pair Qsag.ZkHemV2Migration.zkHemV2_r1cs_single_transcript_extract_or_qrom_128_break vs
   Qsag.ZkHemV2Migration.tooth_zkHemV2MigrationMachine_rejects_double_nullifier
+
+theorem realCurveR1csScheme_nullifier (shapeOf pubInputsOf deriveNullifier) (cred : LegacyCredential) :
+    (realCurveR1csScheme shapeOf pubInputsOf deriveNullifier).deriveNullifier cred = deriveNullifier cred := by
+  unfold realCurveR1csScheme
+  rfl
 
 theorem realCurveR1csScheme_ownsKey_iff (shapeOf pubInputsOf deriveNullifier)
     (cred : LegacyCredential) (wit : ExtractedR1csMigrationWitness) (claim) :

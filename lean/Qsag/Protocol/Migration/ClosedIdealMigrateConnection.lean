@@ -1,4 +1,6 @@
 module
+public import Qsag.Protocol.Aggregation.WhirAssignmentRecovery
+public import Qsag.Protocol.Aggregation.ZkHemV2PackedFiberCerts
 public import Qsag.Protocol.Migration.ZkHemV2Migration
 public import Qsag.Protocol.Aggregation.ZkHemV2ComposedZkAndCerts
 import Qsag.Tactic.AssuranceKit
@@ -6,6 +8,7 @@ import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag.ZkHemV2Migration
 set_option autoImplicit false
+set_option exponentiation.threshold 512
 open Qsag
 
 /-- The CLI discriminants. These classify the statement, independently of whether
@@ -95,13 +98,14 @@ private theorem projectedScalar_one (k : MigrationCurveKind) : projectedScalar k
 
 /-- Checked projection at the assignment boundary. The original private wires are
     retained so that the ideal ownership scheme checks precisely this assignment. -/
-def extractMigrationWitnessFromR1cs (shape : R1csShape) (pub priv : List Goldilocks)
+def extractMigrationWitnessFromR1cs (shape : R1csShape) (pub z : List Goldilocks)
     (indices : List Nat) (claim : Spec.MigrationClaim LegacyCredential) :
     Option ExtractedR1csMigrationWitness := do
-  let raw ← decodeScalarBits (r1csAssignment pub priv) indices
+  let priv := z.drop (pub.length + 1)
+  let raw ← decodeScalarBits z indices
   let c := claim.legacyPk
   let s := projectedScalar c.curve raw
-  if r1csSatisfied shape pub priv && decide (0 < s ∧ s < c.curve.cert.scalarOrd) &&
+  if decide (z = r1csAssignment pub priv) && r1csSatisfied shape pub priv && decide (0 < s ∧ s < c.curve.cert.scalarOrd) &&
       c.curve.cert.publicKeyMatches s c.pubKeyCoordX c.pubKeyCoordY then
     some ⟨s,priv,claim.pqDestinationPk⟩
   else none
@@ -109,11 +113,11 @@ def extractMigrationWitnessFromR1cs (shape : R1csShape) (pub priv : List Goldilo
 theorem extracted_ownsKey (sh : MigrationCurveKind → R1csShape)
     (pub : Spec.MigrationClaim LegacyCredential → List Goldilocks)
     (nf : LegacyCredential → Spec.Digest256) (claim : Spec.MigrationClaim LegacyCredential)
-    (priv : List Goldilocks) (indices : List Nat) (w : ExtractedR1csMigrationWitness)
-    (h : extractMigrationWitnessFromR1cs (sh claim.legacyPk.curve) (pub claim) priv indices claim =
+    (z : List Goldilocks) (indices : List Nat) (w : ExtractedR1csMigrationWitness)
+    (h : extractMigrationWitnessFromR1cs (sh claim.legacyPk.curve) (pub claim) z indices claim =
       some w) : (realCurveR1csScheme sh pub nf).ownsKey claim.legacyPk w claim := by
   unfold extractMigrationWitnessFromR1cs at h
-  cases he : decodeScalarBits (r1csAssignment (pub claim) priv) indices with
+  cases he : decodeScalarBits z indices with
   | none => simp [he] at h
   | some s =>
     simp only [he] at h
@@ -123,25 +127,25 @@ theorem extracted_ownsKey (sh : MigrationCurveKind → R1csShape)
       cases h
       simp only [Bool.and_eq_true, decide_eq_true_eq] at ok
       apply (realCurveR1csScheme_ownsKey_iff ..).mpr
-      exact ⟨ok.1.2.1, ok.1.2.2, ok.2, rfl, ok.1.1⟩
+      exact ⟨ok.1.2.1, ok.1.2.2, ok.2, rfl, ok.1.1.2⟩
     · cases h
 
 /-- Reject a claim tagged for a different curve before decoding its wires. -/
 def extractForStatementKind (kind : StatementKind) (shape : R1csShape)
-    (pub priv : List Goldilocks) (indices : List Nat) (claim : Spec.MigrationClaim LegacyCredential) :=
+    (pub z : List Goldilocks) (indices : List Nat) (claim : Spec.MigrationClaim LegacyCredential) :=
   if claim.legacyPk.curve = kind.keyCurve then
-    extractMigrationWitnessFromR1cs shape pub priv indices claim
+    extractMigrationWitnessFromR1cs shape pub z indices claim
   else none
 
 theorem kind_projection_owns_key (kind : StatementKind) (sh : MigrationCurveKind → R1csShape)
     (pub : Spec.MigrationClaim LegacyCredential → List Goldilocks) (nf : LegacyCredential → Spec.Digest256)
-    (claim : Spec.MigrationClaim LegacyCredential) (priv : List Goldilocks) (indices : List Nat)
+    (claim : Spec.MigrationClaim LegacyCredential) (z : List Goldilocks) (indices : List Nat)
     (w : ExtractedR1csMigrationWitness) (h : extractForStatementKind kind (sh claim.legacyPk.curve)
-      (pub claim) priv indices claim = some w) :
+      (pub claim) z indices claim = some w) :
     claim.legacyPk.curve = kind.keyCurve ∧ (realCurveR1csScheme sh pub nf).ownsKey claim.legacyPk w claim := by
   unfold extractForStatementKind at h
   split at h
-  · exact ⟨by assumption,extracted_ownsKey sh pub nf claim priv indices w h⟩
+  · exact ⟨by assumption,extracted_ownsKey sh pub nf claim z indices w h⟩
   · cases h
 
 /-- The checked projection succeeds on every certified generator. The bit
@@ -149,37 +153,49 @@ theorem kind_projection_owns_key (kind : StatementKind) (sh : MigrationCurveKind
 theorem bit_projection_generator (k : MigrationCurveKind) :
     let sh : R1csShape := ⟨16,0,1,[r1csBitRow 1]⟩
     let claim : Spec.MigrationClaim LegacyCredential := ⟨⟨k,0#256,k.cert.genX,k.cert.genY⟩,0#256,[]⟩
-    extractMigrationWitnessFromR1cs sh [] [Goldilocks.one] [1] claim =
+    extractMigrationWitnessFromR1cs sh [] (r1csAssignment [] [Goldilocks.one]) [1] claim =
       some ⟨1,[Goldilocks.one],[]⟩ := by
   intro sh claim
   have sat : r1csSatisfied sh [] [Goldilocks.one] = true := by decide +kernel
-  have bit : decodeScalarBits (r1csAssignment [] [Goldilocks.one]) [1] = some 1 := by decide +kernel
-  simp [extractMigrationWitnessFromR1cs,claim,bit,projectedScalar_one,sat,
+  simp [extractMigrationWitnessFromR1cs,r1csAssignment,decodeScalarBits,claim,projectedScalar_one,sat,
     k.cert.generator_matches,show 1 < k.cert.scalarOrd from k.cert.scalarOrd_prime.1]
 
-/-- This machine uses the assignment available to a checked decoder. Its visible
-    step is the existing settlement step. A failed decode cannot mint a receipt. -/
-def checkedAssignment_refines_idealMigrate {D : Type}
-    (sh : MigrationCurveKind → R1csShape)
-    (pub : Spec.MigrationClaim LegacyCredential → List Goldilocks)
-    (nf : LegacyCredential → Spec.Digest256) (snapshot : Spec.EnrolledSnapshot LegacyCredential)
-    (priv : ZkHemV2MigrationSubmission D → List Goldilocks)
-    (indices : ZkHemV2MigrationSubmission D → List Nat) :
-    let project := fun s : ZkHemV2MigrationSubmission D => extractMigrationWitnessFromR1cs
-      (sh s.claim.legacyPk.curve) (pub s.claim) (priv s) (indices s) s.claim
-    let witness := fun s => (project s).getD ⟨0,[],[]⟩
-    Spec.DataRefines (zkHemV2MigrationMachine (fun s => (project s).isSome) nf snapshot)
-      (Spec.idealMigrateMachine (realCurveR1csScheme sh pub nf) snapshot)
-      (fun s => some (s.claim, witness s)) id := by
-  intro project witness
-  apply zkHemV2Migration_dataRefines_idealMigrate
-  rw [ZkHemV2ExtractorSound.public_eq_1]
-  intro s accepted
-  cases he : project s with
-  | none => simp [he] at accepted
-  | some w =>
-    have he' := extracted_ownsKey sh pub nf s.claim (priv s) (indices s) w he
-    simpa only [witness, he, Option.getD_some] using he'
+/-- Openings supplied to the extractor carry a complete strided fiber and its
+    path under the public stage-zero root. The Merkle setup binds the tree nonce. -/
+def recoverCommittedAssignment {Salt D : Type} [DecidableEq D]
+    (shape : R1csShape) (st : ClosedWhir.WhirStage)
+    (setup : BitVec 256 → ClosedFs.MerkleSetup D (ZkHemV2Cert.PackedFiber Salt st.foldK))
+    (sub : ZkHemV2MigrationSubmission D)
+    (openings : List (Nat × ZkHemV2Cert.PackedFiber Salt st.foldK × List D)) :
+    Option (List Goldilocks) := do
+  guard ((ZkHemV2Cert.zkHemV2ProdSched shape.logCells).stages.head? = some st)
+  guard (1 + shape.numPublic + shape.numPriv ≤ 2^shape.logCells)
+  let fibers := openings.filterMap fun (i,v,path) =>
+    if ClosedFs.openingOk (setup sub.proof.treeNonce) (fun _ => st.logDomain)
+        (fun _ => sub.proof.initRoot) (0,i) (v,path) then some (i,List.ofFn v.z) else none
+  let cs ← WhirAssignmentRecovery.decode shape.logCells st.logDomain st.foldK fibers
+  return (List.range (1 + shape.numPublic + shape.numPriv)).map (WhirAssignmentRecovery.vertex cs)
+
+def extractCommittedMigrationWitness {Salt D : Type} [DecidableEq D]
+    (shape : R1csShape) (pub : List Goldilocks) (st : ClosedWhir.WhirStage)
+    (setup : BitVec 256 → ClosedFs.MerkleSetup D (ZkHemV2Cert.PackedFiber Salt st.foldK))
+    (sub : ZkHemV2MigrationSubmission D) (indices : List Nat)
+    (openings : List (Nat × ZkHemV2Cert.PackedFiber Salt st.foldK × List D)) :=
+  (recoverCommittedAssignment shape st setup sub openings).bind fun z =>
+    extractMigrationWitnessFromR1cs shape pub z indices sub.claim
+
+theorem committed_extraction_ownsKey {Salt D : Type} [DecidableEq D]
+    (sh : MigrationCurveKind → R1csShape) (pub : Spec.MigrationClaim LegacyCredential → List Goldilocks)
+    (nf : LegacyCredential → Spec.Digest256) (st : ClosedWhir.WhirStage)
+    (setup : BitVec 256 → ClosedFs.MerkleSetup D (ZkHemV2Cert.PackedFiber Salt st.foldK))
+    (sub : ZkHemV2MigrationSubmission D) (indices : List Nat)
+    (openings : List (Nat × ZkHemV2Cert.PackedFiber Salt st.foldK × List D))
+    (w : ExtractedR1csMigrationWitness)
+    (success : extractCommittedMigrationWitness (sh sub.claim.legacyPk.curve) (pub sub.claim)
+      st setup sub indices openings = some w) :
+    (realCurveR1csScheme sh pub nf).ownsKey sub.claim.legacyPk w sub.claim := by
+  obtain ⟨z,_,hz⟩ := Option.bind_eq_some_iff.mp success
+  exact extracted_ownsKey sh pub nf sub.claim z indices w hz
 
 /-- A nonempty satisfied bit circuit can encode scalar one while the asserted
     affine point differs from the certified generator on every curve. -/
@@ -189,23 +205,88 @@ theorem tooth_bit_rows_alone_do_not_bind_pk (k : MigrationCurveKind) :
       ⟨⟨k,0#256,(k.cert.genX + 1) % k.cert.baseP,k.cert.genY⟩,0#256,[]⟩
     r1csSatisfied shape [] [Goldilocks.one] = true ∧
       decodeScalarBits (r1csAssignment [] [Goldilocks.one]) [1] = some 1 ∧
-      extractMigrationWitnessFromR1cs shape [] [Goldilocks.one] [1] claim = none := by
+      extractMigrationWitnessFromR1cs shape [] (r1csAssignment [] [Goldilocks.one]) [1] claim = none := by
   let shape : R1csShape := ⟨16,0,1,[r1csBitRow 1]⟩
   refine ⟨shape, ?_⟩
   intro claim
   have hs : r1csSatisfied shape [] [Goldilocks.one] = true := by decide +kernel
   have hd : decodeScalarBits (r1csAssignment [] [Goldilocks.one]) [1] = some 1 := by decide +kernel
-  exact ⟨hs, hd, by simp [extractMigrationWitnessFromR1cs, hd, claim, projectedScalar_one, k.cert.generator_rejects_changed_x]⟩
+  exact ⟨hs, hd, by simp [extractMigrationWitnessFromR1cs, r1csAssignment, decodeScalarBits, claim, projectedScalar_one, k.cert.generator_rejects_changed_x]⟩
 
 #tooth_pair extracted_ownsKey vs tooth_bit_rows_alone_do_not_bind_pk
 
-/-- The exact seed budget obstructs a certificate that charges even one first-OOD
-    transition. This specializes to each deployed migration relation size. -/
-theorem first_ood_positive_charge_excludes_certificate
-    (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28) (env : ClosedWhir.WhirEnv QuinticGoldilocks) :
-    ¬ ∃ c : ClosedWhir.WhirScheduleCert env (ZkHemV2Cert.zkHemV2ProdSched n) 400,
-      0 < c.cert.bad ⟨_, (ZkHemV2Cert.deployed_first_ood_data n lo hi).1⟩ := by
-  rintro ⟨c,h⟩
-  rw [ZkHemV2Cert.deployed_cert_first_ood_zero n lo hi env c] at h
-  exact Nat.lt_irrefl _ h
+/-- On each deployed first stage there is a received word whose *actual*
+    bad-seed count under the mixed-radix decoder is nonzero and below 2^-277
+    of all seeds. The word is fixed before counting the seeds. -/
+theorem first_ood_positive_seed_mass (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28)
+    (st : ClosedWhir.WhirStage) (first : (ZkHemV2Cert.zkHemV2ProdSched n).stages.head? = some st)
+    (shift : QuinticGoldilocks) (nz : shift ≠ CommRingOps.zero) :
+    ∃ word : QuinticGoldilocks → QuinticGoldilocks,
+      let ps := gsDecodeList st.degBound st.agree (ZkHemV2.fiberRoots st.logDomain shift) word
+      let bad := qsum (2^400) fun i => if ZkHemV2Packed.gsListHasOodCollision ps
+        (ZkHemV2Packed.decodeQuintic400 i.val) then 1 else 0
+      0 < bad ∧ RatBound.lt ⟨bad,2^400,Nat.two_pow_pos _⟩ (RatBound.invPow2 277) := by
+  let env := {ZkHemV2Cert.zkHemV2QuinticEnv with chalField := fun c _ => ZkHemV2Packed.decodeQuintic400 c}
+  let a : Fin (2^400) := ⟨0,Nat.two_pow_pos _⟩
+  obtain ⟨word,P,hP,Q,hQ,ne,hit⟩ := ZkHemV2Cert.deployed_first_ood_list_collision n lo hi
+    st first shift nz env a
+  refine ⟨word,?_⟩
+  intro ps bad
+  have yes : ZkHemV2Packed.gsListHasOodCollision ps (ZkHemV2Packed.decodeQuintic400 a.val) = true :=
+    ZkHemV2Packed.gsListHasOodCollision_of_pair ps P Q hP hQ ne _ (hit 0)
+  have mem : st ∈ (ZkHemV2Packed.packedProdSched n).stages := by
+    rw [ZkHemV2Packed.packedProdSched, ZkHemV2Packed.packedProdStages_eq n lo hi]
+    rw [ZkHemV2Cert.zkHemV2ProdSched.public_eqs] at first
+    change st ∈ ZkHemV2Cert.zkHemV2ProdStages n
+    change (ZkHemV2Cert.zkHemV2ProdStages n).head? = some st at first
+    cases h : ZkHemV2Cert.zkHemV2ProdStages n with
+    | nil => simp [h] at first
+    | cons head tail =>
+      have eq : head = st := Option.some.inj (by simpa only [h, List.head?_cons] using first)
+      exact eq ▸ List.mem_cons_self
+  obtain ⟨_,_,bound,lt⟩ := ZkHemV2Packed.deployed_single_ood_gs_bad_lt_277 n lo hi st mem shift nz word
+  constructor
+  · calc
+      1 = qsum (2^400) (fun i => if i = a then 1 else 0) := (qsum_eq_indicator _ _).symm
+      _ ≤ bad := by
+        apply qsum_le_qsum
+        intro i
+        by_cases eq : i = a
+        · subst i; simp [yes]
+        · simp [eq]
+  · exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2^277) bound) lt
+
+/-- A 64-bit challenge admits a first-stage decode-list pair that collides on all
+    five derived points with probability at least 2^-64. -/
+theorem undersized_digest_ood_collision (n : Nat) (lo : 16 ≤ n) (hi : n ≤ 28)
+    (st : ClosedWhir.WhirStage) (first : (ZkHemV2Cert.zkHemV2ProdSched n).stages.head? = some st)
+    (shift : QuinticGoldilocks) (nz : shift ≠ CommRingOps.zero)
+    (env : ClosedWhir.WhirEnv QuinticGoldilocks) :
+    ∃ word : QuinticGoldilocks → QuinticGoldilocks, ∃ P ∈ gsDecodeList st.degBound st.agree (ZkHemV2.fiberRoots st.logDomain shift) word,
+      ∃ Q ∈ gsDecodeList st.degBound st.agree (ZkHemV2.fiberRoots st.logDomain shift) word, P ≠ Q ∧
+        RatBound.le (RatBound.invPow2 64) ⟨qsum (2^64) (fun i =>
+          if (List.finRange 5).all (fun j => decide (RoundPoly.evalCoeffs P.coeffs
+            (env.chalField i.val j.val) = RoundPoly.evalCoeffs Q.coeffs (env.chalField i.val j.val)))
+          then 1 else 0), 2^64, Nat.two_pow_pos _⟩ := by
+  obtain ⟨w,P,hP,Q,hQ,ne,hit⟩ := ZkHemV2Cert.deployed_first_ood_list_collision n lo hi st first
+    shift nz env ⟨0,Nat.two_pow_pos _⟩
+  refine ⟨w,P,hP,Q,hQ,ne,?_⟩
+  let bad (i : Fin (2^64)) := (List.finRange 5).all (fun j => decide
+    (RoundPoly.evalCoeffs P.coeffs (env.chalField i.val j.val) =
+      RoundPoly.evalCoeffs Q.coeffs (env.chalField i.val j.val)))
+  let a : Fin (2^64) := ⟨0,Nat.two_pow_pos _⟩
+  have yes : bad a = true := List.all_eq_true.mpr (fun j _ => decide_eq_true (hit j))
+  change 1 * 2^64 ≤ qsum (2^64) (fun i => if bad i then 1 else 0) * 2^64
+  apply Nat.mul_le_mul_right
+  calc
+    1 = qsum (2^64) (fun i => if i = a then 1 else 0) := (qsum_eq_indicator _ _).symm
+    _ ≤ _ := by
+      apply qsum_le_qsum
+      intro i
+      by_cases eq : i = a
+      · subst i; simp [yes]
+      · simp [eq]
+
+#tooth_pair first_ood_positive_seed_mass vs undersized_digest_ood_collision
+#verify_constructive committed_extraction_ownsKey
 end Qsag.ZkHemV2Migration

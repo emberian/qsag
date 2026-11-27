@@ -1,4 +1,5 @@
 module
+public import Qsag.Protocol.Migration.ClosedIdealMigrateConnection
 public import Qsag.Machine.Gf128ClmulLoopAgreement
 /-
 # Qsag.Top.Migration — End-to-End Composed Post-Quantum Ownership Migration Security
@@ -55,7 +56,7 @@ Top-level composition module (zero `import all`) connecting:
    the discrete-log relation. One joint instance is exhibited, on the toy curve:
    `secp7Mod43_dlogSettlement_complete_refinement_witness` (two enrolled keys, three submissions;
    its circuit is the lane well-formedness circuit of `MigrationExecution.honestSubmission` for
-   every statement). `bls381_dlogSettlement_refines_or_nullifierCollision` is the dichotomy over
+   every statement). `bls381_dlogSettlement_refines_or_nullifierCollision_of_groupLaws` is the dichotomy over
    BLS12-381 coordinates, conditional on a `PrimeOrderGroup` hypothesis for `bls381G1`.
 8. `zk-Hem v2` R1CS migration (`ZkHemV2Migration`): `production_curves_all_certified_prime`
    (primality of the twelve base-field and scalar-order moduli; integers only, no group-order
@@ -63,10 +64,11 @@ Top-level composition module (zero `import all`) connecting:
    `zkHemV2_r1cs_migration_trace_conservation_and_nodup` for `zkHemV2MigrationMachine` (an
    uninterpreted `verifyProof`, snapshot and nullifier checks, `NullifierRegistry.register`).
    Standing hypotheses of these two: `hCodeSound` / `ZkHemV2ExtractorSound` (the extractor's
-   output owns the key; no extractor is constructed), a `WhirScheduleCert` for
-   `ZkHemV2Cert.zkHemV2ProdSched logCells` (none is constructed for a deployed size), and the
-   Merkle collision bound `merkle400QromBound Q`. `realCurveR1csScheme` is parameterised by the
-   R1CS shape and public-input map; no compiled relation of `crates/qsag-migrate` is instantiated.
+   output owns the key), a single-seed `ZkHemV2Packed.SeededScheduleCert` (the full round-state
+   certificate is open for deployed sizes), and the Merkle collision bound `merkle400QromBound Q`.
+   `settled_committed_witness_ownership` instead authenticates the opened WHIR codeword and
+   checks the recovered R1CS assignment against the actual receipt, public inputs and curve key.
+   Its premise is successful recovery. The R1CS shape and public-input map are parameters here.
 -/
 
 public import Qsag.Spec.Primitives
@@ -89,201 +91,11 @@ namespace Qsag.Top
 
 set_option autoImplicit false
 
-/-! ## 1. Certified Curve Primality + `ZKBoo` / `RedPallas` Witness Extraction + Ideal Nullifier Safety -/
-
-/-- **Certified Primality, `ZKBoo` / `RedPallas` Extraction, and Ideal Migration Conservation
-    (`legacy_curve_primality_extraction_and_ideal_migration_chain`)**:
-    Composes `Spec.idealMigrateMachine_reachable_inv`, `PrattPrimalityCert`
-    (`secp256k1FieldPrime_isPrime`, `secp256k1OrderPrime_isPrime`, `verifyPrimeCert_sound`),
-    and `PallasAndBlsMigration` (`zkboo_two_challenge_extraction_sound`,
-    `orchard_redpallas_rerandomized_extraction_sound`, `migration_active_field_check_exact_bounds`):
-    1. Every reachable state of `idealMigrateMachine` maintains `spentNullifiers.Nodup`, settles
-       each legacy key at most once, and has `totalMigrated ≤ EnrolledSnapshot.total snapshot`,
-    2. `secp256k1` base-field and scalar-order moduli are constructively certified primes,
-    3. Distinct `ZKBoo` opened views `(e₁ ≠ e₂)` extract the unique canonical secret scalar `sk < ord`
-       satisfying `grp.smul sk = pk`, and
-    4. `RedPallas` rerandomized views extract `(ask, alpha, rsk)` satisfying `grp.add (grp.smul ask) (grp.smul alpha) = rk`! -/
-theorem legacy_curve_primality_extraction_and_ideal_migration_chain
-    {LegacyPk Witness : Type} [DecidableEq LegacyPk]
-    (scheme : Qsag.Spec.LegacyOwnershipScheme LegacyPk Witness)
-    (snapshot : Qsag.Spec.EnrolledSnapshot LegacyPk)
-    {stMig : Qsag.Spec.IdealMigrateState LegacyPk}
-    (hReach : (Qsag.Spec.idealMigrateMachine scheme snapshot).Reachable stMig)
-    {chain : List Qsag.PocklingtonStep} {targetPrime : Nat}
-    (hCert : Qsag.verifyPrimeCert chain targetPrime = true)
-    {C : Qsag.SwCurve} {G pk : Qsag.SwPoint} {ord : Nat}
-    (grp : Qsag.PrimeSubgroup C G ord)
-    (shares : Fin 3 → Nat) (e1 e2 : Fin 3) (hNe : e1 ≠ e2)
-    (hValidDlog : Qsag.ZkBooDlogCommitted grp pk shares)
-    {C_pal : Qsag.SwCurve} {G_pal rk : Qsag.SwPoint}
-    (grpPal : Qsag.PrimeSubgroup C_pal G_pal Qsag.q_pallas)
-    (askShares alphaShares : Fin 3 → Nat)
-    (hAskRange : 0 < Qsag.zkbooReconstructScalar Qsag.q_pallas (askShares 0) (askShares 1) (askShares 2) ∧
-                 Qsag.zkbooReconstructScalar Qsag.q_pallas (askShares 0) (askShares 1) (askShares 2) < Qsag.q_pallas)
-    (hAlphaRange : Qsag.zkbooReconstructScalar Qsag.q_pallas (alphaShares 0) (alphaShares 1) (alphaShares 2) < Qsag.q_pallas)
-    (hRskPos : 0 < Qsag.redpallasEffectiveScalar Qsag.q_pallas
-      (Qsag.zkbooReconstructScalar Qsag.q_pallas (askShares 0) (askShares 1) (askShares 2))
-      (Qsag.zkbooReconstructScalar Qsag.q_pallas (alphaShares 0) (alphaShares 1) (alphaShares 2)))
-    (hCurveRk : grpPal.smul (Qsag.redpallasEffectiveScalar Qsag.q_pallas
-      (Qsag.zkbooReconstructScalar Qsag.q_pallas (askShares 0) (askShares 1) (askShares 2))
-      (Qsag.zkbooReconstructScalar Qsag.q_pallas (alphaShares 0) (alphaShares 1) (alphaShares 2))) = rk) :
-    let (s0, s1, s2) := Qsag.extractThreeShares e1 e2 (Qsag.zkbooOpenedPair shares e1) (Qsag.zkbooOpenedPair shares e2)
-    let sk := Qsag.zkbooReconstructScalar ord s0 s1 s2
-    let (a0, a1, a2) := Qsag.extractThreeShares e1 e2 (Qsag.zkbooOpenedPair askShares e1) (Qsag.zkbooOpenedPair askShares e2)
-    let (r0, r1, r2) := Qsag.extractThreeShares e1 e2 (Qsag.zkbooOpenedPair alphaShares e1) (Qsag.zkbooOpenedPair alphaShares e2)
-    let ask := Qsag.zkbooReconstructScalar Qsag.q_pallas a0 a1 a2
-    let alpha := Qsag.zkbooReconstructScalar Qsag.q_pallas r0 r1 r2
-    (stMig.totalMigrated ≤ Qsag.Spec.EnrolledSnapshot.total snapshot ∧
-     stMig.spentNullifiers.Nodup ∧
-     (stMig.settledClaims.map (fun r => r.claim.legacyPk)).Nodup) ∧
-    (Qsag.Weierstrass.IsPrime 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F ∧
-     Qsag.Weierstrass.IsPrime 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141 ∧
-     Qsag.Weierstrass.IsPrime targetPrime) ∧
-    (0 < sk ∧ sk < ord ∧ grp.smul sk = pk) ∧
-    (grpPal.add (grpPal.smul ask) (grpPal.smul alpha) = rk) ∧
-    (Qsag.ActiveFieldCheckBound 35 250 Qsag.migrationSecp256k1P ∧
-     Qsag.ActiveFieldCheckBound 35 249 Qsag.p_bls381 ∧
-     Qsag.ActiveFieldCheckBound 35 248 Qsag.p_pallas) := by
-  have hInv := Qsag.Spec.idealMigrateMachine_reachable_inv scheme snapshot hReach
-  obtain ⟨hSkPos, hSkLt, hSmul, _⟩ :=
-    Qsag.zkboo_two_challenge_extraction_sound grp shares e1 e2 hNe hValidDlog
-  obtain ⟨_, _, _, _, _, hPalEq, _⟩ :=
-    Qsag.orchard_redpallas_rerandomized_extraction_sound grpPal askShares alphaShares e1 e2 hNe
-      hAskRange hAlphaRange hRskPos hCurveRk
-  obtain ⟨hSecp, _, hBlsP, _, hPalP, _, _⟩ := Qsag.migration_active_field_check_exact_bounds
-  exact ⟨⟨hInv.totalMigrated_le_enrolled, hInv.2.1, hInv.settled_legacyPk_nodup⟩,
-         ⟨Qsag.secp256k1FieldPrime_isPrime, Qsag.secp256k1OrderPrime_isPrime,
-          Qsag.verifyPrimeCert_sound hCert⟩,
-         ⟨hSkPos, hSkLt, hSmul⟩,
-         hPalEq,
-         ⟨hSecp, hBlsP, hPalP⟩⟩
-
-/-! ## 2. Unconditional 438-Repetition Sacrifice Ceremony Defect + QROM Scaling + `𝔽_{2^{128}}` Bridge -/
-
-/-- **Active 438-Repetition Sacrifice Ceremony Soundness & Canonical `Gf2Pow128` Bridge
-    (`active_migration_ceremony_qrom_and_gf2pow128_chain`)**:
-    Composes `MigrationExecution.migration_unconditional_circuit_to_sacrifice_ceremony_bound`,
-    `MigrationExecution.migration_438_zkboo_and_ceremony_qrom_soundness`, and
-    `Math.gf2Pow128_five_way_mul_agreement` (connecting `MigrationExecution.rustGf128Mul` to
-    canonical `Math.Gf2Pow128.mul` and hardware `PCLMULQDQ` / `PMULL`!). -/
-theorem active_migration_ceremony_qrom_and_gf2pow128_chain
-    (gates : List Qsag.MigrationExecution.Gate)
-    (relB : Qsag.MigrationKey256 → Bool)
-    (hCirc : Qsag.MigrationExecution.CircuitSoundForRel gates relB)
-    (batches : Qsag.MigrationWitnessBatches)
-    (hBatch : Qsag.MigrationBatchConsistent batches)
-    (hFalse : relB (Qsag.extractRepetitionWitness (batches 0) 0) = false)
-    (st : Fin 7 → Qsag.MigrationExecution.GateState) (numSuper : Fin 7 → Nat)
-    (hEval : ∀ b : Fin 7, Qsag.MigrationExecution.evalGates ⟨Qsag.MigrationExecution.witnessWires (batches b), []⟩ gates = some (st b))
-    (hOpen : ∀ b : Fin 7, Qsag.MigrationExecution.finishWithoutCheck (st b) = .accepted)
-    (hCap : ∀ b : Fin 7, (st b).pending.length ≤ 128 * numSuper b)
-    (r : Nat) (hr : r ≤ 13)
-    (otherGammas : Fin 7 → Nat → Qsag.MigrationExecution.RustGf128)
-    (p : Qsag.MigrationExecution.FullCeremonyProver r)
-    (hOwn : Qsag.MigrationExecution.FullForkStrategiesPrecedeOwnCoins p)
-    (rep : Fin 438) (others : Qsag.MigrationExecution.FullCeremonyCoins)
-    (qHash : Nat) (hqHash : qHash + 1 ≤ 2 ^ 56)
-    (a b : BitVec 128)
-    (pSrv : Fin 3) (srvView : Fin 3 → Qsag.Goldilocks)
-    (hViewZero : srvView pSrv = CommRingOps.zero) (blindInput : Qsag.Goldilocks) :
-    let fk := Qsag.MigrationExecution.repetitionFork rep
-    let lane := Qsag.MigrationExecution.repetitionLane rep
-    (relB (Qsag.migrationRepetitionWitness batches rep) = false ∧
-     ∃ qStar : Nat, qStar < numSuper fk ∧
-       Qsag.MigrationExecution.superBlockDefect (st fk).pending qStar lane ≠ 0#128 ∧
-       ((Qsag.MigrationExecution.fullFlushCoinSpace
-           Qsag.MigrationExecution.productionFoldCoins
-           Qsag.MigrationExecution.productionBaseCoins r).filter (fun gv =>
-         Qsag.MigrationExecution.fullCeremonyAccepts r st numSuper otherGammas
-           (fun b' => if b' = fk then qStar else 0) p
-           (Qsag.MigrationExecution.setFullForkCoins others fk gv))).length * 2 ^ 127 ≤
-         (Qsag.MigrationExecution.fullFlushCoinSpace
-           Qsag.MigrationExecution.productionFoldCoins
-           Qsag.MigrationExecution.productionBaseCoins r).length) ∧
-    (8 * (qHash + 1) ^ 2 * 2 ^ 438 * 2 ^ 128 ≤ 3 ^ 438 ∧
-     (qHash + 1) * 2 ^ 438 * 2 ^ 192 ≤ 3 ^ 438) ∧
-    (∃ c : Fin 3 → Qsag.Goldilocks,
-      (Qsag.sum3 c = blindInput ∧ Qsag.rss3ServerView pSrv c = srvView) ∧
-      ∀ c' : Fin 3 → Qsag.Goldilocks,
-        Qsag.sum3 c' = blindInput → Qsag.rss3ServerView pSrv c' = srvView → c' = c) ∧
-    ((Qsag.Math.Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits = Qsag.MigrationExecution.rustGf128Mul a b ∧
-     (Qsag.Math.Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits =
-       Qsag.SimdBinaryEquiv.fastRemainder (Qsag.pclmulqdqFourProduct256 a b)) := by
-  have hCer :=
-    Qsag.MigrationExecution.migration_unconditional_circuit_to_sacrifice_ceremony_bound
-      gates relB hCirc batches hBatch hFalse st numSuper hEval hOpen hCap r hr otherGammas p hOwn rep others
-  have hQrom := Qsag.MigrationExecution.migration_438_zkboo_and_ceremony_qrom_soundness qHash hqHash
-  have hToprfPriv := Qsag.rss3_client_blind_perfect_privacy pSrv srvView hViewZero blindInput
-  obtain ⟨_, hRustMul, _, hClmul, _⟩ := Qsag.Math.gf2Pow128_five_way_mul_agreement a b
-  exact ⟨hCer, ⟨hQrom.1, hQrom.2.1⟩, hToprfPriv, ⟨hRustMul, hClmul⟩⟩
-
 /-! ### Bit-check count at the `outer_mpc.rs` geometry (`BIT_CHECK_NUMERATOR = 63`)
 
 The ceremony theorem above models the `D0_BITS = 16` packing (numerator `54`). The current
 `verify_pending_bits_slice` runs seven weight stages, six ternary sumcheck rounds, eighteen
 halving rounds and the base sacrifice. -/
-
-open Qsag.MigrationExecution in
-/-- **Staged bit-check count, one instance.** If each stage ahead of the halving rounds is
-    sound with its degree (`StagesSound`, a hypothesis: the weighted embedding and the ternary
-    sumcheck of `outer_mpc.rs` are not modelled), an adaptive prover starting from a false claim
-    is accepted on at most `stagedBadCoinBound` coin vectors through the stages, `r` halving
-    rounds and the base sacrifice. At the Rust stage list (`7` stages of degree `1`, `6` of
-    degree `3`), `18` halving rounds, fold coins over `GF(2^128)` and a nonzero base coin, that
-    count is at most `63 / (2^128 - 1)` of the coin space, and `7 + 18 + 36 + 2 = 63`. -/
-theorem migration_bit_check_staged_count_numerator_63 {Cl Msg : Type}
-    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) (r : Nat)
-    (stage : Nat → Cl → Msg → RustGf128 → Cl) (embed : Cl → IpClaim) (ds : List Nat)
-    (hStages : StagesSound S stage (fun s => decide ((embed s).err ≠ 0#128)) ds)
-    (p : StagedProver Msg (FoldProver r) ds) (s : Cl) (hErr : (embed s).err ≠ 0#128) :
-    ((stagedCoinVectors S (coinVectors S Sb r) ds).filter
-      (stagedAccepts stage (fun q c coins => sacrificeAccepts r q (embed c) coins) ds p s)).length ≤
-      stagedBadCoinBound S.length (S.length ^ r * Sb.length)
-        (sacrificeBadCoinBound S.length Sb.length r) ds ∧
-    rustBitCheckStageNumerators.sum + 2 * rustBitCheckHalvingRounds + 2 = 63 ∧
-    stagedBadCoinBound (2 ^ 128) ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))
-        (sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) rustBitCheckHalvingRounds)
-        rustBitCheckStageNumerators * (2 ^ 128 - 1) ≤
-      63 * ((2 ^ 128) ^ rustBitCheckStageNumerators.length *
-        ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))) :=
-  ⟨staged_sacrifice_false_claim_accepting_coins_bound S Sb hS hSb r stage embed ds hStages p s hErr,
-    rust_bit_check_numerator_63_bound.2.1, rust_bit_check_numerator_63_bound.2.2.1⟩
-
-open Qsag.MigrationExecution in
-/-- **Unconditional concrete staged bit-check bound at `BIT_CHECK_NUMERATOR = 63`
-    (`migration_bit_check_concrete_bound_63`).**
-    Specializes `migration_bit_check_staged_count_numerator_63` to the concrete `outer_mpc.rs`
-    13-stage transition `rustBitStageStep` (`7` degree-1 weight stages + `6` degree-3 ternary
-    sumcheck rounds) and discharges `StagesSound` unconditionally via `rustBitCheckStages_sound`. -/
-theorem migration_bit_check_concrete_bound_63
-    (p : StagedProver RustBitStageMsg (FoldProver rustBitCheckHalvingRounds)
-      rustBitCheckStageNumerators)
-    (cl : RustBitStageClaim) (hErr : (rustBitStageEmbed cl).err ≠ 0#128) :
-    StagesSound productionFoldCoins rustBitStageStep
-      (fun s => decide ((rustBitStageEmbed s).err ≠ 0#128)) rustBitCheckStageNumerators ∧
-    rustBitCheckStageNumerators.sum + 2 * rustBitCheckHalvingRounds + 2 = 63 ∧
-    ((stagedCoinVectors productionFoldCoins
-        (coinVectors productionFoldCoins productionBaseCoins rustBitCheckHalvingRounds)
-        rustBitCheckStageNumerators).filter
-      (stagedAccepts rustBitStageStep
-        (fun q c coins =>
-          sacrificeAccepts rustBitCheckHalvingRounds q (rustBitStageEmbed c) coins)
-        rustBitCheckStageNumerators p cl)).length * (2 ^ 128 - 1) ≤
-      BIT_CHECK_NUMERATOR *
-        (stagedCoinVectors productionFoldCoins
-          (coinVectors productionFoldCoins productionBaseCoins rustBitCheckHalvingRounds)
-          rustBitCheckStageNumerators).length ∧
-    stagedBadCoinBound (2 ^ 128) ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))
-        (sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) rustBitCheckHalvingRounds)
-        rustBitCheckStageNumerators * (2 ^ 128 - 1) ≤
-      63 * ((2 ^ 128) ^ rustBitCheckStageNumerators.length *
-        ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))) :=
-  let hSound := rustBitCheckStages_sound productionFoldCoins productionFoldCoins_nodup
-  let hSpec := migration_bit_check_staged_count_numerator_63
-    productionFoldCoins productionBaseCoins productionFoldCoins_nodup productionBaseCoins_nodup
-    rustBitCheckHalvingRounds rustBitStageStep rustBitStageEmbed rustBitCheckStageNumerators
-    hSound p cl hErr
-  ⟨hSound, hSpec.2.1, rust_bit_check_63_concrete_accepting_coins_bound p cl hErr, hSpec.2.2⟩
 
 /-! ## 3. Destination-Bound Discrete-Log Ownership Instance of `Spec.LegacyOwnershipScheme` -/
 
@@ -1993,15 +1805,6 @@ private theorem secp7Mod43DecodePk_eq_none {bx by_ : UInt8}
     rw [← hPt, Qsag.Weierstrass.secp7Mod43_eq, h] at hOn
     cases hOn
 
-/-- `#tooth` Off-curve (`[0, 0]`) and unreduced (`[50, 7]`, `[71, 7]`) byte pairs are deterministically
-    rejected by `secp7Mod43DecodePk`. -/
-theorem tooth_secp7Mod43DecodePk_rejects_offCurve_and_unreduced :
-    secp7Mod43DecodePk [0, 0] = none ∧
-    secp7Mod43DecodePk [50, 7] = none ∧
-    secp7Mod43DecodePk [71, 7] = none :=
-  ⟨secp7Mod43DecodePk_eq_none (by decide +kernel), secp7Mod43DecodePk_eq_none (by decide +kernel),
-    secp7Mod43DecodePk_eq_none (by decide +kernel)⟩
-
 /-- Unary serialization of a 256-bit destination (toy wire format of the `secp7Mod43` instance). -/
 def unaryDestBytes (d : BitVec 256) : Spec.Bytes :=
   List.replicate d.toNat 0
@@ -2521,7 +2324,7 @@ def bls381FoldNullifier (pk : Qsag.CanonicalSwPk Qsag.bls381Curve) : Spec.Digest
     satisfies the collision-branching dichotomy, although `2^256 < p_bls381` rules out an
     injective map from the coordinate range to `Digest256`
     (`tooth_bls381_width_no_injective_bitvec256`). -/
-theorem bls381_dlogSettlement_refines_or_nullifierCollision
+theorem bls381_dlogSettlement_refines_or_nullifierCollision_of_groupLaws
     (hGrp : Qsag.bls381Curve.PrimeOrderGroup Qsag.bls381G1 Qsag.r_bls381)
     (legacyPkOf : List UInt8 → Option (Qsag.CanonicalSwPk Qsag.bls381Curve))
     (destinationBytes : BitVec 256 → Spec.Bytes)
@@ -2798,6 +2601,33 @@ theorem production_curves_all_certified_prime :
      ⟨(Qsag.ZkHemV2Migration.migrationCurveKind_all_certified_prime k).1,
       (Qsag.ZkHemV2Migration.migrationCurveKind_all_certified_prime k).2.1⟩⟩
 
+#verify_constructive production_curves_all_certified_prime
+
+/-- Successful decoding from authenticated fibers for a settled submission
+    certifies the account, entitlement, and nullifier of the actual receipt. -/
+theorem settled_committed_witness_ownership {Salt D : Type} [DecidableEq D]
+    (shape : ZkHemV2Migration.MigrationCurveKind → ZkHemV2Migration.R1csShape)
+    (pub : Spec.MigrationClaim ZkHemV2Migration.LegacyCredential → List Goldilocks)
+    (nf : ZkHemV2Migration.LegacyCredential → Spec.Digest256)
+    (snapshot : Spec.EnrolledSnapshot ZkHemV2Migration.LegacyCredential)
+    (verify : ZkHemV2Migration.ZkHemV2MigrationSubmission D → Bool)
+    (st : ClosedWhir.WhirStage)
+    (setup : BitVec 256 → ClosedFs.MerkleSetup D (ZkHemV2Cert.PackedFiber Salt st.foldK))
+    (sub : ZkHemV2Migration.ZkHemV2MigrationSubmission D) (indices : List Nat)
+    (openings : List (Nat × ZkHemV2Cert.PackedFiber Salt st.foldK × List D))
+    {before after : ZkHemV2Migration.ZkHemV2MigrateState}
+    {receipt : Spec.MigrationReceipt ZkHemV2Migration.LegacyCredential}
+    (accepted : (ZkHemV2Migration.zkHemV2MigrationMachine verify nf snapshot).step before sub =
+      some (after,receipt)) (w : ZkHemV2Migration.ExtractedR1csMigrationWitness)
+    (decoded : ZkHemV2Migration.extractCommittedMigrationWitness (shape sub.claim.legacyPk.curve)
+      (pub sub.claim) st setup sub indices openings = some w) :
+    Spec.ValidLegacyOwnership (ZkHemV2Migration.realCurveR1csScheme shape pub nf)
+      snapshot receipt.claim w receipt.amount := by
+  obtain ⟨_,hNf,_,_,_,ent,_,rfl,_⟩ :=
+    ZkHemV2Migration.zkHemV2MigrationMachine_step_eq_some verify nf snapshot accepted
+  refine ⟨ent, ?_, ZkHemV2Migration.committed_extraction_ownsKey shape pub nf st setup sub indices openings w decoded⟩
+  exact hNf.trans (ZkHemV2Migration.realCurveR1csScheme_nullifier shape pub nf _).symm
+
 /-- **Accepted `zkHemV2MigrationMachine` step: owning witness, or a statement outside the WHIR
     language whose Fiat–Shamir acceptance is below `2^-128`
     (`zkHemV2_r1cs_migration_extract_or_qrom_128_break`).**
@@ -2811,8 +2641,8 @@ theorem production_curves_all_certified_prime :
     * `hCodeSound`: language membership of the lifted statement implies `ownsKey` for
       `extract sub`. This is the knowledge-soundness content; `extract`, `claimOf` and `tblOf` are
       parameters and no extractor is constructed.
-    * `sc`: a `ClosedWhir.WhirScheduleCert` for `zkHemV2ProdSched logCells` at width `400`. None
-      is constructed for a deployed table size.
+    * `sc` bounds the verifier transitions by the seeded per-round counts. The OOD component
+      has a positive counting budget across all supported sizes.
     * In the second branch, the Merkle-root consistency premise and the collision-event bound
       `ZkHemV2Cert.merkle400QromBound Q` are premises of the implication.
     `verifyProof` is an arbitrary Boolean function: nothing relates it to `succinctFsAccept`, so
@@ -2834,7 +2664,7 @@ theorem zkHemV2_r1cs_migration_extract_or_qrom_128_break {D : Type} [DecidableEq
     (extract : Qsag.ZkHemV2Migration.StraightLineExtractor D)
     (env : Qsag.ClosedWhir.WhirEnv Qsag.QuinticGoldilocks)
     (M : Qsag.ClosedFs.MerkleSetup D Qsag.QuinticGoldilocks) (dfltRoot : D)
-    (sc : Qsag.ClosedWhir.WhirScheduleCert env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400)
+    (sc : Qsag.ZkHemV2Packed.SeededScheduleCert env logCells)
     (codec : Qsag.ClosedFs.FsCodec
       (Qsag.ClosedFs.SuccinctRoundMsg D (Qsag.ClosedWhir.WhirPub Qsag.QuinticGoldilocks))
       (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells).numRounds cardX)
@@ -2937,12 +2767,7 @@ theorem zkHemV2_r1cs_migration_trace_conservation_and_nodup {D : Type}
   Qsag.ZkHemV2Migration.zkHemV2Migration_trace_conservation_and_nodup
     shapeOf pubInputsOf deriveNullifier snapshot verifyProof extract hSound hReach
 
-#verify_constructive
-  Qsag.Top.legacy_curve_primality_extraction_and_ideal_migration_chain
-  Qsag.Top.active_migration_ceremony_qrom_and_gf2pow128_chain
-  Qsag.Top.migration_bit_check_staged_count_numerator_63
-  Qsag.Top.migration_bit_check_concrete_bound_63
-  Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar
+#verify_constructive Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar
   Qsag.Top.tooth_dlogOwnership_rejects_destination_swap
   Qsag.Top.zkboo_extracted_scalar_claims_enrolled_entitlement_or_collision
   Qsag.Top.zkboo_extracted_scalar_claims_enrolled_entitlement
@@ -2969,19 +2794,17 @@ theorem zkHemV2_r1cs_migration_trace_conservation_and_nodup {D : Type}
   Qsag.Top.dlogSettlement_schedule_complete_of_injOn
   Qsag.Top.tooth_dlogSettlement_destination_tamper_rejected
   Qsag.Top.secp7Mod43Nullifier_injective
-  Qsag.Top.tooth_secp7Mod43DecodePk_rejects_offCurve_and_unreduced
   Qsag.Top.secp7Mod43_dlogSettlement_honest_accepted
   Qsag.Top.secp7Mod43_dlogSettlement_complete_refinement_witness
   Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_extracts_collision
   Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_blocks_honest_owner
   Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_snapshot_collision
-  Qsag.Top.bls381_dlogSettlement_refines_or_nullifierCollision
+  Qsag.Top.bls381_dlogSettlement_refines_or_nullifierCollision_of_groupLaws
   Qsag.Top.bls381_compressing_nullifier_nonvacuous
   Qsag.Top.inhabited_dlogOwnership_accepted_claim
   Qsag.Top.inhabited_zkboo_extracted_scalar_claim
   Qsag.Top.inhabited_dlogSettlement_schedule_complete
   Qsag.Top.inhabited_singleChallengeZkBoo_two_transcript_extract
-  Qsag.Top.production_curves_all_certified_prime
   Qsag.Top.zkHemV2_r1cs_migration_extract_or_qrom_128_break
   Qsag.Top.zkHemV2_r1cs_migration_trace_conservation_and_nodup
 
@@ -2998,8 +2821,6 @@ theorem zkHemV2_r1cs_migration_trace_conservation_and_nodup {D : Type}
   Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision
   Qsag.Top.inhabited_singleChallengeZkBoo_two_transcript_extract
 
-#tooth_pair Qsag.Top.migration_bit_check_concrete_bound_63 vs
-  Qsag.MigrationExecution.tooth_rust_bit_check_numerator_62_too_small
 #tooth_pair Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision vs
   Qsag.Top.tooth_singleChallengeZkBoo_hides_scalar
 
@@ -3024,8 +2845,7 @@ theorem zkHemV2_r1cs_migration_trace_conservation_and_nodup {D : Type}
   Qsag.Top.tooth_rawSettlement_resubmission_other_destination_rejected
 #tooth_pair Qsag.Top.migrationToy_honest_submission_accepted vs
   Qsag.Top.tooth_migrationToy_forged_nullifier_rejected
-#tooth_pair Qsag.Top.production_curves_all_certified_prime vs
-  Qsag.tooth_cofactor8_edwards_orders_not_prime
+
 #tooth_pair Qsag.Top.zkHemV2_r1cs_migration_extract_or_qrom_128_break vs
   Qsag.ZkHemV2Migration.tooth_zkHemV2MigrationMachine_rejects_double_nullifier
 
