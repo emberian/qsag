@@ -122,7 +122,7 @@ def bls381_primeSubgroup (h : bls381Curve.PrimeOrderGroup bls381G1 r_bls381) :
     PrimeSubgroup bls381Curve bls381G1 r_bls381 :=
   PrimeSubgroup.ofPrimeOrderGroup h
 
-theorem PrimeSubgroup.smul_injective {C : SwCurve} {G : SwPoint} {ord : Nat}
+theorem PrimeSubgroup.smul_injective_of_groupLaws {C : SwCurve} {G : SwPoint} {ord : Nat}
     (grp : PrimeSubgroup C G ord) {a b : Nat} (ha : a < ord) (hb : b < ord) (hEq : grp.smul a = grp.smul b) :
     a = b := by
   have hNeLt : ∀ {u v : Nat}, u < v → v < ord → grp.smul u ≠ grp.smul v := fun {u v} huv hv heq => by
@@ -160,7 +160,7 @@ theorem PrimeSubgroup.smulCanonicalPk_injective {C : SwCurve} {G : SwPoint} {ord
     (hEq : grp.smulCanonicalPk s₁ hp₁ hl₁ = grp.smulCanonicalPk s₂ hp₂ hl₂) : s₁ = s₂ := by
   have hPt : grp.smul s₁ = grp.smul s₂ := by
     rw [← grp.smulCanonicalPk_toSwPoint s₁ hp₁ hl₁, ← grp.smulCanonicalPk_toSwPoint s₂ hp₂ hl₂, hEq]
-  exact grp.smul_injective hl₁ hl₂ hPt
+  exact grp.smul_injective_of_groupLaws hl₁ hl₂ hPt
 
 def zkbooReconstructScalar (ord s0 s1 s2 : Nat) : Nat := (s0 + s1 + s2) % ord
 
@@ -219,7 +219,7 @@ theorem zkboo_two_challenge_extraction_sound {C : SwCurve} {G pk : SwPoint} {ord
     0 < sk ∧ sk < ord ∧ grp.smul sk = pk ∧ (∀ sk' : Nat, sk' < ord → grp.smul sk' = pk → sk' = sk) := by
   rw [extractThreeShares_complete shares e1 e2 hNe]
   dsimp only [ZkBooDlogCommitted] at hValid ⊢; obtain ⟨hPos, hLt, hSmul⟩ := hValid
-  exact ⟨hPos, hLt, hSmul, fun sk' hLt' hSmul' => grp.smul_injective hLt' hLt (hSmul'.trans hSmul.symm)⟩
+  exact ⟨hPos, hLt, hSmul, fun sk' hLt' hSmul' => grp.smul_injective_of_groupLaws hLt' hLt (hSmul'.trans hSmul.symm)⟩
 
 /-- `#tooth` A single ZKBoo challenge `(s0, s1)` information-theoretically hides `sk`. -/
 theorem tooth_zkboo_single_challenge_information_theoretically_hides_witness
@@ -284,7 +284,7 @@ theorem orchard_redpallas_rerandomized_extraction_sound {C : SwCurve} {G rk : Sw
   have hHom := primeSubgroup_smul_add_mod grp hAskRange.2 hAlphaRange
   refine ⟨hAskRange.1, hAskRange.2, hAlphaRange, hRskPos, hRskLt, hHom.symm.trans hCurve, ?_⟩
   intro ask' alpha' hAsk' hAlpha' hRk'
-  exact grp.smul_injective (Nat.mod_lt _ hQPos) hRskLt
+  exact grp.smul_injective_of_groupLaws (Nat.mod_lt _ hQPos) hRskLt
     (((primeSubgroup_smul_add_mod grp hAsk' hAlpha').trans hRk').trans hCurve.symm)
 
 theorem orchard_redpallas_rk_perfect_unlinkability {ord rsk ask : Nat} (hRsk : rsk < ord) (hAsk : ask < ord) :
@@ -377,7 +377,7 @@ all four legacy curves (`secp256k1`, `Ed25519`, `Pallas`, `BLS12-381`). -/
 theorem canonical_legacy_scalar_unique {C : SwCurve} {G : SwPoint} {ord s₁ s₂ : Nat}
     (grp : PrimeSubgroup C G ord) (hs₁ : s₁ < ord) (hs₂ : s₂ < ord)
     (hPk : grp.smul s₁ = grp.smul s₂) : s₁ = s₂ :=
-  grp.smul_injective hs₁ hs₂ hPk
+  grp.smul_injective_of_groupLaws hs₁ hs₂ hPk
 
 /-- `#tooth` Every supported curve order satisfies `1 + ord < 2^256`, so omitting the canonical
 `< ord` wire guard admits distinct 256-bit bit-vectors `1 ≠ 1 + ord` with identical curve point
@@ -398,7 +398,7 @@ theorem tooth_unreduced_256bit_scalar_alias_all_four_curves
 /-! ## 6. Constructive Axiom Audit (`#verify_constructive`) -/
 
 #verify_constructive
-  Qsag.PrimeSubgroup.smul_injective
+  Qsag.PrimeSubgroup.smul_injective_of_groupLaws
   Qsag.bls381GroupLaws_of_group_facts
   Qsag.PrimeSubgroup.smulCanonicalPk_toSwPoint
   Qsag.PrimeSubgroup.smulCanonicalPk_injective

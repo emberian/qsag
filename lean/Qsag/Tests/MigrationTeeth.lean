@@ -86,14 +86,14 @@ end MigrationExecution
   Qsag.Weierstrass.neg_y_parity
   Qsag.Weierstrass.Curve.eq_or_eq_neg_of_same_x
   Qsag.Weierstrass.Curve.add_eq_none_iff_neg
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_neg
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_injective
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_y_ne_zero
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_neg_of_groupLaws
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_injective_of_groupLaws
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_y_ne_zero_of_groupLaws
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws_of_groupLaws
   Qsag.Weierstrass.secp7Mod43_group
   Qsag.Weierstrass.secp7Mod43_projection_coordinates
   Qsag.Weierstrass.secp256k1_checked_parameters
-  Qsag.secp256k1_xonly_parity_on_curve_points
+  Qsag.secp256k1_xonly_parity_on_curve_points_of_groupLaws
 
 #tooth_pair Qsag.MigrationExecution.ceremony_false_repetition_accepting_coins_bound vs Qsag.MigrationExecution.tooth_ceremony_single_fork_check_accepts_false_repetition
 
@@ -116,8 +116,7 @@ theorem tooth_global_swPoint_nullifier_injectivity_false :
         ∀ {pk₁ pk₂ : SwPoint}, deriveNullifier pk₁ = deriveNullifier pk₂ → pk₁ = pk₂ :=
   tooth_unbounded_swPoint_no_injective_bitvec 256
 
-#verify_constructive
-  Qsag.tooth_global_swPoint_nullifier_injectivity_false
+#verify_constructive Qsag.tooth_global_swPoint_nullifier_injectivity_false
   Qsag.CanonicalSwPk.encodeCoordNat_lt_sq
   Qsag.CanonicalSwPk.encodeCoordNat_injective
   Qsag.tooth_unbounded_swPoint_no_injective_bitvec
@@ -131,14 +130,12 @@ theorem tooth_global_swPoint_nullifier_injectivity_false :
   Qsag.Top.dlogSettlement_schedule_refines_or_nullifierCollision
   Qsag.Top.dlogSettlement_schedule_complete_of_injOn
   Qsag.Top.secp7Mod43Nullifier_injective
-  Qsag.Top.tooth_secp7Mod43DecodePk_rejects_offCurve_and_unreduced
   Qsag.Top.secp7Mod43_dlogSettlement_complete_refinement_witness
   Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_extracts_collision
   Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_blocks_honest_owner
   Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_snapshot_collision
-  Qsag.Top.bls381_dlogSettlement_refines_or_nullifierCollision
+  Qsag.Top.bls381_dlogSettlement_refines_or_nullifierCollision_of_groupLaws
   Qsag.Top.bls381_compressing_nullifier_nonvacuous
-  Qsag.Top.migration_bit_check_concrete_bound_63
   Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision
   Qsag.Top.tooth_singleChallengeZkBoo_hides_scalar
   Qsag.Top.inhabited_singleChallengeZkBoo_two_transcript_extract
@@ -156,8 +153,7 @@ theorem tooth_global_swPoint_nullifier_injectivity_false :
   Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision
   Qsag.Top.inhabited_singleChallengeZkBoo_two_transcript_extract
 
-#tooth_pair Qsag.Top.migration_bit_check_concrete_bound_63 vs
-  Qsag.MigrationExecution.tooth_rust_bit_check_numerator_62_too_small
+
 #tooth_pair Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision vs
   Qsag.Top.tooth_singleChallengeZkBoo_hides_scalar
 

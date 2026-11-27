@@ -513,7 +513,7 @@ namespace Curve.PrimeOrderGroup
 variable {C : Curve} {G : Point} {n : Nat}
 
 /-- `[n - s]G = -[s]G`. -/
-theorem smul_neg (h : C.PrimeOrderGroup G n) {s : Nat} (h0 : 0 < s) (hs : s < n) :
+theorem smul_neg_of_groupLaws (h : C.PrimeOrderGroup G n) {s : Nat} (h0 : 0 < s) (hs : s < n) :
     C.smul (n - s) G = C.neg (C.smul s G) := by
   have hSum : C.add (C.smul s G) (C.smul (n - s) G) = none := by
     rw [← h.smul_add, (by omega : s + (n - s) = n), h.order]
@@ -529,7 +529,7 @@ theorem smul_neg (h : C.PrimeOrderGroup G n) {s : Nat} (h0 : 0 < s) (hs : s < n)
       rw [hQe] at hQ hSum
       exact (C.add_eq_none_iff_neg hP hQ).mp hSum
 
-private theorem smul_ne_of_lt (h : C.PrimeOrderGroup G n) {a b : Nat} (hab : a < b) (hb : b < n) :
+private theorem smul_ne_of_lt_of_groupLaws (h : C.PrimeOrderGroup G n) {a b : Nat} (hab : a < b) (hb : b < n) :
     C.smul a G ≠ C.smul b G := by
   intro hEq
   have h1 : C.smul (n - a + b) G = none := by
@@ -540,26 +540,26 @@ private theorem smul_ne_of_lt (h : C.PrimeOrderGroup G n) {a b : Nat} (hab : a <
   exact h.exact (b - a) (by omega) (by omega) (h2.symm.trans h1)
 
 /-- `s ↦ [s]G` is injective on `[0, n)`. -/
-theorem smul_injective (h : C.PrimeOrderGroup G n) {a b : Nat} (ha : a < n) (hb : b < n)
+theorem smul_injective_of_groupLaws (h : C.PrimeOrderGroup G n) {a b : Nat} (ha : a < n) (hb : b < n)
     (hEq : C.smul a G = C.smul b G) : a = b := by
   rcases Nat.lt_trichotomy a b with hlt | heq | hgt
-  · exact absurd hEq (h.smul_ne_of_lt hlt hb)
+  · exact absurd hEq (h.smul_ne_of_lt_of_groupLaws hlt hb)
   · exact heq
-  · exact absurd hEq.symm (h.smul_ne_of_lt hgt ha)
+  · exact absurd hEq.symm (h.smul_ne_of_lt_of_groupLaws hgt ha)
 
 /-- No multiple `[s]G`, `0 < s < n`, has `y = 0`: such a point is its own negative, and
     `[n - s]G = [s]G` contradicts injectivity because `n` is odd. -/
-theorem smul_y_ne_zero (h : C.PrimeOrderGroup G n) {s x y : Nat} (h0 : 0 < s) (hs : s < n)
+theorem smul_y_ne_zero_of_groupLaws (h : C.PrimeOrderGroup G n) {s x y : Nat} (h0 : 0 < s) (hs : s < n)
     (hP : C.smul s G = some (x, y)) : y ≠ 0 := by
   intro hy
   subst hy
-  have hNeg := h.smul_neg h0 hs
+  have hNeg := h.smul_neg_of_groupLaws h0 hs
   rw [hP] at hNeg
   have hSelf : C.neg (some (x, 0)) = some (x, 0) := by
     show (some (x, (C.p - 0) % C.p) : Point) = some (x, 0)
     rw [Nat.sub_zero, Nat.mod_self]
   rw [hSelf, ← hP] at hNeg
-  have := h.smul_injective (by omega) hs hNeg
+  have := h.smul_injective_of_groupLaws (by omega) hs hNeg
   have := h.n_odd
   omega
 
@@ -569,7 +569,7 @@ theorem smul_y_ne_zero (h : C.PrimeOrderGroup G n) {s x y : Nat} (h0 : 0 < s) (h
        `s₂ = s₁` or `s₂ = n - s₁`;
     2. `[n - s]G = -[s]G`, and the least significant bits of the two affine
        `y`-coordinates differ. -/
-theorem xonly_parity_laws (h : C.PrimeOrderGroup G n) :
+theorem xonly_parity_laws_of_groupLaws (h : C.PrimeOrderGroup G n) :
     (∀ s1 s2, 0 < s1 → s1 < n → 0 < s2 → s2 < n →
       (Point.x (C.smul s1 G) = Point.x (C.smul s2 G) ↔ (s1 = s2 ∨ s2 = n - s1))) ∧
     (∀ s, 0 < s → s < n →
@@ -581,7 +581,7 @@ theorem xonly_parity_laws (h : C.PrimeOrderGroup G n) :
     · intro hx
       have hC1 := h.onCurve s1
       have hC2 := h.onCurve s2
-      have hNeg := h.smul_neg p1 l1
+      have hNeg := h.smul_neg_of_groupLaws p1 l1
       cases hP : C.smul s1 G with
       | none => exact absurd hP (h.exact s1 p1 l1)
       | some P =>
@@ -596,13 +596,13 @@ theorem xonly_parity_laws (h : C.PrimeOrderGroup G n) :
           rw [hP] at hC1 hNeg
           rw [hQ] at hC2
           rcases C.eq_or_eq_neg_of_same_x h.p_prime hC1 hC2 with hEq | hEq
-          · exact Or.inl (h.smul_injective l1 l2 (hP.trans (hEq.symm.trans hQ.symm)))
-          · exact Or.inr (h.smul_injective l2 (by omega) (hQ.trans (hEq.trans hNeg.symm)))
+          · exact Or.inl (h.smul_injective_of_groupLaws l1 l2 (hP.trans (hEq.symm.trans hQ.symm)))
+          · exact Or.inr (h.smul_injective_of_groupLaws l2 (by omega) (hQ.trans (hEq.trans hNeg.symm)))
     · rintro (hEq | hEq)
       · rw [hEq]
-      · rw [hEq, h.smul_neg p1 l1, C.neg_x]
+      · rw [hEq, h.smul_neg_of_groupLaws p1 l1, C.neg_x]
   · intro s p l
-    have hNeg := h.smul_neg p l
+    have hNeg := h.smul_neg_of_groupLaws p l
     refine ⟨hNeg, ?_⟩
     have hC := h.onCurve s
     cases hP : C.smul s G with
@@ -611,15 +611,15 @@ theorem xonly_parity_laws (h : C.PrimeOrderGroup G n) :
       obtain ⟨x, y⟩ := P
       rw [hP] at hC
       rw [hNeg, hP]
-      exact neg_y_parity h.p_odd (Nat.pos_of_ne_zero (h.smul_y_ne_zero p l hP)) hC.2.1
+      exact neg_y_parity h.p_odd (Nat.pos_of_ne_zero (h.smul_y_ne_zero_of_groupLaws p l hP)) hC.2.1
 
 /-- The projection whose `xOf` and `yParity` are the affine `x`-coordinate and the
     `y`-coordinate's least significant bit of the curve point `[s]G`. -/
 def projection (h : C.PrimeOrderGroup G n) : TaprootCurveProjection n (Option Nat) where
   xOf s := Point.x (C.smul s G)
   yParity s := Point.yOdd (C.smul s G)
-  sameX_iff := h.xonly_parity_laws.1
-  yParity_neg s p l := (h.xonly_parity_laws.2 s p l).2
+  sameX_iff := h.xonly_parity_laws_of_groupLaws.1
+  yParity_neg s p l := (h.xonly_parity_laws_of_groupLaws.2 s p l).2
 
 end Curve.PrimeOrderGroup
 
@@ -693,7 +693,7 @@ theorem inhabited_prime_order_curve_group :
   ⟨secp7Mod43, secp7Mod43G, 31, secp7Mod43_group⟩
 
 #verify_inhabited
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws_of_groupLaws
   Qsag.Weierstrass.inhabited_prime_order_curve_group
 
 /-- The curve-point projection on `y² = x³ + 7` over `ℤ/43`. -/
@@ -810,7 +810,7 @@ def secp256k1TaprootProjection (h : Weierstrass.Secp256k1GroupLaws) :
     one affine `x`-coordinate exactly when `s₂ = s₁` or `s₂ = n - s₁`, negating the
     scalar flips the parity of the affine `y`-coordinate, and `x` together with that
     parity determines the scalar. -/
-theorem secp256k1_xonly_parity_on_curve_points (h : Weierstrass.Secp256k1GroupLaws) :
+theorem secp256k1_xonly_parity_on_curve_points_of_groupLaws (h : Weierstrass.Secp256k1GroupLaws) :
     (∀ s1 s2 : BitVec 256,
       requireCanonicalScalar .Secp256k1 s1 = true →
       requireCanonicalScalar .Secp256k1 s2 = true →
@@ -1783,7 +1783,7 @@ theorem bls381_canonicalPks_distinct_and_381bit :
   Qsag.TaprootCurveProjection.compressed_injective
   Qsag.TaprootCurveProjection.sameX_iff_canonical
   Qsag.taproot_even_y_parity_restores_canonical_injectivity
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws_of_groupLaws
   Qsag.Weierstrass.secp7Mod43_group
   Qsag.slip0010_ed25519_clamped_canonical_nonzero
   Qsag.pallas_and_bls381_limbs_and_bit_bounds
@@ -1961,9 +1961,9 @@ end
   Qsag.Weierstrass.neg_y_parity
   Qsag.Weierstrass.Curve.eq_or_eq_neg_of_same_x
   Qsag.Weierstrass.Curve.add_eq_none_iff_neg
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_neg
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_y_ne_zero
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_neg_of_groupLaws
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_y_ne_zero_of_groupLaws
   Qsag.Weierstrass.secp7Mod43_projection_coordinates
   Qsag.Weierstrass.secp256k1_checked_parameters
-  Qsag.secp256k1_xonly_parity_on_curve_points
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_injective
+  Qsag.secp256k1_xonly_parity_on_curve_points_of_groupLaws
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_injective_of_groupLaws

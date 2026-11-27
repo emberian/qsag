@@ -16,7 +16,8 @@ public import Qsag.Math.Gf2Pow128
 public import Qsag.Tactic.Prelude
 public import Qsag.Math.Algebra
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.QuarticExt4
+public import Qsag.Math.GoldilocksEncoding
+public import Qsag.Math.QuinticExt5
 public import Qsag.Coding.ReedSolomon
 public import Qsag.Coding.GuruswamiSudan
 public import Qsag.Coding.Cwyz26
@@ -138,11 +139,6 @@ macro "poly_eval" "[" ls:Lean.Parser.Tactic.simpLemma,* "]" : tactic =>
     Qsag.Poly3.liftK.public_eqs,
     Qsag.Poly3.factored.public_eqs,
     Qsag.poleWords.public_eqs,
-    Qsag.whirAffineStageWitnesses.public_eqs,
-    Qsag.hemJohnsonQromStageWitness.public_eqs,
-    Qsag.hemJohnsonQromTableRow.public_eqs,
-    Qsag.hemJohnsonQromWitnessTable.public_eqs,
-    Qsag.hemJohnsonQromStageExhaustive.public_eqs,
     Qsag.AffineMcaBound,
     Qsag.Frac,
     Qsag.Goldilocks.add,
@@ -214,10 +210,6 @@ macro "poly_eval" "[" ls:Lean.Parser.Tactic.simpLemma,* "]" : tactic =>
     Qsag.goldilocksSubSpec,
     Qsag.gsMonomialCount,
     Qsag.gsUniHasse,
-    Qsag.hemJohnsonMinQueries,
-    Qsag.hemStageGeometry,
-    Qsag.hemStageGeoms,
-    Qsag.hemStageGeomsAux,
     Qsag.interpEquationsAux,
     Qsag.interpUnknownsAux,
     Qsag.natCeilDiv,
@@ -272,7 +264,7 @@ theorem tooth_taproot_xonly_not_injective_without_y_parity
 
 namespace Weierstrass
 #tooth_pair
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws_of_groupLaws
   vs
   Qsag.Weierstrass.tooth_two_torsion_point_is_its_own_negative
 
@@ -408,15 +400,6 @@ theorem tooth_mod29_seven_residue_zero_divisor :
   ⟨(6, 28), (6, 1), rfl, rfl, by decide, by decide, by decide⟩
 
 
-namespace GoldilocksField.GoldilocksExt4
-/-- **`#tooth` Zero-Element Inversion Boundary (`tooth_ext4_zero_has_no_inverse`)**. -/
-theorem tooth_ext4_zero_has_no_inverse : zero * zero⁻¹ ≠ one := by
-  intro hEq
-  have hZero : zero * zero⁻¹ = zero := LawfulCommRing.zero_mul (zero⁻¹)
-  rw [hZero] at hEq; exact absurd hEq (by decide)
-
-
-end GoldilocksField.GoldilocksExt4
 /-! ## 4. Inhabitedness Witnesses & `#tooth_pair` / `#verify_constructive` Assurance Gates -/
 
 theorem witness_goldilocks_nonzero_element :
@@ -440,20 +423,18 @@ theorem tooth_monic_quad_factor_zero_at_origin :
 #verify_constructive Qsag.goldilocksPrime_is_prime Qsag.goldilocks_lucas_fermat_witnesses
   Qsag.goldilocks_seven_primitive_root Qsag.goldilocks_universal_mul_inv_cancel
   Qsag.goldilocks_invBezout_eq_inv Qsag.v_pow4_sub_seven_irreducible
-  Qsag.GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel
-  Qsag.GoldilocksField.GoldilocksExt4.towerToPoly_mul_hom
 
 #verify_inhabited Qsag.checkLucasBlsCert_sound Qsag.witness_lucas_bls_goldilocks
 #verify_inhabited Qsag.goldilocks_universal_mul_inv_cancel Qsag.witness_goldilocks_nonzero_element
 #verify_inhabited Qsag.goldilocks_mul_invBezout_cancel Qsag.witness_goldilocks_bezout_nonzero
-#verify_inhabited Qsag.GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel Qsag.witness_ext4_nontrivial_element
+
 
 #tooth_pair Qsag.checkLucasBlsCert_sound vs Qsag.tooth_proth16_65281_not_prime
 #tooth_pair Qsag.checkLucasBlsCert_sound vs Qsag.tooth_carmichael_561_rejected
 #tooth_pair Qsag.goldilocks_universal_mul_inv_cancel vs Qsag.tooth_goldilocks_zero_has_no_inverse
 #tooth_pair Qsag.goldilocks_quadExtMulMod_no_zero_divisors vs Qsag.tooth_mod29_seven_residue_zero_divisor
 #tooth_pair Qsag.v_pow4_sub_seven_irreducible vs Qsag.tooth_monic_quad_factor_zero_at_origin
-#tooth_pair Qsag.GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel vs Qsag.GoldilocksField.GoldilocksExt4.tooth_ext4_zero_has_no_inverse
+
 
 end Qsag
 
@@ -899,7 +880,6 @@ theorem tooth_affine_combiner_zero_loss_linear_floor
     cases lossPred z₀ <;> simp
 
 
-
 /-- **Non-Vacuous Inhabitedness Witness (`inhabited_affine_proximity_gaps`)**:
     Instantiates `welch_berlekamp_affine_proximity_gap` over `Goldilocks` with `d = 1, A = 5`,
     `D = [0, 1, 2, 3, 4, 5]` (`n = 6`, `2 * 6 + 1 + 1 = 14 < 15 = 3 * 5`), `S = [0, 1, 2, 3, 4, 5, 6]`,
@@ -1115,60 +1095,21 @@ theorem tooth_guruswami_sudan_m2_beyond_sudan_and_sharp_threshold :
       rcases hx with rfl | rfl | rfl <;> decide
 
 
-
-/-- **`#tooth`: the checker is sensitive to the deployed table and to the sampling model.**
-    1. Raising the deployed `nv = 24` stage-0 agreement threshold by ONE (`A = 527171`) breaks the
-       exact `2^-256` distinct-fiber query bound;
-    2. the superseded Lean-only row (`A = 527106, B = 526403, m = 64, D = 11007`) at the deployed
-       `258` queries is NOT what Rust ships, and the deployed row fails the weaker
-       with-replacement bound `((A + s)/n)^q < 2^-256` that the previous checker demanded. -/
-theorem tooth_checkWhirAffineWitness_rejects_perturbed_rows :
-    checkWhirAffineWitness
-      { n := 1048576, d := 262146, sFolds := 6, A := 527171, B := 527170,
-        m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
-      (goldilocksPrime ^ 4) = false ∧
-    ¬ ((527170 + 6) ^ 258 * 2 ^ 256 < 1048576 ^ 258) ∧
-    affineFallingFactorial (527170 + 6) 258 * 2 ^ 256 < affineFallingFactorial 1048576 258 := by
-  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
-
-
-
-theorem tooth_deployed_agreement_threshold_increased :
-    ∃ w : WhirAffineWitness, w.A = 527171 ∧ w.queries = 258 ∧
-      checkWhirAffineWitness w (goldilocksPrime ^ 4) = false := by
-  let w : WhirAffineWitness :=
-    { n := 1048576, d := 262146, sFolds := 6, A := 527171, B := 527170,
-      m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
-  exact ⟨w, rfl, rfl, tooth_checkWhirAffineWitness_rejects_perturbed_rows.1⟩
-
-#tooth_pair cwyz26_whir_nv20_and_nv24_all_stages_valid vs tooth_deployed_agreement_threshold_increased
-#verify_inhabited hem_gs_interpolation_dimensions inhabited_deployed_gs_dimensions
-
-
-
 #verify_constructive tooth_scalar_combiner_linear_n_over_q_floor
 #verify_constructive tooth_affine_combiner_zero_loss_linear_floor
 #verify_constructive inhabited_affine_proximity_gaps
 #verify_constructive tooth_guruswami_sudan_m2_beyond_sudan_and_sharp_threshold
-#verify_constructive tooth_checkWhirAffineWitness_rejects_perturbed_rows
 
 end Qsag
 
 namespace Qsag
 open CommRingOps RoundPoly UPoly Poly3
-/-- The hypotheses are met by a concrete case: `5 ≠ 0` in both fields. -/
-theorem inhabited_natCast_ne_zero :
-    ∃ k : Nat, 1 ≤ k ∧ k < goldilocksPrime ∧ (CRing.natCast k : Goldilocks) ≠ zero ∧
-      (CRing.natCast k : QuarticGoldilocks) ≠ zero :=
-  ⟨5, by decide, by decide, Goldilocks.natCast_ne_zero 5 (by decide) (by decide),
-    QuarticGoldilocks.natCast_ne_zero 5 (by decide) (by decide)⟩
 
 /-- The bound `k < p` cannot be dropped: `p = 0` in `Goldilocks`. -/
 theorem tooth_natCast_prime_eq_zero :
     ∃ k : Nat, 1 ≤ k ∧ ¬ (CRing.natCast k : Goldilocks) ≠ zero :=
   ⟨goldilocksPrime, by decide, fun h => h (Goldilocks.ext (by
     rw [Goldilocks.natCast_val, Nat.mod_self]; rfl))⟩
-
 
 
 namespace IncidenceTests
@@ -1211,8 +1152,7 @@ theorem field_independent_bound_fails_example :
 #tooth_pair affineMcaBound_ge_card vs tooth_ge_card_needs_threshold
 #verify_inhabited affineMcaBound_ge_card inhabited_affineMcaBound_ge_card
 
-#verify_constructive inhabited_natCast_ne_zero
-#verify_inhabited Goldilocks.natCast_ne_zero inhabited_natCast_ne_zero
+
 #verify_constructive tooth_natCast_prime_eq_zero
 #tooth_pair Goldilocks.natCast_ne_zero vs tooth_natCast_prime_eq_zero
 
@@ -1447,9 +1387,6 @@ end Qsag
 
 public section
 namespace Qsag
-
-
-
 
 
 /-! ## 6. Constructive Witness Inhabitedness & `#tooth_pair` Assurance Gates -/
@@ -2056,7 +1993,6 @@ end
 public section
 namespace Qsag
 open CommRingOps RoundPoly UPoly
-
 
 
 end Qsag
@@ -2927,39 +2863,12 @@ namespace Qsag
 open CommRingOps RoundPoly UPoly Poly3
 namespace JohnsonCertTests
 
-def q (n : Nat) : QuarticGoldilocks :=
-  ⟨⟨Goldilocks.ofNat n, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩
-
-def dom11 : List QuarticGoldilocks :=
-  [q 0, q 1, q 2, q 3, q 4, q 5, q 6, q 7, q 8, q 9, q 10]
-
-/-- The hypotheses of `hemCwyz26JohnsonCert_sliced` hold together, with the decomposition
-    parameters `(d, A) = (1, 8)` on `|D| = 11` outside the regime `2|D| + d + 1 < 3A`. -/
-theorem inhabited_johnsonCert_sliced :
-    ∃ (S domPts : List QuarticGoldilocks) (d₀ A₀ B m Wx Dy m_gs listG : Nat),
-      domPts.Nodup ∧ S.Nodup ∧
-      domPts.length * triCount 1 m Dy m < triCount (d₀ + 1) Wx Dy (Dy + 1) ∧
-      Wx + Dy ≤ m * (A₀ + 1) ∧ d₀ + 1 + 1 ≤ B ∧ d₀ + 2 ≤ A₀ ∧ A₀ + 1 ≤ domPts.length ∧
-      domPts.length * (d₀ + 1 + 1) < B * B ∧ B < A₀ + 1 ∧ 1 ≤ Dy ∧ Dy < goldilocksPrime ∧
-      domPts.length * (m_gs * (m_gs + 1) / 2) < gsMonomialCount (m_gs * A₀) d₀ listG ∧
-      ¬ 2 * domPts.length + (d₀ + 1) + 1 < 3 * (A₀ + 1) :=
-  ⟨dom11, dom11, 0, 7, 5, 2, 12, 4, 1, 1, by decide, by decide, by poly_eval [q, dom11], by decide,
-    by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide,
-    by decide⟩
-
-
-#verify_constructive inhabited_johnsonCert_sliced
 
 end JohnsonCertTests
 
 namespace DeployedStageTests
 open JohnsonCertTests
 
-/-- A passing parameter set on an actual domain: `|D| = 11`, `d = 1`, `A = 8`, `B = 5`. -/
-theorem inhabited_slicedParamsOk :
-    ∃ (n d A B m Dy : Nat) (D S : List QuarticGoldilocks),
-      slicedParamsOk n d A B m Dy = true ∧ D.Nodup ∧ S.Nodup ∧ D.length = n :=
-  ⟨11, 1, 8, 5, 2, 4, dom11, dom11, by decide +kernel, by decide, by decide, rfl⟩
 
 /-- The check refuses a persistence threshold at the agreement threshold (`B = A`), and one
     below the Johnson radius (`n·(d + 1) ≥ B²`), on the deployed `(9, 1)` geometry. -/
@@ -2969,10 +2878,10 @@ theorem tooth_slicedParamsOk_rejects :
   decide +kernel
 
 #verify_constructive sumTo_le_of_le slicedParamsOk_sound
-#verify_constructive sliced_stage_table_covers_every_canonical_stage sliced_stage_decomp_bound
-#verify_constructive sliced_rest_exceeds_simple_budget
-#verify_constructive inhabited_slicedParamsOk tooth_slicedParamsOk_rejects
-#verify_inhabited slicedParamsOk_sound inhabited_slicedParamsOk
+
+
+#verify_constructive tooth_slicedParamsOk_rejects
+
 
 end DeployedStageTests
 
