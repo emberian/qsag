@@ -951,7 +951,7 @@ def authenticated_belt.VerifiedBeltQuorumGuard.new_validated
       ok (core.result.Result.Err (authenticated_belt.BeltAuthError.Core e))
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::ack_count]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 277:4-279:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 257:4-259:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.impl.ack_count
   (self : pants_and_quorum_guards.BeltQuorumCore) : Result Std.U32 := do
@@ -986,7 +986,7 @@ def authenticated_belt.VerifiedBeltQuorumGuard.n
   pants_and_quorum_guards.BeltQuorumCore.impl.n self.inner
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::q]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 237:4-239:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 227:4-229:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.impl.q
   (self : pants_and_quorum_guards.BeltQuorumCore) : Result Std.U32 := do
@@ -1000,7 +1000,7 @@ def authenticated_belt.VerifiedBeltQuorumGuard.q
   pants_and_quorum_guards.BeltQuorumCore.impl.q self.inner
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::next_epoch]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 247:4-249:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 232:4-234:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.impl.next_epoch
   (self : pants_and_quorum_guards.BeltQuorumCore) : Result Std.U64 := do
@@ -1014,7 +1014,7 @@ def authenticated_belt.VerifiedBeltQuorumGuard.next_epoch
   pants_and_quorum_guards.BeltQuorumCore.impl.next_epoch self.inner
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::phase]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 257:4-259:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 237:4-239:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.impl.phase
   (self : pants_and_quorum_guards.BeltQuorumCore) :
@@ -1032,7 +1032,7 @@ def authenticated_belt.VerifiedBeltQuorumGuard.phase
   pants_and_quorum_guards.BeltQuorumCore.impl.phase self.inner
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::is_poisoned]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 282:4-284:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 262:4-264:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.is_poisoned
   (self : pants_and_quorum_guards.BeltQuorumCore) : Result Bool := do
@@ -1055,7 +1055,7 @@ def authenticated_belt.VerifiedBeltQuorumGuard.impl.guard_key_commit
   ok self.guard_key_commit
 
 /-- [qsag_verified::tower::diff_bytes8]:
-    Source: 'src/tower.rs', lines 74:0-79:1 -/
+    Source: 'src/tower.rs', lines 16:0-21:1 -/
 def tower.diff_bytes8
   (a : Array Std.U8 32#usize) (b : Array Std.U8 32#usize) (base : Std.Usize) :
   Result Std.U8
@@ -1100,7 +1100,7 @@ def tower.diff_bytes8
   ok (i27 ||| i36)
 
 /-- [qsag_verified::tower::ct_eq_bytes32]:
-    Source: 'src/tower.rs', lines 83:0-87:1
+    Source: 'src/tower.rs', lines 25:0-29:1
     Visibility: public -/
 def tower.ct_eq_bytes32
   (a : Array Std.U8 32#usize) (b : Array Std.U8 32#usize) : Result Bool := do
@@ -1129,7 +1129,7 @@ def pants_and_quorum_guards.poison_belt_guard
     }
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::propose_or_retry_epoch]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 289:4-356:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 269:4-336:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
   (self : pants_and_quorum_guards.BeltQuorumCore) (proposed_epoch : Std.U64)
@@ -1357,14 +1357,14 @@ def pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
           pants_and_quorum_guards.PantsGuardError.InvalidBeltQuorumConfig)
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::bound_epoch]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 267:4-269:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 247:4-249:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch
   (self : pants_and_quorum_guards.BeltQuorumCore) : Result Std.U64 := do
   ok self.bound_epoch
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::has_bound_epoch]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 262:4-264:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 242:4-244:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch
   (self : pants_and_quorum_guards.BeltQuorumCore) : Result Bool := do
@@ -1426,7 +1426,7 @@ def authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch
       authenticated_belt.BeltAuthError.InvalidWalReceipt)
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::record_custodian_ack]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 360:4-415:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 340:4-395:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
   (self : pants_and_quorum_guards.BeltQuorumCore) (ack_epoch : Std.U64)
@@ -1535,7 +1535,7 @@ def pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
           pants_and_quorum_guards.PantsGuardError.InvalidBeltQuorumConfig)
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::bound_msg_tag]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 272:4-274:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 252:4-254:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag
   (self : pants_and_quorum_guards.BeltQuorumCore) :
@@ -1651,7 +1651,7 @@ def authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack
           authenticated_belt.BeltAuthError.InvalidCustodianTag)
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::authorize_shares]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 419:4-485:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 399:4-465:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.authorize_shares
   (self : pants_and_quorum_guards.BeltQuorumCore) (req_epoch : Std.U64)
@@ -2963,18 +2963,8 @@ def cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share
         ok (mdrg, core.result.Result.Err
           cred_and_hd_guards.CredHdGuardError.SessionIdMismatch)
 
-/-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::abort_in_place]:
-    Source: 'src/cred_and_hd_guards.rs', lines 253:4-257:5
-    Visibility: public -/
-def cred_and_hd_guards.MlDsaReleaseGate.abort_in_place
-  (self : cred_and_hd_guards.MlDsaReleaseGate) :
-  Result cred_and_hd_guards.MlDsaReleaseGate
-  := do
-  let a := Array.repeat 32#usize 0#u8
-  ok { self with z_share_masked := a, released := false, aborted := true }
-
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::try_release_z_share_into]:
-    Source: 'src/cred_and_hd_guards.rs', lines 218:4-249:5
+    Source: 'src/cred_and_hd_guards.rs', lines 218:4-245:5
     Visibility: public -/
 def cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into
   (self : cred_and_hd_guards.MlDsaReleaseGate)
@@ -2983,51 +2973,33 @@ def cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into
   Result ((core.result.Result Unit cred_and_hd_guards.CredHdGuardError) ×
     cred_and_hd_guards.MlDsaReleaseGate × (Array Std.U8 32#usize))
   := do
-  let refusal ←
-    if self.aborted
-    then ok (some cred_and_hd_guards.CredHdGuardError.GateAbortedOrReleased)
-    else
-      if self.released
-      then ok (some cred_and_hd_guards.CredHdGuardError.GateAbortedOrReleased)
-      else
-        do
-        let b ← tower.ct_eq_bytes32 self.session_id checks.req_session_id
-        if b
-        then
-          if self.attempt != checks.req_attempt
-          then ok (some cred_and_hd_guards.CredHdGuardError.AttemptMismatch)
-          else
-            if checks.z_norm_ok
-            then
-              if checks.r0_norm_ok
-              then
-                if checks.w1_match
-                then
-                  if checks.u_com_bound
-                  then ok none
-                  else
-                    ok (some
-                      cred_and_hd_guards.CredHdGuardError.RejectionSamplingBarrierFailed)
-                else
-                  ok (some
-                    cred_and_hd_guards.CredHdGuardError.RejectionSamplingBarrierFailed)
-              else
-                ok (some
-                  cred_and_hd_guards.CredHdGuardError.RejectionSamplingBarrierFailed)
-            else
-              ok (some
-                cred_and_hd_guards.CredHdGuardError.RejectionSamplingBarrierFailed)
-        else ok (some cred_and_hd_guards.CredHdGuardError.SessionIdMismatch)
-  match refusal with
-  | none =>
-    let a := Array.repeat 32#usize 0#u8
-    ok (core.result.Result.Ok (),
-      { self with z_share_masked := a, released := true, aborted := false },
-      self.z_share_masked)
-  | some error =>
+  let i ← cred_and_hd_guards.MlDsaReleaseGate.impl.attempt self
+  let b ← cred_and_hd_guards.MlDsaReleaseGate.impl.released self
+  let b1 ← cred_and_hd_guards.MlDsaReleaseGate.impl.aborted self
+  let a := Array.repeat 32#usize 0#u8
+  let (next, result) ←
+    cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share
+      {
+        self
+          with
+          attempt := i, z_share_masked := a, released := b, aborted := b1
+      } checks
+  match result with
+  | core.result.Result.Ok _ =>
+    ok (core.result.Result.Ok (), next, self.z_share_masked)
+  | core.result.Result.Err error =>
     let out1 := Array.repeat 32#usize 0#u8
-    let self1 ← cred_and_hd_guards.MlDsaReleaseGate.abort_in_place self
-    ok (core.result.Result.Err error, self1, out1)
+    ok (core.result.Result.Err error, next, out1)
+
+/-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::abort_in_place]:
+    Source: 'src/cred_and_hd_guards.rs', lines 249:4-253:5
+    Visibility: public -/
+def cred_and_hd_guards.MlDsaReleaseGate.abort_in_place
+  (self : cred_and_hd_guards.MlDsaReleaseGate) :
+  Result cred_and_hd_guards.MlDsaReleaseGate
+  := do
+  let a := Array.repeat 32#usize 0#u8
+  ok { self with z_share_masked := a, released := false, aborted := true }
 
 /-- [qsag_verified::goldilocks::GOLDILOCKS_PRIME]
     Source: 'src/goldilocks.rs', lines 11:0-11:56
@@ -3036,7 +3008,7 @@ def cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into
 def goldilocks.GOLDILOCKS_PRIME : Std.U64 := 18446744069414584321#u64
 
 /-- [qsag_verified::cred_and_hd_guards::toprf_majority_of_3_goldilocks]:
-    Source: 'src/cred_and_hd_guards.rs', lines 267:0-301:1
+    Source: 'src/cred_and_hd_guards.rs', lines 263:0-297:1
     Visibility: public -/
 def cred_and_hd_guards.toprf_majority_of_3_goldilocks
   (s0 : Std.U64) (s1 : Std.U64) (s2 : Std.U64) :
@@ -3099,7 +3071,7 @@ def cred_and_hd_guards.toprf_majority_of_3_goldilocks
            else ok none
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::clone::Clone for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}::clone]:
-    Source: 'src/cred_and_hd_guards.rs', lines 304:9-304:14
+    Source: 'src/cred_and_hd_guards.rs', lines 300:9-300:14
     Visibility: public -/
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCloneClone.clone
   (self : cred_and_hd_guards.HdZeroTestPhase) :
@@ -3108,7 +3080,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::clone::Clone for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 304:9-304:14 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 300:9-300:14 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCloneClone : core.clone.Clone
   cred_and_hd_guards.HdZeroTestPhase := {
@@ -3116,7 +3088,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::marker::Copy for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 304:16-304:20 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 300:16-300:20 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreMarkerCopy : core.marker.Copy
   cred_and_hd_guards.HdZeroTestPhase := {
@@ -3124,7 +3096,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::fmt::Debug for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}::fmt]:
-    Source: 'src/cred_and_hd_guards.rs', lines 304:22-304:27
+    Source: 'src/cred_and_hd_guards.rs', lines 300:22-300:27
     Visibility: public -/
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreFmtDebug.fmt
   (self : cred_and_hd_guards.HdZeroTestPhase) (f : core.fmt.Formatter) :
@@ -3143,7 +3115,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreFmtDebug.fmt
     core.fmt.Formatter.write_str f (toStr "FamilyQuarantined")
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::fmt::Debug for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 304:22-304:27 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 300:22-300:27 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreFmtDebug : core.fmt.Debug
   cred_and_hd_guards.HdZeroTestPhase := {
@@ -3151,14 +3123,14 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::marker::StructuralPartialEq for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 304:29-304:38 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 300:29-300:38 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq cred_and_hd_guards.HdZeroTestPhase := {
 }
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::cmp::PartialEq<qsag_verified::cred_and_hd_guards::HdZeroTestPhase> for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}::eq]:
-    Source: 'src/cred_and_hd_guards.rs', lines 304:29-304:38
+    Source: 'src/cred_and_hd_guards.rs', lines 300:29-300:38
     Visibility: public -/
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpPartialEqHdZeroTestPhase.eq
   (self : cred_and_hd_guards.HdZeroTestPhase)
@@ -3170,7 +3142,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpPartialEqHdZeroTestPhase.eq
   ok (self1 = other1)
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::cmp::PartialEq<qsag_verified::cred_and_hd_guards::HdZeroTestPhase> for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 304:29-304:38 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 300:29-300:38 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpPartialEqHdZeroTestPhase :
   core.cmp.PartialEq cred_and_hd_guards.HdZeroTestPhase
@@ -3180,7 +3152,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpPartialEqHdZeroTestPhase :
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::cmp::Eq for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 304:40-304:42 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 300:40-300:42 -/
 @[reducible]
 impl_def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpEq : core.cmp.Eq
   cred_and_hd_guards.HdZeroTestPhase := {
@@ -3191,7 +3163,7 @@ impl_def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::cred_and_hd_guards::quarantine_hd_family]:
-    Source: 'src/cred_and_hd_guards.rs', lines 326:0-339:1 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 322:0-335:1 -/
 def cred_and_hd_guards.quarantine_hd_family
   (session_id : Array Std.U8 32#usize)
   (frozen_peer_commitment : Array Std.U8 32#usize) (modulus_q : Std.U32) :
@@ -3208,7 +3180,7 @@ def cred_and_hd_guards.quarantine_hd_family
     }
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::session_id]:
-    Source: 'src/cred_and_hd_guards.rs', lines 343:4-345:5
+    Source: 'src/cred_and_hd_guards.rs', lines 339:4-341:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.impl.session_id
   (self : cred_and_hd_guards.HdCommittedZeroTest) :
@@ -3217,7 +3189,7 @@ def cred_and_hd_guards.HdCommittedZeroTest.impl.session_id
   ok self.session_id
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::phase]:
-    Source: 'src/cred_and_hd_guards.rs', lines 348:4-350:5
+    Source: 'src/cred_and_hd_guards.rs', lines 344:4-346:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.impl.phase
   (self : cred_and_hd_guards.HdCommittedZeroTest) :
@@ -3225,28 +3197,30 @@ def cred_and_hd_guards.HdCommittedZeroTest.impl.phase
   := do
   ok self.phase
 
-/-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::frozen_peer_commitment]:
-    Source: 'src/cred_and_hd_guards.rs', lines 353:4-355:5
-    Visibility: public -/
-def cred_and_hd_guards.HdCommittedZeroTest.impl.frozen_peer_commitment
-  (self : cred_and_hd_guards.HdCommittedZeroTest) :
-  Result (Array Std.U8 32#usize)
-  := do
-  ok self.frozen_peer_commitment
-
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::modulus_q]:
-    Source: 'src/cred_and_hd_guards.rs', lines 358:4-360:5
+    Source: 'src/cred_and_hd_guards.rs', lines 349:4-351:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.impl.modulus_q
   (self : cred_and_hd_guards.HdCommittedZeroTest) : Result Std.U32 := do
   ok self.modulus_q
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::family_quarantined]:
-    Source: 'src/cred_and_hd_guards.rs', lines 363:4-365:5
+    Source: 'src/cred_and_hd_guards.rs', lines 354:4-356:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.impl.family_quarantined
   (self : cred_and_hd_guards.HdCommittedZeroTest) : Result Bool := do
   ok self.family_quarantined
+
+/-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::quarantine]:
+    Source: 'src/cred_and_hd_guards.rs', lines 359:4-365:5
+    Visibility: public -/
+def cred_and_hd_guards.HdCommittedZeroTest.quarantine
+  (self : cred_and_hd_guards.HdCommittedZeroTest) :
+  Result cred_and_hd_guards.HdCommittedZeroTest
+  := do
+  let a ← cred_and_hd_guards.HdCommittedZeroTest.impl.session_id self
+  cred_and_hd_guards.quarantine_hd_family a self.frozen_peer_commitment
+    self.modulus_q
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::new_awaiting_peer_commit]:
     Source: 'src/cred_and_hd_guards.rs', lines 370:4-387:5
@@ -4286,506 +4260,6 @@ def fips205.tsw_check_target_sum
   if i != ell1
   then ok false
   else fips205.tsw_check_target_sum_loop w target digits 0#u64 0#usize
-
-/-- [qsag_verified::fts_spn_guard::FTS_SPN_REQUIRED_ROUNDS]
-    Source: 'src/fts_spn_guard.rs', lines 13:0-13:43
-    Visibility: public -/
-@[global_simps, irreducible]
-def fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS : Std.U8 := 48#u8
-
-/-- [qsag_verified::fts_spn_guard::WOTS_CS_BASE_W]
-    Source: 'src/fts_spn_guard.rs', lines 16:0-16:33
-    Visibility: public -/
-@[global_simps, irreducible] def fts_spn_guard.WOTS_CS_BASE_W : Std.U8 := 5#u8
-
-/-- [qsag_verified::fts_spn_guard::WOTS_CS_CHAINS]
-    Source: 'src/fts_spn_guard.rs', lines 19:0-19:37
-    Visibility: public -/
-@[global_simps, irreducible]
-def fts_spn_guard.WOTS_CS_CHAINS : Std.Usize := 68#usize
-
-/-- [qsag_verified::fts_spn_guard::WOTS_CS_TARGET_SUM]
-    Source: 'src/fts_spn_guard.rs', lines 22:0-22:40
-    Visibility: public -/
-@[global_simps, irreducible]
-def fts_spn_guard.WOTS_CS_TARGET_SUM : Std.U64 := 136#u64
-
-/-- [qsag_verified::fts_spn_guard::{impl core::clone::Clone for qsag_verified::fts_spn_guard::FtsGuardError}::clone]:
-    Source: 'src/fts_spn_guard.rs', lines 25:9-25:14
-    Visibility: public -/
-def fts_spn_guard.FtsGuardError.Insts.CoreCloneClone.clone
-  (self : fts_spn_guard.FtsGuardError) :
-  Result fts_spn_guard.FtsGuardError
-  := do
-  ok self
-
-/-- Trait implementation: [qsag_verified::fts_spn_guard::{impl core::clone::Clone for qsag_verified::fts_spn_guard::FtsGuardError}]
-    Source: 'src/fts_spn_guard.rs', lines 25:9-25:14 -/
-@[reducible]
-def fts_spn_guard.FtsGuardError.Insts.CoreCloneClone : core.clone.Clone
-  fts_spn_guard.FtsGuardError := {
-  clone := fts_spn_guard.FtsGuardError.Insts.CoreCloneClone.clone
-}
-
-/-- Trait implementation: [qsag_verified::fts_spn_guard::{impl core::marker::Copy for qsag_verified::fts_spn_guard::FtsGuardError}]
-    Source: 'src/fts_spn_guard.rs', lines 25:16-25:20 -/
-@[reducible]
-def fts_spn_guard.FtsGuardError.Insts.CoreMarkerCopy : core.marker.Copy
-  fts_spn_guard.FtsGuardError := {
-  cloneInst := fts_spn_guard.FtsGuardError.Insts.CoreCloneClone
-}
-
-/-- [qsag_verified::fts_spn_guard::{impl core::fmt::Debug for qsag_verified::fts_spn_guard::FtsGuardError}::fmt]:
-    Source: 'src/fts_spn_guard.rs', lines 25:22-25:27
-    Visibility: public -/
-def fts_spn_guard.FtsGuardError.Insts.CoreFmtDebug.fmt
-  (self : fts_spn_guard.FtsGuardError) (f : core.fmt.Formatter) :
-  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
-  := do
-  match self with
-  | fts_spn_guard.FtsGuardError.GuardPoisoned =>
-    core.fmt.Formatter.write_str f (toStr "GuardPoisoned")
-  | fts_spn_guard.FtsGuardError.KeyBindingMismatch =>
-    core.fmt.Formatter.write_str f (toStr "KeyBindingMismatch")
-  | fts_spn_guard.FtsGuardError.EpochMismatch =>
-    core.fmt.Formatter.write_str f (toStr "EpochMismatch")
-  | fts_spn_guard.FtsGuardError.EpochOutOfBounds =>
-    core.fmt.Formatter.write_str f (toStr "EpochOutOfBounds")
-  | fts_spn_guard.FtsGuardError.EpochAlreadyUsed =>
-    core.fmt.Formatter.write_str f (toStr "EpochAlreadyUsed")
-  | fts_spn_guard.FtsGuardError.SessionQuarantined =>
-    core.fmt.Formatter.write_str f (toStr "SessionQuarantined")
-  | fts_spn_guard.FtsGuardError.SessionIdMismatch =>
-    core.fmt.Formatter.write_str f (toStr "SessionIdMismatch")
-  | fts_spn_guard.FtsGuardError.IncompleteSpnRounds =>
-    core.fmt.Formatter.write_str f (toStr "IncompleteSpnRounds")
-  | fts_spn_guard.FtsGuardError.DuplicateMacCheck =>
-    core.fmt.Formatter.write_str f (toStr "DuplicateMacCheck")
-  | fts_spn_guard.FtsGuardError.IntermediateMacQuarantined =>
-    core.fmt.Formatter.write_str f (toStr "IntermediateMacQuarantined")
-  | fts_spn_guard.FtsGuardError.IntermediateMacNotVerified =>
-    core.fmt.Formatter.write_str f (toStr "IntermediateMacNotVerified")
-  | fts_spn_guard.FtsGuardError.OutputAlreadyReleased =>
-    core.fmt.Formatter.write_str f (toStr "OutputAlreadyReleased")
-  | fts_spn_guard.FtsGuardError.InvalidWotsConstantSum =>
-    core.fmt.Formatter.write_str f (toStr "InvalidWotsConstantSum")
-
-/-- Trait implementation: [qsag_verified::fts_spn_guard::{impl core::fmt::Debug for qsag_verified::fts_spn_guard::FtsGuardError}]
-    Source: 'src/fts_spn_guard.rs', lines 25:22-25:27 -/
-@[reducible]
-def fts_spn_guard.FtsGuardError.Insts.CoreFmtDebug : core.fmt.Debug
-  fts_spn_guard.FtsGuardError := {
-  fmt := fts_spn_guard.FtsGuardError.Insts.CoreFmtDebug.fmt
-}
-
-/-- Trait implementation: [qsag_verified::fts_spn_guard::{impl core::marker::StructuralPartialEq for qsag_verified::fts_spn_guard::FtsGuardError}]
-    Source: 'src/fts_spn_guard.rs', lines 25:29-25:38 -/
-@[reducible]
-def fts_spn_guard.FtsGuardError.Insts.CoreMarkerStructuralPartialEq :
-  core.marker.StructuralPartialEq fts_spn_guard.FtsGuardError := {
-}
-
-/-- [qsag_verified::fts_spn_guard::{impl core::cmp::PartialEq<qsag_verified::fts_spn_guard::FtsGuardError> for qsag_verified::fts_spn_guard::FtsGuardError}::eq]:
-    Source: 'src/fts_spn_guard.rs', lines 25:29-25:38
-    Visibility: public -/
-def fts_spn_guard.FtsGuardError.Insts.CoreCmpPartialEqFtsGuardError.eq
-  (self : fts_spn_guard.FtsGuardError) (other : fts_spn_guard.FtsGuardError) :
-  Result Bool
-  := do
-  let self1 := read_discriminant self
-  let other1 := read_discriminant other
-  ok (self1 = other1)
-
-/-- Trait implementation: [qsag_verified::fts_spn_guard::{impl core::cmp::PartialEq<qsag_verified::fts_spn_guard::FtsGuardError> for qsag_verified::fts_spn_guard::FtsGuardError}]
-    Source: 'src/fts_spn_guard.rs', lines 25:29-25:38 -/
-@[reducible]
-def fts_spn_guard.FtsGuardError.Insts.CoreCmpPartialEqFtsGuardError :
-  core.cmp.PartialEq fts_spn_guard.FtsGuardError fts_spn_guard.FtsGuardError
-  := {
-  eq := fts_spn_guard.FtsGuardError.Insts.CoreCmpPartialEqFtsGuardError.eq
-}
-
-/-- Trait implementation: [qsag_verified::fts_spn_guard::{impl core::cmp::Eq for qsag_verified::fts_spn_guard::FtsGuardError}]
-    Source: 'src/fts_spn_guard.rs', lines 25:40-25:42 -/
-@[reducible]
-impl_def fts_spn_guard.FtsGuardError.Insts.CoreCmpEq : core.cmp.Eq
-  fts_spn_guard.FtsGuardError := {
-  partialEqInst :=
-    fts_spn_guard.FtsGuardError.Insts.CoreCmpPartialEqFtsGuardError
-  assert_fields_are_eq := core.cmp.Eq.assert_fields_are_eq.default
-    fts_spn_guard.FtsGuardError.Insts.CoreCmpEq
-}
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsEpochPermit}::into_binding]:
-    Source: 'src/fts_spn_guard.rs', lines 56:4-58:5
-    Visibility: public -/
-def fts_spn_guard.FtsEpochPermit.into_binding
-  (self : fts_spn_guard.FtsEpochPermit) :
-  Result ((Array Std.U8 32#usize) × Std.U32 × (Array Std.U8 32#usize))
-  := do
-  ok (self.key_id, self.authorized_epoch, self.msg_digest)
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsEpochGuard}::key_id]:
-    Source: 'src/fts_spn_guard.rs', lines 79:4-81:5
-    Visibility: public -/
-def fts_spn_guard.FtsEpochGuard.impl.key_id
-  (self : fts_spn_guard.FtsEpochGuard) : Result (Array Std.U8 32#usize) := do
-  ok self.key_id
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsEpochGuard}::epoch]:
-    Source: 'src/fts_spn_guard.rs', lines 84:4-86:5
-    Visibility: public -/
-def fts_spn_guard.FtsEpochGuard.impl.epoch
-  (self : fts_spn_guard.FtsEpochGuard) : Result Std.U32 := do
-  ok self.epoch
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsEpochGuard}::max_epochs]:
-    Source: 'src/fts_spn_guard.rs', lines 89:4-91:5
-    Visibility: public -/
-def fts_spn_guard.FtsEpochGuard.impl.max_epochs
-  (self : fts_spn_guard.FtsEpochGuard) : Result Std.U32 := do
-  ok self.max_epochs
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsEpochGuard}::used]:
-    Source: 'src/fts_spn_guard.rs', lines 94:4-96:5
-    Visibility: public -/
-def fts_spn_guard.FtsEpochGuard.impl.used
-  (self : fts_spn_guard.FtsEpochGuard) : Result Std.U8 := do
-  ok self.used
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsEpochGuard}::poisoned]:
-    Source: 'src/fts_spn_guard.rs', lines 99:4-101:5
-    Visibility: public -/
-def fts_spn_guard.FtsEpochGuard.impl.poisoned
-  (self : fts_spn_guard.FtsEpochGuard) : Result Bool := do
-  ok self.poisoned
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsEpochGuard}::new_unused]:
-    Source: 'src/fts_spn_guard.rs', lines 106:4-115:5
-    Visibility: public -/
-def fts_spn_guard.FtsEpochGuard.new_unused
-  (key_id : Array Std.U8 32#usize) (epoch : Std.U32) (max_epochs : Std.U32) :
-  Result fts_spn_guard.FtsEpochGuard
-  := do
-  if epoch >= max_epochs
-  then ok { key_id, epoch, max_epochs, used := 0#u8, poisoned := true }
-  else ok { key_id, epoch, max_epochs, used := 0#u8, poisoned := false }
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsEpochGuard}::consume_epoch_once]:
-    Source: 'src/fts_spn_guard.rs', lines 119:4-174:5
-    Visibility: public -/
-def fts_spn_guard.FtsEpochGuard.consume_epoch_once
-  (self : fts_spn_guard.FtsEpochGuard) (req_key_id : Array Std.U8 32#usize)
-  (req_epoch : Std.U32) (msg_digest : Array Std.U8 32#usize) :
-  Result (fts_spn_guard.FtsEpochGuard × (core.result.Result
-    fts_spn_guard.FtsEpochPermit fts_spn_guard.FtsGuardError))
-  := do
-  if self.poisoned
-  then
-    ok (self, core.result.Result.Err fts_spn_guard.FtsGuardError.GuardPoisoned)
-  else
-    let b ← tower.ct_eq_bytes32 self.key_id req_key_id
-    if b
-    then
-      if req_epoch != self.epoch
-      then
-        ok (self, core.result.Result.Err
-          fts_spn_guard.FtsGuardError.EpochMismatch)
-      else
-        if self.epoch >= self.max_epochs
-        then
-          ok ({ self with poisoned := true }, core.result.Result.Err
-            fts_spn_guard.FtsGuardError.EpochOutOfBounds)
-        else
-          if self.used != 0#u8
-          then
-            ok ({ self with poisoned := true }, core.result.Result.Err
-              fts_spn_guard.FtsGuardError.EpochAlreadyUsed)
-          else
-            ok ({ self with used := 1#u8 }, core.result.Result.Ok
-              {
-                key_id := self.key_id,
-                authorized_epoch := self.epoch,
-                msg_digest
-              })
-    else
-      ok (self, core.result.Result.Err
-        fts_spn_guard.FtsGuardError.KeyBindingMismatch)
-
-/-- [qsag_verified::fts_spn_guard::wots_cs_verify_68_w5_sum136]: loop body 0:
-    Source: 'src/fts_spn_guard.rs', lines 185:4-198:1
-    Visibility: public -/
-@[rust_loop_body]
-def fts_spn_guard.wots_cs_verify_68_w5_sum136_loop.body
-  (digits : Slice Std.U8) (sum : Std.U64) (i : Std.Usize) :
-  Result (ControlFlow (Std.U64 × Std.Usize) Bool)
-  := do
-  let i1 := Slice.len digits
-  if i < i1
-  then
-    let d ← Slice.index_usize digits i
-    if d >= fts_spn_guard.WOTS_CS_BASE_W
-    then ok (done false)
-    else
-      let d64 ← lift (UScalar.cast .U64 d)
-      let i2 ← core.num.U64.MAX - d64
-      if sum > i2
-      then ok (done false)
-      else let sum1 ← sum + d64
-           let i3 ← i + 1#usize
-           ok (cont (sum1, i3))
-  else ok (done (sum = fts_spn_guard.WOTS_CS_TARGET_SUM))
-
-/-- [qsag_verified::fts_spn_guard::wots_cs_verify_68_w5_sum136]: loop 0:
-    Source: 'src/fts_spn_guard.rs', lines 185:4-198:1
-    Visibility: public -/
-@[rust_loop]
-def fts_spn_guard.wots_cs_verify_68_w5_sum136_loop
-  (digits : Slice Std.U8) (sum : Std.U64) (i : Std.Usize) : Result Bool := do
-  loop
-    (fun (sum1, i1) => fts_spn_guard.wots_cs_verify_68_w5_sum136_loop.body
-      digits sum1 i1)
-    (sum, i)
-
-/-- [qsag_verified::fts_spn_guard::wots_cs_verify_68_w5_sum136]:
-    Source: 'src/fts_spn_guard.rs', lines 179:0-198:1
-    Visibility: public -/
-def fts_spn_guard.wots_cs_verify_68_w5_sum136
-  (digits : Slice Std.U8) : Result Bool := do
-  let i := Slice.len digits
-  if i != fts_spn_guard.WOTS_CS_CHAINS
-  then ok false
-  else fts_spn_guard.wots_cs_verify_68_w5_sum136_loop digits 0#u64 0#usize
-
-/-- [qsag_verified::fts_spn_guard::wots_cs_verify_68_array]:
-    Source: 'src/fts_spn_guard.rs', lines 202:0-204:1
-    Visibility: public -/
-def fts_spn_guard.wots_cs_verify_68_array
-  (digits : Array Std.U8 68#usize) : Result Bool := do
-  let s ← lift (Array.to_slice digits)
-  fts_spn_guard.wots_cs_verify_68_w5_sum136 s
-
-/-- [qsag_verified::fts_spn_guard::quarantine_fts_session]:
-    Source: 'src/fts_spn_guard.rs', lines 219:0-232:1 -/
-def fts_spn_guard.quarantine_fts_session
-  (session_id : Array Std.U8 32#usize) (spn_rounds_completed : Std.U8) :
-  Result fts_spn_guard.FtsDeferredMacSession
-  := do
-  ok
-    {
-      session_id,
-      spn_rounds_completed,
-      intermediate_mac_verified := false,
-      output_released := false,
-      quarantined := true,
-      candidate_output_lo := 0#u128,
-      candidate_output_hi := 0#u128
-    }
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsDeferredMacSession}::session_id]:
-    Source: 'src/fts_spn_guard.rs', lines 236:4-238:5
-    Visibility: public -/
-def fts_spn_guard.FtsDeferredMacSession.impl.session_id
-  (self : fts_spn_guard.FtsDeferredMacSession) :
-  Result (Array Std.U8 32#usize)
-  := do
-  ok self.session_id
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsDeferredMacSession}::spn_rounds_completed]:
-    Source: 'src/fts_spn_guard.rs', lines 241:4-243:5
-    Visibility: public -/
-def fts_spn_guard.FtsDeferredMacSession.impl.spn_rounds_completed
-  (self : fts_spn_guard.FtsDeferredMacSession) : Result Std.U8 := do
-  ok self.spn_rounds_completed
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsDeferredMacSession}::intermediate_mac_verified]:
-    Source: 'src/fts_spn_guard.rs', lines 246:4-248:5
-    Visibility: public -/
-def fts_spn_guard.FtsDeferredMacSession.impl.intermediate_mac_verified
-  (self : fts_spn_guard.FtsDeferredMacSession) : Result Bool := do
-  ok self.intermediate_mac_verified
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsDeferredMacSession}::output_released]:
-    Source: 'src/fts_spn_guard.rs', lines 251:4-253:5
-    Visibility: public -/
-def fts_spn_guard.FtsDeferredMacSession.impl.output_released
-  (self : fts_spn_guard.FtsDeferredMacSession) : Result Bool := do
-  ok self.output_released
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsDeferredMacSession}::quarantined]:
-    Source: 'src/fts_spn_guard.rs', lines 256:4-258:5
-    Visibility: public -/
-def fts_spn_guard.FtsDeferredMacSession.impl.quarantined
-  (self : fts_spn_guard.FtsDeferredMacSession) : Result Bool := do
-  ok self.quarantined
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsDeferredMacSession}::new_spn48_evaluated]:
-    Source: 'src/fts_spn_guard.rs', lines 263:4-282:5
-    Visibility: public -/
-def fts_spn_guard.FtsDeferredMacSession.new_spn48_evaluated
-  (session_id : Array Std.U8 32#usize) (spn_rounds_completed : Std.U8)
-  (candidate_output_lo : Std.U128) (candidate_output_hi : Std.U128) :
-  Result fts_spn_guard.FtsDeferredMacSession
-  := do
-  if spn_rounds_completed != fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS
-  then fts_spn_guard.quarantine_fts_session session_id spn_rounds_completed
-  else
-    ok
-      {
-        session_id,
-        spn_rounds_completed,
-        intermediate_mac_verified := false,
-        output_released := false,
-        quarantined := false,
-        candidate_output_lo,
-        candidate_output_hi
-      }
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsDeferredMacSession}::is_quarantined]:
-    Source: 'src/fts_spn_guard.rs', lines 286:4-288:5
-    Visibility: public -/
-def fts_spn_guard.FtsDeferredMacSession.is_quarantined
-  (self : fts_spn_guard.FtsDeferredMacSession) : Result Bool := do
-  ok self.quarantined
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsDeferredMacSession}::verify_intermediate_mac]:
-    Source: 'src/fts_spn_guard.rs', lines 292:4-338:5
-    Visibility: public -/
-def fts_spn_guard.FtsDeferredMacSession.verify_intermediate_mac
-  (self : fts_spn_guard.FtsDeferredMacSession)
-  (req_session_id : Array Std.U8 32#usize) (mac_residual_lane0 : Std.U128)
-  (mac_residual_lane1 : Std.U128) :
-  Result (fts_spn_guard.FtsDeferredMacSession × (core.result.Result Unit
-    fts_spn_guard.FtsGuardError))
-  := do
-  if self.quarantined
-  then
-    let fdms ←
-      fts_spn_guard.quarantine_fts_session self.session_id
-        self.spn_rounds_completed
-    ok (fdms, core.result.Result.Err
-      fts_spn_guard.FtsGuardError.SessionQuarantined)
-  else
-    let b ← tower.ct_eq_bytes32 self.session_id req_session_id
-    if b
-    then
-      if self.spn_rounds_completed != fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS
-      then
-        let fdms ←
-          fts_spn_guard.quarantine_fts_session self.session_id
-            self.spn_rounds_completed
-        ok (fdms, core.result.Result.Err
-          fts_spn_guard.FtsGuardError.IncompleteSpnRounds)
-      else
-        if self.output_released
-        then
-          let fdms ←
-            fts_spn_guard.quarantine_fts_session self.session_id
-              self.spn_rounds_completed
-          ok (fdms, core.result.Result.Err
-            fts_spn_guard.FtsGuardError.DuplicateMacCheck)
-        else
-          if self.intermediate_mac_verified
-          then
-            let fdms ←
-              fts_spn_guard.quarantine_fts_session self.session_id
-                self.spn_rounds_completed
-            ok (fdms, core.result.Result.Err
-              fts_spn_guard.FtsGuardError.DuplicateMacCheck)
-          else
-            if mac_residual_lane0 != 0#u128
-            then
-              let fdms ←
-                fts_spn_guard.quarantine_fts_session self.session_id
-                  self.spn_rounds_completed
-              ok (fdms, core.result.Result.Err
-                fts_spn_guard.FtsGuardError.IntermediateMacQuarantined)
-            else
-              if mac_residual_lane1 != 0#u128
-              then
-                let fdms ←
-                  fts_spn_guard.quarantine_fts_session self.session_id
-                    self.spn_rounds_completed
-                ok (fdms, core.result.Result.Err
-                  fts_spn_guard.FtsGuardError.IntermediateMacQuarantined)
-              else
-                ok ({ self with intermediate_mac_verified := true },
-                  core.result.Result.Ok ())
-    else
-      let fdms ←
-        fts_spn_guard.quarantine_fts_session self.session_id
-          self.spn_rounds_completed
-      ok (fdms, core.result.Result.Err
-        fts_spn_guard.FtsGuardError.SessionIdMismatch)
-
-/-- [qsag_verified::fts_spn_guard::{qsag_verified::fts_spn_guard::FtsDeferredMacSession}::release_spn_output]:
-    Source: 'src/fts_spn_guard.rs', lines 345:4-398:5
-    Visibility: public -/
-def fts_spn_guard.FtsDeferredMacSession.release_spn_output
-  (self : fts_spn_guard.FtsDeferredMacSession)
-  (req_session_id : Array Std.U8 32#usize) (wots_digits : Slice Std.U8) :
-  Result (fts_spn_guard.FtsDeferredMacSession × (core.result.Result (Std.U128
-    × Std.U128) fts_spn_guard.FtsGuardError))
-  := do
-  if self.quarantined
-  then
-    let fdms ←
-      fts_spn_guard.quarantine_fts_session self.session_id
-        self.spn_rounds_completed
-    ok (fdms, core.result.Result.Err
-      fts_spn_guard.FtsGuardError.SessionQuarantined)
-  else
-    let b ← tower.ct_eq_bytes32 self.session_id req_session_id
-    if b
-    then
-      if self.output_released
-      then
-        let fdms ←
-          fts_spn_guard.quarantine_fts_session self.session_id
-            self.spn_rounds_completed
-        ok (fdms, core.result.Result.Err
-          fts_spn_guard.FtsGuardError.OutputAlreadyReleased)
-      else
-        if self.spn_rounds_completed != fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS
-        then
-          let fdms ←
-            fts_spn_guard.quarantine_fts_session self.session_id
-              self.spn_rounds_completed
-          ok (fdms, core.result.Result.Err
-            fts_spn_guard.FtsGuardError.IncompleteSpnRounds)
-        else
-          if self.intermediate_mac_verified
-          then
-            let b1 ← fts_spn_guard.wots_cs_verify_68_w5_sum136 wots_digits
-            if b1
-            then
-              ok
-                ({
-                   self
-                     with
-                     output_released := true,
-                     candidate_output_lo := 0#u128,
-                     candidate_output_hi := 0#u128
-                 }, core.result.Result.Ok (self.candidate_output_lo,
-                self.candidate_output_hi))
-            else
-              let fdms ←
-                fts_spn_guard.quarantine_fts_session self.session_id
-                  self.spn_rounds_completed
-              ok (fdms, core.result.Result.Err
-                fts_spn_guard.FtsGuardError.InvalidWotsConstantSum)
-          else
-            let fdms ←
-              fts_spn_guard.quarantine_fts_session self.session_id
-                self.spn_rounds_completed
-            ok (fdms, core.result.Result.Err
-              fts_spn_guard.FtsGuardError.IntermediateMacNotVerified)
-    else
-      let fdms ←
-        fts_spn_guard.quarantine_fts_session self.session_id
-          self.spn_rounds_completed
-      ok (fdms, core.result.Result.Err
-        fts_spn_guard.FtsGuardError.SessionIdMismatch)
 
 /-- [qsag_verified::goldilocks::GOLDILOCKS_EPSILON]
     Source: 'src/goldilocks.rs', lines 14:0-14:48
@@ -6038,36 +5512,8 @@ def pants_and_quorum_guards.BeltQuorumCoreOutput.Insts.CoreMarkerCopy :
     pants_and_quorum_guards.BeltQuorumCoreOutput.Insts.CoreCloneClone
 }
 
-/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::t]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 227:4-229:5
-    Visibility: public -/
-def pants_and_quorum_guards.BeltQuorumCore.impl.t
-  (self : pants_and_quorum_guards.BeltQuorumCore) : Result Std.U32 := do
-  ok self.t
-
-/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::f]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 232:4-234:5
-    Visibility: public -/
-def pants_and_quorum_guards.BeltQuorumCore.impl.f
-  (self : pants_and_quorum_guards.BeltQuorumCore) : Result Std.U32 := do
-  ok self.f
-
-/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::global_liveness_mode]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 242:4-244:5
-    Visibility: public -/
-def pants_and_quorum_guards.BeltQuorumCore.impl.global_liveness_mode
-  (self : pants_and_quorum_guards.BeltQuorumCore) : Result Bool := do
-  ok self.global_liveness_mode
-
-/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::max_jump_window]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 252:4-254:5
-    Visibility: public -/
-def pants_and_quorum_guards.BeltQuorumCore.impl.max_jump_window
-  (self : pants_and_quorum_guards.BeltQuorumCore) : Result Std.U64 := do
-  ok self.max_jump_window
-
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::BeltQuorumCore}::step]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 488:4-528:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 468:4-508:5
     Visibility: public -/
 def pants_and_quorum_guards.BeltQuorumCore.step
   (self : pants_and_quorum_guards.BeltQuorumCore)
@@ -6109,7 +5555,7 @@ def pants_and_quorum_guards.BeltQuorumCore.step
     | core.result.Result.Err e => ok (next, core.result.Result.Err e)
 
 /-- [qsag_verified::pants_and_quorum_guards::wotsc256_extract_digit]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 537:0-545:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 517:0-525:1
     Visibility: public -/
 def pants_and_quorum_guards.wotsc256_extract_digit
   (digest : Array Std.U8 32#usize) (chain_idx : Std.Usize) :
@@ -6128,7 +5574,7 @@ def pants_and_quorum_guards.wotsc256_extract_digit
   | _ => ok (b &&& 3#u8)
 
 /-- [qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits]: loop body 0:
-    Source: 'src/pants_and_quorum_guards.rs', lines 551:4-554:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 531:4-534:5
     Visibility: public -/
 @[rust_loop_body]
 def pants_and_quorum_guards.verified_wotsc256_extract_digits_loop.body
@@ -6146,7 +5592,7 @@ def pants_and_quorum_guards.verified_wotsc256_extract_digits_loop.body
   else ok (done digits)
 
 /-- [qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits]: loop 0:
-    Source: 'src/pants_and_quorum_guards.rs', lines 551:4-554:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 531:4-534:5
     Visibility: public -/
 @[rust_loop]
 def pants_and_quorum_guards.verified_wotsc256_extract_digits_loop
@@ -6161,7 +5607,7 @@ def pants_and_quorum_guards.verified_wotsc256_extract_digits_loop
     (digits, i)
 
 /-- [qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 548:0-556:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 528:0-536:1
     Visibility: public -/
 def pants_and_quorum_guards.verified_wotsc256_extract_digits
   (digest : Array Std.U8 32#usize) : Result (Array Std.U8 128#usize) := do
@@ -6170,7 +5616,7 @@ def pants_and_quorum_guards.verified_wotsc256_extract_digits
     0#usize
 
 /-- [qsag_verified::pants_and_quorum_guards::verified_wotsc256_verify_sum]: loop body 0:
-    Source: 'src/pants_and_quorum_guards.rs', lines 562:4-571:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 542:4-551:1
     Visibility: public -/
 @[rust_loop_body]
 def pants_and_quorum_guards.verified_wotsc256_verify_sum_loop.body
@@ -6190,7 +5636,7 @@ def pants_and_quorum_guards.verified_wotsc256_verify_sum_loop.body
   else ok (done (sum = pants_and_quorum_guards.WOTSC256_TARGET_SUM))
 
 /-- [qsag_verified::pants_and_quorum_guards::verified_wotsc256_verify_sum]: loop 0:
-    Source: 'src/pants_and_quorum_guards.rs', lines 562:4-571:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 542:4-551:1
     Visibility: public -/
 @[rust_loop]
 def pants_and_quorum_guards.verified_wotsc256_verify_sum_loop
@@ -6204,7 +5650,7 @@ def pants_and_quorum_guards.verified_wotsc256_verify_sum_loop
     (sum, i)
 
 /-- [qsag_verified::pants_and_quorum_guards::verified_wotsc256_verify_sum]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 559:0-571:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 539:0-551:1
     Visibility: public -/
 @[reducible]
 def pants_and_quorum_guards.verified_wotsc256_verify_sum
@@ -6213,7 +5659,7 @@ def pants_and_quorum_guards.verified_wotsc256_verify_sum
     0#usize
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard}::from_digest_verified]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 582:4-594:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 562:4-574:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedWotsC256Guard.from_digest_verified
   (digest : Array Std.U8 32#usize) :
@@ -6236,7 +5682,7 @@ def pants_and_quorum_guards.VerifiedWotsC256Guard.from_digest_verified
       pants_and_quorum_guards.PantsGuardError.InvalidWotsC256TargetSum)
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard}::validated_digest]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 597:4-599:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 577:4-579:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedWotsC256Guard.impl.validated_digest
   (self : pants_and_quorum_guards.VerifiedWotsC256Guard) :
@@ -6245,7 +5691,7 @@ def pants_and_quorum_guards.VerifiedWotsC256Guard.impl.validated_digest
   ok self.validated_digest
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard}::digits]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 602:4-604:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 582:4-584:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedWotsC256Guard.impl.digits
   (self : pants_and_quorum_guards.VerifiedWotsC256Guard) :
@@ -6254,14 +5700,14 @@ def pants_and_quorum_guards.VerifiedWotsC256Guard.impl.digits
   ok self.digits
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard}::verified_sum]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 607:4-609:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 587:4-589:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedWotsC256Guard.impl.verified_sum
   (self : pants_and_quorum_guards.VerifiedWotsC256Guard) : Result Std.U32 := do
   ok self.verified_sum
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard}::digit_at]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 612:4-618:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 592:4-598:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedWotsC256Guard.digit_at
   (self : pants_and_quorum_guards.VerifiedWotsC256Guard)
@@ -6274,7 +5720,7 @@ def pants_and_quorum_guards.VerifiedWotsC256Guard.digit_at
        ok (some i)
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::fmt::Debug for qsag_verified::pants_and_quorum_guards::RssOpenPermit}::fmt]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 631:9-631:14
+    Source: 'src/pants_and_quorum_guards.rs', lines 611:9-611:14
     Visibility: public -/
 def pants_and_quorum_guards.RssOpenPermit.Insts.CoreFmtDebug.fmt
   (self : pants_and_quorum_guards.RssOpenPermit) (f : core.fmt.Formatter) :
@@ -6286,7 +5732,7 @@ def pants_and_quorum_guards.RssOpenPermit.Insts.CoreFmtDebug.fmt
     (toStr "verified_clean") dyn
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::fmt::Debug for qsag_verified::pants_and_quorum_guards::RssOpenPermit}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 631:9-631:14 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 611:9-611:14 -/
 @[reducible]
 def pants_and_quorum_guards.RssOpenPermit.Insts.CoreFmtDebug : core.fmt.Debug
   pants_and_quorum_guards.RssOpenPermit := {
@@ -6294,14 +5740,14 @@ def pants_and_quorum_guards.RssOpenPermit.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::marker::StructuralPartialEq for qsag_verified::pants_and_quorum_guards::RssOpenPermit}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 631:16-631:25 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 611:16-611:25 -/
 @[reducible]
 def pants_and_quorum_guards.RssOpenPermit.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq pants_and_quorum_guards.RssOpenPermit := {
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::cmp::PartialEq<qsag_verified::pants_and_quorum_guards::RssOpenPermit> for qsag_verified::pants_and_quorum_guards::RssOpenPermit}::eq]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 631:16-631:25
+    Source: 'src/pants_and_quorum_guards.rs', lines 611:16-611:25
     Visibility: public -/
 def
   pants_and_quorum_guards.RssOpenPermit.Insts.CoreCmpPartialEqRssOpenPermit.eq
@@ -6312,7 +5758,7 @@ def
   ok (self.verified_clean = other.verified_clean)
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::cmp::PartialEq<qsag_verified::pants_and_quorum_guards::RssOpenPermit> for qsag_verified::pants_and_quorum_guards::RssOpenPermit}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 631:16-631:25 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 611:16-611:25 -/
 @[reducible]
 def pants_and_quorum_guards.RssOpenPermit.Insts.CoreCmpPartialEqRssOpenPermit :
   core.cmp.PartialEq pants_and_quorum_guards.RssOpenPermit
@@ -6322,14 +5768,14 @@ def pants_and_quorum_guards.RssOpenPermit.Insts.CoreCmpPartialEqRssOpenPermit :
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::cmp::Eq for qsag_verified::pants_and_quorum_guards::RssOpenPermit}::assert_fields_are_eq]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 631:27-631:29
+    Source: 'src/pants_and_quorum_guards.rs', lines 611:27-611:29
     Visibility: public -/
 def pants_and_quorum_guards.RssOpenPermit.Insts.CoreCmpEq.assert_fields_are_eq
   (self : pants_and_quorum_guards.RssOpenPermit) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::cmp::Eq for qsag_verified::pants_and_quorum_guards::RssOpenPermit}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 631:27-631:29 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 611:27-611:29 -/
 @[reducible]
 def pants_and_quorum_guards.RssOpenPermit.Insts.CoreCmpEq : core.cmp.Eq
   pants_and_quorum_guards.RssOpenPermit := {
@@ -6340,7 +5786,7 @@ def pants_and_quorum_guards.RssOpenPermit.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::RssLatchStepInput}::clone]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 637:9-637:14
+    Source: 'src/pants_and_quorum_guards.rs', lines 617:9-617:14
     Visibility: public -/
 def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreCloneClone.clone
   (self : pants_and_quorum_guards.RssLatchStepInput) :
@@ -6349,7 +5795,7 @@ def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::RssLatchStepInput}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 637:9-637:14 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 617:9-617:14 -/
 @[reducible]
 def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreCloneClone :
   core.clone.Clone pants_and_quorum_guards.RssLatchStepInput := {
@@ -6357,7 +5803,7 @@ def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreCloneClone :
 }
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::marker::Copy for qsag_verified::pants_and_quorum_guards::RssLatchStepInput}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 637:16-637:20 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 617:16-617:20 -/
 @[reducible]
 def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreMarkerCopy :
   core.marker.Copy pants_and_quorum_guards.RssLatchStepInput := {
@@ -6365,7 +5811,7 @@ def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreMarkerCopy :
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::fmt::Debug for qsag_verified::pants_and_quorum_guards::RssLatchStepInput}::fmt]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 637:22-637:27
+    Source: 'src/pants_and_quorum_guards.rs', lines 617:22-617:27
     Visibility: public -/
 def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreFmtDebug.fmt
   (self : pants_and_quorum_guards.RssLatchStepInput) (f : core.fmt.Formatter) :
@@ -6385,7 +5831,7 @@ def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreFmtDebug.fmt
     core.fmt.Formatter.write_str f (toStr "AuthorizeOpen")
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::fmt::Debug for qsag_verified::pants_and_quorum_guards::RssLatchStepInput}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 637:22-637:27 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 617:22-617:27 -/
 @[reducible]
 def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreFmtDebug :
   core.fmt.Debug pants_and_quorum_guards.RssLatchStepInput := {
@@ -6393,7 +5839,7 @@ def pants_and_quorum_guards.RssLatchStepInput.Insts.CoreFmtDebug :
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::fmt::Debug for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}::fmt]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 645:9-645:14
+    Source: 'src/pants_and_quorum_guards.rs', lines 625:9-625:14
     Visibility: public -/
 def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreFmtDebug.fmt
   (self : pants_and_quorum_guards.RssLatchStepOutput) (f : core.fmt.Formatter)
@@ -6415,7 +5861,7 @@ def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreFmtDebug.fmt
       __self_01
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::fmt::Debug for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 645:9-645:14 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 625:9-625:14 -/
 @[reducible]
 def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreFmtDebug :
   core.fmt.Debug pants_and_quorum_guards.RssLatchStepOutput := {
@@ -6423,7 +5869,7 @@ def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreFmtDebug :
 }
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::marker::StructuralPartialEq for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 645:16-645:25 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 625:16-625:25 -/
 @[reducible]
 def
   pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreMarkerStructuralPartialEq
@@ -6432,7 +5878,7 @@ def
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::cmp::PartialEq<qsag_verified::pants_and_quorum_guards::RssLatchStepOutput> for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}::eq]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 645:16-645:25
+    Source: 'src/pants_and_quorum_guards.rs', lines 625:16-625:25
     Visibility: public -/
 def
   pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpPartialEqRssLatchStepOutput.eq
@@ -6462,7 +5908,7 @@ def
   else ok false
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::cmp::PartialEq<qsag_verified::pants_and_quorum_guards::RssLatchStepOutput> for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 645:16-645:25 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 625:16-625:25 -/
 @[reducible]
 def
   pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpPartialEqRssLatchStepOutput
@@ -6473,7 +5919,7 @@ def
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::cmp::Eq for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}::assert_fields_are_eq]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 645:27-645:29
+    Source: 'src/pants_and_quorum_guards.rs', lines 625:27-625:29
     Visibility: public -/
 def
   pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpEq.assert_fields_are_eq
@@ -6481,7 +5927,7 @@ def
   ok ()
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::cmp::Eq for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 645:27-645:29 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 625:27-625:29 -/
 @[reducible]
 def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpEq : core.cmp.Eq
   pants_and_quorum_guards.RssLatchStepOutput := {
@@ -6492,20 +5938,20 @@ def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::poison_rss_latch]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 662:0-668:1 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 642:0-648:1 -/
 def pants_and_quorum_guards.poison_rss_latch
   : Result pants_and_quorum_guards.VerifiedRssPoisonLatch := do
   ok { pending_relations := 0#u64, unverified := true, poisoned := true }
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::new_clean]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 673:4-679:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 653:4-659:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedRssPoisonLatch.new_clean
   : Result pants_and_quorum_guards.VerifiedRssPoisonLatch := do
   ok { pending_relations := 0#u64, unverified := false, poisoned := false }
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::pending_relations]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 682:4-684:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 662:4-664:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedRssPoisonLatch.impl.pending_relations
   (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) :
@@ -6514,21 +5960,21 @@ def pants_and_quorum_guards.VerifiedRssPoisonLatch.impl.pending_relations
   ok self.pending_relations
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::is_unverified]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 687:4-689:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 667:4-669:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedRssPoisonLatch.is_unverified
   (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) : Result Bool := do
   ok self.unverified
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::is_poisoned]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 692:4-694:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 672:4-674:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedRssPoisonLatch.is_poisoned
   (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) : Result Bool := do
   ok self.poisoned
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::stage_relations]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 697:4-720:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 677:4-700:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations
   (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) (count : Std.U64) :
@@ -6562,7 +6008,7 @@ def pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations
            }, core.result.Result.Ok next_pending)
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::record_check_result]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 727:4-747:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 707:4-727:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result
   (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) (check_ok : Bool) :
@@ -6586,7 +6032,7 @@ def pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result
         pants_and_quorum_guards.PantsGuardError.RssVerificationCheckFailed)
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::authorize_open]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 750:4-768:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 730:4-748:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open
   (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) :
@@ -6612,7 +6058,7 @@ def pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open
       else ok (self, core.result.Result.Ok { verified_clean := true })
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::step]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 771:4-801:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 751:4-781:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedRssPoisonLatch.step
   (self : pants_and_quorum_guards.VerifiedRssPoisonLatch)
@@ -6649,7 +6095,7 @@ def pants_and_quorum_guards.VerifiedRssPoisonLatch.step
     | core.result.Result.Err e => ok (next, core.result.Result.Err e)
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::WaistbandDerivationRequest}::clone]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 809:9-809:14
+    Source: 'src/pants_and_quorum_guards.rs', lines 789:9-789:14
     Visibility: public -/
 def
   pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreCloneClone.clone
@@ -6659,7 +6105,7 @@ def
   ok self
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::WaistbandDerivationRequest}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 809:9-809:14 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 789:9-789:14 -/
 @[reducible]
 def pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreCloneClone :
   core.clone.Clone pants_and_quorum_guards.WaistbandDerivationRequest := {
@@ -6668,7 +6114,7 @@ def pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreCloneClone :
 }
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::marker::Copy for qsag_verified::pants_and_quorum_guards::WaistbandDerivationRequest}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 809:16-809:20 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 789:16-789:20 -/
 @[reducible]
 def pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreMarkerCopy :
   core.marker.Copy pants_and_quorum_guards.WaistbandDerivationRequest := {
@@ -6677,7 +6123,7 @@ def pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreMarkerCopy :
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::WaistbandAncestorPermit}::clone]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 828:9-828:14
+    Source: 'src/pants_and_quorum_guards.rs', lines 808:9-808:14
     Visibility: public -/
 def pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreCloneClone.clone
   (self : pants_and_quorum_guards.WaistbandAncestorPermit) :
@@ -6686,7 +6132,7 @@ def pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::WaistbandAncestorPermit}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 828:9-828:14 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 808:9-808:14 -/
 @[reducible]
 def pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreCloneClone :
   core.clone.Clone pants_and_quorum_guards.WaistbandAncestorPermit := {
@@ -6695,7 +6141,7 @@ def pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreCloneClone :
 }
 
 /-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::marker::Copy for qsag_verified::pants_and_quorum_guards::WaistbandAncestorPermit}]
-    Source: 'src/pants_and_quorum_guards.rs', lines 828:16-828:20 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 808:16-808:20 -/
 @[reducible]
 def pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreMarkerCopy :
   core.marker.Copy pants_and_quorum_guards.WaistbandAncestorPermit := {
@@ -6704,7 +6150,7 @@ def pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreMarkerCopy :
 }
 
 /-- [qsag_verified::pants_and_quorum_guards::poison_waistband_guard]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 852:0-864:1 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 832:0-844:1 -/
 def pants_and_quorum_guards.poison_waistband_guard
   (st : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
   Result pants_and_quorum_guards.VerifiedWaistbandRootGuard
@@ -6712,7 +6158,7 @@ def pants_and_quorum_guards.poison_waistband_guard
   ok { st with poisoned := true }
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::new_enrolled]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 870:4-889:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 850:4-869:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedWaistbandRootGuard.new_enrolled
   (key_pk_tag : Array Std.U8 32#usize) (key_params_tag : Array Std.U8 32#usize)
@@ -6734,53 +6180,8 @@ def pants_and_quorum_guards.VerifiedWaistbandRootGuard.new_enrolled
       poisoned := false
     }
 
-/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::key_pk_tag]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 892:4-894:5
-    Visibility: public -/
-def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.key_pk_tag
-  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
-  Result (Array Std.U8 32#usize)
-  := do
-  ok self.key_pk_tag
-
-/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::key_params_tag]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 897:4-899:5
-    Visibility: public -/
-def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.key_params_tag
-  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
-  Result (Array Std.U8 32#usize)
-  := do
-  ok self.key_params_tag
-
-/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::ancestor_layer]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 902:4-904:5
-    Visibility: public -/
-def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_layer
-  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
-  Result Std.U32
-  := do
-  ok self.ancestor_layer
-
-/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::ancestor_tree]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 907:4-909:5
-    Visibility: public -/
-def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_tree
-  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
-  Result Std.U64
-  := do
-  ok self.ancestor_tree
-
-/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::ancestor_kp]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 912:4-914:5
-    Visibility: public -/
-def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_kp
-  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
-  Result Std.U32
-  := do
-  ok self.ancestor_kp
-
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::expected_static_child_root]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 917:4-919:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 872:4-874:5
     Visibility: public -/
 def
   pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.expected_static_child_root
@@ -6790,7 +6191,7 @@ def
   ok self.expected_static_child_root
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::has_locked_codeword]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 922:4-924:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 877:4-879:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.has_locked_codeword
   (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
@@ -6799,7 +6200,7 @@ def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.has_locked_codeword
   ok self.has_locked_codeword
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::locked_ancestor_codeword_tag]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 927:4-929:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 882:4-884:5
     Visibility: public -/
 def
   pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.locked_ancestor_codeword_tag
@@ -6809,7 +6210,7 @@ def
   ok self.locked_ancestor_codeword_tag
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::is_poisoned]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 932:4-934:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 887:4-889:5
     Visibility: public -/
 def pants_and_quorum_guards.VerifiedWaistbandRootGuard.is_poisoned
   (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
@@ -6818,7 +6219,7 @@ def pants_and_quorum_guards.VerifiedWaistbandRootGuard.is_poisoned
   ok self.poisoned
 
 /-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::authorize_ancestor_derivation]:
-    Source: 'src/pants_and_quorum_guards.rs', lines 940:4-1011:5
+    Source: 'src/pants_and_quorum_guards.rs', lines 895:4-966:5
     Visibility: public -/
 def
   pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation
@@ -8890,17 +8291,8 @@ def rss_cut_session.RssCutGateSession.impl.session_id
   := do
   ok self.session_id
 
-/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::mask_commitment]:
-    Source: 'src/rss_cut_session.rs', lines 128:4-130:5
-    Visibility: public -/
-def rss_cut_session.RssCutGateSession.impl.mask_commitment
-  (self : rss_cut_session.RssCutGateSession) :
-  Result (Array Std.U8 32#usize)
-  := do
-  ok self.mask_commitment
-
 /-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::new_round1_committed]:
-    Source: 'src/rss_cut_session.rs', lines 134:4-146:5
+    Source: 'src/rss_cut_session.rs', lines 129:4-141:5
     Visibility: public -/
 def rss_cut_session.RssCutGateSession.new_round1_committed
   (session_id : Array Std.U8 32#usize)
@@ -8919,14 +8311,14 @@ def rss_cut_session.RssCutGateSession.new_round1_committed
     }
 
 /-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::is_poisoned]:
-    Source: 'src/rss_cut_session.rs', lines 150:4-152:5
+    Source: 'src/rss_cut_session.rs', lines 145:4-147:5
     Visibility: public -/
 def rss_cut_session.RssCutGateSession.is_poisoned
   (self : rss_cut_session.RssCutGateSession) : Result Bool := do
   ok self.poisoned
 
 /-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::phase]:
-    Source: 'src/rss_cut_session.rs', lines 156:4-158:5
+    Source: 'src/rss_cut_session.rs', lines 151:4-153:5
     Visibility: public -/
 def rss_cut_session.RssCutGateSession.impl.phase
   (self : rss_cut_session.RssCutGateSession) :
@@ -8935,14 +8327,14 @@ def rss_cut_session.RssCutGateSession.impl.phase
   ok self.phase
 
 /-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::is_consistency_verified]:
-    Source: 'src/rss_cut_session.rs', lines 162:4-164:5
+    Source: 'src/rss_cut_session.rs', lines 157:4-159:5
     Visibility: public -/
 def rss_cut_session.RssCutGateSession.is_consistency_verified
   (self : rss_cut_session.RssCutGateSession) : Result Bool := do
   ok self.consistency_verified
 
 /-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::advance_round2_chi]:
-    Source: 'src/rss_cut_session.rs', lines 168:4-210:5
+    Source: 'src/rss_cut_session.rs', lines 163:4-205:5
     Visibility: public -/
 def rss_cut_session.RssCutGateSession.advance_round2_chi
   (self : rss_cut_session.RssCutGateSession)
@@ -9015,7 +8407,7 @@ def rss_cut_session.RssCutGateSession.advance_round2_chi
         rss_cut_session.RssCutError.SessionIdMismatch)
 
 /-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::advance_round3_verify_consistency]:
-    Source: 'src/rss_cut_session.rs', lines 215:4-258:5
+    Source: 'src/rss_cut_session.rs', lines 210:4-253:5
     Visibility: public -/
 def rss_cut_session.RssCutGateSession.advance_round3_verify_consistency
   (self : rss_cut_session.RssCutGateSession)
@@ -9101,7 +8493,7 @@ def rss_cut_session.RssCutGateSession.advance_round3_verify_consistency
         rss_cut_session.RssCutError.SessionIdMismatch)
 
 /-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::open_verified_cut]:
-    Source: 'src/rss_cut_session.rs', lines 262:4-303:5
+    Source: 'src/rss_cut_session.rs', lines 257:4-298:5
     Visibility: public -/
 def rss_cut_session.RssCutGateSession.open_verified_cut
   (self : rss_cut_session.RssCutGateSession)
@@ -9170,7 +8562,7 @@ def rss_cut_session.RssCutGateSession.open_verified_cut
         rss_cut_session.RssCutError.SessionIdMismatch)
 
 /-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::step]:
-    Source: 'src/rss_cut_session.rs', lines 306:4-351:5
+    Source: 'src/rss_cut_session.rs', lines 301:4-346:5
     Visibility: public -/
 def rss_cut_session.RssCutGateSession.step
   (self : rss_cut_session.RssCutGateSession)
@@ -9211,7 +8603,7 @@ def rss_cut_session.RssCutGateSession.step
     | core.result.Result.Err e => ok (next, core.result.Result.Err e)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]: loop body 1:
-    Source: 'src/threshold.rs', lines 37:8-42:9
+    Source: 'src/threshold.rs', lines 36:8-41:9
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_validate_points_gf256_loop0_loop0.body
@@ -9231,7 +8623,7 @@ def threshold.shamir_validate_points_gf256_loop0_loop0.body
   else ok (done ok1)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]: loop 1:
-    Source: 'src/threshold.rs', lines 37:8-42:9
+    Source: 'src/threshold.rs', lines 36:8-41:9
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_validate_points_gf256_loop0_loop0
@@ -9245,7 +8637,7 @@ def threshold.shamir_validate_points_gf256_loop0_loop0
     (ok1, j)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 32:4-44:5
+    Source: 'src/threshold.rs', lines 31:4-43:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_validate_points_gf256_loop0.body
@@ -9266,7 +8658,7 @@ def threshold.shamir_validate_points_gf256_loop0.body
   else ok (done ok1)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 32:4-44:5
+    Source: 'src/threshold.rs', lines 31:4-43:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_validate_points_gf256_loop0
@@ -9279,7 +8671,7 @@ def threshold.shamir_validate_points_gf256_loop0
     (ok1, i)
 
 /-- [qsag_verified::threshold::shamir_validate_points_gf256]:
-    Source: 'src/threshold.rs', lines 25:0-46:1
+    Source: 'src/threshold.rs', lines 24:0-45:1
     Visibility: public -/
 def threshold.shamir_validate_points_gf256
   (points : Slice tower.Gf256) : Result Bool := do
@@ -9288,8 +8680,16 @@ def threshold.shamir_validate_points_gf256
   then ok false
   else threshold.shamir_validate_points_gf256_loop0 points n true 0#usize
 
+/-- [qsag_verified::tower::gf16_add]:
+    Source: 'src/tower.rs', lines 155:0-157:1
+    Visibility: public -/
+def tower.gf16_add (a : tower.Gf16) (b : tower.Gf16) : Result tower.Gf16 := do
+  let i ← lift (a ^^^ b)
+  let i1 ← lift (i &&& 15#u8)
+  ok i1
+
 /-- [qsag_verified::tower::mul_t1]:
-    Source: 'src/tower.rs', lines 97:0-108:1 -/
+    Source: 'src/tower.rs', lines 39:0-50:1 -/
 def tower.mul_t1 (a : Std.U8) (b : Std.U8) : Result Std.U8 := do
   let a_lo ← lift (a &&& 1#u8)
   let i ← a >>> 1#i32
@@ -9308,7 +8708,7 @@ def tower.mul_t1 (a : Std.U8) (b : Std.U8) : Result Std.U8 := do
   ok (lo ||| i4)
 
 /-- [qsag_verified::tower::scale_x_t1]:
-    Source: 'src/tower.rs', lines 90:0-94:1 -/
+    Source: 'src/tower.rs', lines 32:0-36:1 -/
 def tower.scale_x_t1 (a : Std.U8) : Result Std.U8 := do
   let lo ← lift (a &&& 1#u8)
   let i ← a >>> 1#i32
@@ -9318,7 +8718,7 @@ def tower.scale_x_t1 (a : Std.U8) : Result Std.U8 := do
   ok (hi ||| i2)
 
 /-- [qsag_verified::tower::mul_t2]:
-    Source: 'src/tower.rs', lines 119:0-130:1 -/
+    Source: 'src/tower.rs', lines 61:0-72:1 -/
 def tower.mul_t2 (a : Std.U8) (b : Std.U8) : Result Std.U8 := do
   let a_lo ← lift (a &&& 3#u8)
   let i ← a >>> 2#i32
@@ -9340,7 +8740,7 @@ def tower.mul_t2 (a : Std.U8) (b : Std.U8) : Result Std.U8 := do
   ok (lo ||| i7)
 
 /-- [qsag_verified::tower::scale_x_t2]:
-    Source: 'src/tower.rs', lines 111:0-116:1 -/
+    Source: 'src/tower.rs', lines 53:0-58:1 -/
 def tower.scale_x_t2 (a : Std.U8) : Result Std.U8 := do
   let lo ← lift (a &&& 3#u8)
   let i ← a >>> 2#i32
@@ -9350,9 +8750,11 @@ def tower.scale_x_t2 (a : Std.U8) : Result Std.U8 := do
   let i2 ← i1 <<< 2#i32
   ok (hi ||| i2)
 
-/-- [qsag_verified::tower::mul_t3]:
-    Source: 'src/tower.rs', lines 141:0-152:1 -/
-def tower.mul_t3 (a : Std.U8) (b : Std.U8) : Result Std.U8 := do
+/-- [qsag_verified::tower::gf256_mul]:
+    Source: 'src/tower.rs', lines 173:0-184:1
+    Visibility: public -/
+def tower.gf256_mul
+  (a : tower.Gf256) (b : tower.Gf256) : Result tower.Gf256 := do
   let a_lo ← lift (a &&& 15#u8)
   let i ← a >>> 4#i32
   let a_hi ← lift (i &&& 15#u8)
@@ -9368,20 +8770,13 @@ def tower.mul_t3 (a : Std.U8) (b : Std.U8) : Result Std.U8 := do
   let i4 ← lift (r ^^^ p)
   let i5 ← lift (i4 ^^^ q)
   let i6 ← tower.scale_x_t2 q
-  let hi ← lift (i5 ^^^ i6)
+  let hi ← tower.gf16_add i5 i6
   let i7 ← hi <<< 4#i32
-  ok (lo ||| i7)
-
-/-- [qsag_verified::tower::gf256_mul]:
-    Source: 'src/tower.rs', lines 248:0-250:1
-    Visibility: public -/
-def tower.gf256_mul
-  (a : tower.Gf256) (b : tower.Gf256) : Result tower.Gf256 := do
-  let i ← tower.mul_t3 a b
-  ok i
+  let i8 ← lift (lo ||| i7)
+  ok i8
 
 /-- [qsag_verified::tower::gf256_add]:
-    Source: 'src/tower.rs', lines 242:0-244:1
+    Source: 'src/tower.rs', lines 167:0-169:1
     Visibility: public -/
 def tower.gf256_add
   (a : tower.Gf256) (b : tower.Gf256) : Result tower.Gf256 := do
@@ -9389,7 +8784,7 @@ def tower.gf256_add
   ok i
 
 /-- [qsag_verified::threshold::shamir_eval_poly_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 52:4-55:5
+    Source: 'src/threshold.rs', lines 51:4-54:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_eval_poly_gf256_loop.body
@@ -9407,7 +8802,7 @@ def threshold.shamir_eval_poly_gf256_loop.body
   else ok (done acc)
 
 /-- [qsag_verified::threshold::shamir_eval_poly_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 52:4-55:5
+    Source: 'src/threshold.rs', lines 51:4-54:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_eval_poly_gf256_loop
@@ -9421,7 +8816,7 @@ def threshold.shamir_eval_poly_gf256_loop
     (acc, rem)
 
 /-- [qsag_verified::threshold::shamir_eval_poly_gf256]:
-    Source: 'src/threshold.rs', lines 49:0-57:1
+    Source: 'src/threshold.rs', lines 48:0-56:1
     Visibility: public -/
 def threshold.shamir_eval_poly_gf256
   (coeffs : Slice tower.Gf256) (x : tower.Gf256) : Result tower.Gf256 := do
@@ -9429,7 +8824,7 @@ def threshold.shamir_eval_poly_gf256
   threshold.shamir_eval_poly_gf256_loop coeffs x 0#u8 rem
 
 /-- [qsag_verified::threshold::shamir_eval_poly_goldilocks]: loop body 0:
-    Source: 'src/threshold.rs', lines 63:4-66:5
+    Source: 'src/threshold.rs', lines 62:4-65:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_eval_poly_goldilocks_loop.body
@@ -9448,7 +8843,7 @@ def threshold.shamir_eval_poly_goldilocks_loop.body
   else ok (done acc)
 
 /-- [qsag_verified::threshold::shamir_eval_poly_goldilocks]: loop 0:
-    Source: 'src/threshold.rs', lines 63:4-66:5
+    Source: 'src/threshold.rs', lines 62:4-65:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_eval_poly_goldilocks_loop
@@ -9462,7 +8857,7 @@ def threshold.shamir_eval_poly_goldilocks_loop
     (acc, rem)
 
 /-- [qsag_verified::threshold::shamir_eval_poly_goldilocks]:
-    Source: 'src/threshold.rs', lines 60:0-68:1
+    Source: 'src/threshold.rs', lines 59:0-67:1
     Visibility: public -/
 def threshold.shamir_eval_poly_goldilocks
   (coeffs : Slice goldilocks.Goldilocks) (x : goldilocks.Goldilocks) :
@@ -9472,7 +8867,7 @@ def threshold.shamir_eval_poly_goldilocks
   threshold.shamir_eval_poly_goldilocks_loop coeffs x 0#u64 rem
 
 /-- [qsag_verified::tower::gf256_inv_or_zero]:
-    Source: 'src/tower.rs', lines 256:0-268:1
+    Source: 'src/tower.rs', lines 190:0-202:1
     Visibility: public -/
 def tower.gf256_inv_or_zero (a : tower.Gf256) : Result tower.Gf256 := do
   let a2 ← tower.gf256_mul a a
@@ -9490,7 +8885,7 @@ def tower.gf256_inv_or_zero (a : tower.Gf256) : Result tower.Gf256 := do
   tower.gf256_mul hi a14
 
 /-- [qsag_verified::tower::gf256_inv]:
-    Source: 'src/tower.rs', lines 273:0-276:1
+    Source: 'src/tower.rs', lines 207:0-210:1
     Visibility: public -/
 def tower.gf256_inv (a : tower.Gf256) : Result (Option tower.Gf256) := do
   let inv ← tower.gf256_inv_or_zero a
@@ -9499,7 +8894,7 @@ def tower.gf256_inv (a : tower.Gf256) : Result (Option tower.Gf256) := do
   else ok (some inv)
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 85:4-97:5
+    Source: 'src/threshold.rs', lines 84:4-96:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_lagrange_weight_zero_gf256_loop.body
@@ -9528,7 +8923,7 @@ def threshold.shamir_lagrange_weight_zero_gf256_loop.body
   else ok (done (num, den, valid))
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 85:4-97:5
+    Source: 'src/threshold.rs', lines 84:4-96:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_lagrange_weight_zero_gf256_loop
@@ -9543,7 +8938,7 @@ def threshold.shamir_lagrange_weight_zero_gf256_loop
     (num, den, valid, j)
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_gf256]:
-    Source: 'src/threshold.rs', lines 72:0-105:1
+    Source: 'src/threshold.rs', lines 71:0-104:1
     Visibility: public -/
 def threshold.shamir_lagrange_weight_zero_gf256
   (points : Slice tower.Gf256) (i : Std.Usize) :
@@ -9570,7 +8965,7 @@ def threshold.shamir_lagrange_weight_zero_gf256
       else ok none
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 117:4-127:5
+    Source: 'src/threshold.rs', lines 116:4-126:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_lagrange_at_zero_gf256_loop.body
@@ -9595,7 +8990,7 @@ def threshold.shamir_lagrange_at_zero_gf256_loop.body
   else ok (done (secret, valid))
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 117:4-127:5
+    Source: 'src/threshold.rs', lines 116:4-126:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_lagrange_at_zero_gf256_loop
@@ -9610,7 +9005,7 @@ def threshold.shamir_lagrange_at_zero_gf256_loop
     (secret, valid, i)
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_gf256]:
-    Source: 'src/threshold.rs', lines 109:0-129:1
+    Source: 'src/threshold.rs', lines 108:0-128:1
     Visibility: public -/
 def threshold.shamir_lagrange_at_zero_gf256
   (points : Slice tower.Gf256) (shares : Slice tower.Gf256) :
@@ -9632,7 +9027,7 @@ def threshold.shamir_lagrange_at_zero_gf256
       else ok none
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks]: loop body 0:
-    Source: 'src/threshold.rs', lines 149:4-161:5
+    Source: 'src/threshold.rs', lines 148:4-160:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_lagrange_weight_zero_goldilocks_loop.body
@@ -9663,7 +9058,7 @@ def threshold.shamir_lagrange_weight_zero_goldilocks_loop.body
   else ok (done (num, den, valid))
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks]: loop 0:
-    Source: 'src/threshold.rs', lines 149:4-161:5
+    Source: 'src/threshold.rs', lines 148:4-160:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_lagrange_weight_zero_goldilocks_loop
@@ -9679,7 +9074,7 @@ def threshold.shamir_lagrange_weight_zero_goldilocks_loop
     (num, den, valid, j)
 
 /-- [qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks]:
-    Source: 'src/threshold.rs', lines 133:0-169:1
+    Source: 'src/threshold.rs', lines 132:0-168:1
     Visibility: public -/
 def threshold.shamir_lagrange_weight_zero_goldilocks
   (points : Slice goldilocks.Goldilocks) (i : Std.Usize) :
@@ -9708,7 +9103,7 @@ def threshold.shamir_lagrange_weight_zero_goldilocks
       else ok none
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks]: loop body 0:
-    Source: 'src/threshold.rs', lines 184:4-194:5
+    Source: 'src/threshold.rs', lines 183:4-193:5
     Visibility: public -/
 @[rust_loop_body]
 def threshold.shamir_lagrange_at_zero_goldilocks_loop.body
@@ -9735,7 +9130,7 @@ def threshold.shamir_lagrange_at_zero_goldilocks_loop.body
   else ok (done (secret, valid))
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks]: loop 0:
-    Source: 'src/threshold.rs', lines 184:4-194:5
+    Source: 'src/threshold.rs', lines 183:4-193:5
     Visibility: public -/
 @[rust_loop]
 def threshold.shamir_lagrange_at_zero_goldilocks_loop
@@ -9751,7 +9146,7 @@ def threshold.shamir_lagrange_at_zero_goldilocks_loop
     (secret, valid, i)
 
 /-- [qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks]:
-    Source: 'src/threshold.rs', lines 173:0-196:1
+    Source: 'src/threshold.rs', lines 172:0-195:1
     Visibility: public -/
 def threshold.shamir_lagrange_at_zero_goldilocks
   (points : Slice goldilocks.Goldilocks) (shares : Slice goldilocks.Goldilocks)
@@ -9774,7 +9169,7 @@ def threshold.shamir_lagrange_at_zero_goldilocks
       else ok none
 
 /-- [qsag_verified::threshold::shamir_degree_reduce_2of3_gf256]:
-    Source: 'src/threshold.rs', lines 202:0-241:1
+    Source: 'src/threshold.rs', lines 201:0-240:1
     Visibility: public -/
 def threshold.shamir_degree_reduce_2of3_gf256
   (points : Array tower.Gf256 3#usize)
@@ -9838,7 +9233,7 @@ def threshold.shamir_degree_reduce_2of3_gf256
               ok (some g16)
 
 /-- [qsag_verified::threshold::dkg_beaver_frobenius_eval_gf256]:
-    Source: 'src/threshold.rs', lines 251:0-259:1
+    Source: 'src/threshold.rs', lines 250:0-258:1
     Visibility: public -/
 def threshold.dkg_beaver_frobenius_eval_gf256
   (a : tower.Gf256) (b : tower.Gf256) (c : tower.Gf256) (s : tower.Gf256) :
@@ -9855,7 +9250,7 @@ def threshold.dkg_beaver_frobenius_eval_gf256
   tower.gf256_add s_sq s
 
 /-- [qsag_verified::threshold::dkg_beaver_frobenius_share_shamir_gf256]:
-    Source: 'src/threshold.rs', lines 264:0-280:1
+    Source: 'src/threshold.rs', lines 263:0-279:1
     Visibility: public -/
 def threshold.dkg_beaver_frobenius_share_shamir_gf256
   (s_share : tower.Gf256) (a_share : tower.Gf256) (b_share : tower.Gf256)
@@ -9870,475 +9265,22 @@ def threshold.dkg_beaver_frobenius_share_shamir_gf256
   let s_sq_share ← tower.gf256_add g1 g4
   tower.gf256_add s_sq_share s_share
 
-/-- [qsag_verified::tower::encode_le_u128]:
-    Source: 'src/tower.rs', lines 354:0-373:1 -/
-def tower.encode_le_u128 (v : Std.U128) : Result (Array Std.U8 16#usize) := do
-  let i ← lift (v &&& 255#u128)
-  let i1 ← lift (UScalar.cast .U8 i)
-  let i2 ← v >>> 8#i32
-  let i3 ← lift (i2 &&& 255#u128)
-  let i4 ← lift (UScalar.cast .U8 i3)
-  let i5 ← v >>> 16#i32
-  let i6 ← lift (i5 &&& 255#u128)
-  let i7 ← lift (UScalar.cast .U8 i6)
-  let i8 ← v >>> 24#i32
-  let i9 ← lift (i8 &&& 255#u128)
-  let i10 ← lift (UScalar.cast .U8 i9)
-  let i11 ← v >>> 32#i32
-  let i12 ← lift (i11 &&& 255#u128)
-  let i13 ← lift (UScalar.cast .U8 i12)
-  let i14 ← v >>> 40#i32
-  let i15 ← lift (i14 &&& 255#u128)
-  let i16 ← lift (UScalar.cast .U8 i15)
-  let i17 ← v >>> 48#i32
-  let i18 ← lift (i17 &&& 255#u128)
-  let i19 ← lift (UScalar.cast .U8 i18)
-  let i20 ← v >>> 56#i32
-  let i21 ← lift (i20 &&& 255#u128)
-  let i22 ← lift (UScalar.cast .U8 i21)
-  let i23 ← v >>> 64#i32
-  let i24 ← lift (i23 &&& 255#u128)
-  let i25 ← lift (UScalar.cast .U8 i24)
-  let i26 ← v >>> 72#i32
-  let i27 ← lift (i26 &&& 255#u128)
-  let i28 ← lift (UScalar.cast .U8 i27)
-  let i29 ← v >>> 80#i32
-  let i30 ← lift (i29 &&& 255#u128)
-  let i31 ← lift (UScalar.cast .U8 i30)
-  let i32 ← v >>> 88#i32
-  let i33 ← lift (i32 &&& 255#u128)
-  let i34 ← lift (UScalar.cast .U8 i33)
-  let i35 ← v >>> 96#i32
-  let i36 ← lift (i35 &&& 255#u128)
-  let i37 ← lift (UScalar.cast .U8 i36)
-  let i38 ← v >>> 104#i32
-  let i39 ← lift (i38 &&& 255#u128)
-  let i40 ← lift (UScalar.cast .U8 i39)
-  let i41 ← v >>> 112#i32
-  let i42 ← lift (i41 &&& 255#u128)
-  let i43 ← lift (UScalar.cast .U8 i42)
-  let i44 ← v >>> 120#i32
-  let i45 ← lift (i44 &&& 255#u128)
-  let i46 ← lift (UScalar.cast .U8 i45)
-  ok
-    (Array.make 16#usize [
-      i1, i4, i7, i10, i13, i16, i19, i22, i25, i28, i31, i34, i37, i40, i43,
-      i46
-      ])
-
-/-- [qsag_verified::tower::encode_le_u64]:
-    Source: 'src/tower.rs', lines 340:0-351:1 -/
-def tower.encode_le_u64 (v : Std.U64) : Result (Array Std.U8 8#usize) := do
-  let i ← lift (v &&& 255#u64)
-  let i1 ← lift (UScalar.cast .U8 i)
-  let i2 ← v >>> 8#i32
-  let i3 ← lift (i2 &&& 255#u64)
-  let i4 ← lift (UScalar.cast .U8 i3)
-  let i5 ← v >>> 16#i32
-  let i6 ← lift (i5 &&& 255#u64)
-  let i7 ← lift (UScalar.cast .U8 i6)
-  let i8 ← v >>> 24#i32
-  let i9 ← lift (i8 &&& 255#u64)
-  let i10 ← lift (UScalar.cast .U8 i9)
-  let i11 ← v >>> 32#i32
-  let i12 ← lift (i11 &&& 255#u64)
-  let i13 ← lift (UScalar.cast .U8 i12)
-  let i14 ← v >>> 40#i32
-  let i15 ← lift (i14 &&& 255#u64)
-  let i16 ← lift (UScalar.cast .U8 i15)
-  let i17 ← v >>> 48#i32
-  let i18 ← lift (i17 &&& 255#u64)
-  let i19 ← lift (UScalar.cast .U8 i18)
-  let i20 ← v >>> 56#i32
-  let i21 ← lift (i20 &&& 255#u64)
-  let i22 ← lift (UScalar.cast .U8 i21)
-  ok (Array.make 8#usize [ i1, i4, i7, i10, i13, i16, i19, i22 ])
-
-/-- [qsag_verified::tower::bdoz_commit_masked_tag]:
-    Source: 'src/tower.rs', lines 377:0-404:1
-    Visibility: public -/
-def tower.bdoz_commit_masked_tag
-  (session_id : Array Std.U8 32#usize) (round_id : Std.U64)
-  (masked_sum : tower.Tower128)
-  (peer_masked_mac_lanes : Array tower.Tower128 2#usize)
-  (open_nonce : Array Std.U8 32#usize) :
-  Result (Array Std.U8 32#usize)
-  := do
-  let round_bytes ← tower.encode_le_u64 round_id
-  let sum_bytes ← tower.encode_le_u128 masked_sum
-  let t ← Array.index_usize peer_masked_mac_lanes 0#usize
-  let mac0_bytes ← tower.encode_le_u128 t
-  let t1 ← Array.index_usize peer_masked_mac_lanes 1#usize
-  let mac1_bytes ← tower.encode_le_u128 t1
-  let sp ← keccak.Shake256Sponge.new_shake256
-  let s ←
-    lift (Array.to_slice
-      (Array.make 16#usize [
-        81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 66#u8, 68#u8, 79#u8, 90#u8, 46#u8,
-        77#u8, 65#u8, 67#u8, 50#u8, 76#u8, 1#u8
-        ]))
-  let sp1 ← keccak.Shake256Sponge.absorb sp s
-  let s1 ← lift (Array.to_slice session_id)
-  let sp2 ← keccak.Shake256Sponge.absorb sp1 s1
-  let s2 ← lift (Array.to_slice round_bytes)
-  let sp3 ← keccak.Shake256Sponge.absorb sp2 s2
-  let s3 ← lift (Array.to_slice sum_bytes)
-  let sp4 ← keccak.Shake256Sponge.absorb sp3 s3
-  let s4 ← lift (Array.to_slice mac0_bytes)
-  let sp5 ← keccak.Shake256Sponge.absorb sp4 s4
-  let s5 ← lift (Array.to_slice mac1_bytes)
-  let sp6 ← keccak.Shake256Sponge.absorb sp5 s5
-  let s6 ← lift (Array.to_slice open_nonce)
-  let sp7 ← keccak.Shake256Sponge.absorb sp6 s6
-  let commit := Array.repeat 32#usize 0#u8
-  let (s7, to_slice_mut_back) ← lift (Array.to_slice_mut commit)
-  let (_, s8) ← keccak.Shake256Sponge.squeeze sp7 s7
-  ok (to_slice_mut_back s8)
-
-/-- [qsag_verified::tower::scale_x_t3]:
-    Source: 'src/tower.rs', lines 133:0-138:1 -/
-def tower.scale_x_t3 (a : Std.U8) : Result Std.U8 := do
-  let lo ← lift (a &&& 15#u8)
-  let i ← a >>> 4#i32
-  let hi ← lift (i &&& 15#u8)
-  let s ← tower.scale_x_t2 hi
-  let i1 ← lift (lo ^^^ s)
-  let i2 ← i1 <<< 4#i32
-  ok (hi ||| i2)
-
-/-- [qsag_verified::tower::mul_t4]:
-    Source: 'src/tower.rs', lines 163:0-174:1 -/
-def tower.mul_t4 (a : Std.U16) (b : Std.U16) : Result Std.U16 := do
-  let i ← lift (a &&& 255#u16)
-  let a_lo ← lift (UScalar.cast .U8 i)
-  let i1 ← a >>> 8#i32
-  let i2 ← lift (i1 &&& 255#u16)
-  let a_hi ← lift (UScalar.cast .U8 i2)
-  let i3 ← lift (b &&& 255#u16)
-  let b_lo ← lift (UScalar.cast .U8 i3)
-  let i4 ← b >>> 8#i32
-  let i5 ← lift (i4 &&& 255#u16)
-  let b_hi ← lift (UScalar.cast .U8 i5)
-  let p ← tower.mul_t3 a_lo b_lo
-  let q ← tower.mul_t3 a_hi b_hi
-  let i6 ← lift (a_lo ^^^ a_hi)
-  let i7 ← lift (b_lo ^^^ b_hi)
-  let r ← tower.mul_t3 i6 i7
-  let lo ← lift (p ^^^ q)
-  let i8 ← lift (r ^^^ p)
-  let i9 ← lift (i8 ^^^ q)
-  let i10 ← tower.scale_x_t3 q
-  let hi ← lift (i9 ^^^ i10)
-  let i11 ← lift (UScalar.cast .U16 lo)
-  let i12 ← lift (UScalar.cast .U16 hi)
-  let i13 ← i12 <<< 8#i32
-  ok (i11 ||| i13)
-
-/-- [qsag_verified::tower::scale_x_t4]:
-    Source: 'src/tower.rs', lines 155:0-160:1 -/
-def tower.scale_x_t4 (a : Std.U16) : Result Std.U16 := do
-  let i ← lift (a &&& 255#u16)
-  let lo ← lift (UScalar.cast .U8 i)
-  let i1 ← a >>> 8#i32
-  let i2 ← lift (i1 &&& 255#u16)
-  let hi ← lift (UScalar.cast .U8 i2)
-  let s ← tower.scale_x_t3 hi
-  let i3 ← lift (UScalar.cast .U16 hi)
-  let i4 ← lift (lo ^^^ s)
-  let i5 ← lift (UScalar.cast .U16 i4)
-  let i6 ← i5 <<< 8#i32
-  ok (i3 ||| i6)
-
-/-- [qsag_verified::tower::mul_t5]:
-    Source: 'src/tower.rs', lines 185:0-196:1 -/
-def tower.mul_t5 (a : Std.U32) (b : Std.U32) : Result Std.U32 := do
-  let i ← lift (a &&& 65535#u32)
-  let a_lo ← lift (UScalar.cast .U16 i)
-  let i1 ← a >>> 16#i32
-  let i2 ← lift (i1 &&& 65535#u32)
-  let a_hi ← lift (UScalar.cast .U16 i2)
-  let i3 ← lift (b &&& 65535#u32)
-  let b_lo ← lift (UScalar.cast .U16 i3)
-  let i4 ← b >>> 16#i32
-  let i5 ← lift (i4 &&& 65535#u32)
-  let b_hi ← lift (UScalar.cast .U16 i5)
-  let p ← tower.mul_t4 a_lo b_lo
-  let q ← tower.mul_t4 a_hi b_hi
-  let i6 ← lift (a_lo ^^^ a_hi)
-  let i7 ← lift (b_lo ^^^ b_hi)
-  let r ← tower.mul_t4 i6 i7
-  let lo ← lift (p ^^^ q)
-  let i8 ← lift (r ^^^ p)
-  let i9 ← lift (i8 ^^^ q)
-  let i10 ← tower.scale_x_t4 q
-  let hi ← lift (i9 ^^^ i10)
-  let i11 ← lift (UScalar.cast .U32 lo)
-  let i12 ← lift (UScalar.cast .U32 hi)
-  let i13 ← i12 <<< 16#i32
-  ok (i11 ||| i13)
-
-/-- [qsag_verified::tower::scale_x_t5]:
-    Source: 'src/tower.rs', lines 177:0-182:1 -/
-def tower.scale_x_t5 (a : Std.U32) : Result Std.U32 := do
-  let i ← lift (a &&& 65535#u32)
-  let lo ← lift (UScalar.cast .U16 i)
-  let i1 ← a >>> 16#i32
-  let i2 ← lift (i1 &&& 65535#u32)
-  let hi ← lift (UScalar.cast .U16 i2)
-  let s ← tower.scale_x_t4 hi
-  let i3 ← lift (UScalar.cast .U32 hi)
-  let i4 ← lift (lo ^^^ s)
-  let i5 ← lift (UScalar.cast .U32 i4)
-  let i6 ← i5 <<< 16#i32
-  ok (i3 ||| i6)
-
-/-- [qsag_verified::tower::mul_t6]:
-    Source: 'src/tower.rs', lines 207:0-218:1 -/
-def tower.mul_t6 (a : Std.U64) (b : Std.U64) : Result Std.U64 := do
-  let i ← lift (a &&& 4294967295#u64)
-  let a_lo ← lift (UScalar.cast .U32 i)
-  let i1 ← a >>> 32#i32
-  let i2 ← lift (i1 &&& 4294967295#u64)
-  let a_hi ← lift (UScalar.cast .U32 i2)
-  let i3 ← lift (b &&& 4294967295#u64)
-  let b_lo ← lift (UScalar.cast .U32 i3)
-  let i4 ← b >>> 32#i32
-  let i5 ← lift (i4 &&& 4294967295#u64)
-  let b_hi ← lift (UScalar.cast .U32 i5)
-  let p ← tower.mul_t5 a_lo b_lo
-  let q ← tower.mul_t5 a_hi b_hi
-  let i6 ← lift (a_lo ^^^ a_hi)
-  let i7 ← lift (b_lo ^^^ b_hi)
-  let r ← tower.mul_t5 i6 i7
-  let lo ← lift (p ^^^ q)
-  let i8 ← lift (r ^^^ p)
-  let i9 ← lift (i8 ^^^ q)
-  let i10 ← tower.scale_x_t5 q
-  let hi ← lift (i9 ^^^ i10)
-  let i11 ← lift (UScalar.cast .U64 lo)
-  let i12 ← lift (UScalar.cast .U64 hi)
-  let i13 ← i12 <<< 32#i32
-  ok (i11 ||| i13)
-
-/-- [qsag_verified::tower::scale_x_t6]:
-    Source: 'src/tower.rs', lines 199:0-204:1 -/
-def tower.scale_x_t6 (a : Std.U64) : Result Std.U64 := do
-  let i ← lift (a &&& 4294967295#u64)
-  let lo ← lift (UScalar.cast .U32 i)
-  let i1 ← a >>> 32#i32
-  let i2 ← lift (i1 &&& 4294967295#u64)
-  let hi ← lift (UScalar.cast .U32 i2)
-  let s ← tower.scale_x_t5 hi
-  let i3 ← lift (UScalar.cast .U64 hi)
-  let i4 ← lift (lo ^^^ s)
-  let i5 ← lift (UScalar.cast .U64 i4)
-  let i6 ← i5 <<< 32#i32
-  ok (i3 ||| i6)
-
-/-- [qsag_verified::tower::tower128_mul]:
-    Source: 'src/tower.rs', lines 305:0-316:1
-    Visibility: public -/
-def tower.tower128_mul
-  (a : tower.Tower128) (b : tower.Tower128) : Result tower.Tower128 := do
-  let i ← lift (a &&& 18446744073709551615#u128)
-  let a_lo ← lift (UScalar.cast .U64 i)
-  let i1 ← a >>> 64#i32
-  let i2 ← lift (i1 &&& 18446744073709551615#u128)
-  let a_hi ← lift (UScalar.cast .U64 i2)
-  let i3 ← lift (b &&& 18446744073709551615#u128)
-  let b_lo ← lift (UScalar.cast .U64 i3)
-  let i4 ← b >>> 64#i32
-  let i5 ← lift (i4 &&& 18446744073709551615#u128)
-  let b_hi ← lift (UScalar.cast .U64 i5)
-  let p ← tower.mul_t6 a_lo b_lo
-  let q ← tower.mul_t6 a_hi b_hi
-  let i6 ← lift (a_lo ^^^ a_hi)
-  let i7 ← lift (b_lo ^^^ b_hi)
-  let r ← tower.mul_t6 i6 i7
-  let lo ← lift (p ^^^ q)
-  let i8 ← lift (r ^^^ p)
-  let i9 ← lift (i8 ^^^ q)
-  let i10 ← tower.scale_x_t6 q
-  let hi ← lift (i9 ^^^ i10)
-  let i11 ← lift (UScalar.cast .U128 lo)
-  let i12 ← lift (UScalar.cast .U128 hi)
-  let i13 ← i12 <<< 64#i32
-  let i14 ← lift (i11 ||| i13)
-  ok i14
-
-/-- [qsag_verified::tower::tower128_add]:
-    Source: 'src/tower.rs', lines 299:0-301:1
-    Visibility: public -/
-def tower.tower128_add
-  (a : tower.Tower128) (b : tower.Tower128) : Result tower.Tower128 := do
-  let i ← lift (a ^^^ b)
-  ok i
-
-/-- [qsag_verified::tower::embed_gf256_to_tower128]:
-    Source: 'src/tower.rs', lines 293:0-295:1
-    Visibility: public -/
-def tower.embed_gf256_to_tower128
-  (x : tower.Gf256) : Result tower.Tower128 := do
-  let i ← lift (UScalar.cast .U128 x)
-  ok i
-
-/-- [qsag_verified::tower::verify_mac_2lane]: loop body 0:
-    Source: 'src/tower.rs', lines 439:4-449:5
-    Visibility: public -/
-@[rust_loop_body]
-def tower.verify_mac_2lane_loop.body
-  (openings : Slice tower.BdozWireOpening2Lane) (weight_ok : Std.U8)
-  (masked_sum : tower.Tower128) (folded_key0 : tower.Tower128)
-  (folded_key1 : tower.Tower128) (i : Std.Usize) :
-  Result (ControlFlow (Std.U8 × tower.Tower128 × tower.Tower128 ×
-    tower.Tower128 × Std.Usize) (Std.U8 × tower.Tower128 × tower.Tower128 ×
-    tower.Tower128))
-  := do
-  let i1 := Slice.len openings
-  if i < i1
-  then
-    let w ← Slice.index_usize openings i
-    let i2 := w.chal_weight
-    let weight_ok1 ← if i2 = 0#u128
-                       then ok 0#u8
-                       else ok weight_ok
-    let x_emb ← tower.embed_gf256_to_tower128 w.opened_value
-    let t ← tower.tower128_mul w.chal_weight x_emb
-    let masked_sum1 ← tower.tower128_add masked_sum t
-    let t1 ← Array.index_usize w.key_lanes 0#usize
-    let t2 ← tower.tower128_mul w.chal_weight t1
-    let folded_key01 ← tower.tower128_add folded_key0 t2
-    let t3 ← Array.index_usize w.key_lanes 1#usize
-    let t4 ← tower.tower128_mul w.chal_weight t3
-    let folded_key11 ← tower.tower128_add folded_key1 t4
-    let i3 ← i + 1#usize
-    ok (cont (weight_ok1, masked_sum1, folded_key01, folded_key11, i3))
-  else ok (done (weight_ok, masked_sum, folded_key0, folded_key1))
-
-/-- [qsag_verified::tower::verify_mac_2lane]: loop 0:
-    Source: 'src/tower.rs', lines 439:4-449:5
-    Visibility: public -/
-@[rust_loop]
-def tower.verify_mac_2lane_loop
-  (openings : Slice tower.BdozWireOpening2Lane) (weight_ok : Std.U8)
-  (masked_sum : tower.Tower128) (folded_key0 : tower.Tower128)
-  (folded_key1 : tower.Tower128) (i : Std.Usize) :
-  Result (Std.U8 × tower.Tower128 × tower.Tower128 × tower.Tower128)
-  := do
-  loop
-    (fun (weight_ok1, masked_sum1, folded_key01, folded_key11, i1) =>
-      tower.verify_mac_2lane_loop.body openings weight_ok1 masked_sum1
-      folded_key01 folded_key11 i1)
-    (weight_ok, masked_sum, folded_key0, folded_key1, i)
-
-/-- [qsag_verified::tower::verify_mac_2lane]:
-    Source: 'src/tower.rs', lines 426:0-463:1
-    Visibility: public -/
-def tower.verify_mac_2lane
-  (alpha_lanes : Array tower.Tower128 2#usize)
-  (batch : tower.BdozCommittedBatchOpening2Lane)
-  (openings : Slice tower.BdozWireOpening2Lane) :
-  Result Bool
-  := do
-  let b ← core.slice.Slice.is_empty openings
-  if b
-  then ok false
-  else
-    let folded_key0 ← Array.index_usize batch.mask_key_lanes 0#usize
-    let folded_key1 ← Array.index_usize batch.mask_key_lanes 1#usize
-    let (weight_ok, masked_sum, folded_key01, folded_key11) ←
-      tower.verify_mac_2lane_loop openings 1#u8 batch.mask_value folded_key0
-        folded_key1 0#usize
-    let expected_commit ←
-      tower.bdoz_commit_masked_tag batch.session_id batch.round_id masked_sum
-        batch.peer_masked_mac_lanes batch.open_nonce
-    let commit_ok ← tower.ct_eq_bytes32 expected_commit batch.tag_commitment
-    let t ← Array.index_usize alpha_lanes 0#usize
-    let t1 ← tower.tower128_mul t masked_sum
-    let exp0 ← tower.tower128_add folded_key01 t1
-    let t2 ← Array.index_usize alpha_lanes 1#usize
-    let t3 ← tower.tower128_mul t2 masked_sum
-    let exp1 ← tower.tower128_add folded_key11 t3
-    let t4 ← Array.index_usize batch.peer_masked_mac_lanes 0#usize
-    let diff0 ← lift (t4 ^^^ exp0)
-    let t5 ← Array.index_usize batch.peer_masked_mac_lanes 1#usize
-    let diff1 ← lift (t5 ^^^ exp1)
-    if weight_ok = 1#u8
-    then
-      if commit_ok
-      then let i ← lift (diff0 ||| diff1)
-           ok (i = 0#u128)
-      else ok false
-    else ok false
-
-/-- [qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256]: loop body 0:
-    Source: 'src/threshold.rs', lines 297:4-300:5
-    Visibility: public -/
-@[rust_loop_body]
-def threshold.dkg_verify_key_shares_boolean_bdoz_gf256_loop.body
-  (residual_openings : Slice tower.BdozWireOpening2Lane)
-  (non_boolean_acc : Std.U8) (i : Std.Usize) :
-  Result (ControlFlow (Std.U8 × Std.Usize) Std.U8)
-  := do
-  let i1 := Slice.len residual_openings
-  if i < i1
-  then
-    let bwol ← Slice.index_usize residual_openings i
-    let i2 := bwol.opened_value
-    let non_boolean_acc1 ← lift (non_boolean_acc ||| i2)
-    let i3 ← i + 1#usize
-    ok (cont (non_boolean_acc1, i3))
-  else ok (done non_boolean_acc)
-
-/-- [qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256]: loop 0:
-    Source: 'src/threshold.rs', lines 297:4-300:5
-    Visibility: public -/
-@[rust_loop]
-def threshold.dkg_verify_key_shares_boolean_bdoz_gf256_loop
-  (residual_openings : Slice tower.BdozWireOpening2Lane)
-  (non_boolean_acc : Std.U8) (i : Std.Usize) :
-  Result Std.U8
-  := do
-  loop
-    (fun (non_boolean_acc1, i1) =>
-      threshold.dkg_verify_key_shares_boolean_bdoz_gf256_loop.body
-      residual_openings non_boolean_acc1 i1)
-    (non_boolean_acc, i)
-
-/-- [qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256]:
-    Source: 'src/threshold.rs', lines 287:0-302:1
-    Visibility: public -/
-def threshold.dkg_verify_key_shares_boolean_bdoz_gf256
-  (alpha_lanes : Array tower.Tower128 2#usize)
-  (batch_opening : tower.BdozCommittedBatchOpening2Lane)
-  (residual_openings : Slice tower.BdozWireOpening2Lane) :
-  Result Bool
-  := do
-  let b ← tower.verify_mac_2lane alpha_lanes batch_opening residual_openings
-  if b
-  then
-    let non_boolean_acc ←
-      threshold.dkg_verify_key_shares_boolean_bdoz_gf256_loop residual_openings
-        0#u8 0#usize
-    ok (non_boolean_acc = 0#u8)
-  else ok false
-
 /-- [qsag_verified::tower::gf256_frobenius_residual]:
-    Source: 'src/tower.rs', lines 281:0-283:1
+    Source: 'src/tower.rs', lines 215:0-217:1
     Visibility: public -/
 def tower.gf256_frobenius_residual (x : tower.Gf256) : Result tower.Gf256 := do
   let g ← tower.gf256_mul x x
   tower.gf256_add g x
 
 /-- [qsag_verified::tower::gf256_is_boolean_frobenius]:
-    Source: 'src/tower.rs', lines 287:0-289:1
+    Source: 'src/tower.rs', lines 221:0-223:1
     Visibility: public -/
 def tower.gf256_is_boolean_frobenius (x : tower.Gf256) : Result Bool := do
   let g ← tower.gf256_frobenius_residual x
   ok (g = 0#u8)
 
 /-- [qsag_verified::threshold::dkg_verify_shamir_2of3_key_bit_gf256]:
-    Source: 'src/threshold.rs', lines 309:0-339:1
+    Source: 'src/threshold.rs', lines 286:0-316:1
     Visibility: public -/
 def threshold.dkg_verify_shamir_2of3_key_bit_gf256
   (points : Array tower.Gf256 3#usize) (shares : Array tower.Gf256 3#usize) :
@@ -10384,14 +9326,14 @@ def threshold.dkg_verify_shamir_2of3_key_bit_gf256
   else ok false
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::RssShare64}::clone]:
-    Source: 'src/threshold.rs', lines 347:9-347:14
+    Source: 'src/threshold.rs', lines 324:9-324:14
     Visibility: public -/
 def threshold.RssShare64.Insts.CoreCloneClone.clone
   (self : threshold.RssShare64) : Result threshold.RssShare64 := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::RssShare64}]
-    Source: 'src/threshold.rs', lines 347:9-347:14 -/
+    Source: 'src/threshold.rs', lines 324:9-324:14 -/
 @[reducible]
 def threshold.RssShare64.Insts.CoreCloneClone : core.clone.Clone
   threshold.RssShare64 := {
@@ -10399,7 +9341,7 @@ def threshold.RssShare64.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::RssShare64}]
-    Source: 'src/threshold.rs', lines 347:16-347:20 -/
+    Source: 'src/threshold.rs', lines 324:16-324:20 -/
 @[reducible]
 def threshold.RssShare64.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.RssShare64 := {
@@ -10407,7 +9349,7 @@ def threshold.RssShare64.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::threshold::{impl core::default::Default for qsag_verified::threshold::RssShare64}::default]:
-    Source: 'src/threshold.rs', lines 347:22-347:29
+    Source: 'src/threshold.rs', lines 324:22-324:29
     Visibility: public -/
 def threshold.RssShare64.Insts.CoreDefaultDefault.default
   : Result threshold.RssShare64 := do
@@ -10419,7 +9361,7 @@ def threshold.RssShare64.Insts.CoreDefaultDefault.default
     }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::default::Default for qsag_verified::threshold::RssShare64}]
-    Source: 'src/threshold.rs', lines 347:22-347:29 -/
+    Source: 'src/threshold.rs', lines 324:22-324:29 -/
 @[reducible]
 def threshold.RssShare64.Insts.CoreDefaultDefault : core.default.Default
   threshold.RssShare64 := {
@@ -10427,14 +9369,14 @@ def threshold.RssShare64.Insts.CoreDefaultDefault : core.default.Default
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::RssZeroSeeds64}::clone]:
-    Source: 'src/threshold.rs', lines 356:9-356:14
+    Source: 'src/threshold.rs', lines 333:9-333:14
     Visibility: public -/
 def threshold.RssZeroSeeds64.Insts.CoreCloneClone.clone
   (self : threshold.RssZeroSeeds64) : Result threshold.RssZeroSeeds64 := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::RssZeroSeeds64}]
-    Source: 'src/threshold.rs', lines 356:9-356:14 -/
+    Source: 'src/threshold.rs', lines 333:9-333:14 -/
 @[reducible]
 def threshold.RssZeroSeeds64.Insts.CoreCloneClone : core.clone.Clone
   threshold.RssZeroSeeds64 := {
@@ -10442,7 +9384,7 @@ def threshold.RssZeroSeeds64.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::RssZeroSeeds64}]
-    Source: 'src/threshold.rs', lines 356:16-356:20 -/
+    Source: 'src/threshold.rs', lines 333:16-333:20 -/
 @[reducible]
 def threshold.RssZeroSeeds64.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.RssZeroSeeds64 := {
@@ -10450,7 +9392,7 @@ def threshold.RssZeroSeeds64.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::threshold::{impl core::default::Default for qsag_verified::threshold::RssZeroSeeds64}::default]:
-    Source: 'src/threshold.rs', lines 356:22-356:29
+    Source: 'src/threshold.rs', lines 333:22-333:29
     Visibility: public -/
 def threshold.RssZeroSeeds64.Insts.CoreDefaultDefault.default
   : Result threshold.RssZeroSeeds64 := do
@@ -10462,7 +9404,7 @@ def threshold.RssZeroSeeds64.Insts.CoreDefaultDefault.default
     }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::default::Default for qsag_verified::threshold::RssZeroSeeds64}]
-    Source: 'src/threshold.rs', lines 356:22-356:29 -/
+    Source: 'src/threshold.rs', lines 333:22-333:29 -/
 @[reducible]
 def threshold.RssZeroSeeds64.Insts.CoreDefaultDefault : core.default.Default
   threshold.RssZeroSeeds64 := {
@@ -10470,7 +9412,7 @@ def threshold.RssZeroSeeds64.Insts.CoreDefaultDefault : core.default.Default
 }
 
 /-- [qsag_verified::threshold::rss_share_u64]:
-    Source: 'src/threshold.rs', lines 365:0-371:1
+    Source: 'src/threshold.rs', lines 342:0-348:1
     Visibility: public -/
 def threshold.rss_share_u64
   (secret : Std.U64) (m0 : Std.U64) (m1 : Std.U64) :
@@ -10481,7 +9423,7 @@ def threshold.rss_share_u64
   ok { x0 := m0, x1 := m1, x2 := i1 }
 
 /-- [qsag_verified::threshold::rss_reconstruct]:
-    Source: 'src/threshold.rs', lines 375:0-377:1
+    Source: 'src/threshold.rs', lines 352:0-354:1
     Visibility: public -/
 def threshold.rss_reconstruct
   (sh : threshold.RssShare64) : Result Std.U64 := do
@@ -10489,7 +9431,7 @@ def threshold.rss_reconstruct
   ok (i ^^^ sh.x2)
 
 /-- [qsag_verified::threshold::rss_xor]:
-    Source: 'src/threshold.rs', lines 381:0-387:1
+    Source: 'src/threshold.rs', lines 358:0-364:1
     Visibility: public -/
 def threshold.rss_xor
   (a : threshold.RssShare64) (b : threshold.RssShare64) :
@@ -10501,7 +9443,7 @@ def threshold.rss_xor
   ok { x0 := i, x1 := i1, x2 := i2 }
 
 /-- [qsag_verified::threshold::rss_not]:
-    Source: 'src/threshold.rs', lines 391:0-397:1
+    Source: 'src/threshold.rs', lines 368:0-374:1
     Visibility: public -/
 def threshold.rss_not
   (a : threshold.RssShare64) : Result threshold.RssShare64 := do
@@ -10509,7 +9451,7 @@ def threshold.rss_not
   ok { a with x0 := i }
 
 /-- [qsag_verified::threshold::rss_party_and_local]:
-    Source: 'src/threshold.rs', lines 402:0-411:1
+    Source: 'src/threshold.rs', lines 379:0-388:1
     Visibility: public -/
 def threshold.rss_party_and_local
   (ax_i : Std.U64) (ax_next : Std.U64) (bx_i : Std.U64) (bx_next : Std.U64)
@@ -10525,7 +9467,7 @@ def threshold.rss_party_and_local
   ok (i4 ^^^ i5)
 
 /-- [qsag_verified::threshold::rss_and_gate]:
-    Source: 'src/threshold.rs', lines 416:0-422:1
+    Source: 'src/threshold.rs', lines 393:0-399:1
     Visibility: public -/
 def threshold.rss_and_gate
   (a : threshold.RssShare64) (b : threshold.RssShare64)
@@ -10539,19 +9481,8 @@ def threshold.rss_and_gate
     threshold.rss_party_and_local a.x2 a.x0 b.x2 b.x0 seeds.r2 seeds.r0
   ok { x0 := i, x1 := i1, x2 := i2 }
 
-/-- [qsag_verified::threshold::rss_reshare_views]:
-    Source: 'src/threshold.rs', lines 426:0-428:1
-    Visibility: public -/
-def threshold.rss_reshare_views
-  (z : threshold.RssShare64) :
-  Result ((Array Std.U64 2#usize) × (Array Std.U64 2#usize) × (Array Std.U64
-    2#usize))
-  := do
-  ok (Array.make 2#usize [ z.x0, z.x1 ], Array.make 2#usize [ z.x1, z.x2 ],
-    Array.make 2#usize [ z.x2, z.x0 ])
-
 /-- [qsag_verified::threshold::rss_keccak_chi_lane]:
-    Source: 'src/threshold.rs', lines 432:0-439:1
+    Source: 'src/threshold.rs', lines 403:0-410:1
     Visibility: public -/
 def threshold.rss_keccak_chi_lane
   (a : threshold.RssShare64) (b : threshold.RssShare64)
@@ -10563,14 +9494,14 @@ def threshold.rss_keccak_chi_lane
   threshold.rss_xor a rs1
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::BoundEpochRecord}::clone]:
-    Source: 'src/threshold.rs', lines 448:9-448:14
+    Source: 'src/threshold.rs', lines 419:9-419:14
     Visibility: public -/
 def threshold.BoundEpochRecord.Insts.CoreCloneClone.clone
   (self : threshold.BoundEpochRecord) : Result threshold.BoundEpochRecord := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 448:9-448:14 -/
+    Source: 'src/threshold.rs', lines 419:9-419:14 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreCloneClone : core.clone.Clone
   threshold.BoundEpochRecord := {
@@ -10578,7 +9509,7 @@ def threshold.BoundEpochRecord.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 448:16-448:20 -/
+    Source: 'src/threshold.rs', lines 419:16-419:20 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.BoundEpochRecord := {
@@ -10586,14 +9517,14 @@ def threshold.BoundEpochRecord.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 448:22-448:31 -/
+    Source: 'src/threshold.rs', lines 419:22-419:31 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.BoundEpochRecord := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::BoundEpochRecord> for qsag_verified::threshold::BoundEpochRecord}::eq]:
-    Source: 'src/threshold.rs', lines 448:22-448:31
+    Source: 'src/threshold.rs', lines 419:22-419:31
     Visibility: public -/
 def threshold.BoundEpochRecord.Insts.CoreCmpPartialEqBoundEpochRecord.eq
   (self : threshold.BoundEpochRecord) (other : threshold.BoundEpochRecord) :
@@ -10612,7 +9543,7 @@ def threshold.BoundEpochRecord.Insts.CoreCmpPartialEqBoundEpochRecord.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::BoundEpochRecord> for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 448:22-448:31 -/
+    Source: 'src/threshold.rs', lines 419:22-419:31 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreCmpPartialEqBoundEpochRecord :
   core.cmp.PartialEq threshold.BoundEpochRecord threshold.BoundEpochRecord := {
@@ -10620,14 +9551,14 @@ def threshold.BoundEpochRecord.Insts.CoreCmpPartialEqBoundEpochRecord :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::BoundEpochRecord}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 448:33-448:35
+    Source: 'src/threshold.rs', lines 419:33-419:35
     Visibility: public -/
 def threshold.BoundEpochRecord.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.BoundEpochRecord) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::BoundEpochRecord}]
-    Source: 'src/threshold.rs', lines 448:33-448:35 -/
+    Source: 'src/threshold.rs', lines 419:33-419:35 -/
 @[reducible]
 def threshold.BoundEpochRecord.Insts.CoreCmpEq : core.cmp.Eq
   threshold.BoundEpochRecord := {
@@ -10638,14 +9569,14 @@ def threshold.BoundEpochRecord.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::LastBoundEpoch}::clone]:
-    Source: 'src/threshold.rs', lines 458:9-458:14
+    Source: 'src/threshold.rs', lines 429:9-429:14
     Visibility: public -/
 def threshold.LastBoundEpoch.Insts.CoreCloneClone.clone
   (self : threshold.LastBoundEpoch) : Result threshold.LastBoundEpoch := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 458:9-458:14 -/
+    Source: 'src/threshold.rs', lines 429:9-429:14 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreCloneClone : core.clone.Clone
   threshold.LastBoundEpoch := {
@@ -10653,7 +9584,7 @@ def threshold.LastBoundEpoch.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 458:16-458:20 -/
+    Source: 'src/threshold.rs', lines 429:16-429:20 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.LastBoundEpoch := {
@@ -10661,14 +9592,14 @@ def threshold.LastBoundEpoch.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 458:22-458:31 -/
+    Source: 'src/threshold.rs', lines 429:22-429:31 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.LastBoundEpoch := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::LastBoundEpoch> for qsag_verified::threshold::LastBoundEpoch}::eq]:
-    Source: 'src/threshold.rs', lines 458:22-458:31
+    Source: 'src/threshold.rs', lines 429:22-429:31
     Visibility: public -/
 def threshold.LastBoundEpoch.Insts.CoreCmpPartialEqLastBoundEpoch.eq
   (self : threshold.LastBoundEpoch) (other : threshold.LastBoundEpoch) :
@@ -10689,7 +9620,7 @@ def threshold.LastBoundEpoch.Insts.CoreCmpPartialEqLastBoundEpoch.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::LastBoundEpoch> for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 458:22-458:31 -/
+    Source: 'src/threshold.rs', lines 429:22-429:31 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreCmpPartialEqLastBoundEpoch :
   core.cmp.PartialEq threshold.LastBoundEpoch threshold.LastBoundEpoch := {
@@ -10697,14 +9628,14 @@ def threshold.LastBoundEpoch.Insts.CoreCmpPartialEqLastBoundEpoch :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::LastBoundEpoch}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 458:33-458:35
+    Source: 'src/threshold.rs', lines 429:33-429:35
     Visibility: public -/
 def threshold.LastBoundEpoch.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.LastBoundEpoch) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::LastBoundEpoch}]
-    Source: 'src/threshold.rs', lines 458:33-458:35 -/
+    Source: 'src/threshold.rs', lines 429:33-429:35 -/
 @[reducible]
 def threshold.LastBoundEpoch.Insts.CoreCmpEq : core.cmp.Eq
   threshold.LastBoundEpoch := {
@@ -10715,14 +9646,14 @@ def threshold.LastBoundEpoch.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochSignRequest}::clone]:
-    Source: 'src/threshold.rs', lines 483:9-483:14
+    Source: 'src/threshold.rs', lines 455:9-455:14
     Visibility: public -/
 def threshold.EpochSignRequest.Insts.CoreCloneClone.clone
   (self : threshold.EpochSignRequest) : Result threshold.EpochSignRequest := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 483:9-483:14 -/
+    Source: 'src/threshold.rs', lines 455:9-455:14 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreCloneClone : core.clone.Clone
   threshold.EpochSignRequest := {
@@ -10730,7 +9661,7 @@ def threshold.EpochSignRequest.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 483:16-483:20 -/
+    Source: 'src/threshold.rs', lines 455:16-455:20 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.EpochSignRequest := {
@@ -10738,14 +9669,14 @@ def threshold.EpochSignRequest.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 483:22-483:31 -/
+    Source: 'src/threshold.rs', lines 455:22-455:31 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.EpochSignRequest := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochSignRequest> for qsag_verified::threshold::EpochSignRequest}::eq]:
-    Source: 'src/threshold.rs', lines 483:22-483:31
+    Source: 'src/threshold.rs', lines 455:22-455:31
     Visibility: public -/
 def threshold.EpochSignRequest.Insts.CoreCmpPartialEqEpochSignRequest.eq
   (self : threshold.EpochSignRequest) (other : threshold.EpochSignRequest) :
@@ -10770,7 +9701,7 @@ def threshold.EpochSignRequest.Insts.CoreCmpPartialEqEpochSignRequest.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochSignRequest> for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 483:22-483:31 -/
+    Source: 'src/threshold.rs', lines 455:22-455:31 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreCmpPartialEqEpochSignRequest :
   core.cmp.PartialEq threshold.EpochSignRequest threshold.EpochSignRequest := {
@@ -10778,14 +9709,14 @@ def threshold.EpochSignRequest.Insts.CoreCmpPartialEqEpochSignRequest :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochSignRequest}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 483:33-483:35
+    Source: 'src/threshold.rs', lines 455:33-455:35
     Visibility: public -/
 def threshold.EpochSignRequest.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.EpochSignRequest) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochSignRequest}]
-    Source: 'src/threshold.rs', lines 483:33-483:35 -/
+    Source: 'src/threshold.rs', lines 455:33-455:35 -/
 @[reducible]
 def threshold.EpochSignRequest.Insts.CoreCmpEq : core.cmp.Eq
   threshold.EpochSignRequest := {
@@ -10796,14 +9727,14 @@ def threshold.EpochSignRequest.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochAuthGrant}::clone]:
-    Source: 'src/threshold.rs', lines 498:9-498:14
+    Source: 'src/threshold.rs', lines 470:9-470:14
     Visibility: public -/
 def threshold.EpochAuthGrant.Insts.CoreCloneClone.clone
   (self : threshold.EpochAuthGrant) : Result threshold.EpochAuthGrant := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 498:9-498:14 -/
+    Source: 'src/threshold.rs', lines 470:9-470:14 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreCloneClone : core.clone.Clone
   threshold.EpochAuthGrant := {
@@ -10811,7 +9742,7 @@ def threshold.EpochAuthGrant.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 498:16-498:20 -/
+    Source: 'src/threshold.rs', lines 470:16-470:20 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.EpochAuthGrant := {
@@ -10819,14 +9750,14 @@ def threshold.EpochAuthGrant.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 498:22-498:31 -/
+    Source: 'src/threshold.rs', lines 470:22-470:31 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.EpochAuthGrant := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochAuthGrant> for qsag_verified::threshold::EpochAuthGrant}::eq]:
-    Source: 'src/threshold.rs', lines 498:22-498:31
+    Source: 'src/threshold.rs', lines 470:22-470:31
     Visibility: public -/
 def threshold.EpochAuthGrant.Insts.CoreCmpPartialEqEpochAuthGrant.eq
   (self : threshold.EpochAuthGrant) (other : threshold.EpochAuthGrant) :
@@ -10852,7 +9783,7 @@ def threshold.EpochAuthGrant.Insts.CoreCmpPartialEqEpochAuthGrant.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochAuthGrant> for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 498:22-498:31 -/
+    Source: 'src/threshold.rs', lines 470:22-470:31 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreCmpPartialEqEpochAuthGrant :
   core.cmp.PartialEq threshold.EpochAuthGrant threshold.EpochAuthGrant := {
@@ -10860,14 +9791,14 @@ def threshold.EpochAuthGrant.Insts.CoreCmpPartialEqEpochAuthGrant :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochAuthGrant}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 498:33-498:35
+    Source: 'src/threshold.rs', lines 470:33-470:35
     Visibility: public -/
 def threshold.EpochAuthGrant.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.EpochAuthGrant) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochAuthGrant}]
-    Source: 'src/threshold.rs', lines 498:33-498:35 -/
+    Source: 'src/threshold.rs', lines 470:33-470:35 -/
 @[reducible]
 def threshold.EpochAuthGrant.Insts.CoreCmpEq : core.cmp.Eq
   threshold.EpochAuthGrant := {
@@ -10878,14 +9809,14 @@ def threshold.EpochAuthGrant.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochRequest}::clone]:
-    Source: 'src/threshold.rs', lines 508:9-508:14
+    Source: 'src/threshold.rs', lines 480:9-480:14
     Visibility: public -/
 def threshold.EpochRequest.Insts.CoreCloneClone.clone
   (self : threshold.EpochRequest) : Result threshold.EpochRequest := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 508:9-508:14 -/
+    Source: 'src/threshold.rs', lines 480:9-480:14 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreCloneClone : core.clone.Clone
   threshold.EpochRequest := {
@@ -10893,7 +9824,7 @@ def threshold.EpochRequest.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 508:16-508:20 -/
+    Source: 'src/threshold.rs', lines 480:16-480:20 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.EpochRequest := {
@@ -10901,7 +9832,7 @@ def threshold.EpochRequest.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::threshold::{impl core::fmt::Debug for qsag_verified::threshold::EpochRequest}::fmt]:
-    Source: 'src/threshold.rs', lines 508:22-508:27
+    Source: 'src/threshold.rs', lines 480:22-480:27
     Visibility: public -/
 def threshold.EpochRequest.Insts.CoreFmtDebug.fmt
   (self : threshold.EpochRequest) (f : core.fmt.Formatter) :
@@ -10915,7 +9846,7 @@ def threshold.EpochRequest.Insts.CoreFmtDebug.fmt
     "requested_epoch") dyn (toStr "key_epoch_id") dyn1
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::fmt::Debug for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 508:22-508:27 -/
+    Source: 'src/threshold.rs', lines 480:22-480:27 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreFmtDebug : core.fmt.Debug
   threshold.EpochRequest := {
@@ -10923,14 +9854,14 @@ def threshold.EpochRequest.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 508:29-508:38 -/
+    Source: 'src/threshold.rs', lines 480:29-480:38 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.EpochRequest := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochRequest> for qsag_verified::threshold::EpochRequest}::eq]:
-    Source: 'src/threshold.rs', lines 508:29-508:38
+    Source: 'src/threshold.rs', lines 480:29-480:38
     Visibility: public -/
 def threshold.EpochRequest.Insts.CoreCmpPartialEqEpochRequest.eq
   (self : threshold.EpochRequest) (other : threshold.EpochRequest) :
@@ -10943,7 +9874,7 @@ def threshold.EpochRequest.Insts.CoreCmpPartialEqEpochRequest.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochRequest> for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 508:29-508:38 -/
+    Source: 'src/threshold.rs', lines 480:29-480:38 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreCmpPartialEqEpochRequest :
   core.cmp.PartialEq threshold.EpochRequest threshold.EpochRequest := {
@@ -10951,14 +9882,14 @@ def threshold.EpochRequest.Insts.CoreCmpPartialEqEpochRequest :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochRequest}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 508:40-508:42
+    Source: 'src/threshold.rs', lines 480:40-480:42
     Visibility: public -/
 def threshold.EpochRequest.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.EpochRequest) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochRequest}]
-    Source: 'src/threshold.rs', lines 508:40-508:42 -/
+    Source: 'src/threshold.rs', lines 480:40-480:42 -/
 @[reducible]
 def threshold.EpochRequest.Insts.CoreCmpEq : core.cmp.Eq threshold.EpochRequest
   := {
@@ -10968,14 +9899,14 @@ def threshold.EpochRequest.Insts.CoreCmpEq : core.cmp.Eq threshold.EpochRequest
 }
 
 /-- [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochLatchError}::clone]:
-    Source: 'src/threshold.rs', lines 515:9-515:14
+    Source: 'src/threshold.rs', lines 487:9-487:14
     Visibility: public -/
 def threshold.EpochLatchError.Insts.CoreCloneClone.clone
   (self : threshold.EpochLatchError) : Result threshold.EpochLatchError := do
   ok self
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::clone::Clone for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 515:9-515:14 -/
+    Source: 'src/threshold.rs', lines 487:9-487:14 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreCloneClone : core.clone.Clone
   threshold.EpochLatchError := {
@@ -10983,7 +9914,7 @@ def threshold.EpochLatchError.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::Copy for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 515:16-515:20 -/
+    Source: 'src/threshold.rs', lines 487:16-487:20 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreMarkerCopy : core.marker.Copy
   threshold.EpochLatchError := {
@@ -10991,7 +9922,7 @@ def threshold.EpochLatchError.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::threshold::{impl core::fmt::Debug for qsag_verified::threshold::EpochLatchError}::fmt]:
-    Source: 'src/threshold.rs', lines 515:22-515:27
+    Source: 'src/threshold.rs', lines 487:22-487:27
     Visibility: public -/
 def threshold.EpochLatchError.Insts.CoreFmtDebug.fmt
   (self : threshold.EpochLatchError) (f : core.fmt.Formatter) :
@@ -11022,7 +9953,7 @@ def threshold.EpochLatchError.Insts.CoreFmtDebug.fmt
       (toStr "max_epoch") __self_01
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::fmt::Debug for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 515:22-515:27 -/
+    Source: 'src/threshold.rs', lines 487:22-487:27 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreFmtDebug : core.fmt.Debug
   threshold.EpochLatchError := {
@@ -11030,14 +9961,14 @@ def threshold.EpochLatchError.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::marker::StructuralPartialEq for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 515:29-515:38 -/
+    Source: 'src/threshold.rs', lines 487:29-487:38 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq threshold.EpochLatchError := {
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochLatchError> for qsag_verified::threshold::EpochLatchError}::eq]:
-    Source: 'src/threshold.rs', lines 515:29-515:38
+    Source: 'src/threshold.rs', lines 487:29-487:38
     Visibility: public -/
 def threshold.EpochLatchError.Insts.CoreCmpPartialEqEpochLatchError.eq
   (self : threshold.EpochLatchError) (other : threshold.EpochLatchError) :
@@ -11092,7 +10023,7 @@ def threshold.EpochLatchError.Insts.CoreCmpPartialEqEpochLatchError.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::PartialEq<qsag_verified::threshold::EpochLatchError> for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 515:29-515:38 -/
+    Source: 'src/threshold.rs', lines 487:29-487:38 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreCmpPartialEqEpochLatchError :
   core.cmp.PartialEq threshold.EpochLatchError threshold.EpochLatchError := {
@@ -11100,14 +10031,14 @@ def threshold.EpochLatchError.Insts.CoreCmpPartialEqEpochLatchError :
 }
 
 /-- [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochLatchError}::assert_fields_are_eq]:
-    Source: 'src/threshold.rs', lines 515:40-515:42
+    Source: 'src/threshold.rs', lines 487:40-487:42
     Visibility: public -/
 def threshold.EpochLatchError.Insts.CoreCmpEq.assert_fields_are_eq
   (self : threshold.EpochLatchError) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::threshold::{impl core::cmp::Eq for qsag_verified::threshold::EpochLatchError}]
-    Source: 'src/threshold.rs', lines 515:40-515:42 -/
+    Source: 'src/threshold.rs', lines 487:40-487:42 -/
 @[reducible]
 def threshold.EpochLatchError.Insts.CoreCmpEq : core.cmp.Eq
   threshold.EpochLatchError := {
@@ -11118,35 +10049,35 @@ def threshold.EpochLatchError.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::next_epoch]:
-    Source: 'src/threshold.rs', lines 526:4-528:5
+    Source: 'src/threshold.rs', lines 498:4-500:5
     Visibility: public -/
 def threshold.EpochLatch.impl.next_epoch
   (self : threshold.EpochLatch) : Result Std.U64 := do
   ok self.next_epoch
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::max_epoch]:
-    Source: 'src/threshold.rs', lines 529:4-531:5
+    Source: 'src/threshold.rs', lines 501:4-503:5
     Visibility: public -/
 def threshold.EpochLatch.impl.max_epoch
   (self : threshold.EpochLatch) : Result Std.U64 := do
   ok self.max_epoch
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::key_epoch_id]:
-    Source: 'src/threshold.rs', lines 532:4-534:5
+    Source: 'src/threshold.rs', lines 504:4-506:5
     Visibility: public -/
 def threshold.EpochLatch.impl.key_epoch_id
   (self : threshold.EpochLatch) : Result (Array Std.U8 32#usize) := do
   ok self.key_epoch_id
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::last_bound]:
-    Source: 'src/threshold.rs', lines 535:4-537:5
+    Source: 'src/threshold.rs', lines 507:4-509:5
     Visibility: public -/
 def threshold.EpochLatch.impl.last_bound
   (self : threshold.EpochLatch) : Result threshold.LastBoundEpoch := do
   ok self.last_bound
 
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::new]:
-    Source: 'src/threshold.rs', lines 541:4-548:5
+    Source: 'src/threshold.rs', lines 513:4-520:5
     Visibility: public -/
 def threshold.EpochLatch.new
   (max_epoch : Std.U64) (key_epoch_id : Array Std.U8 32#usize) :
@@ -11160,8 +10091,39 @@ def threshold.EpochLatch.new
       last_bound := threshold.LastBoundEpoch.Unset
     }
 
+/-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::from_cursor]:
+    Source: 'src/threshold.rs', lines 524:4-544:5
+    Visibility: public -/
+def threshold.EpochLatch.from_cursor
+  (next_epoch : Std.U64) (max_epoch : Std.U64)
+  (key_epoch_id : Array Std.U8 32#usize)
+  (last_bound : threshold.LastBoundEpoch) :
+  Result (core.result.Result threshold.EpochLatch threshold.EpochLatchError)
+  := do
+  if next_epoch > max_epoch
+  then
+    ok (core.result.Result.Err (threshold.EpochLatchError.TreeExhausted
+      max_epoch))
+  else
+    match last_bound with
+    | threshold.LastBoundEpoch.Unset =>
+      ok (core.result.Result.Ok
+        {
+          next_epoch,
+          max_epoch,
+          key_epoch_id,
+          last_bound := threshold.LastBoundEpoch.Unset
+        })
+    | threshold.LastBoundEpoch.Bound bound =>
+      if bound.epoch >= next_epoch
+      then
+        ok (core.result.Result.Err threshold.EpochLatchError.CorruptedWalState)
+      else
+        ok (core.result.Result.Ok
+          { next_epoch, max_epoch, key_epoch_id, last_bound })
+
 /-- [qsag_verified::threshold::{qsag_verified::threshold::EpochLatch}::acquire_or_retry]:
-    Source: 'src/threshold.rs', lines 560:4-628:5
+    Source: 'src/threshold.rs', lines 556:4-624:5
     Visibility: public -/
 def threshold.EpochLatch.acquire_or_retry
   (self : threshold.EpochLatch) (req : threshold.EpochSignRequest) :
@@ -11270,7 +10232,7 @@ def threshold.EpochLatch.acquire_or_retry
   else ok (core.result.Result.Err threshold.EpochLatchError.KeyBindingMismatch)
 
 /-- [qsag_verified::threshold::epoch_latch_advance]:
-    Source: 'src/threshold.rs', lines 633:0-667:1
+    Source: 'src/threshold.rs', lines 629:0-663:1
     Visibility: public -/
 def threshold.epoch_latch_advance
   (st : threshold.EpochLatch) (req : threshold.EpochRequest) :
@@ -11323,28 +10285,28 @@ def threshold.epoch_latch_advance
   else ok (core.result.Result.Err threshold.EpochLatchError.KeyBindingMismatch)
 
 /-- [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::Gf16}::clone]:
-    Source: 'src/tower.rs', lines 9:9-9:14
+    Source: 'src/tower.rs', lines 4:9-4:14
     Visibility: public -/
 def tower.Gf16.Insts.CoreCloneClone.clone
   (self : tower.Gf16) : Result tower.Gf16 := do
   ok self
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::Gf16}]
-    Source: 'src/tower.rs', lines 9:9-9:14 -/
+    Source: 'src/tower.rs', lines 4:9-4:14 -/
 @[reducible]
 def tower.Gf16.Insts.CoreCloneClone : core.clone.Clone tower.Gf16 := {
   clone := tower.Gf16.Insts.CoreCloneClone.clone
 }
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::marker::Copy for qsag_verified::tower::Gf16}]
-    Source: 'src/tower.rs', lines 9:16-9:20 -/
+    Source: 'src/tower.rs', lines 4:16-4:20 -/
 @[reducible]
 def tower.Gf16.Insts.CoreMarkerCopy : core.marker.Copy tower.Gf16 := {
   cloneInst := tower.Gf16.Insts.CoreCloneClone
 }
 
 /-- [qsag_verified::tower::{impl core::fmt::Debug for qsag_verified::tower::Gf16}::fmt]:
-    Source: 'src/tower.rs', lines 9:22-9:27
+    Source: 'src/tower.rs', lines 4:22-4:27
     Visibility: public -/
 def tower.Gf16.Insts.CoreFmtDebug.fmt
   (self : tower.Gf16) (f : core.fmt.Formatter) :
@@ -11354,41 +10316,41 @@ def tower.Gf16.Insts.CoreFmtDebug.fmt
   core.fmt.Formatter.debug_tuple_field1_finish f (toStr "Gf16") dyn
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::fmt::Debug for qsag_verified::tower::Gf16}]
-    Source: 'src/tower.rs', lines 9:22-9:27 -/
+    Source: 'src/tower.rs', lines 4:22-4:27 -/
 @[reducible]
 def tower.Gf16.Insts.CoreFmtDebug : core.fmt.Debug tower.Gf16 := {
   fmt := tower.Gf16.Insts.CoreFmtDebug.fmt
 }
 
 /-- [qsag_verified::tower::{impl core::default::Default for qsag_verified::tower::Gf16}::default]:
-    Source: 'src/tower.rs', lines 9:29-9:36
+    Source: 'src/tower.rs', lines 4:29-4:36
     Visibility: public -/
 def tower.Gf16.Insts.CoreDefaultDefault.default : Result tower.Gf16 := do
   ok (core.default.DefaultU8.default)
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::default::Default for qsag_verified::tower::Gf16}]
-    Source: 'src/tower.rs', lines 9:29-9:36 -/
+    Source: 'src/tower.rs', lines 4:29-4:36 -/
 @[reducible]
 def tower.Gf16.Insts.CoreDefaultDefault : core.default.Default tower.Gf16 := {
   default := tower.Gf16.Insts.CoreDefaultDefault.default
 }
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::marker::StructuralPartialEq for qsag_verified::tower::Gf16}]
-    Source: 'src/tower.rs', lines 9:38-9:47 -/
+    Source: 'src/tower.rs', lines 4:38-4:47 -/
 @[reducible]
 def tower.Gf16.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq tower.Gf16 := {
 }
 
 /-- [qsag_verified::tower::{impl core::cmp::PartialEq<qsag_verified::tower::Gf16> for qsag_verified::tower::Gf16}::eq]:
-    Source: 'src/tower.rs', lines 9:38-9:47
+    Source: 'src/tower.rs', lines 4:38-4:47
     Visibility: public -/
 def tower.Gf16.Insts.CoreCmpPartialEqGf16.eq
   (self : tower.Gf16) (other : tower.Gf16) : Result Bool := do
   ok (self = other)
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::cmp::PartialEq<qsag_verified::tower::Gf16> for qsag_verified::tower::Gf16}]
-    Source: 'src/tower.rs', lines 9:38-9:47 -/
+    Source: 'src/tower.rs', lines 4:38-4:47 -/
 @[reducible]
 def tower.Gf16.Insts.CoreCmpPartialEqGf16 : core.cmp.PartialEq tower.Gf16
   tower.Gf16 := {
@@ -11396,14 +10358,14 @@ def tower.Gf16.Insts.CoreCmpPartialEqGf16 : core.cmp.PartialEq tower.Gf16
 }
 
 /-- [qsag_verified::tower::{impl core::cmp::Eq for qsag_verified::tower::Gf16}::assert_fields_are_eq]:
-    Source: 'src/tower.rs', lines 9:49-9:51
+    Source: 'src/tower.rs', lines 4:49-4:51
     Visibility: public -/
 def tower.Gf16.Insts.CoreCmpEq.assert_fields_are_eq
   (self : tower.Gf16) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::cmp::Eq for qsag_verified::tower::Gf16}]
-    Source: 'src/tower.rs', lines 9:49-9:51 -/
+    Source: 'src/tower.rs', lines 4:49-4:51 -/
 @[reducible]
 def tower.Gf16.Insts.CoreCmpEq : core.cmp.Eq tower.Gf16 := {
   partialEqInst := tower.Gf16.Insts.CoreCmpPartialEqGf16
@@ -11411,28 +10373,28 @@ def tower.Gf16.Insts.CoreCmpEq : core.cmp.Eq tower.Gf16 := {
 }
 
 /-- [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::Gf256}::clone]:
-    Source: 'src/tower.rs', lines 13:9-13:14
+    Source: 'src/tower.rs', lines 8:9-8:14
     Visibility: public -/
 def tower.Gf256.Insts.CoreCloneClone.clone
   (self : tower.Gf256) : Result tower.Gf256 := do
   ok self
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::Gf256}]
-    Source: 'src/tower.rs', lines 13:9-13:14 -/
+    Source: 'src/tower.rs', lines 8:9-8:14 -/
 @[reducible]
 def tower.Gf256.Insts.CoreCloneClone : core.clone.Clone tower.Gf256 := {
   clone := tower.Gf256.Insts.CoreCloneClone.clone
 }
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::marker::Copy for qsag_verified::tower::Gf256}]
-    Source: 'src/tower.rs', lines 13:16-13:20 -/
+    Source: 'src/tower.rs', lines 8:16-8:20 -/
 @[reducible]
 def tower.Gf256.Insts.CoreMarkerCopy : core.marker.Copy tower.Gf256 := {
   cloneInst := tower.Gf256.Insts.CoreCloneClone
 }
 
 /-- [qsag_verified::tower::{impl core::fmt::Debug for qsag_verified::tower::Gf256}::fmt]:
-    Source: 'src/tower.rs', lines 13:22-13:27
+    Source: 'src/tower.rs', lines 8:22-8:27
     Visibility: public -/
 def tower.Gf256.Insts.CoreFmtDebug.fmt
   (self : tower.Gf256) (f : core.fmt.Formatter) :
@@ -11442,20 +10404,20 @@ def tower.Gf256.Insts.CoreFmtDebug.fmt
   core.fmt.Formatter.debug_tuple_field1_finish f (toStr "Gf256") dyn
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::fmt::Debug for qsag_verified::tower::Gf256}]
-    Source: 'src/tower.rs', lines 13:22-13:27 -/
+    Source: 'src/tower.rs', lines 8:22-8:27 -/
 @[reducible]
 def tower.Gf256.Insts.CoreFmtDebug : core.fmt.Debug tower.Gf256 := {
   fmt := tower.Gf256.Insts.CoreFmtDebug.fmt
 }
 
 /-- [qsag_verified::tower::{impl core::default::Default for qsag_verified::tower::Gf256}::default]:
-    Source: 'src/tower.rs', lines 13:29-13:36
+    Source: 'src/tower.rs', lines 8:29-8:36
     Visibility: public -/
 def tower.Gf256.Insts.CoreDefaultDefault.default : Result tower.Gf256 := do
   ok (core.default.DefaultU8.default)
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::default::Default for qsag_verified::tower::Gf256}]
-    Source: 'src/tower.rs', lines 13:29-13:36 -/
+    Source: 'src/tower.rs', lines 8:29-8:36 -/
 @[reducible]
 def tower.Gf256.Insts.CoreDefaultDefault : core.default.Default tower.Gf256
   := {
@@ -11463,21 +10425,21 @@ def tower.Gf256.Insts.CoreDefaultDefault : core.default.Default tower.Gf256
 }
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::marker::StructuralPartialEq for qsag_verified::tower::Gf256}]
-    Source: 'src/tower.rs', lines 13:38-13:47 -/
+    Source: 'src/tower.rs', lines 8:38-8:47 -/
 @[reducible]
 def tower.Gf256.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq tower.Gf256 := {
 }
 
 /-- [qsag_verified::tower::{impl core::cmp::PartialEq<qsag_verified::tower::Gf256> for qsag_verified::tower::Gf256}::eq]:
-    Source: 'src/tower.rs', lines 13:38-13:47
+    Source: 'src/tower.rs', lines 8:38-8:47
     Visibility: public -/
 def tower.Gf256.Insts.CoreCmpPartialEqGf256.eq
   (self : tower.Gf256) (other : tower.Gf256) : Result Bool := do
   ok (self = other)
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::cmp::PartialEq<qsag_verified::tower::Gf256> for qsag_verified::tower::Gf256}]
-    Source: 'src/tower.rs', lines 13:38-13:47 -/
+    Source: 'src/tower.rs', lines 8:38-8:47 -/
 @[reducible]
 def tower.Gf256.Insts.CoreCmpPartialEqGf256 : core.cmp.PartialEq tower.Gf256
   tower.Gf256 := {
@@ -11485,14 +10447,14 @@ def tower.Gf256.Insts.CoreCmpPartialEqGf256 : core.cmp.PartialEq tower.Gf256
 }
 
 /-- [qsag_verified::tower::{impl core::cmp::Eq for qsag_verified::tower::Gf256}::assert_fields_are_eq]:
-    Source: 'src/tower.rs', lines 13:49-13:51
+    Source: 'src/tower.rs', lines 8:49-8:51
     Visibility: public -/
 def tower.Gf256.Insts.CoreCmpEq.assert_fields_are_eq
   (self : tower.Gf256) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::cmp::Eq for qsag_verified::tower::Gf256}]
-    Source: 'src/tower.rs', lines 13:49-13:51 -/
+    Source: 'src/tower.rs', lines 8:49-8:51 -/
 @[reducible]
 def tower.Gf256.Insts.CoreCmpEq : core.cmp.Eq tower.Gf256 := {
   partialEqInst := tower.Gf256.Insts.CoreCmpPartialEqGf256
@@ -11500,28 +10462,28 @@ def tower.Gf256.Insts.CoreCmpEq : core.cmp.Eq tower.Gf256 := {
 }
 
 /-- [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::Tower128}::clone]:
-    Source: 'src/tower.rs', lines 17:9-17:14
+    Source: 'src/tower.rs', lines 12:9-12:14
     Visibility: public -/
 def tower.Tower128.Insts.CoreCloneClone.clone
   (self : tower.Tower128) : Result tower.Tower128 := do
   ok self
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::Tower128}]
-    Source: 'src/tower.rs', lines 17:9-17:14 -/
+    Source: 'src/tower.rs', lines 12:9-12:14 -/
 @[reducible]
 def tower.Tower128.Insts.CoreCloneClone : core.clone.Clone tower.Tower128 := {
   clone := tower.Tower128.Insts.CoreCloneClone.clone
 }
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::marker::Copy for qsag_verified::tower::Tower128}]
-    Source: 'src/tower.rs', lines 17:16-17:20 -/
+    Source: 'src/tower.rs', lines 12:16-12:20 -/
 @[reducible]
 def tower.Tower128.Insts.CoreMarkerCopy : core.marker.Copy tower.Tower128 := {
   cloneInst := tower.Tower128.Insts.CoreCloneClone
 }
 
 /-- [qsag_verified::tower::{impl core::fmt::Debug for qsag_verified::tower::Tower128}::fmt]:
-    Source: 'src/tower.rs', lines 17:22-17:27
+    Source: 'src/tower.rs', lines 12:22-12:27
     Visibility: public -/
 def tower.Tower128.Insts.CoreFmtDebug.fmt
   (self : tower.Tower128) (f : core.fmt.Formatter) :
@@ -11531,21 +10493,21 @@ def tower.Tower128.Insts.CoreFmtDebug.fmt
   core.fmt.Formatter.debug_tuple_field1_finish f (toStr "Tower128") dyn
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::fmt::Debug for qsag_verified::tower::Tower128}]
-    Source: 'src/tower.rs', lines 17:22-17:27 -/
+    Source: 'src/tower.rs', lines 12:22-12:27 -/
 @[reducible]
 def tower.Tower128.Insts.CoreFmtDebug : core.fmt.Debug tower.Tower128 := {
   fmt := tower.Tower128.Insts.CoreFmtDebug.fmt
 }
 
 /-- [qsag_verified::tower::{impl core::default::Default for qsag_verified::tower::Tower128}::default]:
-    Source: 'src/tower.rs', lines 17:29-17:36
+    Source: 'src/tower.rs', lines 12:29-12:36
     Visibility: public -/
 def tower.Tower128.Insts.CoreDefaultDefault.default
   : Result tower.Tower128 := do
   ok (core.default.DefaultU128.default)
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::default::Default for qsag_verified::tower::Tower128}]
-    Source: 'src/tower.rs', lines 17:29-17:36 -/
+    Source: 'src/tower.rs', lines 12:29-12:36 -/
 @[reducible]
 def tower.Tower128.Insts.CoreDefaultDefault : core.default.Default
   tower.Tower128 := {
@@ -11553,21 +10515,21 @@ def tower.Tower128.Insts.CoreDefaultDefault : core.default.Default
 }
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::marker::StructuralPartialEq for qsag_verified::tower::Tower128}]
-    Source: 'src/tower.rs', lines 17:38-17:47 -/
+    Source: 'src/tower.rs', lines 12:38-12:47 -/
 @[reducible]
 def tower.Tower128.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq tower.Tower128 := {
 }
 
 /-- [qsag_verified::tower::{impl core::cmp::PartialEq<qsag_verified::tower::Tower128> for qsag_verified::tower::Tower128}::eq]:
-    Source: 'src/tower.rs', lines 17:38-17:47
+    Source: 'src/tower.rs', lines 12:38-12:47
     Visibility: public -/
 def tower.Tower128.Insts.CoreCmpPartialEqTower128.eq
   (self : tower.Tower128) (other : tower.Tower128) : Result Bool := do
   ok (self = other)
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::cmp::PartialEq<qsag_verified::tower::Tower128> for qsag_verified::tower::Tower128}]
-    Source: 'src/tower.rs', lines 17:38-17:47 -/
+    Source: 'src/tower.rs', lines 12:38-12:47 -/
 @[reducible]
 def tower.Tower128.Insts.CoreCmpPartialEqTower128 : core.cmp.PartialEq
   tower.Tower128 tower.Tower128 := {
@@ -11575,207 +10537,167 @@ def tower.Tower128.Insts.CoreCmpPartialEqTower128 : core.cmp.PartialEq
 }
 
 /-- [qsag_verified::tower::{impl core::cmp::Eq for qsag_verified::tower::Tower128}::assert_fields_are_eq]:
-    Source: 'src/tower.rs', lines 17:49-17:51
+    Source: 'src/tower.rs', lines 12:49-12:51
     Visibility: public -/
 def tower.Tower128.Insts.CoreCmpEq.assert_fields_are_eq
   (self : tower.Tower128) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::tower::{impl core::cmp::Eq for qsag_verified::tower::Tower128}]
-    Source: 'src/tower.rs', lines 17:49-17:51 -/
+    Source: 'src/tower.rs', lines 12:49-12:51 -/
 @[reducible]
 def tower.Tower128.Insts.CoreCmpEq : core.cmp.Eq tower.Tower128 := {
   partialEqInst := tower.Tower128.Insts.CoreCmpPartialEqTower128
   assert_fields_are_eq := tower.Tower128.Insts.CoreCmpEq.assert_fields_are_eq
 }
 
-/-- [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::Tower256}::clone]:
-    Source: 'src/tower.rs', lines 21:9-21:14
-    Visibility: public -/
-def tower.Tower256.Insts.CoreCloneClone.clone
-  (self : tower.Tower256) : Result tower.Tower256 := do
-  ok self
+/-- [qsag_verified::tower::scale_x_t3]:
+    Source: 'src/tower.rs', lines 75:0-80:1 -/
+def tower.scale_x_t3 (a : Std.U8) : Result Std.U8 := do
+  let lo ← lift (a &&& 15#u8)
+  let i ← a >>> 4#i32
+  let hi ← lift (i &&& 15#u8)
+  let s ← tower.scale_x_t2 hi
+  let i1 ← lift (lo ^^^ s)
+  let i2 ← i1 <<< 4#i32
+  ok (hi ||| i2)
 
-/-- Trait implementation: [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::Tower256}]
-    Source: 'src/tower.rs', lines 21:9-21:14 -/
-@[reducible]
-def tower.Tower256.Insts.CoreCloneClone : core.clone.Clone tower.Tower256 := {
-  clone := tower.Tower256.Insts.CoreCloneClone.clone
-}
+/-- [qsag_verified::tower::mul_t3]:
+    Source: 'src/tower.rs', lines 83:0-85:1 -/
+def tower.mul_t3 (a : Std.U8) (b : Std.U8) : Result Std.U8 := do
+  tower.gf256_mul a b
 
-/-- Trait implementation: [qsag_verified::tower::{impl core::marker::Copy for qsag_verified::tower::Tower256}]
-    Source: 'src/tower.rs', lines 21:16-21:20 -/
-@[reducible]
-def tower.Tower256.Insts.CoreMarkerCopy : core.marker.Copy tower.Tower256 := {
-  cloneInst := tower.Tower256.Insts.CoreCloneClone
-}
-
-/-- [qsag_verified::tower::{impl core::fmt::Debug for qsag_verified::tower::Tower256}::fmt]:
-    Source: 'src/tower.rs', lines 21:22-21:27
-    Visibility: public -/
-def tower.Tower256.Insts.CoreFmtDebug.fmt
-  (self : tower.Tower256) (f : core.fmt.Formatter) :
-  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
-  := do
-  let dyn := Dyn.mk _ core.fmt.DebugU128 self.lo
-  let dyn1 := Dyn.mk _ (core.fmt.DebugShared core.fmt.DebugU128) self.hi
-  core.fmt.Formatter.debug_struct_field2_finish f (toStr "Tower256") (toStr
-    "lo") dyn (toStr "hi") dyn1
-
-/-- Trait implementation: [qsag_verified::tower::{impl core::fmt::Debug for qsag_verified::tower::Tower256}]
-    Source: 'src/tower.rs', lines 21:22-21:27 -/
-@[reducible]
-def tower.Tower256.Insts.CoreFmtDebug : core.fmt.Debug tower.Tower256 := {
-  fmt := tower.Tower256.Insts.CoreFmtDebug.fmt
-}
-
-/-- [qsag_verified::tower::{impl core::default::Default for qsag_verified::tower::Tower256}::default]:
-    Source: 'src/tower.rs', lines 21:29-21:36
-    Visibility: public -/
-def tower.Tower256.Insts.CoreDefaultDefault.default
-  : Result tower.Tower256 := do
-  ok
-    {
-      lo := (core.default.DefaultU128.default),
-      hi := (core.default.DefaultU128.default)
-    }
-
-/-- Trait implementation: [qsag_verified::tower::{impl core::default::Default for qsag_verified::tower::Tower256}]
-    Source: 'src/tower.rs', lines 21:29-21:36 -/
-@[reducible]
-def tower.Tower256.Insts.CoreDefaultDefault : core.default.Default
-  tower.Tower256 := {
-  default := tower.Tower256.Insts.CoreDefaultDefault.default
-}
-
-/-- Trait implementation: [qsag_verified::tower::{impl core::marker::StructuralPartialEq for qsag_verified::tower::Tower256}]
-    Source: 'src/tower.rs', lines 21:38-21:47 -/
-@[reducible]
-def tower.Tower256.Insts.CoreMarkerStructuralPartialEq :
-  core.marker.StructuralPartialEq tower.Tower256 := {
-}
-
-/-- [qsag_verified::tower::{impl core::cmp::PartialEq<qsag_verified::tower::Tower256> for qsag_verified::tower::Tower256}::eq]:
-    Source: 'src/tower.rs', lines 21:38-21:47
-    Visibility: public -/
-def tower.Tower256.Insts.CoreCmpPartialEqTower256.eq
-  (self : tower.Tower256) (other : tower.Tower256) : Result Bool := do
-  if self.lo = other.lo
-  then ok (self.hi = other.hi)
-  else ok false
-
-/-- Trait implementation: [qsag_verified::tower::{impl core::cmp::PartialEq<qsag_verified::tower::Tower256> for qsag_verified::tower::Tower256}]
-    Source: 'src/tower.rs', lines 21:38-21:47 -/
-@[reducible]
-def tower.Tower256.Insts.CoreCmpPartialEqTower256 : core.cmp.PartialEq
-  tower.Tower256 tower.Tower256 := {
-  eq := tower.Tower256.Insts.CoreCmpPartialEqTower256.eq
-}
-
-/-- [qsag_verified::tower::{impl core::cmp::Eq for qsag_verified::tower::Tower256}::assert_fields_are_eq]:
-    Source: 'src/tower.rs', lines 21:49-21:51
-    Visibility: public -/
-def tower.Tower256.Insts.CoreCmpEq.assert_fields_are_eq
-  (self : tower.Tower256) : Result Unit := do
-  ok ()
-
-/-- Trait implementation: [qsag_verified::tower::{impl core::cmp::Eq for qsag_verified::tower::Tower256}]
-    Source: 'src/tower.rs', lines 21:49-21:51 -/
-@[reducible]
-def tower.Tower256.Insts.CoreCmpEq : core.cmp.Eq tower.Tower256 := {
-  partialEqInst := tower.Tower256.Insts.CoreCmpPartialEqTower256
-  assert_fields_are_eq := tower.Tower256.Insts.CoreCmpEq.assert_fields_are_eq
-}
-
-/-- [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::BdozWireOpening2Lane}::clone]:
-    Source: 'src/tower.rs', lines 30:9-30:14
-    Visibility: public -/
-def tower.BdozWireOpening2Lane.Insts.CoreCloneClone.clone
-  (self : tower.BdozWireOpening2Lane) : Result tower.BdozWireOpening2Lane := do
-  ok self
-
-/-- Trait implementation: [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::BdozWireOpening2Lane}]
-    Source: 'src/tower.rs', lines 30:9-30:14 -/
-@[reducible]
-def tower.BdozWireOpening2Lane.Insts.CoreCloneClone : core.clone.Clone
-  tower.BdozWireOpening2Lane := {
-  clone := tower.BdozWireOpening2Lane.Insts.CoreCloneClone.clone
-}
-
-/-- Trait implementation: [qsag_verified::tower::{impl core::marker::Copy for qsag_verified::tower::BdozWireOpening2Lane}]
-    Source: 'src/tower.rs', lines 30:16-30:20 -/
-@[reducible]
-def tower.BdozWireOpening2Lane.Insts.CoreMarkerCopy : core.marker.Copy
-  tower.BdozWireOpening2Lane := {
-  cloneInst := tower.BdozWireOpening2Lane.Insts.CoreCloneClone
-}
-
-/-- [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::BdozCommittedBatchOpening2Lane}::clone]:
-    Source: 'src/tower.rs', lines 42:9-42:14
-    Visibility: public -/
-def tower.BdozCommittedBatchOpening2Lane.Insts.CoreCloneClone.clone
-  (self : tower.BdozCommittedBatchOpening2Lane) :
-  Result tower.BdozCommittedBatchOpening2Lane
-  := do
-  ok self
-
-/-- Trait implementation: [qsag_verified::tower::{impl core::clone::Clone for qsag_verified::tower::BdozCommittedBatchOpening2Lane}]
-    Source: 'src/tower.rs', lines 42:9-42:14 -/
-@[reducible]
-def tower.BdozCommittedBatchOpening2Lane.Insts.CoreCloneClone :
-  core.clone.Clone tower.BdozCommittedBatchOpening2Lane := {
-  clone := tower.BdozCommittedBatchOpening2Lane.Insts.CoreCloneClone.clone
-}
-
-/-- Trait implementation: [qsag_verified::tower::{impl core::marker::Copy for qsag_verified::tower::BdozCommittedBatchOpening2Lane}]
-    Source: 'src/tower.rs', lines 42:16-42:20 -/
-@[reducible]
-def tower.BdozCommittedBatchOpening2Lane.Insts.CoreMarkerCopy :
-  core.marker.Copy tower.BdozCommittedBatchOpening2Lane := {
-  cloneInst := tower.BdozCommittedBatchOpening2Lane.Insts.CoreCloneClone
-}
-
-/-- [qsag_verified::tower::{qsag_verified::tower::BdozVerifierSession2Lane}::new]:
-    Source: 'src/tower.rs', lines 61:4-66:5
-    Visibility: public -/
-def tower.BdozVerifierSession2Lane.new
-  (alpha_lanes : Array tower.Tower128 2#usize) :
-  Result tower.BdozVerifierSession2Lane
-  := do
-  ok { alpha_lanes, burned := false }
-
-/-- [qsag_verified::tower::{qsag_verified::tower::BdozVerifierSession2Lane}::is_burned]:
-    Source: 'src/tower.rs', lines 68:4-70:5
-    Visibility: public -/
-def tower.BdozVerifierSession2Lane.is_burned
-  (self : tower.BdozVerifierSession2Lane) : Result Bool := do
-  ok self.burned
-
-/-- [qsag_verified::tower::scale_x_t7]:
-    Source: 'src/tower.rs', lines 221:0-226:1 -/
-def tower.scale_x_t7 (a : Std.U128) : Result Std.U128 := do
-  let i ← lift (a &&& 18446744073709551615#u128)
-  let lo ← lift (UScalar.cast .U64 i)
-  let i1 ← a >>> 64#i32
-  let i2 ← lift (i1 &&& 18446744073709551615#u128)
-  let hi ← lift (UScalar.cast .U64 i2)
-  let s ← tower.scale_x_t6 hi
-  let i3 ← lift (UScalar.cast .U128 hi)
+/-- [qsag_verified::tower::scale_x_t4]:
+    Source: 'src/tower.rs', lines 88:0-93:1 -/
+def tower.scale_x_t4 (a : Std.U16) : Result Std.U16 := do
+  let i ← lift (a &&& 255#u16)
+  let lo ← lift (UScalar.cast .U8 i)
+  let i1 ← a >>> 8#i32
+  let i2 ← lift (i1 &&& 255#u16)
+  let hi ← lift (UScalar.cast .U8 i2)
+  let s ← tower.scale_x_t3 hi
+  let i3 ← lift (UScalar.cast .U16 hi)
   let i4 ← lift (lo ^^^ s)
-  let i5 ← lift (UScalar.cast .U128 i4)
-  let i6 ← i5 <<< 64#i32
+  let i5 ← lift (UScalar.cast .U16 i4)
+  let i6 ← i5 <<< 8#i32
   ok (i3 ||| i6)
 
-/-- [qsag_verified::tower::gf16_add]:
-    Source: 'src/tower.rs', lines 230:0-232:1
-    Visibility: public -/
-def tower.gf16_add (a : tower.Gf16) (b : tower.Gf16) : Result tower.Gf16 := do
-  let i ← lift (a ^^^ b)
-  let i1 ← lift (i &&& 15#u8)
-  ok i1
+/-- [qsag_verified::tower::mul_t4]:
+    Source: 'src/tower.rs', lines 96:0-107:1 -/
+def tower.mul_t4 (a : Std.U16) (b : Std.U16) : Result Std.U16 := do
+  let i ← lift (a &&& 255#u16)
+  let a_lo ← lift (UScalar.cast .U8 i)
+  let i1 ← a >>> 8#i32
+  let i2 ← lift (i1 &&& 255#u16)
+  let a_hi ← lift (UScalar.cast .U8 i2)
+  let i3 ← lift (b &&& 255#u16)
+  let b_lo ← lift (UScalar.cast .U8 i3)
+  let i4 ← b >>> 8#i32
+  let i5 ← lift (i4 &&& 255#u16)
+  let b_hi ← lift (UScalar.cast .U8 i5)
+  let p ← tower.mul_t3 a_lo b_lo
+  let q ← tower.mul_t3 a_hi b_hi
+  let i6 ← lift (a_lo ^^^ a_hi)
+  let i7 ← lift (b_lo ^^^ b_hi)
+  let r ← tower.mul_t3 i6 i7
+  let lo ← lift (p ^^^ q)
+  let i8 ← lift (r ^^^ p)
+  let i9 ← lift (i8 ^^^ q)
+  let i10 ← tower.scale_x_t3 q
+  let hi ← lift (i9 ^^^ i10)
+  let i11 ← lift (UScalar.cast .U16 lo)
+  let i12 ← lift (UScalar.cast .U16 hi)
+  let i13 ← i12 <<< 8#i32
+  ok (i11 ||| i13)
+
+/-- [qsag_verified::tower::scale_x_t5]:
+    Source: 'src/tower.rs', lines 110:0-115:1 -/
+def tower.scale_x_t5 (a : Std.U32) : Result Std.U32 := do
+  let i ← lift (a &&& 65535#u32)
+  let lo ← lift (UScalar.cast .U16 i)
+  let i1 ← a >>> 16#i32
+  let i2 ← lift (i1 &&& 65535#u32)
+  let hi ← lift (UScalar.cast .U16 i2)
+  let s ← tower.scale_x_t4 hi
+  let i3 ← lift (UScalar.cast .U32 hi)
+  let i4 ← lift (lo ^^^ s)
+  let i5 ← lift (UScalar.cast .U32 i4)
+  let i6 ← i5 <<< 16#i32
+  ok (i3 ||| i6)
+
+/-- [qsag_verified::tower::mul_t5]:
+    Source: 'src/tower.rs', lines 118:0-129:1 -/
+def tower.mul_t5 (a : Std.U32) (b : Std.U32) : Result Std.U32 := do
+  let i ← lift (a &&& 65535#u32)
+  let a_lo ← lift (UScalar.cast .U16 i)
+  let i1 ← a >>> 16#i32
+  let i2 ← lift (i1 &&& 65535#u32)
+  let a_hi ← lift (UScalar.cast .U16 i2)
+  let i3 ← lift (b &&& 65535#u32)
+  let b_lo ← lift (UScalar.cast .U16 i3)
+  let i4 ← b >>> 16#i32
+  let i5 ← lift (i4 &&& 65535#u32)
+  let b_hi ← lift (UScalar.cast .U16 i5)
+  let p ← tower.mul_t4 a_lo b_lo
+  let q ← tower.mul_t4 a_hi b_hi
+  let i6 ← lift (a_lo ^^^ a_hi)
+  let i7 ← lift (b_lo ^^^ b_hi)
+  let r ← tower.mul_t4 i6 i7
+  let lo ← lift (p ^^^ q)
+  let i8 ← lift (r ^^^ p)
+  let i9 ← lift (i8 ^^^ q)
+  let i10 ← tower.scale_x_t4 q
+  let hi ← lift (i9 ^^^ i10)
+  let i11 ← lift (UScalar.cast .U32 lo)
+  let i12 ← lift (UScalar.cast .U32 hi)
+  let i13 ← i12 <<< 16#i32
+  ok (i11 ||| i13)
+
+/-- [qsag_verified::tower::scale_x_t6]:
+    Source: 'src/tower.rs', lines 132:0-137:1 -/
+def tower.scale_x_t6 (a : Std.U64) : Result Std.U64 := do
+  let i ← lift (a &&& 4294967295#u64)
+  let lo ← lift (UScalar.cast .U32 i)
+  let i1 ← a >>> 32#i32
+  let i2 ← lift (i1 &&& 4294967295#u64)
+  let hi ← lift (UScalar.cast .U32 i2)
+  let s ← tower.scale_x_t5 hi
+  let i3 ← lift (UScalar.cast .U64 hi)
+  let i4 ← lift (lo ^^^ s)
+  let i5 ← lift (UScalar.cast .U64 i4)
+  let i6 ← i5 <<< 32#i32
+  ok (i3 ||| i6)
+
+/-- [qsag_verified::tower::mul_t6]:
+    Source: 'src/tower.rs', lines 140:0-151:1 -/
+def tower.mul_t6 (a : Std.U64) (b : Std.U64) : Result Std.U64 := do
+  let i ← lift (a &&& 4294967295#u64)
+  let a_lo ← lift (UScalar.cast .U32 i)
+  let i1 ← a >>> 32#i32
+  let i2 ← lift (i1 &&& 4294967295#u64)
+  let a_hi ← lift (UScalar.cast .U32 i2)
+  let i3 ← lift (b &&& 4294967295#u64)
+  let b_lo ← lift (UScalar.cast .U32 i3)
+  let i4 ← b >>> 32#i32
+  let i5 ← lift (i4 &&& 4294967295#u64)
+  let b_hi ← lift (UScalar.cast .U32 i5)
+  let p ← tower.mul_t5 a_lo b_lo
+  let q ← tower.mul_t5 a_hi b_hi
+  let i6 ← lift (a_lo ^^^ a_hi)
+  let i7 ← lift (b_lo ^^^ b_hi)
+  let r ← tower.mul_t5 i6 i7
+  let lo ← lift (p ^^^ q)
+  let i8 ← lift (r ^^^ p)
+  let i9 ← lift (i8 ^^^ q)
+  let i10 ← tower.scale_x_t5 q
+  let hi ← lift (i9 ^^^ i10)
+  let i11 ← lift (UScalar.cast .U64 lo)
+  let i12 ← lift (UScalar.cast .U64 hi)
+  let i13 ← i12 <<< 32#i32
+  ok (i11 ||| i13)
 
 /-- [qsag_verified::tower::gf16_mul]:
-    Source: 'src/tower.rs', lines 236:0-238:1
+    Source: 'src/tower.rs', lines 161:0-163:1
     Visibility: public -/
 def tower.gf16_mul (a : tower.Gf16) (b : tower.Gf16) : Result tower.Gf16 := do
   let i ← lift (a &&& 15#u8)
@@ -11783,159 +10705,51 @@ def tower.gf16_mul (a : tower.Gf16) (b : tower.Gf16) : Result tower.Gf16 := do
   let i2 ← tower.mul_t2 i i1
   ok i2
 
-/-- [qsag_verified::tower::tower256_add]:
-    Source: 'src/tower.rs', lines 320:0-325:1
+/-- [qsag_verified::tower::embed_gf256_to_tower128]:
+    Source: 'src/tower.rs', lines 227:0-229:1
     Visibility: public -/
-def tower.tower256_add
-  (a : tower.Tower256) (b : tower.Tower256) : Result tower.Tower256 := do
-  let i ← lift (a.lo ^^^ b.lo)
-  let i1 ← lift (a.hi ^^^ b.hi)
-  ok { lo := i, hi := i1 }
+def tower.embed_gf256_to_tower128
+  (x : tower.Gf256) : Result tower.Tower128 := do
+  let i ← lift (UScalar.cast .U128 x)
+  ok i
 
-/-- [qsag_verified::tower::tower256_mul]:
-    Source: 'src/tower.rs', lines 329:0-337:1
+/-- [qsag_verified::tower::tower128_add]:
+    Source: 'src/tower.rs', lines 233:0-235:1
     Visibility: public -/
-def tower.tower256_mul
-  (a : tower.Tower256) (b : tower.Tower256) : Result tower.Tower256 := do
-  let t ← tower.tower128_mul a.lo b.lo
-  let t1 ← tower.tower128_mul a.hi b.hi
-  let i ← lift (a.lo ^^^ a.hi)
-  let i1 ← lift (b.lo ^^^ b.hi)
-  let t2 ← tower.tower128_mul i i1
-  let i2 ← lift (t ^^^ t1)
-  let i3 ← lift (t2 ^^^ t)
-  let i4 ← lift (i3 ^^^ t1)
-  let i5 ← tower.scale_x_t7 t1
-  let i6 ← lift (i4 ^^^ i5)
-  ok { lo := i2, hi := i6 }
+def tower.tower128_add
+  (a : tower.Tower128) (b : tower.Tower128) : Result tower.Tower128 := do
+  let i ← lift (a ^^^ b)
+  ok i
 
-/-- [qsag_verified::tower::bdoz_fold_masked_value]: loop body 0:
-    Source: 'src/tower.rs', lines 411:4-416:5
+/-- [qsag_verified::tower::tower128_mul]:
+    Source: 'src/tower.rs', lines 239:0-250:1
     Visibility: public -/
-@[rust_loop_body]
-def tower.bdoz_fold_masked_value_loop.body
-  (openings : Slice tower.BdozWireOpening2Lane) (acc : tower.Tower128)
-  (i : Std.Usize) :
-  Result (ControlFlow (tower.Tower128 × Std.Usize) tower.Tower128)
-  := do
-  let i1 := Slice.len openings
-  if i < i1
-  then
-    let w ← Slice.index_usize openings i
-    let x_emb ← tower.embed_gf256_to_tower128 w.opened_value
-    let t ← tower.tower128_mul w.chal_weight x_emb
-    let acc1 ← tower.tower128_add acc t
-    let i2 ← i + 1#usize
-    ok (cont (acc1, i2))
-  else ok (done acc)
-
-/-- [qsag_verified::tower::bdoz_fold_masked_value]: loop 0:
-    Source: 'src/tower.rs', lines 411:4-416:5
-    Visibility: public -/
-@[rust_loop]
-def tower.bdoz_fold_masked_value_loop
-  (openings : Slice tower.BdozWireOpening2Lane) (acc : tower.Tower128)
-  (i : Std.Usize) :
-  Result tower.Tower128
-  := do
-  loop
-    (fun (acc1, i1) => tower.bdoz_fold_masked_value_loop.body openings acc1 i1)
-    (acc, i)
-
-/-- [qsag_verified::tower::bdoz_fold_masked_value]:
-    Source: 'src/tower.rs', lines 408:0-418:1
-    Visibility: public -/
-@[reducible]
-def tower.bdoz_fold_masked_value
-  (mask_value : tower.Tower128) (openings : Slice tower.BdozWireOpening2Lane) :
-  Result tower.Tower128
-  := do
-  tower.bdoz_fold_masked_value_loop openings mask_value 0#usize
-
-/-- [qsag_verified::tower::verify_mac_2lane_with_burn]:
-    Source: 'src/tower.rs', lines 468:0-494:1
-    Visibility: public -/
-def tower.verify_mac_2lane_with_burn
-  (session : tower.BdozVerifierSession2Lane)
-  (batch : tower.BdozCommittedBatchOpening2Lane)
-  (openings : Slice tower.BdozWireOpening2Lane) :
-  Result (tower.BdozVerifierSession2Lane × Bool)
-  := do
-  if session.burned
-  then
-    ok
-      ({ alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]), burned := true
-       }, false)
-  else
-    let ok1 ← tower.verify_mac_2lane session.alpha_lanes batch openings
-    if ok1
-    then ok (session, true)
-    else
-      ok
-        ({
-           alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]),
-           burned := true
-         }, false)
-
-/-- [qsag_verified::tower::{qsag_verified::tower::BdozOpeningGuard2Lane}::new]:
-    Source: 'src/tower.rs', lines 507:4-514:5
-    Visibility: public -/
-def tower.BdozOpeningGuard2Lane.new
-  (alpha_lanes : Array tower.Tower128 2#usize)
-  (session_id : Array Std.U8 32#usize) (round_id : Std.U64) :
-  Result tower.BdozOpeningGuard2Lane
-  := do
-  ok { alpha_lanes, session_id, round_id, consumed := false }
-
-/-- [qsag_verified::tower::{qsag_verified::tower::BdozOpeningGuard2Lane}::is_consumed]:
-    Source: 'src/tower.rs', lines 516:4-518:5
-    Visibility: public -/
-def tower.BdozOpeningGuard2Lane.is_consumed
-  (self : tower.BdozOpeningGuard2Lane) : Result Bool := do
-  ok self.consumed
-
-/-- [qsag_verified::tower::{qsag_verified::tower::BdozOpeningGuard2Lane}::verify_once]:
-    Source: 'src/tower.rs', lines 522:4-541:5
-    Visibility: public -/
-def tower.BdozOpeningGuard2Lane.verify_once
-  (self : tower.BdozOpeningGuard2Lane)
-  (batch : tower.BdozCommittedBatchOpening2Lane)
-  (openings : Slice tower.BdozWireOpening2Lane) :
-  Result (tower.BdozOpeningGuard2Lane × Bool)
-  := do
-  if self.consumed
-  then
-    ok ({ self with alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]) },
-      false)
-  else
-    let b ← tower.ct_eq_bytes32 self.session_id batch.session_id
-    if b
-    then
-      if self.round_id != batch.round_id
-      then
-        ok
-          ({
-             self
-               with
-               alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]),
-               consumed := true
-           }, false)
-      else
-        let accepted ← tower.verify_mac_2lane self.alpha_lanes batch openings
-        ok
-          ({
-             self
-               with
-               alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]),
-               consumed := true
-           }, accepted)
-    else
-      ok
-        ({
-           self
-             with
-             alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]),
-             consumed := true
-         }, false)
+def tower.tower128_mul
+  (a : tower.Tower128) (b : tower.Tower128) : Result tower.Tower128 := do
+  let i ← lift (a &&& 18446744073709551615#u128)
+  let a_lo ← lift (UScalar.cast .U64 i)
+  let i1 ← a >>> 64#i32
+  let i2 ← lift (i1 &&& 18446744073709551615#u128)
+  let a_hi ← lift (UScalar.cast .U64 i2)
+  let i3 ← lift (b &&& 18446744073709551615#u128)
+  let b_lo ← lift (UScalar.cast .U64 i3)
+  let i4 ← b >>> 64#i32
+  let i5 ← lift (i4 &&& 18446744073709551615#u128)
+  let b_hi ← lift (UScalar.cast .U64 i5)
+  let p ← tower.mul_t6 a_lo b_lo
+  let q ← tower.mul_t6 a_hi b_hi
+  let i6 ← lift (a_lo ^^^ a_hi)
+  let i7 ← lift (b_lo ^^^ b_hi)
+  let r ← tower.mul_t6 i6 i7
+  let lo ← lift (p ^^^ q)
+  let i8 ← lift (r ^^^ p)
+  let i9 ← lift (i8 ^^^ q)
+  let i10 ← tower.scale_x_t6 q
+  let hi ← lift (i9 ^^^ i10)
+  let i11 ← lift (UScalar.cast .U128 lo)
+  let i12 ← lift (UScalar.cast .U128 hi)
+  let i13 ← i12 <<< 64#i32
+  let i14 ← lift (i11 ||| i13)
+  ok i14
 
 end qsag_verified
