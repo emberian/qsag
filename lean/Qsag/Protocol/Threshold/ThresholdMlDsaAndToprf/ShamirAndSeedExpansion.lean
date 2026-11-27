@@ -477,3 +477,481 @@ def lagrangeBasisCoeffs204 (nodes : List Fq204) (pt : Fq204) : List Fq204 :=
   let denom := RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs others) pt
   (RoundPoly.vanishingCoeffs others).map (Fq204.mul (Fq204.inv denom))
 
+def lagrangeWeightAt204 (nodes : List Fq204) (pt target : Fq204) : Fq204 :=
+  RoundPoly.evalCoeffs (lagrangeBasisCoeffs204 nodes pt) target
+
+/-- Lagrange weights mapping degree-`< nodes.length` evaluations at `nodes` to the evaluation at `target`
+    (`threshold_mldsa.rs:2027-2042`). -/
+def lagrangeWeightsFq204 (nodes : List Fq204) (target : Fq204) : List Fq204 :=
+  nodes.map (fun pt => lagrangeWeightAt204 nodes pt target)
+
+private theorem lagrangeWeightAt204_kron {nodes : List Fq204} (hNd : nodes.Nodup)
+    {pt y : Fq204} (_hPt : pt ∈ nodes) (hY : y ∈ nodes) :
+    lagrangeWeightAt204 nodes pt y = if y = pt then Fq204.one else Fq204.zero := by
+  unfold lagrangeWeightAt204 lagrangeBasisCoeffs204
+  dsimp only
+  have hMap : ∀ (s : Fq204) (cs : List Fq204) (z : Fq204),
+      RoundPoly.evalCoeffs (cs.map (Fq204.mul s)) z = Fq204.mul s (RoundPoly.evalCoeffs cs z) :=
+    fun s cs z => RoundPoly.evalCoeffs_map_mul s cs z
+  rw [hMap]
+  if hyEq : y = pt then
+    subst hyEq
+    simp only [↓reduceIte]
+    have hNotMem : y ∉ eraseFirstFq204 y nodes := not_mem_eraseFirstFq204_of_nodup hNd
+    have hDenNz : RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs (eraseFirstFq204 y nodes)) y ≠
+        CommRingOps.zero :=
+      RoundPoly.evalCoeffs_vanishingCoeffs_ne_zero (by decide) _ y hNotMem
+    rw [Fq204.mul_comm, Fq204.mul_inv_cancel hDenNz]
+  else
+    simp only [hyEq, ↓reduceIte]
+    have hIn : y ∈ eraseFirstFq204 pt nodes := mem_eraseFirstFq204_of_ne hyEq hY
+    have hVan : RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs (eraseFirstFq204 pt nodes)) y =
+        CommRingOps.zero :=
+      RoundPoly.evalCoeffs_vanishingCoeffs_of_mem _ y hIn
+    rw [hVan]
+    exact Fq204.mul_zero _
+
+private def lagrangeInterpLoop204 (allNodes : List Fq204) : List Fq204 → List Fq204 → List Fq204
+  | [], _ => []
+  | _, [] => []
+  | pt :: ptsRest, sh :: shRest =>
+    polyAddCoeffs204 ((lagrangeBasisCoeffs204 allNodes pt).map (Fq204.mul sh))
+      (lagrangeInterpLoop204 allNodes ptsRest shRest)
+
+/-- Explicit degree-`< nodes.length` Lagrange interpolant over `Fq204`. -/
+def lagrangeInterpCoeffs204 (nodes shares : List Fq204) : List Fq204 :=
+  lagrangeInterpLoop204 nodes nodes shares
+
+private theorem lagrangeInterpLoop204_length_le (allNodes : List Fq204) :
+    ∀ (curNodes curShares : List Fq204),
+      (∀ pt ∈ curNodes, pt ∈ allNodes) →
+      (lagrangeInterpLoop204 allNodes curNodes curShares).length ≤ allNodes.length
+  | [], _, _ => Nat.zero_le _
+  | _ :: _, [], _ => Nat.zero_le _
+  | pt :: ptsRest, sh :: shRest, hSub => by
+    simp only [lagrangeInterpLoop204, polyAddCoeffs204_length, List.length_map]
+    have hBasisLen : (lagrangeBasisCoeffs204 allNodes pt).length = allNodes.length := by
+      unfold lagrangeBasisCoeffs204
+      simp only [List.length_map, RoundPoly.vanishingCoeffs_length]
+      exact eraseFirstFq204_length_of_mem (hSub pt (.head _))
+    have ih := lagrangeInterpLoop204_length_le allNodes ptsRest shRest
+      (fun z hz => hSub z (.tail _ hz))
+    rw [hBasisLen]
+    exact Nat.max_le.mpr ⟨Nat.le_refl _, ih⟩
+
+private theorem lagrangeInterpLoop204_eval_eq_dot (allNodes : List Fq204) (target : Fq204) :
+    ∀ (curNodes curShares : List Fq204),
+      RoundPoly.evalCoeffs (lagrangeInterpLoop204 allNodes curNodes curShares) target =
+        ringDot (curNodes.map (fun pt => lagrangeWeightAt204 allNodes pt target)) curShares
+  | [], _ => by simp [lagrangeInterpLoop204, ringDot]
+  | _ :: _, [] => by simp [lagrangeInterpLoop204, ringDot]
+  | pt :: ptsRest, sh :: shRest => by
+    simp only [lagrangeInterpLoop204, List.map_cons, evalCoeffs_polyAddCoeffs204,
+      lagrangeInterpLoop204_eval_eq_dot allNodes target ptsRest shRest]
+    have hTerm : RoundPoly.evalCoeffs ((lagrangeBasisCoeffs204 allNodes pt).map (Fq204.mul sh)) target =
+        Fq204.mul (lagrangeWeightAt204 allNodes pt target) sh := by
+      have hMap := RoundPoly.evalCoeffs_map_mul sh (lagrangeBasisCoeffs204 allNodes pt) target
+      exact hMap.trans (Fq204.mul_comm sh _)
+    rw [hTerm]
+    rfl
+
+private theorem ringDot_kron_mem {allNodes : List Fq204} (hNd : allNodes.Nodup) :
+    ∀ {curNodes curShares : List Fq204},
+      curNodes.Nodup →
+      (∀ pt ∈ curNodes, pt ∈ allNodes) →
+      ∀ {p : Fq204 × Fq204},
+        p ∈ List.zip curNodes curShares →
+        ringDot (curNodes.map (fun pt => lagrangeWeightAt204 allNodes pt p.1)) curShares = p.2
+  | [], _, _, _, _, hp => nomatch hp
+  | _ :: _, [], _, _, _, hp => nomatch hp
+  | pt :: ptsRest, sh :: shRest, .cons hnot hndRest, hSub, ⟨x, y⟩, hp => by
+    have hZeroNotIn : ∀ {ns ss : List Fq204} {z : Fq204},
+        z ∈ allNodes →
+        (∀ q ∈ ns, q ∈ allNodes) →
+        (∀ q ∈ ns, z ≠ q) →
+        ringDot (ns.map (fun q => lagrangeWeightAt204 allNodes q z)) ss = Fq204.zero := by
+      intro ns
+      induction ns with
+      | nil => intro _ _ _ _ _; rfl
+      | cons q qs ihq =>
+        intro ss z hzIn hSubQ hNeQ
+        cases ss with
+        | nil => rfl
+        | cons s ss' =>
+          simp only [List.map_cons, ringDot, dotVec]
+          have hw0 : lagrangeWeightAt204 allNodes q z = Fq204.zero := by
+            rw [lagrangeWeightAt204_kron hNd (hSubQ q (.head _)) hzIn]
+            have hne : z ≠ q := hNeQ q (.head _)
+            simp [hne]
+          rw [hw0]
+          change Fq204.add (Fq204.mul Fq204.zero s)
+              (ringDot (qs.map (fun q' => lagrangeWeightAt204 allNodes q' z)) ss') = Fq204.zero
+          rw [Fq204.zero_mul, Fq204.zero_add]
+          exact ihq hzIn (fun q' hq' => hSubQ q' (.tail _ hq'))
+            (fun q' hq' => hNeQ q' (.tail _ hq'))
+    rcases List.mem_cons.mp hp with hHead | hTail
+    · cases hHead
+      dsimp only
+      simp only [List.map_cons, ringDot, dotVec]
+      have hw1 : lagrangeWeightAt204 allNodes pt pt = Fq204.one := by
+        rw [lagrangeWeightAt204_kron hNd (hSub pt (.head _)) (hSub pt (.head _))]
+        simp
+      rw [hw1]
+      change Fq204.add (Fq204.mul Fq204.one sh)
+          (ringDot (ptsRest.map (fun q => lagrangeWeightAt204 allNodes q pt)) shRest) = sh
+      rw [Fq204.one_mul,
+          hZeroNotIn (hSub pt (.head _)) (fun q hq => hSub q (.tail _ hq))
+            (fun q hq heq => hnot q hq heq),
+          Fq204.add_zero]
+    · dsimp only
+      simp only [List.map_cons, ringDot, dotVec]
+      have hxInRest : x ∈ ptsRest := by
+        have hFst := List.of_mem_zip hTail
+        exact hFst.1
+      have hxNePt : x ≠ pt := fun heq => hnot x hxInRest heq.symm
+      have hw0 : lagrangeWeightAt204 allNodes pt x = Fq204.zero := by
+        rw [lagrangeWeightAt204_kron hNd (hSub pt (.head _)) (hSub x (.tail _ hxInRest))]
+        simp [hxNePt]
+      rw [hw0]
+      change Fq204.add (Fq204.mul Fq204.zero sh)
+          (ringDot (ptsRest.map (fun q => lagrangeWeightAt204 allNodes q x)) shRest) = y
+      rw [Fq204.zero_mul, Fq204.zero_add]
+      exact ringDot_kron_mem hNd hndRest (fun q hq => hSub q (.tail _ hq)) hTail
+
+private theorem poly204_eq_of_agree_ge_t {t : Nat} (ht : 1 ≤ t)
+    {Q P S : List Fq204}
+    (hQLen : Q.length ≤ t) (hPLen : P.length ≤ t)
+    (hSNd : S.Nodup) (hSCard : t ≤ S.length)
+    (hAgree : ∀ x ∈ S, RoundPoly.evalCoeffs Q x = RoundPoly.evalCoeffs P x)
+    (target : Fq204) :
+    RoundPoly.evalCoeffs Q target = RoundPoly.evalCoeffs P target := by
+  if hEq : RoundPoly.evalCoeffs Q target = RoundPoly.evalCoeffs P target then
+    exact hEq
+  else
+    exfalso
+    let diff := RoundPoly.subCoeffs Q P
+    have hDiffLen : diff.length ≤ (t - 1) + 1 := by
+      dsimp only [diff]
+      rw [RoundPoly.subCoeffs_length]
+      have hMax : Nat.max Q.length P.length ≤ t := Nat.max_le.mpr ⟨hQLen, hPLen⟩
+      omega
+    have hDiffTargetNz : RoundPoly.evalCoeffs diff target ≠ CommRingOps.zero := by
+      dsimp only [diff]
+      rw [RoundPoly.evalCoeffs_sub]
+      exact fun hz => hEq (LawfulCommRing.sub_eq_zero_iff.mp hz)
+    have hFiltGen : ∀ (U : List Fq204),
+        (∀ x ∈ U, RoundPoly.evalCoeffs Q x = RoundPoly.evalCoeffs P x) →
+        U.filter (fun r => decide (RoundPoly.evalCoeffs diff r = CommRingOps.zero)) = U := by
+      intro U
+      induction U with
+      | nil => intro _; rfl
+      | cons x xs ih =>
+        intro hAg
+        have hx0 : RoundPoly.evalCoeffs diff x = CommRingOps.zero := by
+          dsimp only [diff]
+          rw [RoundPoly.evalCoeffs_sub, hAg x (.head _), LawfulCommRing.sub_self]
+        simp only [List.filter_cons, decide_eq_true hx0, ↓reduceIte]
+        exact congrArg (x :: ·) (ih (fun y hy => hAg y (.tail _ hy)))
+    have hFiltEq := hFiltGen S hAgree
+    have hRootsLe := RoundPoly.roots_nodup_length_le (t - 1) diff S hSNd hDiffLen ⟨target, hDiffTargetNz⟩
+    rw [hFiltEq] at hRootsLe
+    omega
+
+/-- Exact Shamir-to-additive signing session key conversion (`shamir_session_key`,
+    `threshold_mldsa.rs:2055-2085`): uses the first `t` quorum shares to define the degree-`< t`
+    interpolant, checks that all remaining `m - t` quorum shares vanish against their Lagrange
+    predictions (`KeyShareInconsistent` otherwise), and returns the `t` additive shares
+    `λ_i(0) · share_i` summing to `P(0)`. -/
+def shamirSessionKeyConvert (t : Nat) (pts shares : List Fq204) : Option (List Fq204) :=
+  if decide (1 ≤ t ∧ t ≤ pts.length ∧ pts.length = shares.length) then
+    let ptsBase := pts.take t
+    let sharesBase := shares.take t
+    let extraPairs := (List.zip pts shares).drop t
+    let checksOk := extraPairs.all (fun ps =>
+      decide (Fq204.sub ps.2 (ringDot (lagrangeWeightsFq204 ptsBase ps.1) sharesBase) = Fq204.zero))
+    if checksOk then
+      some (List.zipWith Fq204.mul (lagrangeWeightsFq204 ptsBase Fq204.zero) sharesBase)
+    else
+      none
+  else
+    none
+
+private theorem sum_zipWith_mul_eq_ringDot :
+    ∀ (ws ss : List Fq204),
+      (List.zipWith Fq204.mul ws ss).foldr Fq204.add Fq204.zero = ringDot ws ss
+  | [], _ => rfl
+  | _ :: _, [] => rfl
+  | w :: ws, s :: ss => by
+    simp only [List.zipWith_cons_cons, List.foldr_cons, ringDot, dotVec]
+    exact congrArg (Fq204.add (Fq204.mul w s)) (sum_zipWith_mul_eq_ringDot ws ss)
+
+private theorem nodup_take_of_nodup {α : Type} :
+    ∀ (k : Nat) {xs : List α}, xs.Nodup → (xs.take k).Nodup
+  | 0, _, _ => .nil
+  | _ + 1, [], _ => .nil
+  | k + 1, _ :: _xs, .cons hnot hnd =>
+    .cons (fun z hz => hnot z (List.mem_of_mem_take hz)) (nodup_take_of_nodup k hnd)
+
+private theorem take_map_fq204 {α β : Type} (f : α → β) :
+    ∀ (k : Nat) (xs : List α), (xs.map f).take k = (xs.take k).map f
+  | 0, _ => rfl
+  | _ + 1, [] => rfl
+  | k + 1, x :: xs => congrArg (f x :: ·) (take_map_fq204 f k xs)
+
+private theorem mem_zip_map_self {α β : Type} (f : α → β) :
+    ∀ {xs : List α} {x : α}, x ∈ xs → (x, f x) ∈ List.zip xs (xs.map f)
+  | [], _, hx => nomatch hx
+  | a :: as, _, hx => by
+    rcases List.mem_cons.mp hx with rfl | hTl
+    · exact .head _
+    · exact .tail _ (mem_zip_map_self f hTl)
+
+/-- **Shamir Threshold ML-DSA Conversion Completeness (`shamirSessionKey_complete`)**:
+    For any valid parameter tuple `(t, n, m)` (`n ≤ 64`, `2t - 1 ≤ m ≤ 16`), distinct quorum
+    evaluation points `pts` of size `m`, and degree-`< t` secret polynomial `coeffs`,
+    honest Shamir shares `pts.map (RoundPoly.evalCoeffs coeffs)` pass all `m - t` syndrome checks
+    and convert into additive shares whose sum equals the exact secret `RoundPoly.evalCoeffs coeffs 0`. -/
+theorem shamirSessionKey_complete {t n m : Nat}
+    (hParams : shamirMldsaParamsValid t n m = true)
+    (pts coeffs : List Fq204)
+    (hPtsNd : pts.Nodup) (hPtsLen : pts.length = m)
+    (hDeg : coeffs.length ≤ t) :
+    let shares := pts.map (RoundPoly.evalCoeffs coeffs)
+    ∃ additiveShares : List Fq204,
+      shamirSessionKeyConvert t pts shares = some additiveShares ∧
+      additiveShares.length = t ∧
+      additiveShares.foldr Fq204.add Fq204.zero = RoundPoly.evalCoeffs coeffs Fq204.zero := by
+  obtain ⟨ht2, _, _, _, hmLo, _⟩ := shamirMldsaParamsValid_bounds hParams
+  have ht1 : 1 ≤ t := by omega
+  have htLe : t ≤ pts.length := by omega
+  let shares := pts.map (RoundPoly.evalCoeffs coeffs)
+  have hShLen : pts.length = shares.length := (List.length_map _).symm
+  let ptsBase := pts.take t
+  let sharesBase := shares.take t
+  have hBaseNd : ptsBase.Nodup := nodup_take_of_nodup t hPtsNd
+  have hBaseLen : ptsBase.length = t := List.length_take_of_le htLe
+  have hShBaseEq : sharesBase = ptsBase.map (RoundPoly.evalCoeffs coeffs) := by
+    dsimp only [sharesBase, shares, ptsBase]
+    exact take_map_fq204 _ t pts
+  let Q := lagrangeInterpCoeffs204 ptsBase sharesBase
+  have hQLen : Q.length ≤ t := by
+    have hL := lagrangeInterpLoop204_length_le ptsBase ptsBase sharesBase (fun _ h => h)
+    rwa [hBaseLen] at hL
+  have hQAgreeBase : ∀ x ∈ ptsBase, RoundPoly.evalCoeffs Q x = RoundPoly.evalCoeffs coeffs x := by
+    intro x hx
+    have hPairMem : (x, RoundPoly.evalCoeffs coeffs x) ∈ List.zip ptsBase sharesBase := by
+      rw [hShBaseEq]
+      exact mem_zip_map_self _ hx
+    have hEvalDot := lagrangeInterpLoop204_eval_eq_dot ptsBase x ptsBase sharesBase
+    have hKron := ringDot_kron_mem hBaseNd hBaseNd (fun _ h => h) hPairMem
+    exact hEvalDot.trans hKron
+  have hQEqAll : ∀ target : Fq204, RoundPoly.evalCoeffs Q target = RoundPoly.evalCoeffs coeffs target :=
+    poly204_eq_of_agree_ge_t ht1 hQLen hDeg hBaseNd (Nat.le_of_eq hBaseLen.symm) hQAgreeBase
+  have hChecksOk : ((List.zip pts shares).drop t).all (fun ps =>
+      decide (Fq204.sub ps.2 (ringDot (lagrangeWeightsFq204 ptsBase ps.1) sharesBase) = Fq204.zero)) = true := by
+    apply List.all_eq_true.mpr
+    intro ps hps
+    have hInZip : ps ∈ List.zip pts shares := List.mem_of_mem_drop hps
+    have hPs2 : ps.2 = RoundPoly.evalCoeffs coeffs ps.1 := by
+      dsimp only [shares] at hInZip
+      have hZipMap : ∀ xs : List Fq204, ∀ p ∈ List.zip xs (xs.map (RoundPoly.evalCoeffs coeffs)),
+          p.2 = RoundPoly.evalCoeffs coeffs p.1 := by
+        intro xs
+        induction xs with
+        | nil => intro _ hp; nomatch hp
+        | cons a as iha =>
+          intro p hp
+          rcases List.mem_cons.mp hp with rfl | hTl
+          · rfl
+          · exact iha p hTl
+      exact hZipMap pts ps hInZip
+    apply decide_eq_true
+    have hDot : ringDot (lagrangeWeightsFq204 ptsBase ps.1) sharesBase = RoundPoly.evalCoeffs Q ps.1 :=
+      (lagrangeInterpLoop204_eval_eq_dot ptsBase ps.1 ptsBase sharesBase).symm
+    rw [hDot, hQEqAll ps.1, hPs2, fq204_sub_self]
+  let out := List.zipWith Fq204.mul (lagrangeWeightsFq204 ptsBase Fq204.zero) sharesBase
+  refine ⟨out, ?_, ?_, ?_⟩
+  · unfold shamirSessionKeyConvert
+    have hGuard : decide (1 ≤ t ∧ t ≤ pts.length ∧ pts.length = shares.length) = true :=
+      decide_eq_true ⟨ht1, htLe, hShLen⟩
+    rw [hGuard]
+    dsimp only
+    rw [hChecksOk]
+    rfl
+  · dsimp only [out, lagrangeWeightsFq204, sharesBase]
+    rw [List.length_zipWith, List.length_map, hBaseLen, List.length_take_of_le (by omega), Nat.min_self]
+  · dsimp only [out]
+    rw [sum_zipWith_mul_eq_ringDot]
+    have hDot0 : ringDot (lagrangeWeightsFq204 ptsBase Fq204.zero) sharesBase =
+        RoundPoly.evalCoeffs Q Fq204.zero :=
+      (lagrangeInterpLoop204_eval_eq_dot ptsBase Fq204.zero ptsBase sharesBase).symm
+    rw [hDot0, hQEqAll Fq204.zero]
+
+private theorem filter_partition_length {α : Type} (p : α → Bool) :
+    ∀ xs : List α, (xs.filter p).length + (xs.filter (fun x => !p x)).length = xs.length
+  | [] => rfl
+  | x :: xs => by
+    have ih := filter_partition_length p xs
+    cases hpx : p x <;> simp [hpx] <;> omega
+
+private theorem zip_take_eq {α β : Type} :
+    ∀ (k : Nat) (xs : List α) (ys : List β),
+      (List.zip xs ys).take k = List.zip (xs.take k) (ys.take k)
+  | 0, _, _ => rfl
+  | _ + 1, [], _ => rfl
+  | _ + 1, _ :: _, [] => rfl
+  | k + 1, x :: xs, y :: ys => congrArg ((x, y) :: ·) (zip_take_eq k xs ys)
+
+private theorem nodup_map_fst_of_sublist {α β : Type} (p : α × β → Bool) :
+    ∀ {xs : List α} {ys : List β},
+      xs.Nodup → (((List.zip xs ys).filter p).map Prod.fst).Nodup
+  | [], _, _ => .nil
+  | _ :: _, [], _ => .nil
+  | x :: xs, y :: ys, .cons hnot hnd => by
+    simp only [List.zip_cons_cons, List.filter_cons]
+    cases p (x, y) with
+    | false => exact nodup_map_fst_of_sublist p hnd
+    | true =>
+      simp only [↓reduceIte, List.map_cons]
+      refine .cons ?_ (nodup_map_fst_of_sublist p hnd)
+      intro z hz
+      obtain ⟨pair, hMemFilt, rfl⟩ := List.mem_map.mp hz
+      have hInZip := (List.mem_filter.mp hMemFilt).1
+      exact hnot pair.1 (List.of_mem_zip hInZip).1
+
+/-- **Shamir Threshold ML-DSA Byzantine Conversion Soundness (`shamirSessionKey_byzantine_sound`)**:
+    For any valid `(t, n, m)` (`n ≤ 64`, `2t - 1 ≤ m ≤ 16`), distinct quorum points `pts` of size `m`,
+    degree-`< t` secret polynomial `coeffs`, and submitted quorum shares `shares` with **at most `t - 1`
+    corrupt shares**, if `shamirSessionKeyConvert t pts shares = some additiveShares`, then the
+    converted additive shares sum to the **exact** secret `RoundPoly.evalCoeffs coeffs 0`! -/
+theorem shamirSessionKey_byzantine_sound {t n m : Nat}
+    (hParams : shamirMldsaParamsValid t n m = true)
+    {pts coeffs shares additiveShares : List Fq204}
+    (hPtsNd : pts.Nodup) (hLens : (pts.length, shares.length) = (m, m))
+    (hDeg : coeffs.length ≤ t)
+    (hCorruptLe :
+      ((List.zip pts shares).filter
+        (fun ps => decide (ps.2 ≠ RoundPoly.evalCoeffs coeffs ps.1))).length ≤ t - 1)
+    (hConv : shamirSessionKeyConvert t pts shares = some additiveShares) :
+    additiveShares.foldr Fq204.add Fq204.zero = RoundPoly.evalCoeffs coeffs Fq204.zero := by
+  have hPtsLen : pts.length = m := (Prod.mk.injEq _ _ _ _).mp hLens |>.1
+  have hShLen : shares.length = m := (Prod.mk.injEq _ _ _ _).mp hLens |>.2
+  obtain ⟨ht2, _, _, _, hmLo, _⟩ := shamirMldsaParamsValid_bounds hParams
+  have ht1 : 1 ≤ t := by omega
+  have htLe : t ≤ pts.length := by omega
+  unfold shamirSessionKeyConvert at hConv
+  have hGuard : decide (1 ≤ t ∧ t ≤ pts.length ∧ pts.length = shares.length) = true :=
+    decide_eq_true ⟨ht1, htLe, hPtsLen.trans hShLen.symm⟩
+  rw [hGuard] at hConv
+  dsimp only at hConv
+  let ptsBase := pts.take t
+  let sharesBase := shares.take t
+  let extraPairs := (List.zip pts shares).drop t
+  cases hChecks : extraPairs.all (fun ps =>
+      decide (Fq204.sub ps.2 (ringDot (lagrangeWeightsFq204 ptsBase ps.1) sharesBase) = Fq204.zero)) with
+  | false => rw [hChecks] at hConv; cases hConv
+  | true =>
+    rw [hChecks] at hConv
+    simp only [↓reduceIte, Option.some.injEq] at hConv
+    subst hConv
+    have hBaseNd : ptsBase.Nodup := nodup_take_of_nodup t hPtsNd
+    have hBaseLen : ptsBase.length = t := List.length_take_of_le htLe
+    let Q := lagrangeInterpCoeffs204 ptsBase sharesBase
+    have hQLen : Q.length ≤ t := by
+      have hL := lagrangeInterpLoop204_length_le ptsBase ptsBase sharesBase (fun _ h => h)
+      rwa [hBaseLen] at hL
+    have hPairOnQ : ∀ ps ∈ List.zip pts shares, RoundPoly.evalCoeffs Q ps.1 = ps.2 := by
+      intro ps hMem
+      rw [← List.take_append_drop t (List.zip pts shares)] at hMem
+      rcases List.mem_append.mp hMem with hInTake | hInDrop
+      · rw [zip_take_eq t pts shares] at hInTake
+        have hEval := lagrangeInterpLoop204_eval_eq_dot ptsBase ps.1 ptsBase sharesBase
+        have hKron := ringDot_kron_mem hBaseNd hBaseNd (fun _ h => h) hInTake
+        exact hEval.trans hKron
+      · have hChk := of_decide_eq_true (List.all_eq_true.mp hChecks ps hInDrop)
+        have hEqDot := fq204_eq_of_sub_eq_zero hChk
+        have hEval := lagrangeInterpLoop204_eval_eq_dot ptsBase ps.1 ptsBase sharesBase
+        exact hEval.trans hEqDot.symm
+    let isBad : Fq204 × Fq204 → Bool := fun ps => decide (ps.2 ≠ RoundPoly.evalCoeffs coeffs ps.1)
+    let honestPairs := (List.zip pts shares).filter (fun ps => !isBad ps)
+    have hZipLen : (List.zip pts shares).length = m := by
+      rw [List.length_zip, hPtsLen, hShLen, Nat.min_self]
+    have hPart := filter_partition_length isBad (List.zip pts shares)
+    have hHonestLen : t ≤ honestPairs.length := by
+      dsimp only [honestPairs, isBad] at hPart ⊢
+      omega
+    let honestPts := honestPairs.map Prod.fst
+    have hHonestPtsNd : honestPts.Nodup := nodup_map_fst_of_sublist (fun ps => !isBad ps) hPtsNd
+    have hHonestPtsLen : t ≤ honestPts.length := by
+      dsimp only [honestPts]; rwa [List.length_map]
+    have hAgreeHonest : ∀ x ∈ honestPts,
+        RoundPoly.evalCoeffs Q x = RoundPoly.evalCoeffs coeffs x := by
+      intro x hx
+      obtain ⟨ps, hpsMem, rfl⟩ := List.mem_map.mp hx
+      obtain ⟨hInZip, hNotBad⟩ := List.mem_filter.mp hpsMem
+      have hGood : ps.2 = RoundPoly.evalCoeffs coeffs ps.1 := by
+        dsimp only [isBad] at hNotBad
+        if hEq : ps.2 = RoundPoly.evalCoeffs coeffs ps.1 then
+          exact hEq
+        else
+          simp [hEq] at hNotBad
+      exact (hPairOnQ ps hInZip).trans hGood
+    have hAt0 := poly204_eq_of_agree_ge_t ht1 hQLen hDeg hHonestPtsNd hHonestPtsLen hAgreeHonest Fq204.zero
+    rw [sum_zipWith_mul_eq_ringDot]
+    exact (lagrangeInterpLoop204_eval_eq_dot ptsBase Fq204.zero ptsBase sharesBase).symm.trans hAt0
+
+/-- **`#tooth` (`tooth_shamirSessionKey_corrupt_threshold_forges`)**:
+    When `t` custodians are corrupt (violating `≤ t - 1`, or when `m = t` omits the `m - t`
+    syndrome checks), a forged degree-`< t` share vector passes `shamirSessionKeyConvert` while
+    reconstructing a forged secret `≠ RoundPoly.evalCoeffs coeffs 0`! -/
+theorem tooth_shamirSessionKey_corrupt_threshold_forges :
+    ∃ (pts coeffs forgedShares out : List Fq204),
+      shamirMldsaParamsValid 2 64 3 = true ∧
+      pts.Nodup ∧ pts.length = 3 ∧ forgedShares.length = 3 ∧ coeffs.length ≤ 2 ∧
+      shamirSessionKeyConvert 2 pts forgedShares = some out ∧
+      out.foldr Fq204.add Fq204.zero ≠ RoundPoly.evalCoeffs coeffs Fq204.zero := by
+  let pts : List Fq204 := [Fq204.ofNat 1, Fq204.ofNat 2, Fq204.ofNat 3]
+  let coeffs : List Fq204 := [Fq204.zero, Fq204.zero]
+  -- Forged linear polynomial `f(X) = 3 - X` agrees with `coeffs = 0` at `X = 3` (`1` honest party,
+  -- `2 = t` corrupt parties at `X = 1, 2`) and reconstructs `f(0) = 3 ≠ 0`!
+  let forgedPoly : List Fq204 := [Fq204.ofNat 3, Fq204.neg Fq204.one]
+  let forgedShares : List Fq204 := pts.map (RoundPoly.evalCoeffs forgedPoly)
+  obtain ⟨out, hConv, _, hSum⟩ :=
+    shamirSessionKey_complete (t := 2) (n := 64) (m := 3) (by decide) pts forgedPoly
+      (.cons (fun x hx heq => by subst heq; revert hx; decide)
+        (.cons (fun x hx heq => by subst heq; revert hx; decide)
+          (.cons (fun _ h => nomatch h) .nil)))
+      rfl (by decide)
+  refine ⟨pts, coeffs, forgedShares, out, by decide,
+    .cons (fun x hx heq => by subst heq; revert hx; decide)
+      (.cons (fun x hx heq => by subst heq; revert hx; decide)
+        (.cons (fun _ h => nomatch h) .nil)),
+    rfl, rfl, by decide, hConv, ?_⟩
+  rw [hSum]
+  decide
+
+theorem inhabited_shamirSessionKey_byzantine_sound :
+    ∃ (t n m : Nat) (pts coeffs shares additiveShares : List Fq204),
+      shamirMldsaParamsValid t n m = true ∧
+      pts.Nodup ∧ (pts.length, shares.length) = (m, m) ∧ coeffs.length ≤ t ∧
+      ((List.zip pts shares).filter
+        (fun ps => decide (ps.2 ≠ RoundPoly.evalCoeffs coeffs ps.1))).length ≤ t - 1 ∧
+      shamirSessionKeyConvert t pts shares = some additiveShares := by
+  have hNd : ([Fq204.ofNat 1, Fq204.ofNat 2, Fq204.ofNat 3] : List Fq204).Nodup :=
+    .cons (fun x hx heq => by subst heq; revert hx; decide)
+      (.cons (fun x hx heq => by subst heq; revert hx; decide)
+        (.cons (fun _ h => nomatch h) .nil))
+  exact ⟨2, 64, 3,
+    [Fq204.ofNat 1, Fq204.ofNat 2, Fq204.ofNat 3],
+    [],
+    [Fq204.zero, Fq204.zero, Fq204.zero],
+    [Fq204.zero, Fq204.zero],
+    by decide, hNd, rfl, by decide, by decide, by decide⟩
+
+#tooth_pair shamirSessionKey_byzantine_sound vs tooth_shamirSessionKey_corrupt_threshold_forges
+#verify_inhabited shamirSessionKey_byzantine_sound inhabited_shamirSessionKey_byzantine_sound
+
+#verify_constructive shamirSessionKey_complete shamirSessionKey_byzantine_sound
+
+end Qsag
+end
