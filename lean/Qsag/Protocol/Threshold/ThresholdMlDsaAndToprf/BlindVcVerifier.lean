@@ -508,3 +508,492 @@ def foldFramesHashCollision
         exact hSub hdEq
 termination_by xs.length
 
+theorem foldFramesHash_collision_of_ne
+    {H : List UInt8 → List UInt8} {tag : List UInt8}
+    (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    {xs ys : List (List UInt8)}
+    (hxB : ∀ f ∈ xs, f.length < 256 ^ 8)
+    (hyB : ∀ g ∈ ys, g.length < 256 ^ 8)
+    (hNe : xs ≠ ys)
+    (hEq : foldFramesHash H tag xs = foldFramesHash H tag ys) :
+    ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂ := by
+  obtain ⟨m₁, m₂, h⟩ := foldFramesHashCollision hHLen hxB hyB hNe hEq
+  exact ⟨m₁, m₂, h⟩
+
+/-- Prefix-free structural frame serializer combinators (`∀ f, f.length ≤ 48 < 256 ^ 8`). -/
+private def serListFrames {α : Type} (serElem : α → List (List UInt8)) : List α → List (List UInt8)
+  | [] => [[0x00]]
+  | x :: xs => [0x01] :: (serElem x ++ serListFrames serElem xs)
+
+private theorem serListFrames_len_lt {α : Type} {serElem : α → List (List UInt8)}
+    (hElem : ∀ (a : α) (f : List UInt8), f ∈ serElem a → f.length < 256 ^ 8) :
+    ∀ (xs : List α) (f : List UInt8), f ∈ serListFrames serElem xs → f.length < 256 ^ 8
+  | [], f, hf => by
+    rcases List.mem_cons.mp hf with rfl | hNil
+    · simp only [List.length]; decide
+    · cases hNil
+  | x :: xs, f, hf => by
+    rcases List.mem_cons.mp hf with rfl | hRest
+    · simp only [List.length]; decide
+    · rcases List.mem_append.mp hRest with hE | hT
+      · exact hElem x f hE
+      · exact serListFrames_len_lt hElem xs f hT
+
+private theorem serListFrames_prefix_inj {α : Type} {serElem : α → List (List UInt8)}
+    (hElemInj : ∀ (a₁ a₂ : α) (r₁ r₂ : List (List UInt8)),
+      serElem a₁ ++ r₁ = serElem a₂ ++ r₂ → a₁ = a₂ ∧ r₁ = r₂) :
+    ∀ (xs₁ xs₂ : List α) (r₁ r₂ : List (List UInt8)),
+      serListFrames serElem xs₁ ++ r₁ = serListFrames serElem xs₂ ++ r₂ → xs₁ = xs₂ ∧ r₁ = r₂
+  | [], [], r₁, r₂, h => by
+    dsimp only [serListFrames, List.cons_append, List.nil_append] at h
+    injection h with _ hr
+    exact ⟨rfl, hr⟩
+  | [], _ :: _, _, _, h => by
+    dsimp only [serListFrames, List.cons_append, List.nil_append] at h
+    injection h with hTag _; cases hTag
+  | _ :: _, [], _, _, h => by
+    dsimp only [serListFrames, List.cons_append, List.nil_append] at h
+    injection h with hTag _; cases hTag
+  | x :: xs, y :: ys, r₁, r₂, h => by
+    dsimp only [serListFrames, List.cons_append] at h
+    injection h with _ hBody
+    rw [List.append_assoc, List.append_assoc] at hBody
+    obtain ⟨hxy, hRest⟩ := hElemInj x y _ _ hBody
+    obtain ⟨hxs, hr⟩ := serListFrames_prefix_inj hElemInj xs ys r₁ r₂ hRest
+    subst hxy hxs
+    exact ⟨rfl, hr⟩
+
+private def serGoldFrame (x : Goldilocks) : List (List UInt8) :=
+  [encodeGoldilocksVecLe [x]]
+
+private theorem serGoldFrame_inj {x y : Goldilocks} {r₁ r₂ : List (List UInt8)}
+    (h : serGoldFrame x ++ r₁ = serGoldFrame y ++ r₂) : x = y ∧ r₁ = r₂ := by
+  dsimp only [serGoldFrame, List.cons_append, List.nil_append] at h
+  injection h with hx hr
+  have hList := encodeGoldilocksVecLe_injective hx
+  injection hList with hxy _
+  exact ⟨hxy, hr⟩
+
+private theorem serGoldFrame_len (x : Goldilocks) (f : List UInt8) (hf : f ∈ serGoldFrame x) :
+    f.length < 256 ^ 8 := by
+  rcases List.mem_cons.mp hf with rfl | hNil
+  · rw [encodeGoldilocksVecLe_length]; simp only [List.length]; decide
+  · cases hNil
+
+def serLane4Frame (x : Lane4) : List (List UInt8) :=
+  [encodeGoldilocksVecLe [x.x0, x.x1, x.x2, x.x3]]
+
+private theorem serLane4Frame_inj {x y : Lane4} {r₁ r₂ : List (List UInt8)}
+    (h : serLane4Frame x ++ r₁ = serLane4Frame y ++ r₂) : x = y ∧ r₁ = r₂ := by
+  dsimp only [serLane4Frame, List.cons_append, List.nil_append] at h
+  injection h with hx hr
+  have hList := encodeGoldilocksVecLe_injective hx
+  injection hList with h0 t1; injection t1 with h1 t2; injection t2 with h2 t3; injection t3 with h3 _
+  exact ⟨Lane4.ext h0 h1 h2 h3, hr⟩
+
+private theorem serLane4Frame_len (x : Lane4) (f : List UInt8) (hf : f ∈ serLane4Frame x) :
+    f.length < 256 ^ 8 := by
+  rcases List.mem_cons.mp hf with rfl | hNil
+  · rw [encodeGoldilocksVecLe_length]; simp only [List.length]; decide
+  · cases hNil
+
+def serLane6Frame (x : Lane6) : List (List UInt8) :=
+  [encodeGoldilocksVecLe [x.x0, x.x1, x.x2, x.x3, x.x4, x.x5]]
+
+private theorem serLane6Frame_inj {x y : Lane6} {r₁ r₂ : List (List UInt8)}
+    (h : serLane6Frame x ++ r₁ = serLane6Frame y ++ r₂) : x = y ∧ r₁ = r₂ := by
+  dsimp only [serLane6Frame, List.cons_append, List.nil_append] at h
+  injection h with hx hr
+  have hList := encodeGoldilocksVecLe_injective hx
+  injection hList with h0 t1; injection t1 with h1 t2; injection t2 with h2 t3
+  injection t3 with h3 t4; injection t4 with h4 t5; injection t5 with h5 _
+  exact ⟨Lane6.ext h0 h1 h2 h3 h4 h5, hr⟩
+
+private theorem serLane6Frame_len (x : Lane6) (f : List UInt8) (hf : f ∈ serLane6Frame x) :
+    f.length < 256 ^ 8 := by
+  rcases List.mem_cons.mp hf with rfl | hNil
+  · rw [encodeGoldilocksVecLe_length]; simp only [List.length]; decide
+  · cases hNil
+
+private def serMulFrame (g : PartyMulView) : List (List UInt8) :=
+  [encodeGoldilocksVecLe [g.r, g.out]]
+
+private theorem serMulFrame_inj {a b : PartyMulView} {r₁ r₂ : List (List UInt8)}
+    (h : serMulFrame a ++ r₁ = serMulFrame b ++ r₂) : a = b ∧ r₁ = r₂ := by
+  dsimp only [serMulFrame, List.cons_append, List.nil_append] at h
+  injection h with hx hr
+  have hList := encodeGoldilocksVecLe_injective hx
+  injection hList with h0 t1; injection t1 with h1 _
+  refine ⟨?_, hr⟩
+  rcases a with ⟨_, _⟩; rcases b with ⟨_, _⟩
+  dsimp only at h0 h1
+  rw [h0, h1]
+
+private theorem serMulFrame_len (a : PartyMulView) (f : List UInt8) (hf : f ∈ serMulFrame a) :
+    f.length < 256 ^ 8 := by
+  rcases List.mem_cons.mp hf with rfl | hNil
+  · rw [encodeGoldilocksVecLe_length]; simp only [List.length]; decide
+  · cases hNil
+
+private def serSboxFrames (s : PartySboxView) : List (List UInt8) :=
+  serMulFrame s.g1 ++ serMulFrame s.g2 ++ serMulFrame s.g3 ++ serMulFrame s.g4
+
+private theorem serSboxFrames_inj {a b : PartySboxView} {r₁ r₂ : List (List UInt8)}
+    (h : serSboxFrames a ++ r₁ = serSboxFrames b ++ r₂) : a = b ∧ r₁ = r₂ := by
+  unfold serSboxFrames at h
+  simp only [List.append_assoc] at h
+  rcases serMulFrame_inj h with ⟨e1, h1⟩
+  rcases serMulFrame_inj h1 with ⟨e2, h2⟩
+  rcases serMulFrame_inj h2 with ⟨e3, h3⟩
+  rcases serMulFrame_inj h3 with ⟨e4, h4⟩
+  refine ⟨?_, h4⟩
+  rcases a with ⟨_, _, _, _⟩; rcases b with ⟨_, _, _, _⟩
+  dsimp only at e1 e2 e3 e4
+  rw [e1, e2, e3, e4]
+
+private theorem serSboxFrames_len (s : PartySboxView) (f : List UInt8) (hf : f ∈ serSboxFrames s) :
+    f.length < 256 ^ 8 := by
+  unfold serSboxFrames at hf
+  rcases List.mem_append.mp hf with h123 | h4
+  · rcases List.mem_append.mp h123 with h12 | h3
+    · rcases List.mem_append.mp h12 with h1 | h2
+      · exact serMulFrame_len _ f h1
+      · exact serMulFrame_len _ f h2
+    · exact serMulFrame_len _ f h3
+  · exact serMulFrame_len _ f h4
+
+private def serExtRoundFrames (rv : PartyExtRoundView) : List (List UInt8) :=
+  serSboxFrames rv.s0 ++ serSboxFrames rv.s1 ++ serSboxFrames rv.s2 ++ serSboxFrames rv.s3 ++
+  serSboxFrames rv.s4 ++ serSboxFrames rv.s5 ++ serSboxFrames rv.s6 ++ serSboxFrames rv.s7 ++
+  serSboxFrames rv.s8 ++ serSboxFrames rv.s9 ++ serSboxFrames rv.s10 ++ serSboxFrames rv.s11
+
+private theorem serExtRoundFrames_inj {a b : PartyExtRoundView} {r₁ r₂ : List (List UInt8)}
+    (h : serExtRoundFrames a ++ r₁ = serExtRoundFrames b ++ r₂) : a = b ∧ r₁ = r₂ := by
+  unfold serExtRoundFrames at h
+  simp only [List.append_assoc] at h
+  rcases serSboxFrames_inj h with ⟨e0, h0⟩; rcases serSboxFrames_inj h0 with ⟨e1, h1⟩
+  rcases serSboxFrames_inj h1 with ⟨e2, h2⟩; rcases serSboxFrames_inj h2 with ⟨e3, h3⟩
+  rcases serSboxFrames_inj h3 with ⟨e4, h4⟩; rcases serSboxFrames_inj h4 with ⟨e5, h5⟩
+  rcases serSboxFrames_inj h5 with ⟨e6, h6⟩; rcases serSboxFrames_inj h6 with ⟨e7, h7⟩
+  rcases serSboxFrames_inj h7 with ⟨e8, h8⟩; rcases serSboxFrames_inj h8 with ⟨e9, h9⟩
+  rcases serSboxFrames_inj h9 with ⟨e10, h10⟩; rcases serSboxFrames_inj h10 with ⟨e11, h11⟩
+  refine ⟨?_, h11⟩
+  rcases a with ⟨_, _, _, _, _, _, _, _, _, _, _, _⟩
+  rcases b with ⟨_, _, _, _, _, _, _, _, _, _, _, _⟩
+  dsimp only at e0 e1 e2 e3 e4 e5 e6 e7 e8 e9 e10 e11
+  rw [e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11]
+
+private theorem serExtRoundFrames_len (rv : PartyExtRoundView) (f : List UInt8)
+    (hf : f ∈ serExtRoundFrames rv) : f.length < 256 ^ 8 := by
+  unfold serExtRoundFrames at hf
+  simp only [List.mem_append] at hf
+  rcases hf with (((((((((((h0 | h1) | h2) | h3) | h4) | h5) | h6) | h7) | h8) | h9) | h10) | h11)
+  · exact serSboxFrames_len _ f h0
+  · exact serSboxFrames_len _ f h1
+  · exact serSboxFrames_len _ f h2
+  · exact serSboxFrames_len _ f h3
+  · exact serSboxFrames_len _ f h4
+  · exact serSboxFrames_len _ f h5
+  · exact serSboxFrames_len _ f h6
+  · exact serSboxFrames_len _ f h7
+  · exact serSboxFrames_len _ f h8
+  · exact serSboxFrames_len _ f h9
+  · exact serSboxFrames_len _ f h10
+  · exact serSboxFrames_len _ f h11
+
+private def serPerm12Frames (pv : PartyPerm12View) : List (List UInt8) :=
+  serListFrames serExtRoundFrames pv.initExt ++
+  serListFrames serSboxFrames pv.internal ++
+  serListFrames serExtRoundFrames pv.termExt
+
+private theorem serPerm12Frames_inj {a b : PartyPerm12View} {r₁ r₂ : List (List UInt8)}
+    (h : serPerm12Frames a ++ r₁ = serPerm12Frames b ++ r₂) : a = b ∧ r₁ = r₂ := by
+  unfold serPerm12Frames at h
+  simp only [List.append_assoc] at h
+  rcases serListFrames_prefix_inj (fun _ _ _ _ => serExtRoundFrames_inj) a.initExt b.initExt _ _ h with ⟨e1, h1⟩
+  rcases serListFrames_prefix_inj (fun _ _ _ _ => serSboxFrames_inj) a.internal b.internal _ _ h1 with ⟨e2, h2⟩
+  rcases serListFrames_prefix_inj (fun _ _ _ _ => serExtRoundFrames_inj) a.termExt b.termExt _ _ h2 with ⟨e3, h3⟩
+  refine ⟨?_, h3⟩
+  rcases a with ⟨_, _, _⟩; rcases b with ⟨_, _, _⟩
+  dsimp only at e1 e2 e3
+  rw [e1, e2, e3]
+
+private theorem serPerm12Frames_len (pv : PartyPerm12View) (f : List UInt8)
+    (hf : f ∈ serPerm12Frames pv) : f.length < 256 ^ 8 := by
+  unfold serPerm12Frames at hf
+  simp only [List.mem_append] at hf
+  rcases hf with (h1 | h2) | h3
+  · exact serListFrames_len_lt serExtRoundFrames_len _ f h1
+  · exact serListFrames_len_lt serSboxFrames_len _ f h2
+  · exact serListFrames_len_lt serExtRoundFrames_len _ f h3
+
+private def serSponge3Frames (sv : PartySponge3PermView) : List (List UInt8) :=
+  serPerm12Frames sv.perm1 ++ serPerm12Frames sv.perm2 ++ serPerm12Frames sv.perm3
+
+private theorem serSponge3Frames_inj {a b : PartySponge3PermView} {r₁ r₂ : List (List UInt8)}
+    (h : serSponge3Frames a ++ r₁ = serSponge3Frames b ++ r₂) : a = b ∧ r₁ = r₂ := by
+  unfold serSponge3Frames at h
+  simp only [List.append_assoc] at h
+  rcases serPerm12Frames_inj h with ⟨e1, h1⟩
+  rcases serPerm12Frames_inj h1 with ⟨e2, h2⟩
+  rcases serPerm12Frames_inj h2 with ⟨e3, h3⟩
+  refine ⟨?_, h3⟩
+  rcases a with ⟨_, _, _⟩; rcases b with ⟨_, _, _⟩
+  dsimp only at e1 e2 e3
+  rw [e1, e2, e3]
+
+private theorem serSponge3Frames_len (sv : PartySponge3PermView) (f : List UInt8)
+    (hf : f ∈ serSponge3Frames sv) : f.length < 256 ^ 8 := by
+  unfold serSponge3Frames at hf
+  simp only [List.mem_append] at hf
+  rcases hf with (h1 | h2) | h3
+  · exact serPerm12Frames_len _ f h1
+  · exact serPerm12Frames_len _ f h2
+  · exact serPerm12Frames_len _ f h3
+
+private def serMerkleLevelFrames (lv : PartyMerkleLevelView) : List (List UInt8) :=
+  serGoldFrame lv.bitShare ++ serLane6Frame lv.sibShare ++
+  serMulFrame lv.boolGate ++ serMulFrame lv.sel0 ++ serMulFrame lv.sel1 ++
+  serMulFrame lv.sel2 ++ serMulFrame lv.sel3 ++ serMulFrame lv.sel4 ++
+  serMulFrame lv.sel5 ++ serSponge3Frames lv.hashView
+
+private theorem serMerkleLevelFrames_inj {a b : PartyMerkleLevelView} {r₁ r₂ : List (List UInt8)}
+    (h : serMerkleLevelFrames a ++ r₁ = serMerkleLevelFrames b ++ r₂) : a = b ∧ r₁ = r₂ := by
+  unfold serMerkleLevelFrames at h
+  simp only [List.append_assoc] at h
+  rcases serGoldFrame_inj h with ⟨eb, h0⟩
+  rcases serLane6Frame_inj h0 with ⟨es, h1⟩
+  rcases serMulFrame_inj h1 with ⟨ebg, h2⟩
+  rcases serMulFrame_inj h2 with ⟨e0, h3⟩; rcases serMulFrame_inj h3 with ⟨e1, h4⟩
+  rcases serMulFrame_inj h4 with ⟨e2, h5⟩; rcases serMulFrame_inj h5 with ⟨e3, h6⟩
+  rcases serMulFrame_inj h6 with ⟨e4, h7⟩; rcases serMulFrame_inj h7 with ⟨e5, h8⟩
+  rcases serSponge3Frames_inj h8 with ⟨eh, h9⟩
+  refine ⟨?_, h9⟩
+  rcases a with ⟨_, _, _, _, _, _, _, _, _, _⟩
+  rcases b with ⟨_, _, _, _, _, _, _, _, _, _⟩
+  dsimp only at eb es ebg e0 e1 e2 e3 e4 e5 eh
+  rw [eb, es, ebg, e0, e1, e2, e3, e4, e5, eh]
+
+private theorem serMerkleLevelFrames_len (lv : PartyMerkleLevelView) (f : List UInt8)
+    (hf : f ∈ serMerkleLevelFrames lv) : f.length < 256 ^ 8 := by
+  unfold serMerkleLevelFrames at hf
+  simp only [List.mem_append] at hf
+  rcases hf with (((((((((hb | hs) | hbg) | h0) | h1) | h2) | h3) | h4) | h5) | hh)
+  · exact serGoldFrame_len _ f hb
+  · exact serLane6Frame_len _ f hs
+  · exact serMulFrame_len _ f hbg
+  · exact serMulFrame_len _ f h0
+  · exact serMulFrame_len _ f h1
+  · exact serMulFrame_len _ f h2
+  · exact serMulFrame_len _ f h3
+  · exact serMulFrame_len _ f h4
+  · exact serMulFrame_len _ f h5
+  · exact serSponge3Frames_len _ f hh
+
+private def serVec32Frame (v : Vec UInt8 32) : List (List UInt8) := [v.toList]
+
+private theorem serVec32Frame_inj {a b : Vec UInt8 32} {r₁ r₂ : List (List UInt8)}
+    (h : serVec32Frame a ++ r₁ = serVec32Frame b ++ r₂) : a = b ∧ r₁ = r₂ := by
+  dsimp only [serVec32Frame, List.cons_append, List.nil_append] at h
+  injection h with hv hr
+  exact ⟨Vec.toList_injective hv, hr⟩
+
+private theorem serVec32Frame_len (a : Vec UInt8 32) (f : List UInt8) (hf : f ∈ serVec32Frame a) :
+    f.length < 256 ^ 8 := by
+  rcases List.mem_cons.mp hf with rfl | hNil
+  · rw [Vec.toList_length]; decide
+  · cases hNil
+
+/-- Full injective frame serialization of `(v.tapeSeed, v.attrShares, v.holderBlindShare,
+    v.presBlindShare, v.attrSponge, v.merkleLevels, v.presSponge, v.scopeSponge, partyOut)`
+    for `"QSAG.VC.VIEW_COM.V1"` (`digest_party_view`, `blind_vc.rs:514-530, 2386-2387`). -/
+def serPartyViewDigestFrames (v : PartyVcRepView) (fo : VcPartyFinalOut) : List (List UInt8) :=
+  serVec32Frame v.tapeSeed ++
+  serListFrames serGoldFrame v.attrShares ++
+  serLane4Frame v.holderBlindShare ++
+  serLane4Frame v.presBlindShare ++
+  serSponge3Frames v.attrSponge ++
+  serListFrames serMerkleLevelFrames v.merkleLevels ++
+  serSponge3Frames v.presSponge ++
+  serSponge3Frames v.scopeSponge ++
+  serLane6Frame fo.rootShare ++
+  serLane6Frame fo.presShare ++
+  serLane6Frame fo.scopeShare ++
+  serListFrames serGoldFrame fo.boolZeroShares
+
+private theorem serPartyViewDigestFrames_len (v : PartyVcRepView) (fo : VcPartyFinalOut) :
+    ∀ f ∈ serPartyViewDigestFrames v fo, f.length < 256 ^ 8 := by
+  intro f hf
+  unfold serPartyViewDigestFrames at hf
+  simp only [List.mem_append] at hf
+  rcases hf with (((((((((((h0 | h1) | h2) | h3) | h4) | h5) | h6) | h7) | h8) | h9) | h10) | h11)
+  · exact serVec32Frame_len _ f h0
+  · exact serListFrames_len_lt serGoldFrame_len _ f h1
+  · exact serLane4Frame_len _ f h2
+  · exact serLane4Frame_len _ f h3
+  · exact serSponge3Frames_len _ f h4
+  · exact serListFrames_len_lt serMerkleLevelFrames_len _ f h5
+  · exact serSponge3Frames_len _ f h6
+  · exact serSponge3Frames_len _ f h7
+  · exact serLane6Frame_len _ f h8
+  · exact serLane6Frame_len _ f h9
+  · exact serLane6Frame_len _ f h10
+  · exact serListFrames_len_lt serGoldFrame_len _ f h11
+
+/-- Two party views with identical `commitSalt` and identical `serPartyViewDigestFrames` are equal. -/
+private theorem serPartyViewDigestFrames_injective
+    {v₁ v₂ : PartyVcRepView} {fo₁ fo₂ : VcPartyFinalOut}
+    (hSalt : v₁.commitSalt = v₂.commitSalt)
+    (hEq : serPartyViewDigestFrames v₁ fo₁ = serPartyViewDigestFrames v₂ fo₂) :
+    v₁ = v₂ ∧ fo₁ = fo₂ := by
+  have hApp : serPartyViewDigestFrames v₁ fo₁ ++ [] = serPartyViewDigestFrames v₂ fo₂ ++ [] := by
+    simp [hEq]
+  unfold serPartyViewDigestFrames at hApp
+  simp only [List.append_assoc] at hApp
+  rcases serVec32Frame_inj hApp with ⟨eSeed, h0⟩
+  rcases serListFrames_prefix_inj (fun _ _ _ _ => serGoldFrame_inj) _ _ _ _ h0 with ⟨eAttrs, h1⟩
+  rcases serLane4Frame_inj h1 with ⟨eHb, h2⟩
+  rcases serLane4Frame_inj h2 with ⟨ePb, h3⟩
+  rcases serSponge3Frames_inj h3 with ⟨eAs, h4⟩
+  rcases serListFrames_prefix_inj (fun _ _ _ _ => serMerkleLevelFrames_inj) _ _ _ _ h4 with ⟨eMk, h5⟩
+  rcases serSponge3Frames_inj h5 with ⟨ePs, h6⟩
+  rcases serSponge3Frames_inj h6 with ⟨eSs, h7⟩
+  rcases serLane6Frame_inj h7 with ⟨eFr, h8⟩
+  rcases serLane6Frame_inj h8 with ⟨eFp, h9⟩
+  rcases serLane6Frame_inj h9 with ⟨eFs, h10⟩
+  rcases serListFrames_prefix_inj (fun _ _ _ _ => serGoldFrame_inj) _ _ _ _ h10 with ⟨eFb, _⟩
+  refine ⟨?_, ?_⟩
+  · rcases v₁ with ⟨_, _, _, _, _, _, _, _, _⟩
+    rcases v₂ with ⟨_, _, _, _, _, _, _, _, _⟩
+    dsimp only at hSalt eSeed eAttrs eHb ePb eAs eMk ePs eSs
+    rw [hSalt, eSeed, eAttrs, eHb, ePb, eAs, eMk, ePs, eSs]
+  · rcases fo₁ with ⟨_, _, _, _⟩
+    rcases fo₂ with ⟨_, _, _, _⟩
+    dsimp only at eFr eFp eFs eFb
+    rw [eFr, eFp, eFs, eFb]
+
+/-- `"QSAG.VC.VIEW_COM.V1"` party-view digest (`digest_party_view`, `blind_vc.rs:514-530`). -/
+def vcViewDigest (H : List UInt8 → List UInt8) (v : PartyVcRepView) (fo : VcPartyFinalOut) : List UInt8 :=
+  foldFramesHash H vcViewCommitTag (serPartyViewDigestFrames v fo)
+
+/-- Salted `"QSAG.COMMIT.V1"` Round-1 broadcast commitment (`commit_mpc_broadcast`, `blind_vc.rs:2388-2401`). -/
+def vcCommitPartyViewPreimage (presNonce : Vec UInt8 32) (repIdx : Nat) (partyIdx : Fin 3)
+    (viewDigest : List UInt8) (salt : Vec UInt8 32) : List UInt8 :=
+  cshake256FramedPreimage vcMpcCommitTag
+    [presNonce.toList, encodeNatLeBytes 8 repIdx, [UInt8.ofNat partyIdx.val], viewDigest, salt.toList]
+
+def vcCommitPartyView (H : List UInt8 → List UInt8) (presNonce : Vec UInt8 32)
+    (repIdx : Nat) (partyIdx : Fin 3) (v : PartyVcRepView) (fo : VcPartyFinalOut) : List UInt8 :=
+  H (vcCommitPartyViewPreimage presNonce repIdx partyIdx (vcViewDigest H v fo) v.commitSalt)
+
+/-- Constructive commitment binding (`0 Classical.choice`): any `(v₁, fo₁) ≠ (v₂, fo₂)` colliding
+    on `vcCommitPartyView` constructively exhibit an explicit `H`-collision under either
+    `"QSAG.COMMIT.V1"` or `"QSAG.VC.VIEW_COM.V1"`. -/
+def vcCommitPartyViewCollision
+    {H : List UInt8 → List UInt8}
+    (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    {presNonce : Vec UInt8 32} {repIdx : Nat} {partyIdx : Fin 3}
+    {v₁ v₂ : PartyVcRepView} {fo₁ fo₂ : VcPartyFinalOut}
+    (hNe : (v₁, fo₁) ≠ (v₂, fo₂))
+    (hComEq : vcCommitPartyView H presNonce repIdx partyIdx v₁ fo₁ =
+              vcCommitPartyView H presNonce repIdx partyIdx v₂ fo₂) :
+    Σ m₁ : List UInt8, {m₂ : List UInt8 // m₁ ≠ m₂ ∧ H m₁ = H m₂} := by
+  let d₁ := vcViewDigest H v₁ fo₁
+  let d₂ := vcViewDigest H v₂ fo₂
+  let pre₁ := vcCommitPartyViewPreimage presNonce repIdx partyIdx d₁ v₁.commitSalt
+  let pre₂ := vcCommitPartyViewPreimage presNonce repIdx partyIdx d₂ v₂.commitSalt
+  have hPreFrames : ∀ (d : List UInt8) (s : Vec UInt8 32),
+      d.length < 256 ^ 8 →
+      ∀ f ∈ [presNonce.toList, encodeNatLeBytes 8 repIdx, [UInt8.ofNat partyIdx.val], d, s.toList],
+        f.length < 256 ^ 8 := by
+    intro d s hd f hf
+    rcases List.mem_cons.mp hf with rfl | h1
+    · rw [Vec.toList_length]; decide
+    · rcases List.mem_cons.mp h1 with rfl | h2
+      · rw [encodeNatLeBytes_length]; decide
+      · rcases List.mem_cons.mp h2 with rfl | h3
+        · simp only [List.length]; decide
+        · rcases List.mem_cons.mp h3 with rfl | h4
+          · exact hd
+          · rcases List.mem_cons.mp h4 with rfl | h5
+            · rw [Vec.toList_length]; decide
+            · cases h5
+  if hPreEq : pre₁ = pre₂ then
+    have hFr := cshake256FramedPreimage_frames_injective (by simp) (by simp)
+      (hPreFrames d₁ v₁.commitSalt (hHLen _))
+      (hPreFrames d₂ v₂.commitSalt (hHLen _)) hPreEq
+    injection hFr with _ t1; injection t1 with _ t2; injection t2 with _ t3
+    injection t3 with hdEq t4; injection t4 with hSaltList _
+    have hSaltEq : v₁.commitSalt = v₂.commitSalt := Vec.toList_injective hSaltList
+    have hFramesNe : serPartyViewDigestFrames v₁ fo₁ ≠ serPartyViewDigestFrames v₂ fo₂ := by
+      intro hSerEq
+      obtain ⟨hv, hfo⟩ := serPartyViewDigestFrames_injective hSaltEq hSerEq
+      exact hNe (by rw [hv, hfo])
+    exact foldFramesHashCollision hHLen
+      (serPartyViewDigestFrames_len v₁ fo₁)
+      (serPartyViewDigestFrames_len v₂ fo₂) hFramesNe hdEq
+  else
+    exact ⟨pre₁, pre₂, hPreEq, hComEq⟩
+
+theorem vcCommitPartyView_binding
+    {H : List UInt8 → List UInt8}
+    (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    {presNonce : Vec UInt8 32} {repIdx : Nat} {partyIdx : Fin 3}
+    {v₁ v₂ : PartyVcRepView} {fo₁ fo₂ : VcPartyFinalOut}
+    (hNe : (v₁, fo₁) ≠ (v₂, fo₂))
+    (hComEq : vcCommitPartyView H presNonce repIdx partyIdx v₁ fo₁ =
+              vcCommitPartyView H presNonce repIdx partyIdx v₂ fo₂) :
+    ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂ := by
+  obtain ⟨m₁, m₂, h⟩ := vcCommitPartyViewCollision hHLen hNe hComEq
+  exact ⟨m₁, m₂, h⟩
+
+/-- Framed preimage injectivity and domain-tag parity for `"QSAG.MLDSA.NONCE_BURN.V2"` and
+    `"QSAG.BLIND_VC.SD_LIMBO.V1"`. -/
+theorem mldsaNonceBurnPreimage_injective
+    {k₁ k₂ l₁ l₂ b₁ b₂ : List UInt8}
+    (hk₁ : k₁.length < 256 ^ 8) (hk₂ : k₂.length < 256 ^ 8)
+    (hl₁ : l₁.length < 256 ^ 8) (hl₂ : l₂.length < 256 ^ 8)
+    (hb₁ : b₁.length < 256 ^ 8) (hb₂ : b₂.length < 256 ^ 8)
+    (hEq : mldsaNonceBurnPreimage k₁ l₁ b₁ = mldsaNonceBurnPreimage k₂ l₂ b₂) :
+    k₁ = k₂ ∧ l₁ = l₂ ∧ b₁ = b₂ ∧
+    mldsaNonceBurnDomainTag =
+      (['Q', 'S', 'A', 'G', '.', 'M', 'L', 'D', 'S', 'A', '.',
+        'N', 'O', 'N', 'C', 'E', '_', 'B', 'U', 'R', 'N', '.', 'V', '2'].map
+        (fun c => UInt8.ofNat c.toNat)) ∧
+    vcSdLimboDomainTag =
+      (['Q', 'S', 'A', 'G', '.', 'B', 'L', 'I', 'N', 'D', '_', 'V', 'C', '.',
+        'S', 'D', '_', 'L', 'I', 'M', 'B', 'O', '.', 'V', '1'].map
+        (fun c => UInt8.ofNat c.toNat)) := by
+  unfold mldsaNonceBurnPreimage at hEq
+  have hAll1 : ∀ f ∈ [k₁, l₁, b₁], f.length < 256 ^ 8 := by
+    intro f hf
+    rcases List.mem_cons.mp hf with rfl | h1
+    · exact hk₁
+    · rcases List.mem_cons.mp h1 with rfl | h2
+      · exact hl₁
+      · rcases List.mem_cons.mp h2 with rfl | h3
+        · exact hb₁
+        · cases h3
+  have hAll2 : ∀ g ∈ [k₂, l₂, b₂], g.length < 256 ^ 8 := by
+    intro g hg
+    rcases List.mem_cons.mp hg with rfl | h1
+    · exact hk₂
+    · rcases List.mem_cons.mp h1 with rfl | h2
+      · exact hl₂
+      · rcases List.mem_cons.mp h2 with rfl | h3
+        · exact hb₂
+        · cases h3
+  have hFrEq := cshake256FramedPreimage_frames_injective (by simp) (by simp) hAll1 hAll2 hEq
+  injection hFrEq with ek t1
+  injection t1 with el t2
+  injection t2 with eb _
+  exact ⟨ek, el, eb, by decide, by decide⟩
+
+#export_eqns vcCommitPartyView
+
+#verify_constructive mldsaNonceBurnPreimage_injective
+
+#export_eqns checkPartyPrgTape
+
+end Qsag
+end
