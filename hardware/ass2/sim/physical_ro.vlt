@@ -1,4 +1,0 @@
-`verilator_config
-// Physical ROs intentionally contain combinational feedback at their output.
-// All paths outside this module retain Verilator's circular-logic diagnostic.
-lint_off -rule UNOPTFLAT -file "*qsag_ass2_ring.sv" -match "*Circular combinational logic*"
