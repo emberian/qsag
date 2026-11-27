@@ -1,8 +1,0 @@
-`verilator_config
-// The HDK publishes all shell sidebands and a port-only DDR verification stub.
-lint_off -rule UNUSEDSIGNAL -file "*/cl_ports.vh"
-lint_off -rule UNDRIVEN -file "*/sh_ddr.stub.sv"
-lint_off -rule UNUSEDSIGNAL -file "*/sh_ddr.stub.sv"
-lint_off -rule UNUSEDPARAM -file "*/sh_ddr.stub.sv"
-// Explicitly unconnected DDR return ports when DDR_PRESENT=0.
-lint_off -rule PINCONNECTEMPTY -file "*/cl_qsag_f2.sv"
