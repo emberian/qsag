@@ -5442,3 +5442,4 @@ mod tests {
 }
 
 mod fp5;
+pub(crate) use fp5::Resident;

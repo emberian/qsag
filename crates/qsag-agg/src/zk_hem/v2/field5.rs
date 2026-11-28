@@ -1021,3 +1021,135 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod batch_tests {
+    use super::super::pcs::fold_fiber;
+    use super::*;
+    use alloc::vec::Vec;
+    use qsag_accel::{AcceleratorBackend, CpuReferenceBackend, Fp5Table};
+
+    fn pack(x: Fp5) -> [u64; 5] {
+        x.0.map(Goldilocks::to_canonical_u64)
+    }
+    fn compare(backend: &dyn AcceleratorBackend) {
+        let p = GOLDILOCKS_PRIME;
+        let raw: Vec<_> = (0..2050u64)
+            .map(|i| {
+                [
+                    p.wrapping_add(i),
+                    p.wrapping_sub(i),
+                    i.wrapping_mul(0xd1342543de82ef95),
+                    u64::MAX - i,
+                    7 * i * i,
+                ]
+            })
+            .collect();
+        let base: Vec<_> = raw.iter().map(|v| v[0]).collect();
+        let mut weights = raw.clone();
+        weights.rotate_left(17);
+        let canonical = |x: [u64; 5]| Fp5(x.map(Goldilocks::from_u64_reduced));
+        let r = canonical(raw[99]);
+        for (table, z) in [
+            (
+                Fp5Table::Extension(&raw),
+                raw.iter().map(|&a| canonical(a)).collect::<Vec<_>>(),
+            ),
+            (
+                Fp5Table::Base(&base),
+                base.iter()
+                    .map(|&a| Fp5::from_base(Goldilocks::from_u64_reduced(a)))
+                    .collect(),
+            ),
+        ] {
+            let w: Vec<_> = weights.iter().map(|&x| canonical(x)).collect();
+            let mut evals = [Fp5::ZERO; 3];
+            let mut folded = alloc::vec![[0;5];z.len()/2];
+            backend
+                .fp5_fold_even_odd(table, pack(r), &mut folded)
+                .unwrap();
+            for ((z, w), f) in z.chunks_exact(2).zip(w.chunks_exact(2)).zip(folded) {
+                assert_eq!(f, pack(z[0] + r * (z[1] - z[0])));
+                evals[0] += z[0] * w[0];
+                evals[1] += z[1] * w[1];
+                evals[2] += (z[1] + z[1] - z[0]) * (w[1] + w[1] - w[0]);
+            }
+            assert_eq!(
+                backend.fp5_sumcheck_quad_evals(table, &weights).unwrap(),
+                evals.map(pack)
+            );
+            assert_eq!(
+                backend.fp5_dot_batch(table, &weights).unwrap(),
+                pack(evals[0] + evals[1])
+            );
+            assert!(
+                backend
+                    .fp5_sumcheck_quad_evals(table, &weights[1..])
+                    .is_err()
+            );
+        }
+        let cs = [[r, canonical(raw[3]), canonical(raw[4])]; 3];
+        let shift = Goldilocks::NON_RESIDUE;
+        for (table, base_first) in [
+            (Fp5Table::Base(&base[..1024]), true),
+            (Fp5Table::Extension(&raw[..1024]), false),
+        ] {
+            let mut out = [[0; 5]; 128];
+            backend
+                .whir_stage_fold_fp5(
+                    table,
+                    shift.to_canonical_u64(),
+                    &cs.map(|c| c.map(pack)),
+                    &mut out,
+                )
+                .unwrap();
+            let root = Goldilocks::two_adic_generator(10);
+            for (j, &v) in out.iter().enumerate() {
+                let fiber = (0..8)
+                    .map(|k| {
+                        if base_first {
+                            Fp5::from_base(Goldilocks::from_u64_reduced(base[j + 128 * k]))
+                        } else {
+                            canonical(raw[j + 128 * k])
+                        }
+                    })
+                    .collect();
+                assert_eq!(v, pack(fold_fiber(fiber, shift * root.pow(j as u64), &cs)));
+            }
+        }
+    }
+    #[test]
+    fn fp5_sumcheck_cpu_matches_field5() {
+        compare(&CpuReferenceBackend);
+    }
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires an audited discrete GPU"]
+    fn fp5_sumcheck_vulkan_matches_field5() {
+        use std::time::Instant;
+        let gpu = qsag_accel::VulkanSpirvBackend::try_new_audited().unwrap();
+        compare(&gpu);
+        let table: Vec<_> = (0..1 << 18)
+            .map(|i| [i, i + 1, i + 2, i + 3, i + 4])
+            .collect();
+        for (name, backend) in [
+            ("CPU", &CpuReferenceBackend as &dyn AcceleratorBackend),
+            ("Vulkan", &gpu),
+        ] {
+            let run = || {
+                backend
+                    .fp5_sumcheck_quad_evals(Fp5Table::Extension(&table), &table)
+                    .unwrap()
+            };
+            let expected = run();
+            let start = Instant::now();
+            for _ in 0..10 {
+                assert_eq!(std::hint::black_box(run()), expected);
+            }
+            std::println!(
+                "{name} quadratic round, {:.2} million pairs/s including transfers",
+                5.0 * table.len() as f64 / start.elapsed().as_secs_f64() / 1e6
+            );
+        }
+    }
+}

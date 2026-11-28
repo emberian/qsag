@@ -8,6 +8,10 @@ use alloc::vec::Vec;
 use qsag_accel::vulkan::{CanopyProfile, VulkanError, VulkanFp5Session};
 use qsag_core::wipe::SecretBuffer;
 
+pub(crate) fn unpack(words: [u64; 5]) -> Fp5 {
+    Fp5(words.map(F::from_u64_reduced))
+}
+
 pub(crate) fn base_words(values: &[F]) -> SecretBuffer<Vec<[u64; 1]>> {
     SecretBuffer::new(values.iter().map(|x| [x.to_canonical_u64()]).collect())
 }

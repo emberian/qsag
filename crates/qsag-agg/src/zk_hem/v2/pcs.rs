@@ -1107,19 +1107,190 @@ pub(in crate::zk_hem) struct Stage0Reduced {
     pub(in crate::zk_hem) beta_r: Fp5,
 }
 
-pub(in crate::zk_hem) fn stage0_reduce<C: Channel>(
-    coeffs: &[impl Coef],
+/// The polynomial entering a fold stage: base-field coefficients of a scalar Stage-0
+/// commitment, or challenge-field coefficients (every later stage, and Stage 0 of a
+/// projected interleaved commitment).
+pub(in crate::zk_hem) enum Coefficients<'a> {
+    Base(&'a [Goldilocks]),
+    Ext(&'a [Fp5]),
+}
+impl<'a> From<&'a [Goldilocks]> for Coefficients<'a> {
+    fn from(xs: &'a [Goldilocks]) -> Self {
+        Self::Base(xs)
+    }
+}
+impl<'a> From<&'a [Fp5]> for Coefficients<'a> {
+    fn from(xs: &'a [Fp5]) -> Self {
+        Self::Ext(xs)
+    }
+}
+type StageFolds = (Vec<Fp5>, Vec<[Fp5; 5]>, Vec<[Fp5; 3]>);
+
+fn cpu_folds<C: Channel>(
+    input: Coefficients<'_>,
+    st: &mut Folding,
+    steps: usize,
+    guarded: usize,
+    ch: &mut C,
+) -> Result<StageFolds, MaskRankDeficient> {
+    let mut folds = Vec::with_capacity(steps);
+    let mut chals = Vec::with_capacity(steps);
+    let mut poly = SecretBuffer::new(Vec::new());
+    for i in 0..steps {
+        let src = if i == 0 {
+            &input
+        } else {
+            &Coefficients::Ext(&poly)
+        };
+        let (next, wire, c) = match src {
+            Coefficients::Base(b) => prove_fold(b, st, guarded, ch)?,
+            Coefficients::Ext(b) => prove_fold(b, st, guarded, ch)?,
+        };
+        poly = SecretBuffer::new(next);
+        folds.push(wire);
+        chals.push(c);
+    }
+    Ok((poly.into_inner(), folds, chals))
+}
+
+#[cfg(feature = "vulkan")]
+fn gpu_folds<C: Channel>(
+    gpu: &qsag_accel::vulkan::VulkanFp5Session<'_>,
+    input: Coefficients<'_>,
+    st: &mut Folding,
+    steps: usize,
+    guarded: usize,
+    ch: &mut C,
+) -> Result<StageFolds, super::protocol::ZkHemV2Error> {
+    use super::protocol::ZkHemV2Error;
+    use crate::vulkan::{base_words, ext_words, unpack};
+    use qsag_accel::vulkan::{VulkanError, WhirChallenges};
+    fn pack(x: Fp5) -> [u64; 5] {
+        x.0.map(Goldilocks::to_canonical_u64)
+    }
+    struct Rounds<'a, C> {
+        st: &'a mut Folding,
+        ch: &'a mut C,
+        guarded: usize,
+        wire: [Fp5; 5],
+        phi: Fp5,
+        folds: Vec<[Fp5; 5]>,
+        chals: Vec<[Fp5; 3]>,
+    }
+    impl<C: Channel> WhirChallenges for Rounds<'_, C> {
+        fn kernel_tail(&self, n: usize) -> [[u64; 5]; 3] {
+            let tail = point_tail(&self.st.points, n, 3);
+            core::array::from_fn(|i| pack(tail[i]))
+        }
+        fn phi(&mut self, products: [[u64; 5]; 3]) -> Option<[u64; 5]> {
+            self.wire[..3].copy_from_slice(&products.map(unpack));
+            self.ch.absorb_fp5_slice(b"FOLD_A", &self.wire[..3]);
+            self.phi = self.ch.squeeze_fp5(b"FOLD_PHI");
+            if self.guarded > 0 {
+                let xs: Vec<_> = self.st.points[..self.guarded].iter().map(|p| p.1).collect();
+                if !fold_challenge_good(self.phi, &xs) {
+                    return None;
+                }
+            }
+            Some(pack(self.phi))
+        }
+        fn mix(&mut self, products: [[u64; 5]; 2]) -> [[u64; 5]; 3] {
+            self.wire[3..].copy_from_slice(&products.map(unpack));
+            self.ch.absorb_fp5_slice(b"FOLD_B", &self.wire[3..]);
+            let c = [
+                self.ch.squeeze_fp5(b"FOLD_THETA"),
+                self.ch.squeeze_fp5(b"FOLD_ALPHA"),
+                self.ch.squeeze_fp5(b"FOLD_BETA"),
+            ];
+            self.st.claim = next_claim(&self.wire, self.st.claim, self.phi, c);
+            fold_points(&mut self.st.points, self.phi);
+            self.folds.push(self.wire);
+            self.chals.push(c);
+            c.map(pack)
+        }
+    }
+    let (base, ext);
+    let table = match input {
+        Coefficients::Base(xs) => {
+            base = base_words(xs);
+            qsag_accel::Fp5Table::Base(base.as_flattened())
+        }
+        Coefficients::Ext(xs) => {
+            ext = ext_words(xs);
+            qsag_accel::Fp5Table::Extension(&ext)
+        }
+    };
+    let kernel = ext_words(&st.kernel);
+    let len = (0..steps).fold(kernel.len(), |m, _| m.div_ceil(2) + 1);
+    let mut poly = SecretBuffer::new(vec![[0; 5]; len]);
+    let mut dual = vec![[0; 5]; len];
+    let mut rounds = Rounds {
+        st,
+        ch,
+        guarded,
+        wire: [Fp5::ZERO; 5],
+        phi: Fp5::ZERO,
+        folds: Vec::with_capacity(steps),
+        chals: Vec::with_capacity(steps),
+    };
+    gpu.whir_coefficients(table, &kernel, steps, &mut rounds, &mut poly, &mut dual)
+        .map_err(|e| match e {
+            VulkanError::FoldChallengeRejected => ZkHemV2Error::MaskRankDeficient,
+            other => ZkHemV2Error::Vulkan(other),
+        })?;
+    rounds.st.kernel = dual.into_iter().map(unpack).collect();
+    Ok((
+        poly.iter().copied().map(unpack).collect(),
+        rounds.folds,
+        rounds.chals,
+    ))
+}
+
+pub(in crate::zk_hem) fn stage0_reduce<'a, T: Coef, C: Channel>(
+    coeffs: &'a [T],
     mask: &[Fp5],
     step_vars: usize,
     points: usize,
+    kernel: Vec<Fp5>,
+    claim: Fp5,
+    ch: &mut C,
+) -> Result<Stage0Reduced, MaskRankDeficient>
+where
+    &'a [T]: Into<Coefficients<'a>>,
+{
+    stage0_reduce_with(
+        coeffs,
+        mask,
+        (step_vars, points),
+        kernel,
+        claim,
+        ch,
+        &cpu_folds,
+    )
+}
+
+fn stage0_reduce_with<'a, T: Coef, C: Channel, Err: From<MaskRankDeficient>>(
+    coeffs: &'a [T],
+    mask: &[Fp5],
+    (step_vars, points): (usize, usize),
     mut kernel: Vec<Fp5>,
     claim: Fp5,
     ch: &mut C,
-) -> Result<Stage0Reduced, MaskRankDeficient> {
+    fold_stage: &impl Fn(
+        Coefficients<'_>,
+        &mut Folding,
+        usize,
+        usize,
+        &mut C,
+    ) -> Result<StageFolds, Err>,
+) -> Result<Stage0Reduced, Err>
+where
+    &'a [T]: Into<Coefficients<'a>>,
+{
     assert_eq!(kernel.len(), coeffs.len());
     let omegas: Vec<Fp5> = (0..points).map(|_| ch.squeeze_fp5(b"MASK_POINT")).collect();
     if !mask_points_good(&omegas, step_vars) {
-        return Err(MaskRankDeficient);
+        return Err(MaskRankDeficient.into());
     }
     let mut mask_evals = Vec::with_capacity(points);
     for chunk in omegas.chunks(5) {
@@ -1132,7 +1303,7 @@ pub(in crate::zk_hem) fn stage0_reduce<C: Channel>(
         .map(|_| ch.squeeze_fp5(b"MASK_WEIGHT"))
         .collect();
     if weights.iter().any(|w| w.is_zero()) {
-        return Err(MaskRankDeficient);
+        return Err(MaskRankDeficient.into());
     }
     let point_terms: Vec<(Fp5, Fp5)> = weights.iter().copied().zip(omegas).collect();
     add_points(&mut kernel, &point_terms);
@@ -1145,20 +1316,7 @@ pub(in crate::zk_hem) fn stage0_reduce<C: Channel>(
         points: point_terms,
     };
 
-    let mut folds = Vec::with_capacity(step_vars);
-    let mut chals = Vec::with_capacity(step_vars);
-    let (mut poly, wire, c) = prove_fold(coeffs, &mut st, points, ch)?;
-    folds.push(wire);
-    chals.push(c);
-    for _ in 1..step_vars {
-        let folded = prove_fold(&poly, &mut st, points, ch);
-        qsag_asm::volatile_fill(&mut poly, Fp5::ZERO);
-        let (next, wire, c) = folded?;
-        poly = next;
-        folds.push(wire);
-        chals.push(c);
-    }
-
+    let (mut poly, folds, chals) = fold_stage(coeffs.into(), &mut st, step_vars, points, ch)?;
     extend_kernel(&mut st.kernel, &st.points, mask.len());
     let kernel = &st.kernel;
     let [mask_claim] = par_sum(mask.len(), |range| {
@@ -1508,7 +1666,7 @@ pub fn open<C: Channel>(
     claim: Fp5,
     ch: &mut C,
 ) -> Result<Opening, MaskRankDeficient> {
-    open_with(st, kernel, claim, ch, cpu_oracle)
+    open_with(st, kernel, claim, ch, cpu_oracle, cpu_folds)
 }
 
 fn cpu_oracle(
@@ -1542,26 +1700,33 @@ pub(crate) fn open_prover<C: Channel>(
 ) -> Result<Opening, super::protocol::ZkHemV2Error> {
     #[cfg(feature = "vulkan")]
     if let Some(gpu) = gpu {
-        return open_with(st, kernel, claim, ch, |i, d, poly, hasher| {
-            let code = SecretBuffer::new(
-                crate::vulkan::encode_ext(gpu, poly, d.log_domain, SHIFT)
-                    .map_err(super::protocol::ZkHemV2Error::Vulkan)?,
-            );
-            let framing = qsag_accel::vulkan::CanopyProfile::ZkExtension {
-                midstate: hasher.tree_midstate(),
-                turbo: st.profile.uses_turboshake(),
-            };
-            let tree = crate::vulkan::tree(
-                gpu,
-                hasher,
-                framing,
-                i as u8,
-                d.arity(),
-                &crate::vulkan::ext_words(&code),
-            )
-            .map_err(super::protocol::ZkHemV2Error::Vulkan)?;
-            Ok((code.into_inner(), tree))
-        });
+        return open_with(
+            st,
+            kernel,
+            claim,
+            ch,
+            |i, d, poly, hasher| {
+                let code = SecretBuffer::new(
+                    crate::vulkan::encode_ext(gpu, poly, d.log_domain, SHIFT)
+                        .map_err(super::protocol::ZkHemV2Error::Vulkan)?,
+                );
+                let framing = qsag_accel::vulkan::CanopyProfile::ZkExtension {
+                    midstate: hasher.tree_midstate(),
+                    turbo: st.profile.uses_turboshake(),
+                };
+                let tree = crate::vulkan::tree(
+                    gpu,
+                    hasher,
+                    framing,
+                    i as u8,
+                    d.arity(),
+                    &crate::vulkan::ext_words(&code),
+                )
+                .map_err(super::protocol::ZkHemV2Error::Vulkan)?;
+                Ok((code.into_inner(), tree))
+            },
+            |p, st, steps, guarded, ch| gpu_folds(gpu, p, st, steps, guarded, ch),
+        );
     }
     Ok(open(st, kernel, claim, ch)?)
 }
@@ -1572,37 +1737,46 @@ fn open_with<C: Channel, Err: From<MaskRankDeficient>>(
     claim: Fp5,
     ch: &mut C,
     oracle: impl Fn(usize, &StageDims, &[Fp5], Hasher) -> Result<(Vec<Fp5>, MerkleTree), Err>,
+    fold_stage: impl Fn(Coefficients<'_>, &mut Folding, usize, usize, &mut C) -> Result<StageFolds, Err>,
 ) -> Result<Opening, Err> {
     let _phase = crate::profile::span("zkhem2_open");
     let hasher = Hasher::new(st.profile);
     let dims = &st.dims;
     let phase = crate::profile::span("zkhem2_open_stage0_folds");
-    let red = stage0_reduce(
+    let red = stage0_reduce_with(
         &st.coeffs,
         &st.mask,
-        dims[0].step_vars,
-        MASK_POINTS,
+        (dims[0].step_vars, MASK_POINTS),
         kernel,
         claim,
         ch,
+        &fold_stage,
     )?;
     drop(phase);
-    open_reduced(hasher, dims, red, ch, oracle, |idx, chals, beta| {
-        let query = stage0_answer(st, idx);
-        let d = &dims[0];
-        let shifts = idx
-            .iter()
-            .zip(&query.leaves)
-            .map(|(&j, leaf)| {
-                let vals = leaf.z.iter().copied().map(Fp5::from_base).collect();
-                (
-                    d.fiber_image(j),
-                    fold_fiber(vals, d.fiber_base(j), chals) + beta * leaf.r,
-                )
-            })
-            .collect();
-        (query, shifts)
-    })
+    open_reduced(
+        hasher,
+        dims,
+        red,
+        ch,
+        oracle,
+        &fold_stage,
+        |idx, chals, beta| {
+            let query = stage0_answer(st, idx);
+            let d = &dims[0];
+            let shifts = idx
+                .iter()
+                .zip(&query.leaves)
+                .map(|(&j, leaf)| {
+                    let vals = leaf.z.iter().copied().map(Fp5::from_base).collect();
+                    (
+                        d.fiber_image(j),
+                        fold_fiber(vals, d.fiber_base(j), chals) + beta * leaf.r,
+                    )
+                })
+                .collect();
+            (query, shifts)
+        },
+    )
 }
 
 type FirstQuery = (Stage0Query, Vec<(Goldilocks, Fp5)>);
@@ -1612,6 +1786,13 @@ fn open_reduced<C: Channel, Err: From<MaskRankDeficient>>(
     red: Stage0Reduced,
     ch: &mut C,
     oracle: impl Fn(usize, &StageDims, &[Fp5], Hasher) -> Result<(Vec<Fp5>, MerkleTree), Err>,
+    fold_stage: &impl Fn(
+        Coefficients<'_>,
+        &mut Folding,
+        usize,
+        usize,
+        &mut C,
+    ) -> Result<StageFolds, Err>,
     first_query: impl Fn(&[usize], &[[Fp5; 3]], Fp5) -> FirstQuery,
 ) -> Result<Opening, Err> {
     let Stage0Reduced {
@@ -1670,15 +1851,10 @@ fn open_reduced<C: Channel, Err: From<MaskRankDeficient>>(
         fold.points.extend(terms);
         fold.claim += delta;
 
-        let mut folds = Vec::with_capacity(d.step_vars);
-        prev_chals = Vec::with_capacity(d.step_vars);
-        for _ in 0..d.step_vars {
-            let folded = prove_fold(&poly, &mut fold, 0, ch);
-            let (next, wire, c) = folded?;
-            poly = SecretBuffer::new(next);
-            folds.push(wire);
-            prev_chals.push(c);
-        }
+        let (next, folds, chals) =
+            fold_stage(Coefficients::Ext(&poly), &mut fold, d.step_vars, 0, ch)?;
+        poly = SecretBuffer::new(next);
+        prev_chals = chals;
         stages.push(LaterStage {
             root,
             ood,

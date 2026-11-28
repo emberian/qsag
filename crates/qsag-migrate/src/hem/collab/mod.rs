@@ -17,11 +17,14 @@ mod over_wire;
 pub use over_wire::*;
 mod tape;
 
+pub mod column_digest;
 pub mod custody;
 pub mod engine;
 pub mod net;
 pub mod prep;
 pub mod prover;
+#[cfg(any(test, feature = "testing-ephemeral"))]
+pub mod ring_lpn;
 pub mod witgen;
 
 use alloc::vec::Vec;
@@ -428,8 +431,12 @@ mod tests {
             let mut other = st.clone();
             other.epoch += 1;
             assert!(!verify_threshold_ownership(&other, profile, &proof));
+            let all_sent: u64 = out
+                .iter()
+                .map(|(_, marks)| marks.last().unwrap().1.bytes_sent)
+                .sum();
             std::println!(
-                "{label}: proof={} bytes wall={total_s:.1}s verify={verify_s:.2}s",
+                "{label}: proof={} bytes all_parties_sent={all_sent} wall={total_s:.1}s verify={verify_s:.2}s",
                 bytes.len()
             );
             let mut before = (Stats::default(), 0.0);

@@ -16,6 +16,8 @@ extern crate std;
 pub use qsag_asm::fill_os_random;
 
 pub mod ct;
+mod fp5_batch;
+pub use fp5_batch::Fp5Table;
 pub mod gf2_128;
 pub mod goldilocks;
 pub mod keccak;
@@ -612,6 +614,50 @@ pub trait AcceleratorBackend: Send + Sync {
         0
     }
 
+    /// Fold adjacent evaluations into lo + phi (hi - lo).
+    fn fp5_fold_even_odd(
+        &self,
+        table: Fp5Table<'_>,
+        phi: [u64; 5],
+        out: &mut [[u64; 5]],
+    ) -> Result<(), AccelError> {
+        let _ = (table, phi, out);
+        Err(AccelError::UnsupportedOperation)
+    }
+
+    /// Sum products of the two affine tables at 0, 1 and 2.
+    fn fp5_sumcheck_quad_evals(
+        &self,
+        table: Fp5Table<'_>,
+        weights: &[[u64; 5]],
+    ) -> Result<[[u64; 5]; 3], AccelError> {
+        let _ = (table, weights);
+        Err(AccelError::UnsupportedOperation)
+    }
+
+    /// Sum the pointwise products, with the empty sum equal to zero.
+    fn fp5_dot_batch(
+        &self,
+        table: Fp5Table<'_>,
+        weights: &[[u64; 5]],
+    ) -> Result<[u64; 5], AccelError> {
+        let _ = (table, weights);
+        Err(AccelError::UnsupportedOperation)
+    }
+
+    /// Fold opposite coset evaluations through successive CWYZ challenges.
+    #[cfg(feature = "alloc")]
+    fn whir_stage_fold_fp5(
+        &self,
+        table: Fp5Table<'_>,
+        shift: u64,
+        challenges: &[[[u64; 5]; 3]],
+        out: &mut [[u64; 5]],
+    ) -> Result<(), AccelError> {
+        let _ = (table, shift, challenges, out);
+        Err(AccelError::UnsupportedOperation)
+    }
+
     /// Parallel 24-round `Keccak-f[1600]` across `states` (accelerating WOTS+/FORS/FTS chains & OT).
     fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]);
 
@@ -833,6 +879,42 @@ pub(crate) fn hash_u64_rows<const W: usize>(cust: &[u8], rows: &[[u64; W]]) -> [
 }
 
 impl AcceleratorBackend for CpuReferenceBackend {
+    fn fp5_fold_even_odd(
+        &self,
+        table: Fp5Table<'_>,
+        phi: [u64; 5],
+        out: &mut [[u64; 5]],
+    ) -> Result<(), AccelError> {
+        fp5_batch::fp5_fold_even_odd(table, phi, out)
+    }
+
+    fn fp5_sumcheck_quad_evals(
+        &self,
+        table: Fp5Table<'_>,
+        weights: &[[u64; 5]],
+    ) -> Result<[[u64; 5]; 3], AccelError> {
+        fp5_batch::fp5_sumcheck_quad_evals(table, weights)
+    }
+
+    fn fp5_dot_batch(
+        &self,
+        table: Fp5Table<'_>,
+        weights: &[[u64; 5]],
+    ) -> Result<[u64; 5], AccelError> {
+        fp5_batch::fp5_dot_batch(table, weights)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn whir_stage_fold_fp5(
+        &self,
+        table: Fp5Table<'_>,
+        shift: u64,
+        challenges: &[[[u64; 5]; 3]],
+        out: &mut [[u64; 5]],
+    ) -> Result<(), AccelError> {
+        fp5_batch::whir_stage_fold_fp5(table, shift, challenges, out)
+    }
+
     fn target_arch(&self) -> KernelTargetArch {
         KernelTargetArch::CpuReference
     }
@@ -1111,6 +1193,43 @@ impl<B: AcceleratorBackend> CertifiedBackend<B> {
 }
 
 impl<B: AcceleratorBackend> AcceleratorBackend for CertifiedBackend<B> {
+    fn fp5_fold_even_odd(
+        &self,
+        table: Fp5Table<'_>,
+        phi: [u64; 5],
+        out: &mut [[u64; 5]],
+    ) -> Result<(), AccelError> {
+        self.inner.fp5_fold_even_odd(table, phi, out)
+    }
+
+    fn fp5_sumcheck_quad_evals(
+        &self,
+        table: Fp5Table<'_>,
+        weights: &[[u64; 5]],
+    ) -> Result<[[u64; 5]; 3], AccelError> {
+        self.inner.fp5_sumcheck_quad_evals(table, weights)
+    }
+
+    fn fp5_dot_batch(
+        &self,
+        table: Fp5Table<'_>,
+        weights: &[[u64; 5]],
+    ) -> Result<[u64; 5], AccelError> {
+        self.inner.fp5_dot_batch(table, weights)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn whir_stage_fold_fp5(
+        &self,
+        table: Fp5Table<'_>,
+        shift: u64,
+        challenges: &[[[u64; 5]; 3]],
+        out: &mut [[u64; 5]],
+    ) -> Result<(), AccelError> {
+        self.inner
+            .whir_stage_fold_fp5(table, shift, challenges, out)
+    }
+
     fn hardware_audit_digest(&self) -> [u8; 32] {
         self.inner.hardware_audit_digest()
     }

@@ -148,6 +148,7 @@ impl Interleaved {
             red,
             ch,
             cpu_oracle,
+            &cpu_folds,
             |idx, chals, beta| {
                 let query = Stage0Query {
                     leaves: idx

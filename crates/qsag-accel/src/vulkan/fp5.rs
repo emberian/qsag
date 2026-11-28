@@ -359,54 +359,15 @@ impl<'a> VulkanFp5Session<'a> {
         shift: u64,
         challenges: &[[[u64; 5]; 3]],
     ) -> Result<Vec<[u64; 5]>, VulkanError> {
-        if !code.len().is_power_of_two()
-            || challenges.len() > code.len().trailing_zeros() as usize
-            || gl_reduce_u64(shift) == 0
-        {
-            return Err(AccelError::LengthOverflow.into());
-        }
+        let n = code
+            .len()
+            .checked_shr(count(challenges.len())?)
+            .ok_or(AccelError::LengthOverflow)?;
+        crate::fp5_batch::whir_shape(code.len(), shift, challenges.len(), n)?;
         self.extent(code.len(), 5)?;
-        if challenges.is_empty() {
-            return Ok(code.iter().map(|v| v.map(gl_reduce_u64)).collect());
-        }
-        let mut values = code.to_vec();
-        let mut x = gl_reduce_u64(shift);
-        let mut omega = gl_pow_pub(
-            GOLDILOCKS_ROOT_2_32,
-            1u64 << (32 - code.len().trailing_zeros()),
-        );
-        for c in challenges {
-            let n = values.len() / 2;
-            let mut params = c.as_flattened().to_vec();
-            let mut y2 = gl_sq(x);
-            let mut inv = gl_mul(0x7fff_ffff_8000_0001, gl_inv_or_zero(x));
-            let inv_omega = gl_inv_or_zero(omega);
-            for _ in 0..n {
-                params.extend([inv, y2]);
-                inv = gl_mul(inv, inv_omega);
-                y2 = gl_mul(y2, gl_sq(omega));
-            }
-            let pass = ComputePass::Dispatch {
-                constants: vec![count(n)?, 0, 0, 0, 0, 0, 6, 0],
-                groups: count(n)?.div_ceil(256),
-                base_word: 5,
-                base_scale: 1,
-            };
-            let mut next = vec![[0; 5]; n];
-            let result = self.job(
-                KernelSlot::Fp5WhirFold,
-                [values.as_flattened(), &[], &params],
-                1,
-                next.as_flattened_mut(),
-                &[pass],
-            );
-            qsag_asm::volatile_fill(&mut values, [0; 5]);
-            result?;
-            values = next;
-            x = gl_sq(x);
-            omega = gl_sq(omega);
-        }
-        Ok(values)
+        let mut out = vec![[0; 5]; n];
+        self.whir_stage_fold_fp5(Fp5Table::Extension(code), shift, challenges, &mut out)?;
+        Ok(out)
     }
 
     /// Build the full heap (top at index 1) in one submission. A 400-bit digest
@@ -561,3 +522,8 @@ impl<'a> VulkanFp5Session<'a> {
         Ok(nodes)
     }
 }
+
+#[path = "fp5_resident.rs"]
+mod resident;
+pub(crate) use resident::{Region, ResidentStep};
+pub use resident::{RowEvaluations, WhirChallenges};
