@@ -486,6 +486,8 @@ def is_rust_non_crypto_helper(sym: str) -> bool:
         "HardwareDitStatus",
         "panicking",
         "panic_bounds_check",
+        "slice_index_fail",
+        "slice_index_order_fail",
         "slice_end_index_len_fail",
         "slice_start_index_len_fail",
         "fmt",
@@ -540,11 +542,14 @@ def secret_guard_drop_kind(sym: str) -> str | None:
 def has_public_vec_header_argument(sym: str) -> bool:
     """First argument points at a `Vec` header (capacity, pointer, length), which is public.
 
-    True for the destructor of a flat `SecretVec` / `SecretScratch` and for the
-    `secret_vec_*` growth helpers, whose first parameter is `&mut Vec<T>`. Reallocation and
-    freeing depend on that header; the elements the pointer leads to stay secret.
+    True for the destructor of a flat `SecretVec` / `SecretScratch`, for inherent
+    `SecretScratch::*` methods (`&mut self` wraps `Vec<T>`), and for the `secret_vec_*`
+    growth helpers, whose first parameter is `&mut Vec<T>`. Reallocation and freeing
+    depend on that header; the elements the pointer leads to stay secret.
     """
     if "qsag_asm::wipe::secret_vec_" in sym:
+        return True
+    if outer_rust_symbol(sym).startswith("qsag_asm::wipe::SecretScratch::"):
         return True
     parsed = _match_guard_drop(sym)
     return bool(parsed) and secret_guard_drop_kind(sym) == "flat" and (
@@ -1547,9 +1552,10 @@ def outer_rust_symbol(symbol: str) -> str:
 
 
 def is_rust_crypto_symbol(symbol):
-    # Storage, CPU discovery, formatting and allocation are outside the kernel
-    # ABI. Include root-level dispatch wrappers as well as nested SIMD modules.
-    if is_rust_non_crypto_helper(symbol) or 'qsag_asm::durable::' in symbol:
+    # Storage, OS entropy syscalls, CPU discovery, formatting and allocation are
+    # outside the kernel ABI. Include root-level dispatch wrappers and SIMD modules.
+    if (is_rust_non_crypto_helper(symbol) or 'qsag_asm::durable::' in symbol
+            or 'qsag_asm::os_random::' in symbol):
         return False
     outer = outer_rust_symbol(symbol)
     if re.search(r'::(?:tests|[A-Za-z0-9_]+_tests)::', outer):
@@ -1665,32 +1671,34 @@ def rust_errors(symbol, instructions, strict=False, machine=None, allow_register
         public_pointer.add('x1' if arm else 'rsi')
     if has_public_vec_header_argument(clean_sym):
         public_pointer.add('x0' if arm else 'rdi')
+    public_stack = set()
     flags = True
     errors = []
     addresses = getattr(instructions, 'addresses', [])
     positions = {address: index for index, address in enumerate(addresses)}
     incoming = {}
-    pending = [(0, taint, stack, public_pointer, flags)]
+    pending = [(0, taint, stack, public_pointer, public_stack, flags)]
     visits = 0
     while pending:
         visits += 1
         if visits > 128 * len(instructions):
             return [f"{symbol}: dataflow did not converge within the analysis budget"]
-        i, taint, stack, public_pointer, flags = pending.pop()
+        i, taint, stack, public_pointer, public_stack, flags = pending.pop()
         if i >= len(instructions):
             continue
         previous = incoming.get(i)
         if previous is not None:
-            old_taint, old_stack, old_public, old_flags = previous
+            old_taint, old_stack, old_public, old_pub_stack, old_flags = previous
             taint = taint | old_taint
             # The map holds public slots only (see `store_stack`); a slot is public after a
             # join exactly when it is public on both edges.
             stack = {key: False for key in stack.keys() & old_stack.keys()}
             public_pointer = public_pointer & old_public
+            public_stack = public_stack & old_pub_stack
             flags |= old_flags
-            if (taint, stack, public_pointer, flags) == previous:
+            if (taint, stack, public_pointer, public_stack, flags) == previous:
                 continue
-        incoming[i] = (taint.copy(), stack.copy(), public_pointer.copy(), flags)
+        incoming[i] = (taint.copy(), stack.copy(), public_pointer.copy(), public_stack.copy(), flags)
         mnemonic, operands = instructions[i]
         successors = [i + 1]
         if positions:
@@ -1718,9 +1726,12 @@ def rust_errors(symbol, instructions, strict=False, machine=None, allow_register
                 delta = int(amount, 0) * (-1 if mnemonic == 'sub' else 1)
             else:
                 stack = {key: value for key, value in stack.items() if key[0] != stack_base}
+                public_stack = {key for key in public_stack if key[0] != stack_base}
         if delta is not None:
             stack = {(base, offset - delta if base == stack_base else offset): value
                      for (base, offset), value in stack.items()}
+            public_stack = {(base, offset - delta if base == stack_base else offset)
+                            for (base, offset) in public_stack}
         try:
             if mnemonic in ('nop', 'nopl', 'nopw', 'endbr64') or (
                     mnemonic == 'data16' and 'nop' in operands.lower()):
@@ -1734,18 +1745,23 @@ def rust_errors(symbol, instructions, strict=False, machine=None, allow_register
                 'SHA256_HW_CONSTS', 'AVX2_GF256_ISO_LUTS', 'AARCH64_GF256_PMULL_CONSTS',
                 'ByteMatrices'))
             size = width(op if not arm else (parts[0] if parts else ''), mnemonic)
-            def store_stack(mem, value, length=size, extra=0):
+            def store_stack(mem, value, length=size, extra=0, pub_ptr=False):
                 # Normal form: a slot that is not recorded reads as secret, so secret
                 # stores remove the slot instead of recording it. This keeps the state
                 # finite when a stack-probe loop moves the stack pointer on its backedge.
                 key = stack_key(mem)
                 if key:
                     base, offset = key
+                    start = offset + extra
+                    for off in range(start - 7, start + length):
+                        public_stack.discard((base, off))
                     for byte in range(length):
                         if value:
-                            stack.pop((base, offset + extra + byte), None)
+                            stack.pop((base, start + byte), None)
                         else:
-                            stack[base, offset + extra + byte] = False
+                            stack[base, start + byte] = False
+                    if pub_ptr and not value and length == 8:
+                        public_stack.add((base, start))
             def secret(value):
                 memory = re.findall(r'(?<![a-z0-9.])\[([^\]]+)\]', value)
                 if memory:
@@ -1794,11 +1810,15 @@ def rust_errors(symbol, instructions, strict=False, machine=None, allow_register
                 flags = value
                 continue
             if not arm and mnemonic == 'push' and parts:
-                store_stack('rsp', secret(parts[0]), 8)
+                store_stack('rsp', secret(parts[0]), 8, pub_ptr=reg(parts[0]) in public_pointer)
                 continue
             if not arm and mnemonic == 'pop' and parts:
                 destination = reg(parts[0])
                 if destination:
+                    if ('rsp', -8) in public_stack:
+                        public_pointer.add(destination)
+                    else:
+                        public_pointer.discard(destination)
                     if any(stack.get(('rsp', byte - 8), True) for byte in range(8)):
                         taint.add(destination)
                     else:
@@ -1808,6 +1828,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None, allow_register
                 continue
             if mnemonic in ('call', 'callq', 'bl', 'blr'):
                 if any(p in relocation for p in ('panicking::', 'assert_failed', 'panic_bounds_check',
+                                                 'slice_index_fail', 'slice_index_order_fail',
                                                  'slice_end_index_len_fail', 'slice_start_index_len_fail',
                                                  'handle_alloc_error', '__rust_alloc_error_handler',
                                                  'raw_vec::handle_error', 'capacity_overflow',
@@ -1875,9 +1896,9 @@ def rust_errors(symbol, instructions, strict=False, machine=None, allow_register
                 continue
             if arm and mnemonic.startswith(('str', 'stur', 'stp', 'st1')):
                 for mem in re.findall(r'(?<![a-z0-9.])\[([^\]]+)\]', op):
-                    store_stack(mem, secret(parts[0]))
+                    store_stack(mem, secret(parts[0]), pub_ptr=reg(parts[0]) in public_pointer)
                     if mnemonic == 'stp':
-                        store_stack(mem, secret(parts[1]), extra=size)
+                        store_stack(mem, secret(parts[1]), extra=size, pub_ptr=reg(parts[1]) in public_pointer)
                 continue
             dst = reg(parts[0])
             sources = parts[2:] if arm and mnemonic == 'ldp' else parts[1:]
@@ -1903,9 +1924,15 @@ def rust_errors(symbol, instructions, strict=False, machine=None, allow_register
                     or mnemonic in ('adc', 'adcs', 'sbb', 'sbc', 'sbcs')):
                 value |= flags
             if dst:
+                spilled_pub_ptr = (
+                    move and size == 8 and sources
+                    and any((k := stack_key(m)) in public_stack
+                            for m in re.findall(r'(?<![a-z0-9.])\[([^\]]+)\]', sources[0]))
+                )
                 is_public_pointer = (
                     public_symbol
                     or (move and sources and reg(sources[0]) in public_pointer)
+                    or spilled_pub_ptr
                     or (not arm and not value and dst in public_pointer
                         and mnemonic in ('add', 'sub', 'inc', 'dec'))
                     # AArch64 arithmetic has a separate source and destination. Preserve
@@ -1936,13 +1963,17 @@ def rust_errors(symbol, instructions, strict=False, machine=None, allow_register
                 key = stack_key(mem[1]) if mem else None
                 second_value = any(stack.get((key[0], key[1] + size + byte), True)
                                    for byte in range(size)) if key else value
+                public_pointer.discard(second)
+                if key and size == 8 and (key[0], key[1] + size) in public_stack:
+                    public_pointer.add(second)
                 if second_value:
                     taint.add(second)
                 else:
                     taint.discard(second)
             elif '[' in parts[0]:
-                for mem in re.findall(r'\[([^\]]+)\]', parts[0]):
-                    store_stack(mem, value)
+                pub_store = move and size == 8 and bool(sources) and reg(sources[0]) in public_pointer
+                for mem in re.findall(r'(?<![a-z0-9.])\[([^\]]+)\]', parts[0]):
+                    store_stack(mem, value, pub_ptr=pub_store)
             if not arm and mnemonic in ('rol', 'ror', 'rcl', 'rcr', 'inc', 'dec'):
                 flags |= value
             if (not arm and mnemonic in ('add', 'sub', 'and', 'or', 'xor', 'adc', 'sbb', 'inc', 'dec',
@@ -1950,7 +1981,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None, allow_register
                 flags = value
         finally:
             for successor in successors:
-                pending.append((successor, taint.copy(), stack.copy(), public_pointer.copy(), flags))
+                pending.append((successor, taint.copy(), stack.copy(), public_pointer.copy(), public_stack.copy(), flags))
     return sorted(set(errors))
 
 
@@ -2194,19 +2225,29 @@ def self_tests():
     assert not is_rust_crypto_symbol(nested_guard)
     assert [has_public_vec_header_argument(s) for s in (
         vec_guard, scratch_guard, 'qsag_asm::wipe::secret_vec_reserve::<u64>',
+        '<qsag_asm::wipe::SecretScratch<u64>>::extend_from_slice',
         array_guard, nested_guard, 'qsag_asm::wipe::volatile_fill::<u8>')] == [
-            True, True, True, False, False, False]
+            True, True, True, True, False, False, False]
     capacity_branch = [('mov', 'rbx, rdi'), ('mov', 'rsi, qword ptr [rbx]'),
                        ('test', 'rsi, rsi'), ('je', '0x40')]
+    spilled_capacity_branch = [('sub', 'rsp, 0x18'), ('mov', 'qword ptr [rsp + 0x10], rdi'),
+                               ('mov', 'rax, qword ptr [rsp + 0x10]'), ('mov', 'rsi, qword ptr [rax]'),
+                               ('test', 'rsi, rsi'), ('je', '0x40')]
+    spilled_content_branch = [('sub', 'rsp, 0x18'), ('mov', 'qword ptr [rsp + 0x10], rdi'),
+                              ('mov', 'rax, qword ptr [rsp + 0x10]'), ('mov', 'r14, qword ptr [rax + 0x8]'),
+                              ('mov', 'al, byte ptr [r14]'), ('test', 'al, al'), ('je', '0x40')]
     content_branch = [('mov', 'r14, qword ptr [rdi + 0x8]'), ('mov', 'al, byte ptr [r14]'),
                       ('test', 'al, al'), ('je', '0x40')]
-    # A `Vec` guard may branch on its capacity, never on what it holds; an inline guard
-    # has no public header at all.
+    # A `Vec` guard may branch on its capacity (even across a stack spill), never on what it holds;
+    # an inline guard has no public header at all.
     assert not rust_errors(vec_guard, capacity_branch, True, 62)
+    assert not rust_errors(vec_guard, spilled_capacity_branch, True, 62)
+    assert rust_errors(vec_guard, spilled_content_branch, True, 62)
     assert rust_errors(vec_guard, content_branch, True, 62)
     assert rust_errors(array_guard, capacity_branch, True, 62)
     count += 4
     assert not is_rust_crypto_symbol('<qsag_asm::durable::LockedRecord>::replace')
+    assert not is_rust_crypto_symbol('qsag_asm::os_random::fill_os_random')
     assert not is_rust_crypto_symbol('<alloc::vec::Vec<u8>>::resize')
     assert not is_rust_crypto_symbol('<alloc::vec::Vec<qsag_asm::wipe::SecretBuffer<u8>>>::push_mut')
     assert not is_rust_crypto_symbol('<alloc::raw_vec::RawVec<qsag_core::rss256::SharedDigest256>>::grow_one')
