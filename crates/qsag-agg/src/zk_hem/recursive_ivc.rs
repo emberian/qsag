@@ -19,6 +19,10 @@
 //! proves public-round mass `< 2^-160` and a spine budget `< 2^-128` for `d ≤ 64, Q ≤ 2^64`.
 //! Quorum-forgery extraction assumes selected-node and collision bounds. The whole-tree budget
 //! clears 128 bits for `d ≤ 7, Q ≤ 2^64` or `d ≤ 20, Q ≤ 2^57`.
+pub mod high_arity_ivc;
+pub use high_arity_ivc::{
+    HighArityError, HighArityProof, prove_high_arity_tree, verify_high_arity_tree,
+};
 mod gadgets;
 #[cfg(test)]
 use super::v2::params::StageSpec;

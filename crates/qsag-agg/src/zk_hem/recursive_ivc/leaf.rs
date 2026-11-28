@@ -134,14 +134,25 @@ impl Witness {
         stmt: &IvcSubtreeStatement,
         s: &IvcShard<'_>,
     ) -> Option<Self> {
+        Self::for_committee(reg, stmt, s, reg.committee)
+    }
+    pub(super) fn for_committee(
+        reg: &IvcPolicyRegistry,
+        stmt: &IvcSubtreeStatement,
+        s: &IvcShard<'_>,
+        committee: MultisigParams,
+    ) -> Option<Self> {
+        if committee.depth != reg.committee.depth {
+            return None;
+        }
         let message = ivc_signing_message(reg.root(), s.shard_id, stmt.message_digest);
         let address = s.policy.address();
         if reg.levels[0].get(&s.shard_id) != Some(&address_leaf(address)) {
             return None;
         }
         Some(Self {
-            committee: reg.committee,
-            slots: multisig::slots_for(reg.committee, s.policy, &message, s.signers, false).ok()?,
+            committee,
+            slots: multisig::slots_for(committee, s.policy, &message, s.signers, false).ok()?,
             threshold: s.policy.threshold(),
             address,
             path: reg.path(s.shard_id),
@@ -165,6 +176,10 @@ pub(super) fn populate(
     for (x, y) in acc.iter().zip(dummy) {
         cs.enforce_equal(x, &Lc::constant(y));
     }
+    populate_signature(cs, &s, w);
+}
+
+pub(super) fn populate_signature(cs: &mut ConstraintSystem, s: &[Lc], w: &Witness) {
     for x in s[..8].iter().chain(&s[10..15]).chain(&s[23..]) {
         bits(cs, x, 32);
     }
@@ -197,7 +212,7 @@ pub(super) fn populate(
         cs.enforce_equal(&pack(&bs[..32]), &pair[0]);
         cs.enforce_equal(&pack(&bs[32..]), &pair[1]);
     }
-    let sig_words = signed(cs, &s);
+    let sig_words = signed(cs, s);
     let mut bytes: Vec<_> = sig_words
         .iter()
         .flat_map(|v| {

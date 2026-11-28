@@ -154,6 +154,31 @@ impl Hasher {
         out
     }
 
+    /// One fiber from every table in an interleaved IVC commitment. The
+    /// little-endian width-minus-one bounds the encoded symbols per leaf.
+    pub(in crate::zk_hem) fn leaf_interleaved(
+        self,
+        nonce: &[u8; 32],
+        index: u32,
+        salt: &[u8; 32],
+        arity: usize,
+        z: &[Goldilocks],
+        mask: Fp5,
+    ) -> Option<Digest> {
+        let width = u16::try_from(z.len().checked_sub(1)?).ok()?;
+        let mut bytes = qsag_core::wipe::SecretBuffer::new(Vec::with_capacity(112 + 8 * z.len()));
+        bytes.extend_from_slice(&[0x13, arity.ilog2() as u8]);
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&index.to_le_bytes());
+        bytes.extend_from_slice(nonce);
+        bytes.extend_from_slice(salt);
+        for x in z {
+            bytes.extend_from_slice(&x.to_le_bytes());
+        }
+        bytes.extend_from_slice(&mask.to_le_bytes());
+        Some(self.tree(&bytes))
+    }
+
     /// Leaf of a later stage: the symbols of a challenge-field codeword on one fiber.
     pub fn leaf_ext(self, stage: u8, leaf_idx: u32, vals: &[Fp5]) -> Digest {
         debug_assert!(vals.len().is_power_of_two() && vals.len() <= 64);
@@ -412,12 +437,13 @@ impl Transcript {
             tag,
             binding,
         );
-        transcript.remaining = Some(calls.saturating_sub(1));
+        transcript.limit_calls(calls);
         transcript
     }
 
-    /// Includes the INIT hash already performed by the constructor.
-    pub(super) fn limit_calls(&mut self, total: u16) {
+    /// Cap the oracle calls of this transcript at `total`, which includes the INIT hash
+    /// already performed by the constructor.
+    pub(in crate::zk_hem) fn limit_calls(&mut self, total: u16) {
         self.remaining = Some(total.saturating_sub(1));
     }
 
