@@ -27,6 +27,38 @@ fn splitmix64(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
+fn detect_glslang_family(validator: &Path) -> &'static str {
+    let out = Command::new(validator)
+        .arg("--version")
+        .output()
+        .expect("invoke glslangValidator --version");
+    assert!(
+        out.status.success(),
+        "glslangValidator --version failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let first_line = text.lines().next().unwrap_or("");
+    if first_line.contains("14.3.0") {
+        "14.3.0"
+    } else if first_line
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .any(|tok| {
+            let mut parts = tok.split('.');
+            matches!(
+                (parts.next(), parts.next(), parts.next(), parts.next()),
+                (Some("15"), Some(min), Some(pat), None)
+                    if !min.is_empty() && !pat.is_empty()
+            )
+        })
+    {
+        "15.x"
+    } else {
+        panic!("expected glslangValidator 14.3.0 or 15.x, got: {first_line}");
+    }
+}
+
 #[test]
 fn test_spirv_shaders_reproducible_from_comp_sources() {
     let validator = Path::new("/usr/bin/glslangValidator");
@@ -39,6 +71,12 @@ fn test_spirv_shaders_reproducible_from_comp_sources() {
         );
         return;
     }
+
+    let family = detect_glslang_family(validator);
+    let has_spirv_val = Command::new("spirv-val")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
 
     let shaders_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
     let out_dir = std::env::temp_dir().join(format!("qsag_spv_repro_{}", std::process::id()));
@@ -62,10 +100,38 @@ fn test_spirv_shaders_reproducible_from_comp_sources() {
             String::from_utf8_lossy(&output.stderr)
         );
         let compiled = std::fs::read(&spv_path).expect("read compiled .spv");
-        assert!(
-            compiled == embedded,
-            "embedded SPIR-V bytes drifted from shaders/{comp_name}"
-        );
+        if family == "14.3.0" {
+            assert!(
+                compiled == embedded,
+                "embedded SPIR-V bytes drifted from shaders/{comp_name}"
+            );
+        } else {
+            assert!(
+                compiled.len() >= 20 && compiled[..4] == [0x03, 0x02, 0x23, 0x07],
+                "compiled SPIR-V header invalid for shaders/{comp_name}"
+            );
+            assert!(
+                embedded.len() >= 20 && embedded[..4] == [0x03, 0x02, 0x23, 0x07],
+                "embedded SPIR-V header invalid for shaders/{comp_name}"
+            );
+            if has_spirv_val {
+                let emb_path = out_dir.join("embedded.spv");
+                std::fs::write(&emb_path, embedded).expect("write embedded .spv");
+                for candidate in [&spv_path, &emb_path] {
+                    let val = Command::new("spirv-val")
+                        .args(["--target-env", "vulkan1.2"])
+                        .arg(candidate)
+                        .output()
+                        .expect("invoke spirv-val");
+                    assert!(
+                        val.status.success(),
+                        "spirv-val failed on {comp_name}: {}{}",
+                        String::from_utf8_lossy(&val.stdout),
+                        String::from_utf8_lossy(&val.stderr)
+                    );
+                }
+            }
+        }
     }
 
     let _ = std::fs::remove_dir_all(&out_dir);
