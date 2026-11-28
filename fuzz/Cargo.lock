@@ -414,6 +414,8 @@ name = "qsag-accel"
 version = "0.1.0"
 dependencies = [
  "qsag-asm",
+ "qsag-verified",
+ "qsag-whir-verified",
 ]
 
 [[package]]
@@ -430,21 +432,12 @@ version = "0.1.0"
 dependencies = [
  "qsag-asm",
  "qsag-core",
- "qsag-cred",
  "qsag-whir-verified",
 ]
 
 [[package]]
 name = "qsag-asm"
 version = "0.1.0"
-
-[[package]]
-name = "qsag-ass2"
-version = "0.1.0"
-dependencies = [
- "qsag-accel",
- "qsag-core",
-]
 
 [[package]]
 name = "qsag-core"
@@ -461,6 +454,7 @@ version = "0.1.0"
 dependencies = [
  "qsag-accel",
  "qsag-addr",
+ "qsag-agg",
  "qsag-asm",
  "qsag-core",
  "qsag-policy",
@@ -490,7 +484,6 @@ dependencies = [
  "qsag-addr",
  "qsag-agg",
  "qsag-asm",
- "qsag-ass2",
  "qsag-core",
  "qsag-cred",
  "qsag-fts",
