@@ -395,11 +395,11 @@ pub fn limb_basis() -> [E; LIMBS] {
 }
 
 #[inline]
-fn eval_poly(coeffs: &[E], x: E) -> E {
+pub(in crate::zk_hem) fn eval_poly(coeffs: &[E], x: E) -> E {
     coeffs.iter().rev().fold(E::ZERO, |acc, &c| acc * x + c)
 }
 
-fn eq_eval(a: &[E], b: &[E]) -> E {
+pub(in crate::zk_hem) fn eq_eval(a: &[E], b: &[E]) -> E {
     a.iter().zip(b).fold(E::ONE, |acc, (&x, &y)| {
         let xy = x * y;
         acc * (xy + xy + E::ONE - x - y)
@@ -459,7 +459,7 @@ fn eq_index(point: &[E], index: usize) -> E {
     })
 }
 
-fn prefix_indicator(point: &[E], count: usize) -> E {
+pub(in crate::zk_hem) fn prefix_indicator(point: &[E], count: usize) -> E {
     if count >> point.len() != 0 {
         return E::ONE;
     }
@@ -1394,6 +1394,64 @@ pub(in crate::zk_hem) fn row_sumcheck(
         qsag_asm::volatile_fill(e, E::ZERO);
     }
     (rounds, rx, values)
+}
+
+/// Reduce all assignments at a common row point. The equality weights over
+/// instances and rows are sampled after the stacked witness commitment.
+pub(in crate::zk_hem) fn batched_row_sumcheck(
+    tau: &[E],
+    weights: &[E],
+    num_sbox: usize,
+    mut bases: Vec<[Vec<F>; 3]>,
+    mut bind: impl FnMut(&[E]) -> E,
+) -> (Vec<Vec<E>>, Vec<E>, Vec<[E; 3]>) {
+    let mut tables: Vec<[Vec<E>; 3]> = (0..bases.len()).map(|_| Default::default()).collect();
+    let mut selector = PrefixSelector {
+        count: num_sbox,
+        boundary: E::ZERO,
+    };
+    let mut rest = eq_table(&tau[1..]);
+    let mut bound = E::ONE;
+    let mut point = Vec::new();
+    let mut rounds = Vec::new();
+    for (j, &t) in tau.iter().enumerate() {
+        let mut co = vec![E::ZERO; ROW_DEGREE + 1];
+        let lo = bound * (E::ONE - t);
+        let slope = bound * (t + t - E::ONE);
+        for (i, &weight) in weights[..tables.len()].iter().enumerate() {
+            let h = if j == 0 {
+                row_round(bases[i].each_ref().map(Vec::as_slice), &rest, &selector)
+            } else {
+                row_round(tables[i].each_ref().map(Vec::as_slice), &rest, &selector)
+            };
+            for (k, &v) in h.iter().enumerate() {
+                let w = weight * v;
+                co[k] += lo * w;
+                co[k + 1] += slope * w;
+            }
+        }
+        let r = bind(&co);
+        rounds.push(co);
+        point.push(r);
+        if j == 0 {
+            for (abc, base) in tables.iter_mut().zip(bases.drain(..)) {
+                for (dst, src) in abc.iter_mut().zip(base) {
+                    *dst = fold_base(&SecretBuffer::new(src), r);
+                }
+            }
+        } else {
+            for v in tables.iter_mut().flatten() {
+                fold_in_place(v, r, true);
+            }
+        }
+        selector.fold(r);
+        bound *= E::ONE - t - r + (t * r).double();
+        if j + 1 < tau.len() {
+            fold_pairs(&mut rest, false, |lo, hi| lo + hi);
+        }
+    }
+    let values = tables.into_iter().map(|abc| abc.map(|v| v[0])).collect();
+    (rounds, point, values)
 }
 
 pub(in crate::zk_hem) fn column_sumcheck(

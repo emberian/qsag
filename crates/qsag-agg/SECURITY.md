@@ -383,6 +383,62 @@ runs of Jorts committees into a fixed-size **639,673-byte** root (`QSAGIVC1\x00`
      node-commitment query (`successful_spine_requires_node_query`) remains an explicit
      bridge obligation. Applying the model to `total_signers` also requires a refinement relating its sum of bitmap weights to the Rust count, including merges of overlapping bitmaps.
 
+### 4.1 High-arity committee aggregation (`QSAGIVC2`)
+
+`prove_high_arity_tree` and `verify_high_arity_tree` prove a batch of completed Jorts committees against the caller's registry root, message digest, interval and signer count. Each distinct (shard, member position) has one private leaf assignment. The proof publishes one 42-byte record per shard (u64 ID, u16 threshold, 256-bit signer union). Adjacent groups for a shard share a union. The verifier derives the single-bit leaf statements from the set positions, checks the population against the threshold and applies `IvcSubtreeStatement::merge` to contiguous, complete shards. The native checks use checked endpoints and totals. The leaf relation authenticates each position, signature and threshold against the directory at that ID.
+
+**Constraint census.** The binary step counter gives the following disjoint costs for both children together. One width-24 permutation uses 236 native seventh-power rows. The other rows enforce ordinary rank-one constraints, including equalities and Boolean assertions. The allocation column excludes the supplied public inputs.
+
+| Binary step operation | Seventh-power rows | Other rows | Allocated variables |
+| --- | ---: | ---: | ---: |
+| Public limb checks, bitmap union, threshold surplus and interval addition | 0 | 3,856 | 3,508 |
+| Child relation selectors | 0 | 2 | 2 |
+| Four-claim matrix reduction and output digest | 42,244 | 5,034 | 47,761 |
+| Two child row/column arguments and their public bindings, excluding openings | 99,592 | 10,140 | 112,814 |
+| Distinct-index sampling, permutation of memory events and bit decomposition | 17,464 | 331,086 | 307,914 |
+| Fiber leaf hashes | 1,244,664 | 0 | 1,244,664 |
+| Frontier authentication, sibling ordering, routing and root comparisons | 2,974,544 | 1,622,084 | 4,675,816 |
+| Remaining WHIR transcript, fiber and kernel folds, mask and terminal checks | 265,736 | 1,038,690 | 1,386,720 |
+| **Total** | **4,644,244** | **3,010,892** | **7,779,199** |
+
+The binary circuit uses 19,679 permutations and 7,655,136 rows before closing. The constant, 38 public inputs and 12 closing variables bring its variable count to 7,779,250. Rows and columns fit the fixed $2^{23}$ geometry. In V2 the aggregation verifier adds **zero R1CS rows and zero witness variables**. Its transcript, commitment hashes, WHIR queries, Merkle paths, roster union and interval checks all run natively. Each application leaf uses **79,432 rows** (73,632 seventh-power and 5,800 ordinary rows) and **80,406 variables** including its constant, 31 public inputs and 12 closing variables. Its padded row and column dimensions are both $2^{17}$. The leaf still executes the Jorts hash chains, the member path and the 64-level policy directory path. Jorts signature security and binding of the existing Poseidon2 policy directory remain application assumptions.
+
+**Commitment and folding relation [proof under the PCS hypotheses of §2.3].** Let $Z(i,j)$ be the Boolean table of assignments, with column bits low and instance bits high. The prover pads missing instances with zero. It commits the complete table before the first challenge. Both supported profiles use their 400-bit Keccak transcript and tree hash. The transcript binds the protocol, profile, fixed shape digest, external root statement, ordered roster, nonce and witness commitment. For each short algebraic message the verifier recomputes the domain-separated commitment from its canonical opening, absorbs the commitment and derives the next challenge. This specializes the commit-and-open idea to disclosed short messages. Construction 6.1 itself uses a CP-SNARK for message consistency and a SNARK for the output relation. Here the verifier checks message consistency directly. Public evaluations and signer positions are disclosed. [Chen, Symphony, Construction 6.1](https://eprint.iacr.org/2025/1905)
+
+1. At random instance and row points $t,\tau$, the row sumcheck starts at zero for the equality-weighted residual. At row point $x$ write $a_i,b_i,c_i$ for the multilinear row evaluations of the three matrices applied to assignment $i$. The gate is $s a_i^7+(1-s)a_ib_i-c_i$, where $s$ is the public prefix selector for seventh-power rows evaluated at $x$. The row polynomial has individual degree at most nine. A zero terminal row equality factor aborts.
+2. On the instance cube write $D_j(i)=a_i^j$ at Boolean indices and extend each table multilinearly. A degree-three sumcheck reduces the equality-weighted gate using $D_4D_3$ and $ab$. At its terminal point $r$ the prover opens five scalars. A fresh $\lambda$ batches $D_4(r)+\lambda D_3(r)$ into the sum of $\mathrm{eq}(r,i)D_2(i)(D_2(i)+\lambda a(i))$. A third cubic sumcheck checks $D_2(v)=\sum_i\mathrm{eq}(v,i)a(i)^2$. These two identities bind the intermediate powers also at non-Boolean challenges.
+3. A fresh power-batch of the resulting five linear claims and a quadratic sumcheck give $a(u),b(u),c(u)$ at one common instance point. Since the matrix is shared, each is a matrix row evaluation against $Z(u,\cdot)$. The column batch uses powers $0,1,2$ of a fresh challenge for the matrices and powers $3$ through $34$ for the constant and **every** public input. The expected prefix is derived from the caller's context and canonical roster at $u$, with zeroes for padding. This independently binds signer position, both interval limbs, threshold and message, including when the aggregate count is unchanged.
+4. The degree-two column sumcheck ends at the product of the public matrix evaluation and one private scalar $Z(u,y)$. The verifier evaluates the matrix locally. One v2 WHIR opening authenticates that scalar against the initial commitment. Changing an assignment after seeing the weights would require defeating this opening or one of the preceding polynomial identities.
+
+**Interleaved witnesses.** A scalar codeword accommodates up to 128 assignments at $2^{24}$ coefficients. Above that size, one Merkle leaf commits the identically indexed fiber of *every* codeword, the common folded mask symbol, index, nonce, salt, arity and fiber width. Each high instance coordinate of $u$ combines two halves as $f+r(g-f)$. The verifier performs this same projection on every authenticated fiber and then applies the ordinary WHIR folds. RS encoding, projection and multilinear evaluation commute by linearity. The final WHIR polynomial and OOD evaluations are over $E$. All stripes share the one tree, sampled positions and opening. Wire decoding derives every round length and fiber width from the roster and fixed shape, rejects noncanonical field encodings and consumes the entire input.
+
+**Round-by-round accounting [cited / model].** Condition on a fixed jointly decodable witness candidate. A false Boolean residual survives the initial multilinear test with probability at most $(17+h)/|E|$, where $h$ is the number of instance coordinates. The row, three instance-product, instance-claim reduction and column rounds have respective individual degrees $9,3,3,3,2,2$. The two intermediate batching degrees are 1 and 4. The final prefix batch has degree 34. If only the public prefix is false, track one erroneous prefix coordinate through the reduction to $u$; losing that discrepancy costs at most one additional root per coordinate. Multiply the per-candidate bounds by the initial Johnson list bound $L$.
+
+For the interleaved case set $n=4\cdot2^{24}$, $D=2^{24}-1$ and take the raw symbol agreement threshold $A$ equal to the Stage-0 fiber threshold times its arity. The checked inequality $(2m A)^2\ge(2m+1)^2 D n$ permits DKT26 Theorem 5.12 with $m=364$. At each high coordinate, represent each remaining tuple by a basis in a finite extension of $E$. Apply the theorem to the two words $f,g-f$ there. Its exceptional set has size at most $B=\lceil(2m+1)^3 n^2/(3D)\rceil$ even when the challenge is sampled from the subfield $E$. Outside this set every nearby projected polynomial lifts to component polynomials with the same agreement positions. Expand coefficients in the basis and repeat at the preceding coordinate. At the original commitment, more than $D$ agreeing base-field positions force base-field component coefficients by interpolation. The ordinary Johnson bound applies to the joint word over the larger alphabet. This uses one joint list throughout the reduction. [Dao, Kominers and Thaler, Theorem 5.12](https://eprint.iacr.org/2026/2056)
+
+The algebraic RBR numerator is bounded by $\max(L\max(17+h,34),B+3L)$, with $B=0$ for the scalar layout. The second term includes the simultaneous quadratic check and possible prefix discrepancy. The PCS mask line, OOD, affine folds and distinct-query rounds retain the §2.3 bounds. Apply the §1 CDHZ25 envelope to the **maximum** RBR error. The main transcript rejects on exhaustion of a 4,096-call budget, including sampler retries. Short-message commitment hashes and every queried leaf, internal node and wrapped root are counted separately. `high_arity_qrom_accounting` checks all 17 instance dimensions, the query caps and the degree and agreement inequalities. The figures are lower bounds on $-\log_2$ of the errors, rounded against the claim. [Chiesa, Di, Hu and Zheng, Theorems 6.10, 8.3 and 11.3](https://eprint.iacr.org/2025/2166)
+
+| Signer instances | Code log | Stripes | Challenge rounds | RBR bits | QROM bits at $Q=2^{64}$ |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 21 | 1 | 90 | 265.009 | 128.663 |
+| 64 | 23 | 1 | 107 | 265.374 | 129.028 |
+| 256 | 24 | 2 | 115 | 264.514 | 128.168 |
+| 131,072 | 24 | 1,024 | 151 | 264.514 | 128.168 |
+
+The largest encoded Stage-0 leaf contains 65,536 base symbols, fixed by its u16 width-minus-one. With 64 symbols per source fiber, the exact format maximum is **131,072 distinct (shard, signer) pairs**. That gives 131,072 one-signer shards, or 2,048 shards with 64 signers each. All admitted geometries clear the conditional 128-bit argument budget. The largest case is a parameter calculation. Its unencoded witness cube alone requires 128 GiB. The direct prover materializes this cube, row tables and codewords. The bound assumes the framed hash oracle and WHIR knowledge/list-extraction model of §§1–2.3. The Rust implementation has no machine-checked refinement to the quantum extractor. Registry binding and application signature forgery have separate security budgets.
+
+**Release measurements.** Each input uses a distinct one-member Jorts committee, threshold one, depth-eight policy and a shared application digest. Each trial uses the production API with a warm compiled shape, rustc 1.99.1 and a 16 GiB process-group memory cap. Times exclude signing, registry construction and serialization. Proof sizes are actual serialized lengths. Distinct sampled positions change the number of sibling digests. The binary root always occupies 639,673 B. On a dedicated 32-thread AMD EPYC-Milan host:
+
+| Shards | V2 bytes | V2 prove (s) | V2 verify (s) | V1 prove (s) | V1 verify (s) | Prover speedup | Verifier speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 350,127 | 2.700140 | 0.178875 | 216.111285 | 9.914001 | 80.04× | 55.42× |
+| 4 | 376,071 | 3.960543 | 0.178208 | 620.277515 | 9.538311 | 156.61× | 53.52× |
+| 16 | 477,147 | 10.933366 | 0.217484 | — | — | — | — |
+| 64 | 585,707 | 39.611306 | 0.180572 | — | — | — | — |
+| 256 | 761,549 | 150.703961 | 0.193241 | — | — | — | — |
+
+On an Intel Core i9-12900 CPU under shared load, 16, 64 and 256 shards in V2 proved in **6.196961 s**, **32.558938 s** and **115.554995 s** and verified in **0.077684 s**, **0.078170 s** and **0.080647 s**, while 16 shards in V1 took **2,495.234665 s** to prove and **11.121759 s** to verify (**402.65×** and **143.17×**). Even 256 shards in V2 proved faster than two shards in V1 (`124.730 s` on the i9-12900 baseline, `216.111 s` on EPYC-Milan). The timing tests are `high_arity_batch_timings` and `high_arity_binary_timings`. Both require `--ignored --nocapture` with their individual test filter.
+
 ---
 
 ## 5. Vulkan evidence

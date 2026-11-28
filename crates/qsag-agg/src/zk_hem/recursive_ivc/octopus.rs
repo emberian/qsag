@@ -229,3 +229,89 @@ pub(super) fn verify<B: Wide>(
         b.equal(x, y);
     }
 }
+
+#[cfg(test)]
+#[test]
+fn high_arity_binary_row_breakdown() {
+    use arithmetic::Counter;
+    fn costs(b: &Counter) -> [usize; 3] {
+        [
+            b.permutations * crate::sponge::POSEIDON2_GL24_SBOX_COUNT,
+            b.products,
+            b.allocated,
+        ]
+    }
+    let cfg = tree::profile();
+    let argument = r1cs::Argument::blank(&cfg);
+    let mut public = Counter::default();
+    let statement = [F::ZERO; STEP_WORDS];
+    for x in statement[..15]
+        .iter()
+        .chain(&statement[23..STATEMENT_WORDS])
+    {
+        bits(&mut public, x, 32);
+    }
+    let stmts = tree::split(
+        &mut public,
+        &statement,
+        &core::array::from_fn(|_| IvcSubtreeStatement::blank()),
+    );
+    let mut child = Counter::default();
+    let (old, new) = r1cs::verify(&mut child, &cfg, [0; 2], &F::ONE, &stmts[0], &argument);
+    let mut reduction = Counter::default();
+    let rounds = vec![vec![E::ZERO; 3]; 2 * cfg.log_cells + 3];
+    let out = matrix::check(
+        &mut reduction,
+        &[old.clone(), new.clone(), old, new],
+        &rounds,
+        E::ZERO,
+    )
+    .digest(&mut reduction);
+    for v in out {
+        reduction.equal(&v, &F::ZERO);
+    }
+    let mut paths = Counter::default();
+    let mut sampling = Counter::default();
+    let mut leaves = Counter::default();
+    let mut tr = cfg.transcript();
+    for (i, (d, w)) in cfg.dims().iter().zip(&argument.opening.stages).enumerate() {
+        let idx = sample(&mut sampling, &mut tr, *d);
+        let digests = idx
+            .iter()
+            .zip(&w.fibers)
+            .map(|((j, _), words)| leaf(&mut leaves, i, *j, words, &[F::ZERO; 4]))
+            .collect();
+        verify(&mut paths, i, d.fibers, &idx, digests, &w.siblings, &w.root);
+    }
+    let op = cfg.opening_row_census(7);
+    let opening = [op.sbox_rows, op.multiplication_rows, op.witness_variables];
+    let child = costs(&child);
+    let public = costs(&public);
+    let matrix = costs(&reduction);
+    let paths = costs(&paths);
+    let leaves = costs(&leaves);
+    let sampling = costs(&sampling);
+    let mut total = [0; 3];
+    for (label, cost) in [
+        ("interval and bitmap", public),
+        ("two Boolean child selectors", [0, 2, 2]),
+        ("matrix reduction", matrix),
+        (
+            "child relation excluding openings",
+            core::array::from_fn(|i| 2 * (child[i] - opening[i])),
+        ),
+        ("fiber sampling", sampling.map(|x| 2 * x)),
+        ("fiber hashes", leaves.map(|x| 2 * x)),
+        ("authentication and routing", paths.map(|x| 2 * x)),
+        (
+            "remaining opening checks",
+            core::array::from_fn(|i| 2 * (opening[i] - sampling[i] - leaves[i] - paths[i])),
+        ),
+    ] {
+        for (sum, v) in total.iter_mut().zip(cost) {
+            *sum += v;
+        }
+        std::println!("{label}: {cost:?}");
+    }
+    assert_eq!(total, [4644244, 3010892, 7779199]);
+}

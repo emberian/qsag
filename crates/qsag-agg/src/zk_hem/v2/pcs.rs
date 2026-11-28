@@ -6,6 +6,8 @@
 //! Also provides [`SplitOpening`], [`open_from_reduced_split`] and [`verify_split`] for
 //! collaborative proving across `1..=MAX_STAGE0_SHARES` additive Stage-0 commitments.
 
+pub(in crate::zk_hem) mod interleave;
+
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -654,14 +656,12 @@ impl Reader<'_> {
         (0..n).map(|_| self.take()).collect()
     }
 
-    fn stage0_query(&mut self, d0: &StageDims) -> Option<Stage0Query> {
+    fn stage0_query(&mut self, d0: &StageDims, words: usize) -> Option<Stage0Query> {
         let leaves = (0..d0.queries)
             .map(|_| {
                 Some(Stage0Leaf {
                     salt: self.take()?,
-                    z: (0..d0.arity())
-                        .map(|_| self.base())
-                        .collect::<Option<_>>()?,
+                    z: (0..words).map(|_| self.base()).collect::<Option<_>>()?,
                     r: self.fp5()?,
                 })
             })
@@ -686,7 +686,7 @@ impl Reader<'_> {
 /// Read one [`Stage0Query`] of geometry `d0` from the entirety of `bytes`.
 pub fn read_stage0_query_exact(bytes: &[u8], d0: &StageDims) -> Option<Stage0Query> {
     let mut r = Reader { bytes, pos: 0 };
-    let q = r.stage0_query(d0)?;
+    let q = r.stage0_query(d0, d0.arity())?;
     (r.pos == bytes.len()).then_some(q)
 }
 
@@ -720,7 +720,17 @@ impl Opening {
         log_cells: usize,
         schedule: &Schedule,
     ) -> Option<Self> {
-        let mut split = SplitOpening::read(bytes, pos, log_cells, schedule, 1)?;
+        Self::read_interleaved(bytes, pos, log_cells, schedule, 1)
+    }
+
+    pub(in crate::zk_hem) fn read_interleaved(
+        bytes: &[u8],
+        pos: &mut usize,
+        log_cells: usize,
+        schedule: &Schedule,
+        width: usize,
+    ) -> Option<Self> {
+        let mut split = SplitOpening::read_with_width(bytes, pos, log_cells, schedule, 1, width)?;
         Some(Self {
             mask_evals: split.mask_evals,
             stage0_folds: split.stage0_folds,
@@ -765,10 +775,24 @@ impl SplitOpening {
         schedule: &Schedule,
         committers: usize,
     ) -> Option<Self> {
+        Self::read_with_width(bytes, pos, log_cells, schedule, committers, 1)
+    }
+    fn read_with_width(
+        bytes: &[u8],
+        pos: &mut usize,
+        log_cells: usize,
+        schedule: &Schedule,
+        committers: usize,
+        width: usize,
+    ) -> Option<Self> {
         if !(1..=MAX_STAGE0_SHARES).contains(&committers) {
             return None;
         }
         let dims = stage_dims(log_cells, schedule)?;
+        let words = dims[0].arity().checked_mul(width)?;
+        if !width.is_power_of_two() || words > 1 << 16 {
+            return None;
+        }
         let mut r = Reader { bytes, pos: *pos };
         let mask_evals = r.fold()?;
         let stage0_folds = (0..dims[0].step_vars)
@@ -784,7 +808,7 @@ impl SplitOpening {
                 let d0 = &dims[0];
                 stage0_shares = Some(
                     (0..committers)
-                        .map(|_| r.stage0_query(d0))
+                        .map(|_| r.stage0_query(d0, words))
                         .collect::<Option<Vec<_>>>()?,
                 );
             } else {
@@ -1084,7 +1108,7 @@ pub(in crate::zk_hem) struct Stage0Reduced {
 }
 
 pub(in crate::zk_hem) fn stage0_reduce<C: Channel>(
-    coeffs: &[Goldilocks],
+    coeffs: &[impl Coef],
     mask: &[Fp5],
     step_vars: usize,
     points: usize,
@@ -1563,6 +1587,33 @@ fn open_with<C: Channel, Err: From<MaskRankDeficient>>(
         ch,
     )?;
     drop(phase);
+    open_reduced(hasher, dims, red, ch, oracle, |idx, chals, beta| {
+        let query = stage0_answer(st, idx);
+        let d = &dims[0];
+        let shifts = idx
+            .iter()
+            .zip(&query.leaves)
+            .map(|(&j, leaf)| {
+                let vals = leaf.z.iter().copied().map(Fp5::from_base).collect();
+                (
+                    d.fiber_image(j),
+                    fold_fiber(vals, d.fiber_base(j), chals) + beta * leaf.r,
+                )
+            })
+            .collect();
+        (query, shifts)
+    })
+}
+
+type FirstQuery = (Stage0Query, Vec<(Goldilocks, Fp5)>);
+fn open_reduced<C: Channel, Err: From<MaskRankDeficient>>(
+    hasher: Hasher,
+    dims: &[StageDims],
+    red: Stage0Reduced,
+    ch: &mut C,
+    oracle: impl Fn(usize, &StageDims, &[Fp5], Hasher) -> Result<(Vec<Fp5>, MerkleTree), Err>,
+    first_query: impl Fn(&[usize], &[[Fp5; 3]], Fp5) -> FirstQuery,
+) -> Result<Opening, Err> {
     let Stage0Reduced {
         mask_evals,
         folds: stage0_folds,
@@ -1590,16 +1641,7 @@ fn open_with<C: Channel, Err: From<MaskRankDeficient>>(
         let idx = ch.squeeze_distinct_indices(b"QUERY", before.fibers, before.queries);
         let shifts: Vec<(Goldilocks, Fp5)> = match &prev_oracle {
             None => {
-                let query = stage0_answer(st, &idx);
-                let shifts = idx
-                    .iter()
-                    .zip(&query.leaves)
-                    .map(|(&j, leaf)| {
-                        let vals = leaf.z.iter().map(|&z| Fp5::from_base(z)).collect();
-                        let folded = fold_fiber(vals, before.fiber_base(j), &prev_chals);
-                        (before.fiber_image(j), folded + beta_r * leaf.r)
-                    })
-                    .collect();
+                let (query, shifts) = first_query(&idx, &prev_chals, beta_r);
                 stage0_query = Some(query);
                 shifts
             }
@@ -1686,8 +1728,6 @@ pub fn verify<C: Channel>(
 ) -> bool {
     verify_inner(
         profile,
-        core::slice::from_ref(tree_nonce),
-        core::slice::from_ref(root),
         log_cells,
         schedule,
         terms,
@@ -1695,7 +1735,20 @@ pub fn verify<C: Channel>(
         &opening.mask_evals,
         &opening.stage0_folds,
         opening.mask_claim,
-        core::slice::from_ref(&opening.stage0_query),
+        |h, d, idx, c, b| {
+            stage0_check_split_fibers(
+                Stage0Trees {
+                    hasher: h,
+                    tree_nonces: core::slice::from_ref(tree_nonce),
+                    roots: core::slice::from_ref(root),
+                },
+                d,
+                idx,
+                core::slice::from_ref(&opening.stage0_query),
+                c,
+                b,
+            )
+        },
         &opening.stages,
         &opening.final_coeffs,
         ch,
@@ -1715,10 +1768,14 @@ pub fn verify_split<C: Channel>(
     opening: &SplitOpening,
     ch: &mut C,
 ) -> bool {
+    if !(1..=MAX_STAGE0_SHARES).contains(&roots.len())
+        || tree_nonces.len() != roots.len()
+        || opening.stage0_shares.len() != roots.len()
+    {
+        return false;
+    }
     verify_inner(
         profile,
-        tree_nonces,
-        roots,
         log_cells,
         schedule,
         terms,
@@ -1726,7 +1783,20 @@ pub fn verify_split<C: Channel>(
         &opening.mask_evals,
         &opening.stage0_folds,
         opening.mask_claim,
-        &opening.stage0_shares,
+        |h, d, idx, c, b| {
+            stage0_check_split_fibers(
+                Stage0Trees {
+                    hasher: h,
+                    tree_nonces,
+                    roots,
+                },
+                d,
+                idx,
+                &opening.stage0_shares,
+                c,
+                b,
+            )
+        },
         &opening.stages,
         &opening.final_coeffs,
         ch,
@@ -1736,8 +1806,6 @@ pub fn verify_split<C: Channel>(
 #[allow(clippy::too_many_arguments)]
 fn verify_inner<C: Channel>(
     profile: Profile,
-    tree_nonces: &[[u8; TREE_NONCE_BYTES]],
-    roots: &[Digest],
     log_cells: usize,
     schedule: &Schedule,
     terms: &[TensorTerm],
@@ -1745,7 +1813,13 @@ fn verify_inner<C: Channel>(
     mask_evals: &[Fp5; MASK_POINTS],
     stage0_folds: &[[Fp5; 5]],
     mask_claim: Fp5,
-    stage0_shares: &[Stage0Query],
+    first_query: impl Fn(
+        Hasher,
+        &StageDims,
+        &[usize],
+        &[[Fp5; 3]],
+        Fp5,
+    ) -> Option<Vec<(Goldilocks, Fp5)>>,
     stages: &[LaterStage],
     final_coeffs: &[Fp5],
     ch: &mut C,
@@ -1754,10 +1828,7 @@ fn verify_inner<C: Channel>(
         return false;
     };
     let hasher = Hasher::new(profile);
-    if !(1..=MAX_STAGE0_SHARES).contains(&roots.len())
-        || tree_nonces.len() != roots.len()
-        || stage0_shares.len() != roots.len()
-        || terms.iter().any(|t| t.point.len() > log_cells)
+    if terms.iter().any(|t| t.point.len() > log_cells)
         || stage0_folds.len() != dims[0].step_vars
         || stages.len() + 1 != dims.len()
         || stages
@@ -1789,18 +1860,7 @@ fn verify_inner<C: Channel>(
         let before = &dims[i - 1];
         let idx = ch.squeeze_distinct_indices(b"QUERY", before.fibers, before.queries);
         let shifts = if i == 1 {
-            stage0_check_split_fibers(
-                Stage0Trees {
-                    hasher,
-                    tree_nonces,
-                    roots,
-                },
-                before,
-                &idx,
-                stage0_shares,
-                &prev_chals,
-                beta_r,
-            )
+            first_query(hasher, before, &idx, &prev_chals, beta_r)
         } else {
             let prev = &stages[i - 2];
             ext_check_fibers(
