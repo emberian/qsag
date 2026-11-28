@@ -52,10 +52,23 @@ pub enum ZkHemV2Error {
 
 /// The table layout of a v2 relation, including any [`Lookups`].
 pub fn layout_of(shape: &Shape) -> Option<Layout> {
+    layout_for_profile(shape, Profile::default())
+}
+
+/// Layout used by both the writer and reader of this profile.
+pub fn layout_for_profile(shape: &Shape, profile: Profile) -> Option<Layout> {
     if shape.closing() != Closing::V2 || shape.log_rows < 5 {
         return None;
     }
-    let layout = Layout::with_lookup(
+    if profile.rate_half()
+        && shape.lookups().is_some_and(|l| {
+            !super::bounds::rate_half_lookup_supported(super::params::LookupSize::of(l))
+        })
+    {
+        return None;
+    }
+    let layout = Layout::for_profile(
+        profile,
         ShapeSize {
             log_rows: shape.log_rows,
             num_vars: shape.num_vars,
@@ -160,11 +173,11 @@ impl ZkHemV2Proof {
     }
 
     pub fn from_bytes(bytes: &[u8], shape: &Shape) -> Option<Self> {
-        let layout = layout_of(shape)?;
         if bytes.get(..8)? != MAGIC {
             return None;
         }
         let profile = Profile::from_wire_tag(*bytes.get(8)?)?;
+        let layout = layout_for_profile(shape, profile)?;
         let log_cells = *bytes.get(9)?;
         if usize::from(log_cells) != layout.log_cells {
             return None;
@@ -279,15 +292,16 @@ impl ZkHemV2SplitProof {
     }
 
     pub fn from_bytes(bytes: &[u8], shape: &Shape) -> Option<Self> {
-        let layout = layout_of(shape)?;
         if bytes.get(..8)? != MAGIC_SPLIT {
             return None;
         }
         let profile = Profile::from_wire_tag(*bytes.get(8)?)?;
+        let layout = layout_for_profile(shape, profile)?;
         let log_cells = *bytes.get(9)?;
         let committers = usize::from(*bytes.get(10)?);
         if usize::from(log_cells) != layout.log_cells
             || !(1..=MAX_STAGE0_SHARES).contains(&committers)
+            || (profile.rate_half() && layout.rate_half_fs_calls(committers).is_none())
         {
             return None;
         }
@@ -1103,6 +1117,9 @@ fn start_transcript(
             &public_bytes,
         ],
     );
+    if profile.rate_half() {
+        tr.limit_calls(layout.rate_half_fs_calls(1).unwrap_or(0));
+    }
     tr.absorb(
         b"STAGE0_ROOT",
         &encode_roots(
@@ -1136,6 +1153,9 @@ pub fn split_transcript(
             &public_bytes,
         ],
     );
+    if profile.rate_half() {
+        tr.limit_calls(layout.rate_half_fs_calls(roots.len()).unwrap_or(0));
+    }
     tr.absorb(b"STAGE0_ROOT", &encode_roots(tree_nonces, roots));
     tr
 }
@@ -1900,7 +1920,7 @@ fn prove_inner(
     claimed: Option<&[F]>,
     #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
 ) -> Result<ZkHemV2Proof, ZkHemV2Error> {
-    let Some(layout) = layout_of(shape) else {
+    let Some(layout) = layout_for_profile(shape, profile) else {
         qsag_asm::volatile_fill(&mut assignment, F::ZERO);
         return Err(ZkHemV2Error::UnsupportedRelation);
     };
@@ -2088,6 +2108,9 @@ fn prove_inner(
         }
         _ => None,
     };
+    if tr.exhausted() {
+        return Err(ZkHemV2Error::MaskRankDeficient);
+    }
     Ok(ZkHemV2Proof {
         profile,
         log_cells: layout.log_cells as u8,
@@ -2383,7 +2406,7 @@ pub fn verify(
     profile: Profile,
     proof: &ZkHemV2Proof,
 ) -> bool {
-    let Some(layout) = layout_of(shape) else {
+    let Some(layout) = layout_for_profile(shape, profile) else {
         return false;
     };
     if proof.profile != profile || usize::from(proof.log_cells) != layout.log_cells {
@@ -2436,7 +2459,7 @@ pub fn verify(
     ) {
         return false;
     }
-    match (&front.helper, &proof.lookup, &layout.lookup) {
+    let valid = match (&front.helper, &proof.lookup, &layout.lookup) {
         (None, None, None) => true,
         (Some(hc), Some(lp), Some(ll)) => pcs::verify(
             profile,
@@ -2450,7 +2473,8 @@ pub fn verify(
             &mut tr,
         ),
         _ => false,
-    }
+    };
+    valid && !tr.exhausted()
 }
 
 /// Verify a collaborative split-share [`ZkHemV2SplitProof`].
@@ -2461,7 +2485,7 @@ pub fn verify_split(
     profile: Profile,
     proof: &ZkHemV2SplitProof,
 ) -> bool {
-    let Some(layout) = layout_of(shape) else {
+    let Some(layout) = layout_for_profile(shape, profile) else {
         return false;
     };
     let committers = proof.roots.len();
@@ -2470,6 +2494,9 @@ pub fn verify_split(
         || !(1..=MAX_STAGE0_SHARES).contains(&committers)
         || proof.tree_nonces.len() != committers
     {
+        return false;
+    }
+    if profile.rate_half() && layout.rate_half_fs_calls(committers).is_none() {
         return false;
     }
     if let Some(lp) = &proof.lookup
@@ -2523,7 +2550,7 @@ pub fn verify_split(
     ) {
         return false;
     }
-    match (&front.helper, &proof.lookup, &layout.lookup) {
+    let valid = match (&front.helper, &proof.lookup, &layout.lookup) {
         (None, None, None) => true,
         (Some(hc), Some(lp), Some(ll)) => pcs::verify_split(
             profile,
@@ -2537,7 +2564,8 @@ pub fn verify_split(
             &mut tr,
         ),
         _ => false,
-    }
+    };
+    valid && !tr.exhausted()
 }
 
 const _: () = assert!(PAD_VARS == LIMBS);
@@ -2589,7 +2617,7 @@ pub fn candidate_matches_masked_evaluation(
     proof: &ZkHemV2Proof,
     candidate: &[F],
 ) -> bool {
-    let layout = layout_of(shape).unwrap();
+    let layout = layout_for_profile(shape, profile).unwrap();
     assert!(shape.lookups().is_none());
     let mut tr = start_transcript(
         profile,
@@ -2794,11 +2822,11 @@ mod tests {
     }
 
     #[test]
-    fn honest_roundtrip_both_profiles_and_serialization() {
+    fn honest_roundtrip_all_profiles_and_serialization() {
         let (shape, z) = fixture(40);
         assert!(shape.is_satisfied(&z));
-        let layout = layout_of(&shape).unwrap();
         for profile in Profile::ALL {
+            let layout = layout_for_profile(&shape, profile).unwrap();
             let proof = prove(&shape, z.clone(), STATEMENT, profile, &SEED).unwrap();
             assert!(verify(
                 &shape,
@@ -2813,6 +2841,25 @@ mod tests {
             assert_eq!(
                 ZkHemV2Proof::from_bytes(&bytes, &shape),
                 Some(proof.clone())
+            );
+            let other = Profile::from_wire_tag(profile.wire_tag() ^ 2).unwrap();
+            assert!(!verify(
+                &shape,
+                &publics(&shape, &z),
+                STATEMENT,
+                other,
+                &proof
+            ));
+            let mut retagged = bytes.clone();
+            retagged[8] = other.wire_tag();
+            assert!(
+                ZkHemV2Proof::from_bytes(&retagged, &shape).is_none_or(|p| !verify(
+                    &shape,
+                    &publics(&shape, &z),
+                    STATEMENT,
+                    other,
+                    &p
+                ))
             );
             let report = bounds::report_for_shape(profile, &shape).unwrap();
             assert_eq!(report.log_cells, layout.log_cells);

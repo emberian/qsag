@@ -187,6 +187,31 @@ pub fn stage_bound_v2(
     })
 }
 
+/// Bound for the packed rate-half domain, including the two overflow coefficients.
+fn rate_half_stage_bound(spec: &super::params::StageSpec, rem: usize) -> Option<StageBound> {
+    let n = 2u128 << rem;
+    let a = 3 * n / 4 + 2;
+    if spec.blowup != 2 || !(1..=6).contains(&spec.step_vars) || a + spec.step_vars as u128 > n {
+        return None;
+    }
+    let mut stage = stage_bound_v2(2, spec.step_vars, spec.num_queries, rem, Some(a))?;
+    // A candidate at a+2 lifts to 2^s a+2 agreements before the binary folds.
+    // DKT26 gives equality of the *full* agreement sets at the scalar mask line.
+    stage.query_bits = query_bits(n, a + 1, spec.num_queries.min(n as usize));
+    let points = n << spec.step_vars;
+    // Two explanations at the entry threshold would agree beyond their degree.
+    if 2 * (a << spec.step_vars) <= points + points / 2 + 2 {
+        return None;
+    }
+    stage.word_list = 1;
+    // Add the initial RVW line and four bridge exceptional challenges. At a-1
+    // agreements distinct polynomials of the possible overflow degree would
+    // coincide on at least 2(a-1)-n > n/2+1 points.
+    stage.list += 5;
+    stage.fold_bits = FIELD_MILLIBITS - log2_hi(stage.list);
+    Some(stage)
+}
+
 /// `[DKT26]` (`2026/2056`) Theorem 5.12 (characteristic-free quantitative Johnson MCA) with
 /// `d = 1` for two words on the folded Stage-0 domain (`fibers` points, code dimension
 /// `k = 2^rem + 2`, degree bound `D = k - 1 = 2^rem + 1`): returns `(agreement_threshold, b_cf)`
@@ -292,6 +317,22 @@ pub fn lookup_terms(size: LookupSize, list: u128, helper_list: u128) -> LookupTe
     }
 }
 
+fn compiled_qrom_sum_bits(rbr: MilliBits, log_t: MilliBits) -> MilliBits {
+    sum_bits(
+        rbr - QROM_RBR_CONST - QROM_ROUND_SLACK - 2 * log_t,
+        8000 * DIGEST_BYTES as i64 - QROM_MERKLE_CONST - QROM_ROUND_SLACK - 3 * log_t,
+    )
+}
+
+/// A lookup's tuple width and number of pairs depend on the actual relation.
+pub(super) fn rate_half_lookup_supported(size: LookupSize) -> bool {
+    let terms = lookup_terms(size, 1, 1);
+    let bits = terms.compression.min(terms.poles).min(terms.sumcheck);
+    bits >= 264_500
+        && compiled_qrom_sum_bits(bits, TARGET_LEVEL_MILLIBITS) >= 0
+        && compiled_qrom_sum_bits(bits, 64_000) >= TARGET_LEVEL_MILLIBITS
+}
+
 /// The bounds of one profile at one relation size.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
@@ -363,10 +404,7 @@ impl Report {
     }
 
     fn qrom_sum_bits(&self, log_t: MilliBits) -> MilliBits {
-        sum_bits(
-            self.rbr_bits - QROM_RBR_CONST - QROM_ROUND_SLACK - 2 * log_t,
-            self.digest_millibits() - QROM_MERKLE_CONST - QROM_ROUND_SLACK - 3 * log_t,
-        )
+        compiled_qrom_sum_bits(self.rbr_bits, log_t)
     }
 
     pub fn qrom_work_bits(&self) -> MilliBits {
@@ -489,12 +527,13 @@ pub fn report_with_lookup(
         || !(1..=log_cells).contains(&var_bits)
         || schedule.stages.is_empty()
         || schedule.early_stop_vars >= log_cells
-        || schedule.stages.iter().any(|st| {
+        || schedule.stages.iter().enumerate().any(|(i, st)| {
             st.step_vars == 0
                 || st.step_vars > log_cells
                 || st.num_queries == 0
                 || !st.blowup.is_power_of_two()
-                || !(4..=256).contains(&st.blowup)
+                || !((4..=256).contains(&st.blowup)
+                    || (i == 0 && profile.rate_half() && st.blowup == 2))
         })
         || schedule
             .stages
@@ -508,9 +547,14 @@ pub fn report_with_lookup(
     let base: Vec<StageBound> = schedule
         .stages
         .iter()
-        .map(|spec| {
+        .enumerate()
+        .map(|(i, spec)| {
             rem -= spec.step_vars;
-            stage_bound_v2(spec.blowup, spec.step_vars, spec.num_queries, rem, None)
+            if i == 0 && profile.rate_half() {
+                rate_half_stage_bound(spec, rem)
+            } else {
+                stage_bound_v2(spec.blowup, spec.step_vars, spec.num_queries, rem, None)
+            }
         })
         .collect::<Option<_>>()?;
     let spec0 = schedule.stages[0];
@@ -592,9 +636,18 @@ pub fn report_with_lookup(
     };
 
     let mut best: Option<(MilliBits, Round, u128, MilliBits, Vec<StageBound>)> = None;
-    for m in 3..=512u128 {
+    // At rate one half, m=16 suffices at the inner agreement on every supported domain.
+    let multiplicities = if profile.rate_half() {
+        16..=16
+    } else {
+        3..=512u128
+    };
+    for m in multiplicities {
         let (threshold, b_cf) = mask_line_bad_challenges(spec0.blowup, rem0, m);
         let binding = threshold > base[0].agreement;
+        if profile.rate_half() && binding {
+            return None;
+        }
         let mut stages = base.clone();
         if binding {
             stages[0] = stage_bound_v2(
@@ -664,7 +717,7 @@ pub fn report_with_lookup(
 
 /// The report for a relation of `size` (no lookups) under the canonical layout and schedule.
 pub fn report(profile: Profile, size: ShapeSize) -> Option<Report> {
-    let layout = Layout::new(size)?;
+    let layout = Layout::for_profile(profile, size, None)?;
     report_with(
         profile,
         size,
@@ -686,7 +739,7 @@ pub fn report_for_shape(profile: Profile, shape: &Shape) -> Option<Report> {
         num_public: shape.num_public,
     };
     let ls = shape.lookups().map(LookupSize::of);
-    let layout = Layout::with_lookup(size, ls.map(|s| s.log_entries()))?;
+    let layout = super::protocol::layout_for_profile(shape, profile)?;
     let lookup = match (ls, &layout.lookup) {
         (Some(s), Some(ll)) => Some((s, ll)),
         (None, None) => None,
@@ -714,6 +767,9 @@ pub fn max_split_proof_bytes(profile: Profile, shape: &Shape, committers: usize)
     if !(1..=super::pcs::MAX_STAGE0_SHARES).contains(&committers) {
         return None;
     }
+    if profile.rate_half() {
+        super::protocol::layout_for_profile(shape, profile)?.rate_half_fs_calls(committers)?;
+    }
     let single = report_for_shape(profile, shape)?;
     let extra_stage0 = |log_cells: usize, _schedule: &Schedule, stages: &[StageBound]| -> usize {
         let st0 = &stages[0];
@@ -731,7 +787,7 @@ pub fn max_split_proof_bytes(profile: Profile, shape: &Shape, committers: usize)
         single.proof_bytes + 1 + extra_stage0(single.log_cells, &single.schedule, &single.stages);
     if let Some(lookups) = shape.lookups() {
         let ls = LookupSize::of(lookups);
-        let ll = LookupLayout::new(ls.log_entries())?;
+        let ll = LookupLayout::search(ls.log_entries(), |l| profile.schedule(l))?;
         let hr = report_with(
             profile,
             size(5, 16),
@@ -803,6 +859,93 @@ mod tests {
     use crate::zk_hem::bounds::{log2_lo, log2_one_plus};
 
     #[test]
+    fn above_johnson_rate_half_budgets_and_sizes() {
+        let lookups = LookupSize {
+            lookups: 1 << 23,
+            table_rows: 1 << 23,
+            width: 3,
+        };
+        assert!(rate_half_lookup_supported(lookups));
+        assert!(!rate_half_lookup_supported(LookupSize {
+            width: 4096,
+            ..lookups
+        }));
+
+        // Maximum number of siblings: occupy min(2^level, q) nodes at each level.
+        fn tight_bytes(r: &Report) -> usize {
+            let mut bytes = r.proof_bytes;
+            for st in &r.stages {
+                let q = st.queries.min(st.fibers as usize);
+                let depth = st.fibers.ilog2() as usize;
+                let exact = super::super::hash::max_siblings(q, depth);
+                let mut spread: Vec<_> = (0..q)
+                    .map(|i| i.reverse_bits() >> (usize::BITS as usize - depth))
+                    .collect();
+                spread.sort_unstable();
+                assert_eq!(super::super::hash::multiproof_len(depth, &spread), exact);
+                bytes -= DIGEST_BYTES * (siblings(q, depth) - exact);
+            }
+            bytes
+        }
+
+        for l in MIN_LOG_CELLS..=MAX_LOG_CELLS {
+            let shape = size(l, 1 << (l - 1));
+            let old = report(Profile::CshakeJohnson400, shape).unwrap();
+            let r = report(Profile::CshakeRateHalf400, shape).unwrap();
+            assert_eq!((old.log_cells, r.log_cells), (l, l));
+            let st = &r.stages[0];
+            assert_eq!(st.fibers * 2, old.stages[0].fibers);
+            let a = 3 * st.fibers / 4 + 2;
+            assert_eq!(st.agreement, a);
+            let layout = Layout::for_profile(r.profile, shape, None).unwrap();
+            assert!(layout.rate_half_fs_calls(1).unwrap() > 1024);
+            let mut with_helper = layout.clone();
+            with_helper.lookup = Some(LookupLayout {
+                log_cells: l,
+                log_entries: l - 3,
+                blind_cells: layout.blind_cells,
+                schedule: layout.schedule.clone(),
+            });
+            assert!(with_helper.rate_half_fs_calls(1).unwrap() > 1024);
+            assert!(
+                layout
+                    .rate_half_fs_calls(super::super::pcs::MAX_STAGE0_SHARES)
+                    .is_none()
+            );
+            assert!(r.view_perfectly_simulated());
+            assert!(r.rbr_bits >= 264_500 && r.qrom_work_bits() >= TARGET_LEVEL_MILLIBITS);
+            assert!(r.qrom_error_bits(64) >= TARGET_LEVEL_MILLIBITS);
+            assert!(r.mask_bits >= 264_500);
+            // Worst front-round degree and number of public inputs at this table size.
+            let worst = report_with(
+                r.profile,
+                ShapeSize {
+                    log_rows: usize::BITS as usize - 1,
+                    num_vars: 1 << l,
+                    num_public: (1 << l) - 16,
+                },
+                l,
+                l,
+                r.blind_cells,
+                &r.schedule,
+            )
+            .unwrap();
+            assert!(worst.rbr_bits >= 264_500 && worst.qrom_work_bits() >= TARGET_LEVEL_MILLIBITS);
+            std::println!(
+                "{l} {} {} {} {} {} {} {} {}",
+                st.step_vars,
+                st.fibers,
+                st.queries,
+                r.rbr_bits,
+                r.qrom_work_bits(),
+                r.qrom_error_bits(64),
+                tight_bytes(&old),
+                tight_bytes(&r)
+            );
+        }
+    }
+
+    #[test]
     fn stage0_queries_are_minimal() {
         for log_cells in MIN_LOG_CELLS..=MAX_LOG_CELLS {
             let q = STAGE0_QUERIES[log_cells - MIN_LOG_CELLS];
@@ -853,7 +996,7 @@ mod tests {
                 num_public: num_vars - 16,
             };
             assert_eq!(Layout::new(shape).unwrap().log_cells, log_cells);
-            for profile in Profile::ALL {
+            for profile in [Profile::CshakeJohnson400, Profile::TurboShakeJohnson400] {
                 let mut r = report(profile, shape).unwrap();
                 assert!(r.qrom_work_bits() >= 128_000, "{log_cells}");
                 assert!(r.classical_work_bits() >= 128_000, "{log_cells}");

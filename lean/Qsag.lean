@@ -67,6 +67,7 @@ public import Qsag.Math.Tactic.MaskBijection
 
 -- Qsag/Coding
 public import Qsag.Coding.AffineProximity
+public import Qsag.Coding.AboveJohnsonWhir
 public import Qsag.Coding.Cwyz26
 public import Qsag.Coding.GuruswamiSudan
 public import Qsag.Coding.ReedSolomon

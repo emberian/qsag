@@ -35,9 +35,9 @@ use qsag_agg::zk_hem::v2::params::{
 use qsag_agg::zk_hem::v2::pcs::{self, Committed, MAX_STAGE0_SHARES, SplitOpening};
 use qsag_agg::zk_hem::v2::protocol::{
     FrontMessages, LookupMessages, Mask, SplitLookupV2Proof, ZkHemV2SplitProof,
-    absorb_lookup_roots, cell_weights_to_kernel, column_table, eq_table, layout_of, limb_basis,
-    lookup_column_add, lookup_masks_full_rank, replay_front, row_challenge_good, split_transcript,
-    verify_split,
+    absorb_lookup_roots, cell_weights_to_kernel, column_table, eq_table, layout_for_profile,
+    limb_basis, lookup_column_add, lookup_masks_full_rank, replay_front, row_challenge_good,
+    split_transcript, verify_split,
 };
 
 use qsag_core::wipe::{SecretBuffer, SecretScratch};
@@ -97,11 +97,11 @@ pub enum Fault<'a> {
 type Fault<'a> = core::marker::PhantomData<&'a ()>;
 
 /// Triples and uniform values one custodian's [`prove_party`] consumes for `shape`.
-pub fn prover_demand(shape: &Shape, _profile: Profile) -> Option<(usize, usize)> {
+pub fn prover_demand(shape: &Shape, profile: Profile) -> Option<(usize, usize)> {
     if shape.num_sbox != 0 {
         return None;
     }
-    let layout = layout_of(shape)?;
+    let layout = layout_for_profile(shape, profile)?;
     let half = 1usize << (shape.log_rows - 1);
     // Round 0 multiplies base-field values (1 triple each); rounds 1.. multiply Fp5 values
     // via 9-triple Toom-3 (2 * 9 = 18 triples per pair); the zero test is 1 Fp5 product (9).
@@ -1050,7 +1050,10 @@ fn prove_with_hook<T: Transport>(
     if shape.num_sbox != 0 {
         return Err(ProveError::SboxRows);
     }
-    let layout = layout_of(shape).ok_or(ProveError::Unsupported)?;
+    let layout = layout_for_profile(shape, profile).ok_or(ProveError::Unsupported)?;
+    if profile.rate_half() && layout.rate_half_fs_calls(parties).is_none() {
+        return Err(ProveError::Unsupported);
+    }
     if !(1..=MAX_STAGE0_SHARES).contains(&parties) {
         return Err(ProveError::Unsupported);
     }
@@ -1342,9 +1345,31 @@ pub(super) mod tests {
         tamper: impl Fn(usize, &mut Vec<Sb>) + Sync,
         fault: impl Fn(usize, Fault<'_>) + Sync,
     ) -> Vec<(Result<ZkHemV2SplitProof, ProveError>, Stats)> {
+        deal_for_profile(
+            Profile::default(),
+            shape,
+            assignment,
+            statement,
+            parties,
+            seed,
+            tamper,
+            fault,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deal_for_profile(
+        profile: Profile,
+        shape: &Shape,
+        assignment: &[F],
+        statement: &[u8],
+        parties: usize,
+        seed: u8,
+        tamper: impl Fn(usize, &mut Vec<Sb>) + Sync,
+        fault: impl Fn(usize, Fault<'_>) + Sync,
+    ) -> Vec<(Result<ZkHemV2SplitProof, ProveError>, Stats)> {
         static CALL_SEQ: AtomicU64 = AtomicU64::new(1);
         let seq = CALL_SEQ.fetch_add(1, Ordering::Relaxed);
-        let profile = Profile::default();
         let mut dseed = [seed; 32];
         // Keep `Dealer` deterministic for equal `seed` when comparing message patterns, while
         // re-randomizing MAC shares via `seq` only for tape_id uniqueness? Wait: `two_witness_relation`
@@ -1385,6 +1410,36 @@ pub(super) mod tests {
             }
             (result, e.stats)
         })
+    }
+
+    #[test]
+    fn rate_half_split_lookup_roundtrip() {
+        let (shape, z) = lookup_relation([5, 7, 250], 25);
+        let profile = Profile::TurboShakeRateHalf400;
+        let out = deal_for_profile(
+            profile,
+            &shape,
+            &z,
+            b"rate half",
+            2,
+            37,
+            |_, _| {},
+            |_, _| {},
+        );
+        let proof = out[0].0.as_ref().unwrap();
+        assert!(out.iter().all(|(p, _)| p.as_ref() == Ok(proof)));
+        let bytes = proof.to_bytes();
+        assert_eq!(
+            ZkHemV2SplitProof::from_bytes(&bytes, &shape).as_ref(),
+            Some(proof)
+        );
+        assert!(verify_split(
+            &shape,
+            &z[1..=shape.num_public],
+            b"rate half",
+            profile,
+            proof
+        ));
     }
 
     #[test]

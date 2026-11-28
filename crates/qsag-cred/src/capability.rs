@@ -2563,7 +2563,7 @@ mod tests {
             for profile in Profile::ALL {
                 let fx = build_fixture(batch_size, max_hops, iss_d, rev_d);
                 let shape = fx.relation.shape();
-                let layout = v2::layout_of(shape).unwrap();
+                let layout = v2::layout_for_profile(shape, profile).unwrap();
                 let median = |mut v: Vec<f64>| {
                     v.sort_by(f64::total_cmp);
                     v[v.len() / 2]

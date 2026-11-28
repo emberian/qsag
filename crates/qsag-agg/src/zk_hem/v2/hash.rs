@@ -336,6 +336,13 @@ pub(crate) fn verify_canopy<const N: usize>(
         && matches!(active.as_slice(), [(1, top)] if hasher.root(stage, log_leaves as u8, top) == *root)
 }
 
+/// Sharp maximum for a nonempty opening. At depth i from the root at most
+/// min(2^i, q) nodes can be active, attained simultaneously by spread leaves.
+pub(super) fn max_siblings(q: usize, depth: usize) -> usize {
+    let split = q.next_power_of_two().ilog2() as usize;
+    (1 << split) - q + q * (depth - split)
+}
+
 /// Number of siblings [`MerkleTree::open`] emits for `sorted_leaves`.
 pub fn multiproof_len(log_leaves: usize, sorted_leaves: &[usize]) -> usize {
     let n = 1usize << log_leaves;
@@ -407,6 +414,11 @@ impl Transcript {
         );
         transcript.remaining = Some(calls.saturating_sub(1));
         transcript
+    }
+
+    /// Includes the INIT hash already performed by the constructor.
+    pub(super) fn limit_calls(&mut self, total: u16) {
+        self.remaining = Some(total.saturating_sub(1));
     }
 
     pub(crate) fn exhausted(&self) -> bool {

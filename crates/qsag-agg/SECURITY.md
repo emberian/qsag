@@ -58,9 +58,11 @@ $$E = \mathbb{F}_{p^5} = \mathbb{F}_p[X] / (X^5 - 3), \qquad |E| = p^5 > 2^{319.
 
 `zk-Hem v2` lives in `src/zk_hem/v2/` behind wire magics `QSAGZKH2` (single-prover
 `ZkHemV2Proof`) and `QSAGZKS2` (collaborative split-share `ZkHemV2SplitProof`). Both
-decoders accept exactly two 400-bit (`50`-byte) digest profiles (`v2/params.rs`):
+decoders accept four 400-bit (`50`-byte) digest profiles (`v2/params.rs`):
 - Tag `16`: `Profile::CshakeJohnson400` (`cSHAKE256`, capacity 512 `[SP800-185]`),
 - Tag `17`: `Profile::TurboShakeJohnson400` (`TurboSHAKE256`, capacity 512 `[RFC9861]`).
+- Tags `18` and `19` select `CshakeRateHalf400` and `TurboShakeRateHalf400`, respectively.
+  They bind the rate-half schedule from §2.3.1 to the transcript. Tag 17 is the default.
 
 Quartic `zk-Hem v1` and non-succinct hiding formats have been retired; all hiding relations
 (`blind_vc`, `multisig`, `capability`, and `qsag-migrate` single-party and collaborative
@@ -94,9 +96,9 @@ fitting `var_cells + masks + b <= 2^ell`. Both $b$ and $N - b$ are multiples of 
 
 **Commitment and kernels.** Let $c \in \mathbb{F}_p^N$ be the multilinear monomial
 coefficient vector of $Z$ (`hypercube_to_monomial_coeffs`), with Reed–Solomon codeword
-$\hat{Z}(x) = \sum_{i < N} c_i x^i$ on coset $D_0$ ($|D_0| = 4N$). Simultaneously, the
+$\hat{Z}(x) = \sum_{i < N} c_i x^i$ on coset $D_0$ ($|D_0| = b_0 N$, with $b_0=4$ for tags 16–17 and $b_0=2$ for tags 18–19). Simultaneously, the
 prover samples a uniform mask polynomial $R \in E[Y]$ of degree at most $N / 2^s + 1$,
-evaluated on the folded domain $D' = \{x^{2^s} : x \in D_0\}$ ($4N / 2^s$ fibers), and a
+evaluated on the folded domain $D' = \{x^{2^s} : x \in D_0\}$ ($b_0 N / 2^s$ fibers), and a
 fresh 32-byte per-tree `tree_nonce`. Stage-0 leaf $g$ hashes `(tree_nonce, g, salt_g,
 Z_hat|_fiber(g), R_hat(y_g))`, where `salt_g` is a fresh 32-byte per-leaf salt.
 
@@ -257,7 +259,7 @@ linearly in $|D'|$ at fixed rate, unlocking all 13 table sizes $2^{16}\dots 2^{2
 minimal Stage-0 queries `STAGE0_QUERIES = [267, 267, 267, 267, 267, 267, 267, 267, 266, 266, 266, 266, 266]`
 (`ZkHemV2PackedFiberCerts.lean`: `zkHemV2_packed_all13_budget_lt_128`). Beyond the
 Johnson radius, `dkt26_beyond_johnson_first_order` (`[DKT26]` Prop. 5.10 + Lemma 5.6 +
-Cor. 7.8, list size $L \le 2$) is an exploratory Rust calculation of $209\dots 220$-query first-order schedules. The deployed profiles use the Johnson schedules above.
+Cor. 7.8, list size $L \le 2$) is an exploratory Rust calculation of $209\dots 220$-query first-order schedules. Tags 16–17 use the schedules above.
 
 Reproduce the full calculator table:
 
@@ -278,6 +280,46 @@ cargo test --release -p qsag-agg --lib -- zk_hem::v2::bounds::tests::print_v2_ta
 | `2^25`, `2^25` | `2^26` | `266, 136, 92, 70` | 511 | `264.634` (Stage-0 query) | `198.999` | **128.048** (`128.144`, `129.112`) | `2^-128.288` | 791,962 |
 | `2^26`, `2^26` | `2^27` | `266, 136, 92, 70` | 512 | `264.629` (Stage-0 query) | `198.999` | **128.051** (`128.142`, `129.112`) | `2^-128.283` | 839,782 |
 | `2^27`, `2^27` | `2^28` | `266, 136, 92, 70` | 512 | `264.627` (Stage-0 query) | `198.999` | **128.050** (`128.141`, `129.112`) | `2^-128.281` | 1,027,882 |
+
+#### 2.3.1 Rate-half packed commitments and the above-Johnson audit
+
+Tags 18–19 use $2N$ base evaluations and 644 distinct Stage-0 fibers, 2.41–2.42 times the legacy query count. Both the assignment and optional lookup helper use the selected profile. Each cube is sized with its own blinding requirement $2^s(644+25)$. Comparisons at fixed $N$ assume the relation fits both layouts. Later stages retain their original rates and query counts.
+
+**Which result transfers.** In Chai–Fan Theorem 5, two scalar challenges with codeword agreements on all but $h$ positions each yield a joint explanation on all but $2h$ positions. Subtracting the two equations on the intersection recovers the slope and then the intercept. This proves the bound of one exceptional scalar for any linear code, including the linear kernels of Corollary 48. A nonzero OOD evaluation defines an affine coset. Subtracting two explanations for it produces an element of the homogeneous kernel. For v2 the five OOD values are batched into the coefficient functional before the first fold. Its point terms extend to the overflow coefficients. The candidate-list OOD and claim-binding terms in §2.3 remain necessary. [Chai–Fan, Theorems 5, 14, 18 and Corollary 48](https://eprint.iacr.org/2026/858)
+
+**The first binary fold.** Put $n=2N/2^s$, $k=n/2+2$, $e=n/4-2$, and $A=n-e$. The premise distance $2e/n$ is strictly between $1-\sqrt{k/n}$ and $1-k/n$, and $k+2e<n$. The first virtual output domain has $n_1=2^{s-1}n$ positions. Write $F,G$ for the even and odd words and $H=F+\theta G$. Pairing both antipodes lifts each joint agreement to two input agreements. For the degree-$N+1$ analysis envelope the even and odd polynomials each have degree at most $N/2$. Hence an input farther than $2e/n$ from this ambient code has joint distance above $2e/n$. Except for at most one $\theta$, $H$ has at most $2^{s-1}A-1$ agreements with every polynomial of degree at most $N/2$. The honest packed polynomial has degree below $N$. Extraction for the relation uses its first $N$ coefficients, with zero statement weights on the two overflow indices. More than $N+1$ agreements with base symbols at distinct base points force its coefficients into the base field by interpolation. Proximity to the larger analysis code alone does not certify that an arbitrary oracle has degree below $N$.
+
+The actual output at $y=x^2$ is $G(y)+(\alpha+\beta y)H(y)$. Conditional on $\theta$, the affine decomposition theorem gives a witness for $H$ of degree at most $N/2$ on all but one of a candidate's agreements. Thus, outside the affine exceptional set, the first output agreement cap is $2^{s-1}A$. Each remaining binary step with cap $M$ has cap $\lfloor M/2\rfloor+1$ on good challenges because a candidate with $u$ agreements lifts to at least $2(u-1)$ parent agreements. These bounds apply on virtual domains determined by the committed word and preceding challenges. There is no intermediate oracle commitment inside the fiber. Starting at $2^{s-1}A$ gives $A+1$ after the remaining folds for $s>1$, and $A$ for $s=1$. Equivalently, $A+2$ exit agreements lift to at least $2^s A+2$ at entry. This is the finite-coordinate cost of affine decomposition. Repeated threshold halving would give a different query budget. [CWYZ, §§4–5](https://arxiv.org/abs/2611.15128)
+
+**Claims and the mask.** Ambient distance covers only one case. For a false coefficient claim with a nearby ambient word, v2 applies CWYZ Theorem 5.1 at the inner agreement $2^j A$ on **every** virtual domain $2^j n$, including the first. A passing candidate lifts to a pair explaining the same agreement set up to one position. At the scaled thresholds the overlap of two such pairs at agreement $2^j A-1$ exceeds the component degree, including overflow. Thus the component witnesses are fixed before the kernel challenge. For their four inner products $u,v,x,y$ against the even and odd kernel halves, the two claimed evaluations at $\phi$ must equal $u+\phi v$ and $x+\phi y$. Equality as polynomials in $\phi$ forces the incoming claim to equal $u+y$. An incorrect claim therefore escapes at at most one $\phi$. The two shift claims are sent after $\phi$ and before $(\theta,\alpha,\beta)$, as permitted by the preannounced shift-claim variant in §5. The calculator charges the finite CWYZ numerator plus five field challenges for the initial scalar line and bridge terms. The Lean certificate checks interpolation at every intermediate size with multiplicity 3 and total degree 14. All lists used by the front end are evaluated at the inner agreement. The argument requires no list bound at the outer distance.
+
+After those folds the independently committed mask still needs a common explanation on exactly the coordinates opened by the verifier. On the $n$-point folded domain the maximum degree is $D=k-1$. At $m=16$ the calculator checks $32^2 A^2\ge 33^2 n k$. DKT Theorem 5.12 then gives equality of the entire agreement sets for the two witnesses to $P_s+\beta_R R$ and a count below $33^3 n^2/(3D)$ of exceptional scalars. The separate list term accounts for cancellation of a false mask claim. The denominator is $|E|-1$ because the mask challenge is nonzero. The resulting pure query bound is $(A+1)_q/(n)_q$ for $q=644$, where $(a)_q$ is a falling factorial. The claim-aware argument also gives this bound for inputs farther than $2(e-1)/n$. Their distance already rules out an entry witness at the stronger inner agreement, and $(A+1)/n=1-(e-1)/n$. [DKT, Theorem 5.12](https://eprint.iacr.org/2026/2056)
+
+**Composition.** Theorem 52 of Chai–Fan assumes at least as many shift queries as final queries. The v2 verifier batches independently sampled shifts into the next stage and finishes by testing the terminal polynomial. Its proof imports WHIR's OOD and sumcheck results for that protocol. Theorem 18's multi-deviation argument also treats distance from a code as a lower bound on distance from an arbitrary next oracle. A next oracle can differ in just one coordinate while both words are far from the code. Appendix D's Theorem 72 defines its state using the current oracle's distance, which omits earlier consistency obligations. Theorem 73 gives a classical random-oracle bound. For v2 the state carries the coefficient claim, the nearby witnesses, and the authenticated shift queries. Each query round uses its own without-replacement bound plus batching, followed by the §1 CDHZ25 compilation for a fixed relation in the ideal-oracle model. The new profiles reserve 512 calls for the round offset and debit the maximum Merkle verification work before allocating the transcript's remaining calls, including retries. A tree with $q$ opened leaves and $S$ authentication siblings uses $2q+S$ hashes including the framed root. Lookup helper trees and split-share trees each count. The verifier rejects split layouts exceeding this envelope and checks each lookup relation’s tuple-compression, pole and sumcheck errors against the target. [Chai–Fan, Theorem 52 and Appendix D](https://eprint.iacr.org/2026/858) · [CDHZ25](https://eprint.iacr.org/2025/2166)
+
+**Space, time and wire size.** For $L=b_0N$, one base transform and five mask-limb transforms take exactly $[L\log_2 L+5(L/2^s)\log_2(L/2^s)]/2$ radix-2 butterflies. Halving $L$ also removes one Merkle level. At $\log_2 N=28$ this reduces 17,112,760,320 butterflies to 8,266,973,184, an exact work ratio of $1360/657$. In a paired CPU measurement at $\log_2 N=20$ the two Stage-0 encoders together took **462.372 ms and 211.395 ms** (2.19×). These are single-worker release medians from three alternating runs after warmup on an i9-12900. The timing includes coset scaling and output allocation.
+
+At $\log_2 N=28$, the base codeword drops from 8 GiB to 4 GiB, the mask codeword from 640 MiB to 320 MiB, and the Vulkan Canopy heap (two slots per leaf at 56 bytes each) from 1,792 MiB to 896 MiB. The three device payloads of the Canopy dispatch thus shrink by **5,312 MiB** in total, counting the mask in its metadata buffer once. These are exact buffer lengths. Allocator headroom, staging and retained buffers affect device residency. The RX 6750 XT reports a maximum storage-buffer range of 4,294,967,295 bytes, one byte short of the smaller base buffer. A peak VRAM measurement for this size requires a chunked backend.
+
+The table compares single-prover shapes with $\log_2 N$ row variables, $N/2$ assignment variables and no lookup. Byte columns give the exact maximum over query placements in the wire format. For depth $d$ and $q$ openings the maximum sibling count is $2^h-q+q(d-h)$, $h=\lceil\log_2 q\rceil$. Spread leaves attain it at every depth. For a specific transcript the exact length uses its actual sibling count at each tree. In the fixed-seed `pin` fixture ($2^{16}$ cells), cSHAKE proofs grew from 264,204 to 366,154 bytes and TurboSHAKE proofs from 264,254 to 366,554 bytes.
+
+| $\log_2 N$ | Stage-0 leaves at rate ½ | RBR bits | QROM work bits | $-\log_2\varepsilon(2^{64})$ | Max bytes at ¼ | Max bytes at ½ | Extra bytes |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 8,192 | 268.787 | 128.992 | 132.441 | 283,804 | 395,804 | 112,000 |
+| 17 | 8,192 | 268.787 | 128.992 | 132.441 | 342,460 | 502,716 | 160,256 |
+| 18 | 16,384 | 268.599 | 128.980 | 132.253 | 369,010 | 548,116 | 179,106 |
+| 19 | 32,768 | 268.867 | 129.001 | 132.521 | 396,840 | 594,796 | 197,956 |
+| 20 | 65,536 | 267.757 | 128.849 | 131.411 | 427,230 | 644,036 | 216,806 |
+| 21 | 65,536 | 267.757 | 128.849 | 131.411 | 496,302 | 809,620 | 313,318 |
+| 22 | 131,072 | 267.017 | 128.779 | 130.671 | 553,892 | 886,060 | 332,168 |
+| 23 | 262,144 | 266.649 | 128.652 | 130.303 | 603,036 | 954,054 | 351,018 |
+| 24 | 524,288 | 266.466 | 128.591 | 130.120 | 635,842 | 1,006,794 | 370,952 |
+| 25 | 1,048,576 | 266.374 | 128.558 | 130.028 | 686,102 | 1,075,954 | 389,852 |
+| 26 | 2,097,152 | 266.328 | 128.561 | 129.982 | 787,162 | 1,195,914 | 408,752 |
+| 27 | 4,194,304 | 266.306 | 128.550 | 129.960 | 834,982 | 1,262,634 | 427,652 |
+| 28 | 8,388,608 | 266.294 | 128.544 | 129.948 | 1,023,082 | 1,469,634 | 446,552 |
+
+Reproduce the size and security table with `cargo test --release -p qsag-agg --lib above_johnson_rate_half -- --nocapture` and the paired timing with `cargo test --release -p qsag-agg --lib rate_half_lde_timing -- --ignored --nocapture`. The constructive [Lean module](../../lean/Qsag/Coding/AboveJohnsonWhir.lean) proves the scalar-line lemma, RS uniqueness, the packed agreement recurrence and the without-replacement count, with kernel-checked witnesses for all 13 sizes.
 
 ### 2.4 Jointly Masked LogUp (`LookupV2Proof`) and Split-Share Opening (`QSAGZKS2`)
 

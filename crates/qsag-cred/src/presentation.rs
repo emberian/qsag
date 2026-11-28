@@ -393,7 +393,7 @@ mod tests {
             let w = witness(MAX_VC_ATTRS);
             let st = BlindVcStatement::derive(&w, 7, 0x1234_5678_9ABC, scope(), &[0, 5, 9]);
             let shape = st.shape().unwrap();
-            let layout = v2::layout_of(&shape).unwrap();
+            let layout = v2::layout_for_profile(&shape, profile).unwrap();
             let median = |mut v: Vec<f64>| {
                 v.sort_by(f64::total_cmp);
                 v[v.len() / 2]

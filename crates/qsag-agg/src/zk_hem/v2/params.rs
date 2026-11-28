@@ -53,16 +53,43 @@ pub enum Profile {
     /// TurboSHAKE256 with 400-bit digests, Johnson-radius schedule, no grinding.
     #[default]
     TurboShakeJohnson400,
+    /// cSHAKE256, rate-half packed commitment, no grinding.
+    CshakeRateHalf400,
+    /// TurboSHAKE256, rate-half packed commitment, no grinding.
+    TurboShakeRateHalf400,
 }
 
 impl Profile {
-    pub const ALL: [Self; 2] = [Self::CshakeJohnson400, Self::TurboShakeJohnson400];
+    pub const ALL: [Self; 4] = [
+        Self::CshakeJohnson400,
+        Self::TurboShakeJohnson400,
+        Self::CshakeRateHalf400,
+        Self::TurboShakeRateHalf400,
+    ];
 
-    /// Canonical wire tag (`16` = `CshakeJohnson400`, `17` = `TurboShakeJohnson400`).
+    pub const fn rate_half(self) -> bool {
+        matches!(self, Self::CshakeRateHalf400 | Self::TurboShakeRateHalf400)
+    }
+
+    /// The envelope and later stages are common to all four profiles.
+    pub fn schedule(self, log_cells: usize) -> Option<Schedule> {
+        if self.rate_half() {
+            let mut sched = schedule(log_cells)?;
+            sched.stages[0].blowup = 2;
+            sched.stages[0].num_queries = 644;
+            Some(sched)
+        } else {
+            schedule(log_cells)
+        }
+    }
+
+    /// Canonical profile byte in the proof header and transcript.
     pub const fn wire_tag(self) -> u8 {
         match self {
             Self::CshakeJohnson400 => 16,
             Self::TurboShakeJohnson400 => 17,
+            Self::CshakeRateHalf400 => 18,
+            Self::TurboShakeRateHalf400 => 19,
         }
     }
 
@@ -70,12 +97,17 @@ impl Profile {
         match tag {
             16 => Some(Self::CshakeJohnson400),
             17 => Some(Self::TurboShakeJohnson400),
+            18 => Some(Self::CshakeRateHalf400),
+            19 => Some(Self::TurboShakeRateHalf400),
             _ => None,
         }
     }
 
     pub const fn uses_turboshake(self) -> bool {
-        matches!(self, Self::TurboShakeJohnson400)
+        matches!(
+            self,
+            Self::TurboShakeJohnson400 | Self::TurboShakeRateHalf400
+        )
     }
 }
 
@@ -270,9 +302,22 @@ impl Layout {
 
     /// [`Self::new`] with an optional LogUp fraction table of `2^log_entries` entries.
     pub fn with_lookup(size: ShapeSize, log_entries: Option<usize>) -> Option<Self> {
-        let mut layout = Self::new(size)?;
+        Self::for_profile(Profile::default(), size, log_entries)
+    }
+
+    /// Smallest assignment and optional helper cubes for this wire profile.
+    pub fn for_profile(
+        profile: Profile,
+        size: ShapeSize,
+        log_entries: Option<usize>,
+    ) -> Option<Self> {
+        let schedule = |l| profile.schedule(l);
+        let mut layout = Self::search(size, schedule)?;
         if let Some(d) = log_entries {
-            layout.lookup = Some(LookupLayout::new(d)?);
+            layout.lookup = Some(LookupLayout::search(d, schedule)?);
+        }
+        if profile.rate_half() {
+            layout.rate_half_fs_calls(1)?;
         }
         Some(layout)
     }
@@ -307,6 +352,33 @@ impl Layout {
                 lookup: None,
             })
         })
+    }
+
+    /// CDHZ25 verifier-oracle allowance for the rate-half profiles. Each tree
+    /// hashes q leaves, q + siblings - 1 internal nodes and one framed root.
+    /// Reserve 512 calls for the round offset in the compilation bound.
+    pub fn rate_half_fs_calls(&self, committers: usize) -> Option<u16> {
+        if !(1..=super::pcs::MAX_STAGE0_SHARES).contains(&committers) {
+            return None;
+        }
+        fn tree_calls(l: usize, schedule: &Schedule, committers: usize) -> Option<usize> {
+            super::pcs::stage_dims(l, schedule)?
+                .iter()
+                .enumerate()
+                .try_fold(0usize, |acc, (i, d)| {
+                    let calls =
+                        2 * d.queries + super::hash::max_siblings(d.queries, d.log_leaves());
+                    let trees = if i == 0 { committers } else { 1 };
+                    acc.checked_add(calls.checked_mul(trees)?)
+                })
+        }
+        let main = tree_calls(self.log_cells, &self.schedule, committers)?;
+        let helper = match &self.lookup {
+            Some(h) => tree_calls(h.log_cells, &h.schedule, committers)?,
+            None => 0,
+        };
+        let left = (32_768usize - 512).checked_sub(main.checked_add(helper)?)?;
+        (left > 1).then_some(left as u16)
     }
 
     #[inline]

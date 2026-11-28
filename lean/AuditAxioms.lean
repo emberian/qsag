@@ -46,6 +46,7 @@ import all Qsag.Math.TapRowParityBias
 import all Qsag.Math.Tactic.CommRing
 import all Qsag.Math.Tactic.MaskBijection
 import all Qsag.Coding.AffineProximity
+import all Qsag.Coding.AboveJohnsonWhir
 import all Qsag.Coding.Cwyz26
 import all Qsag.Coding.GuruswamiSudan
 import all Qsag.Coding.ReedSolomon
@@ -458,6 +459,7 @@ run_cmd do
     `Qsag.Math.QuinticToom3,
     `Qsag.Math.TapRowParityBias,
     `Qsag.Coding.AffineProximity,
+    `Qsag.Coding.AboveJohnsonWhir,
     `Qsag.Coding.Cwyz26,
     `Qsag.Coding.GuruswamiSudan,
     `Qsag.Coding.ReedSolomon,

@@ -11,7 +11,7 @@
 //! Cases: `s17`, `s20`, `s22` (synthetic, `2^n` rows, one fresh variable per row), `f82k`
 //! (`2^17` rows, 82,000 variables), `bip32` (`2^21` rows, 1,088,721 variables),
 //! `multisig`. The credential benchmark is `qsag_cred::presentation::tests::bench_blind_vc_presentation`.
-//! Optional `QSAG_V2_PROTO=turboshake|cshake` selects the hash profile (default
+//! Optional `QSAG_V2_PROTO=turboshake|cshake|rate-half|turboshake-rate-half` selects the hash profile (default
 //! `CshakeJohnson400`). `QSAG_PROFILE=1` adds the phase lines of `crate::profile`.
 
 use alloc::string::String;
@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use super::bounds;
 use super::params::{Profile, ShapeSize};
-use super::protocol::{self as v2, ZkHemV2Proof, layout_of};
+use super::protocol::{self as v2, ZkHemV2Proof, layout_for_profile};
 use crate::field::Goldilocks;
 use crate::sponge::cshake256_32;
 use crate::zk_hem::multisig::{MultisigParams, MultisigRelation, MultisigSigner, Policy};
@@ -184,7 +184,7 @@ fn measure_v2(case: Case, profile: Profile) -> Measured {
         t.elapsed().as_secs_f64()
     });
     Measured {
-        log_cells: layout_of(&shape).unwrap().log_cells,
+        log_cells: layout_for_profile(&shape, profile).unwrap().log_cells,
         prove_s,
         verify_s,
         bytes,
@@ -200,6 +200,8 @@ fn measure_case() {
     let proto = std::env::var("QSAG_V2_PROTO").unwrap_or_else(|_| String::from("v2"));
     let profile = match proto.as_str() {
         "v2" | "cshake" => Profile::CshakeJohnson400,
+        "rate-half" => Profile::CshakeRateHalf400,
+        "turboshake-rate-half" => Profile::TurboShakeRateHalf400,
         "turboshake" => Profile::TurboShakeJohnson400,
         other => panic!("unknown QSAG_V2_PROTO {other}"),
     };
@@ -253,8 +255,54 @@ fn proof_bytes_are_pinned() {
     };
     let cshake = digest(Profile::CshakeJohnson400, usize::MAX);
     let turbo = digest(Profile::TurboShakeJohnson400, usize::MAX);
+    assert_eq!(cshake.0, 264_204);
+    assert_eq!(
+        cshake.1,
+        "5ad8fdc4ef477f284f44e5cd8448bd0b963600888c5b26c086b21ae7ad596bd1"
+    );
+    assert_eq!(turbo.0, 264_254);
+    assert_eq!(
+        turbo.1,
+        "ee6b8aa888c11bed162a79d24e079e638e806c6ecb239664c1629697529f168d"
+    );
     // Worker-count invariance: 1, 3, and max workers produce byte-for-byte identical proofs.
     assert_eq!(digest(Profile::CshakeJohnson400, 1), cshake);
     assert_eq!(digest(Profile::CshakeJohnson400, 3), cshake);
     assert_eq!(digest(Profile::TurboShakeJohnson400, 1), turbo);
+}
+
+/// Median of three paired, single-worker measurements of the two CPU encoders.
+#[test]
+#[ignore = "Stage-0 LDE timing"]
+fn rate_half_lde_timing() {
+    use super::{field5::Fp5, pcs};
+    use std::{hint::black_box, time::Instant};
+
+    let l = 20;
+    let coeffs: Vec<_> = (0..1 << l).map(|i| f(i as u64 + 1)).collect();
+    let s = Profile::default().schedule(l).unwrap().stages[0].step_vars;
+    let mask: Vec<_> = (0..pcs::mask_len(l, s))
+        .map(|i| Fp5(core::array::from_fn(|j| f((5 * i + j + 1) as u64))))
+        .collect();
+    crate::with_worker_limit(1, || {
+        let mut samples = [[0u128; 3]; 2];
+        for run in 0..4 {
+            for offset in 0..2 {
+                let i = (run + offset) % 2;
+                let log_domain = l + 2 - i;
+                let start = Instant::now();
+                let z = pcs::encode_base(&coeffs, log_domain);
+                let r = pcs::encode_ext_folded(&mask, log_domain, s);
+                black_box((&z, &r));
+                let micros = start.elapsed().as_micros();
+                if run > 0 {
+                    samples[i][run - 1] = micros;
+                }
+            }
+        }
+        for (i, times) in samples.iter_mut().enumerate() {
+            times.sort_unstable();
+            std::println!("log_cells={l} blowup={} median_us={}", 4 >> i, times[1]);
+        }
+    });
 }
