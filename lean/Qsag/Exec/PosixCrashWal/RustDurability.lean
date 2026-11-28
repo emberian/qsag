@@ -964,6 +964,14 @@ theorem openBurnBytes_journalBytes (key identity keyId genesis : Bytes)
   rw [ite_eq_right hC1, hGen, hTake, ite_eq_right (fun h => h rfl), hDrop, hDiv,
     burnChunks_flat records hr]
 
+theorem openBurnBytes_burnHeader (key identity keyId genesis : Bytes)
+    (hk : keyId.length = 32) (hg : genesis.length = 32) :
+    openBurnBytes key identity keyId (burnHeader key identity keyId genesis) =
+      some ([], burnGenesisTag key identity keyId genesis) := by
+  have h := openBurnBytes_journalBytes key identity keyId genesis [] hk hg
+    (by intro _ hm; cases hm)
+  simpa [burnJournalBytes, openBurnJournal, verifyBurnChain] using h
+
 /-- A journal copied to another inode fails closed: the V3 genesis tag is recomputed for the
 identity of the descriptor actually held, so the copy opens only if the two genesis tags
 collide (the stated premise is that this one concrete pair of tags differs). -/

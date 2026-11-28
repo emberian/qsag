@@ -382,19 +382,25 @@ fn posix_burn_trace(events: &str) -> String {
             ["reopen"] => reopen(&cur_path, retained, &mut journal),
             ["trunc"] => {
                 journal = None;
-                std::fs::write(&cur_path, &genesis_snap).unwrap();
+                let cur = std::fs::read(&cur_path).unwrap();
+                let mut next = genesis_snap.clone();
+                let copy_len = cur.len().min(104);
+                next[..copy_len].copy_from_slice(&cur[..copy_len]);
+                std::fs::write(&cur_path, &next).unwrap();
                 reopen(&cur_path, retained, &mut journal)
             }
             ["flip"] => {
                 use std::io::{Read, Seek, SeekFrom, Write};
                 journal = None;
                 let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&cur_path).unwrap();
-                if f.metadata().unwrap().len() > 0 {
-                    f.seek(SeekFrom::End(-1)).unwrap();
+                let len = f.metadata().unwrap().len();
+                if len > 0 {
+                    let pos = if len <= 12288 { 103 } else { len - 1 };
+                    f.seek(SeekFrom::Start(pos)).unwrap();
                     let mut b = [0u8; 1];
                     f.read_exact(&mut b).unwrap();
                     b[0] ^= 1;
-                    f.seek(SeekFrom::End(-1)).unwrap();
+                    f.seek(SeekFrom::Start(pos)).unwrap();
                     f.write_all(&b).unwrap();
                     f.sync_all().unwrap();
                 }
@@ -753,13 +759,13 @@ def rust_function(source, signature):
 
 
 LATCH_MUTANTS = [
-    ("poison_check", "kernel", "if self.wal_poisoned {", "if false {", "fail,0:0:0:1,1:0:0:1"),
-    ("poison_set", "kernel", "wal_poisoned: true,", "wal_poisoned: false,", "fail,0:0:0:1,1:0:0:1"),
-    ("epoch_consumed", "kernel", "if req.epoch < self.next_epoch {", "if false {", "2:0:0:1,1:0:0:1"),
-    ("epoch_capacity", "kernel", "if req.epoch >= self.capacity_limit {", "if false {", "0:0:0:1"),
-    ("epoch_jump", "kernel", "if req.epoch - self.next_epoch > BELT_LATCH_MAX_EPOCH_JUMP {", "if false {", "65:0:0:1"),
-    ("retry_salt", "kernel", "if !ct_eq_bytes32(&self.in_flight.retry_salt, &req.retry_salt) {", "if false {", "0:0:0:1,0:0:1:1"),
-    ("digits_binding", "kernel", "if !belt_latch_digits_eq(&self.in_flight.digits, &req.digits) {", "if false {", "0:0:0:1,0:0:0:2"),
+    ("poison_check", "pair", ("self.is_wal_poisoned()", "false"), ("if self.wal_poisoned {", "if false {"), "fail,0:0:0:1,1:0:0:1"),
+    ("poison_set", "kernel", None, ("wal_poisoned: true,", "wal_poisoned: false,"), "fail,0:0:0:1,1:0:0:1"),
+    ("epoch_consumed", "pair", ("if epoch < kernel.next_epoch() {", "if false {"), ("if req.epoch < self.next_epoch {", "if false {"), "2:0:0:1,1:0:0:1"),
+    ("epoch_capacity", "pair", ("if epoch >= kernel.capacity_limit() {", "if false {"), ("if req.epoch >= self.capacity_limit {", "if false {"), "0:0:0:1"),
+    ("epoch_jump", "pair", ("&& epoch > kernel.next_epoch() + MAX_EPOCH_JUMP", "&& false"), ("if req.epoch - self.next_epoch > BELT_LATCH_MAX_EPOCH_JUMP {", "if false {"), "65:0:0:1"),
+    ("retry_salt", "kernel", None, ("if !ct_eq_bytes32(&self.in_flight.retry_salt, &req.retry_salt) {", "if false {"), "0:0:0:1,0:0:1:1"),
+    ("digits_binding", "kernel", None, ("if !belt_latch_digits_eq(&self.in_flight.digits, &req.digits) {", "if false {"), "0:0:0:1,0:0:0:2"),
 ]
 # Walk to the capacity without violating the separate jump guard.
 LATCH_MUTANTS[3] = (*LATCH_MUTANTS[3][:4], ",".join(f"{i}:0:0:1" for i in range(0, 4097, 64)))
@@ -786,17 +792,19 @@ def driver_source(root):
     trace = rust_function(RUST, "fn latch_trace(").replace(
         "use qsag_core::belt_latch::{BeltLatch,BeltLatchError,BindOutcome,MemoryWal,DurableWal};", "")
     arms = []
-    for i, (name, target_kind, old, new, _) in enumerate(LATCH_MUTANTS):
-        if target_kind == "belt":
-            if old not in belt:
-                raise RuntimeError(f"mutation anchor disappeared: {name}")
-            mutated_belt = belt.replace(old, new)
-            mutated_kernel = latch_kernel
-        else:
-            if latch_kernel.count(old) != 1:
-                raise RuntimeError(f"mutation anchor disappeared: {name}")
-            mutated_belt = belt
-            mutated_kernel = latch_kernel.replace(old, new)
+    for i, (name, target_kind, belt_pair, kernel_pair, _) in enumerate(LATCH_MUTANTS):
+        mutated_belt = belt
+        mutated_kernel = latch_kernel
+        if belt_pair is not None:
+            b_old, b_new = belt_pair
+            if b_old not in mutated_belt:
+                raise RuntimeError(f"belt mutation anchor disappeared: {name}")
+            mutated_belt = mutated_belt.replace(b_old, b_new)
+        if kernel_pair is not None:
+            k_old, k_new = kernel_pair
+            if mutated_kernel.count(k_old) != 1:
+                raise RuntimeError(f"kernel mutation anchor disappeared: {name}")
+            mutated_kernel = mutated_kernel.replace(k_old, k_new)
         source += f"\n#[allow(dead_code, unused_variables, unexpected_cfgs)] mod mutant_{i} {{\n" + mutated_belt
         source += "\npub mod kernel_mod {\n" + mutated_kernel + "\n}\n"
         source += "\npub " + trace + "\n}\n"

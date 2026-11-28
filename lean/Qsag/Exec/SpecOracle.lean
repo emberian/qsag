@@ -855,18 +855,30 @@ def PosixBurnState.init : PosixBurnState :=
     openState := some ([], tag0)
     retained := none }
 
+private def trimPosixBurnTail (diskBytes : List UInt8) : List UInt8 :=
+  if 104 ≤ diskBytes.length then
+    diskBytes.take (104 + 42 * ((diskBytes.length - 104) / 42))
+  else
+    diskBytes
+
+/-- Two-phase `QSBURN05` reopen (`crates/qsag-fts/src/wal.rs:155-165`, `327-385`):
+    `load_guarded` authenticates the committed `104 + 42·n` prefix and truncates any
+    interrupted `1..41`-byte trailing record on disk before `open_at_least` checks `retained`. -/
 private def reopenPosixBurnDisk (diskBytes : List UInt8) (inode : Nat)
-    (retained : Option ExternalMonotoneAnchor) : Option (List (List UInt8) × List UInt8) :=
+    (retained : Option ExternalMonotoneAnchor) :
+    List UInt8 × Option (List (List UInt8) × List UInt8) :=
   let idBytes := RustDurability.burnIdentity 1 inode
-  match RustDurability.openBurnBytes posixBurnMacKey idBytes posixBurnKeyId diskBytes with
-  | none => none
+  let trimmed := trimPosixBurnTail diskBytes
+  match RustDurability.openBurnBytes posixBurnMacKey idBytes posixBurnKeyId trimmed with
+  | none => (diskBytes, none)
   | some (bodies, lastTag) =>
     match retained with
-    | none => some (bodies, lastTag)
+    | none => (trimmed, some (bodies, lastTag))
     | some anchor =>
       if verifyAgainstExternalAnchor anchor bodies.length lastTag then
-        some (bodies, lastTag)
-      else none
+        (trimmed, some (bodies, lastTag))
+      else
+        (trimmed, none)
 
 inductive PosixBurnOutcome where
   | ok
@@ -905,36 +917,36 @@ def posixBurnStep (st : PosixBurnState) (ev : PosixBurnEvent) : PosixBurnState �
     | some (bodies, lastTag) =>
       ({ st with retained := some ⟨bodies.length, lastTag⟩ }, .ok)
   | .reopen =>
-    let opened := reopenPosixBurnDisk st.diskBytes st.inode st.retained
+    let (disk'', opened) := reopenPosixBurnDisk st.diskBytes st.inode st.retained
     match opened with
-    | some (bodies, _) => ({ st with openState := opened }, .okCount bodies.length)
-    | none => ({ st with openState := none }, .err)
+    | some (bodies, _) => ({ st with diskBytes := disk'', openState := opened }, .okCount bodies.length)
+    | none => ({ st with diskBytes := disk'', openState := none }, .err)
   | .tear k =>
     let len := if k == 0 then 1 else if k ≥ 42 then 41 else k
     let disk' := st.diskBytes ++ List.replicate len (0xaa : UInt8)
-    let opened := reopenPosixBurnDisk disk' st.inode st.retained
+    let (disk'', opened) := reopenPosixBurnDisk disk' st.inode st.retained
     match opened with
-    | some (bodies, _) => ({ st with diskBytes := disk', openState := opened }, .okCount bodies.length)
-    | none => ({ st with diskBytes := disk', openState := none }, .err)
+    | some (bodies, _) => ({ st with diskBytes := disk'', openState := opened }, .okCount bodies.length)
+    | none => ({ st with diskBytes := disk'', openState := none }, .err)
   | .trunc =>
     let disk' := st.diskBytes.take 104
-    let opened := reopenPosixBurnDisk disk' st.inode st.retained
+    let (disk'', opened) := reopenPosixBurnDisk disk' st.inode st.retained
     match opened with
-    | some (bodies, _) => ({ st with diskBytes := disk', openState := opened }, .okCount bodies.length)
-    | none => ({ st with diskBytes := disk', openState := none }, .err)
+    | some (bodies, _) => ({ st with diskBytes := disk'', openState := opened }, .okCount bodies.length)
+    | none => ({ st with diskBytes := disk'', openState := none }, .err)
   | .flip =>
     let disk' := if st.diskBytes.isEmpty then []
       else st.diskBytes.take (st.diskBytes.length - 1) ++ [st.diskBytes.getLastD 0 ^^^ 1]
-    let opened := reopenPosixBurnDisk disk' st.inode st.retained
+    let (disk'', opened) := reopenPosixBurnDisk disk' st.inode st.retained
     match opened with
-    | some (bodies, _) => ({ st with diskBytes := disk', openState := opened }, .okCount bodies.length)
-    | none => ({ st with diskBytes := disk', openState := none }, .err)
+    | some (bodies, _) => ({ st with diskBytes := disk'', openState := opened }, .okCount bodies.length)
+    | none => ({ st with diskBytes := disk'', openState := none }, .err)
   | .copy =>
     let inode' := st.inode + 1
-    let opened := reopenPosixBurnDisk st.diskBytes inode' st.retained
+    let (disk'', opened) := reopenPosixBurnDisk st.diskBytes inode' st.retained
     match opened with
-    | some (bodies, _) => ({ st with inode := inode', openState := opened }, .okCount bodies.length)
-    | none => ({ st with inode := inode', openState := none }, .err)
+    | some (bodies, _) => ({ st with diskBytes := disk'', inode := inode', openState := opened }, .okCount bodies.length)
+    | none => ({ st with diskBytes := disk'', inode := inode', openState := none }, .err)
 
 def posixBurnTraceOutcomes (evs : List PosixBurnEvent) : List PosixBurnOutcome :=
   (evs.foldl (fun (acc : PosixBurnState × List PosixBurnOutcome) ev =>
@@ -944,40 +956,54 @@ def posixBurnTraceOutcomes (evs : List PosixBurnEvent) : List PosixBurnOutcome :
 def posixBurnTrace (evs : List PosixBurnEvent) : List String :=
   (posixBurnTraceOutcomes evs).map PosixBurnOutcome.render
 
-def PosixBurnTornDisk (st : PosixBurnState) (n k : Nat) : Prop :=
-  st.diskBytes.length = 104 + 42 * n ∧ 0 < k ∧ k < 42
+def PosixBurnTornDisk (st : PosixBurnState) (bodies : List (List UInt8))
+    (lastTag : List UInt8) (k : Nat) : Prop :=
+  st.diskBytes.length = 104 + 42 * bodies.length ∧
+  st.retained = none ∧
+  RustDurability.openBurnBytes posixBurnMacKey (RustDurability.burnIdentity 1 st.inode)
+    posixBurnKeyId st.diskBytes = some (bodies, lastTag) ∧
+  0 < k ∧ k < 42
 
-/-- Any partial record append (`0 < k < 42`) fails closed on reopen (`openState = none`, `.err`),
-    directly discharging `RustDurability.partial_append_refuses`. -/
-theorem posixBurnStep_tear_fails_closed (st : PosixBurnState) (n k : Nat)
-    (hTorn : PosixBurnTornDisk st n k) :
-    (posixBurnStep st (.tear k)).2 = .err ∧ (posixBurnStep st (.tear k)).1.openState = none := by
-  rcases hTorn with ⟨hLen, hk0, hk42⟩
+/-- `QSBURN05` torn-tail recovery (`crates/qsag-fts/src/wal.rs:14-17`, `376-385`):
+    any interrupted partial record append (`0 < k < 42`) after an authenticated
+    `104 + 42·n` prefix truncates the unauthenticated tail back to `st.diskBytes`
+    and recovers `.okCount bodies.length` with `openState = some (bodies, lastTag)`. -/
+theorem posixBurnStep_tear_recovers_committed
+    (st : PosixBurnState) (bodies : List (List UInt8)) (lastTag : List UInt8) (k : Nat)
+    (hTorn : PosixBurnTornDisk st bodies lastTag k) :
+    (posixBurnStep st (.tear k)).2 = .okCount bodies.length ∧
+    (posixBurnStep st (.tear k)).1.diskBytes = st.diskBytes ∧
+    (posixBurnStep st (.tear k)).1.openState = some (bodies, lastTag) := by
+  rcases hTorn with ⟨hLen, hRet, hOpen, hk0, hk42⟩
   have hkZero : (k == 0) = false := by cases k with | zero => omega | succ _ => rfl
   have hkGe : ¬ (k ≥ 42) := by omega
   have hClamp : (if k == 0 then 1 else if k ≥ 42 then 41 else k) = k := by
     rw [hkZero]; simp [hkGe]
-  have hRefuse : RustDurability.openBurnBytes posixBurnMacKey
-      (RustDurability.burnIdentity 1 st.inode) posixBurnKeyId
-      (st.diskBytes ++ List.replicate k (0xaa : UInt8)) = none :=
-    RustDurability.partial_append_refuses posixBurnMacKey
-      (RustDurability.burnIdentity 1 st.inode) posixBurnKeyId
-      st.diskBytes (List.replicate k (0xaa : UInt8)) n hLen
-      (by simp [List.length_replicate, hk0, hk42])
+  have hDiskLen : (st.diskBytes ++ List.replicate k (0xaa : UInt8)).length =
+      104 + 42 * bodies.length + k := by
+    rw [List.length_append, hLen, List.length_replicate]
+  have hGe104 : 104 ≤ (st.diskBytes ++ List.replicate k (0xaa : UInt8)).length := by omega
+  have hDiv : ((st.diskBytes ++ List.replicate k (0xaa : UInt8)).length - 104) / 42 =
+      bodies.length := by
+    rw [hDiskLen]; omega
+  have hTrim : trimPosixBurnTail (st.diskBytes ++ List.replicate k (0xaa : UInt8)) =
+      st.diskBytes := by
+    unfold trimPosixBurnTail
+    rw [ite_eq_left hGe104, hDiv, List.take_left' hLen]
   unfold posixBurnStep reopenPosixBurnDisk
   dsimp only
-  rw [hClamp, hRefuse]
-  exact ⟨rfl, rfl⟩
+  rw [hClamp, hTrim, hOpen, hRet]
+  exact ⟨rfl, rfl, rfl⟩
 
 theorem witness_posixBurnTornDisk :
-    ∃ (st : PosixBurnState) (n k : Nat), PosixBurnTornDisk st n k := by
-  refine ⟨PosixBurnState.init, 0, 7, ?_⟩
-  unfold PosixBurnTornDisk PosixBurnState.init
-  refine ⟨?_, by decide, by decide⟩
-  have hH : (RustDurability.burnHeader posixBurnMacKey (RustDurability.burnIdentity 1 100)
-      posixBurnKeyId posixBurnGenesis).length = 104 :=
-    RustDurability.burnHeader_length (by decide) (by decide)
-  omega
+    ∃ (st : PosixBurnState) (bodies : List (List UInt8)) (lastTag : List UInt8) (k : Nat),
+      PosixBurnTornDisk st bodies lastTag k := by
+  let id0 := RustDurability.burnIdentity 1 100
+  let tag0 := RustDurability.burnGenesisTag posixBurnMacKey id0 posixBurnKeyId posixBurnGenesis
+  refine ⟨PosixBurnState.init, [], tag0, 7, ?_, rfl, ?_, by decide, by decide⟩
+  · exact RustDurability.burnHeader_length (by decide) (by decide)
+  · exact RustDurability.openBurnBytes_burnHeader posixBurnMacKey id0
+      posixBurnKeyId posixBurnGenesis (by decide) (by decide)
 
 /-- `#tooth`: Same-inode tail truncation to the 104-byte genesis header when `st.retained = some anchor`
     has `0 < anchor.attestedEpoch` cannot recover as `.okCount 0`. -/
@@ -989,7 +1015,8 @@ theorem tooth_posixBurn_retained_rejects_truncation
   dsimp only
   rw [hRet]
   cases hOpen : RustDurability.openBurnBytes posixBurnMacKey
-      (RustDurability.burnIdentity 1 st.inode) posixBurnKeyId (st.diskBytes.take 104) with
+      (RustDurability.burnIdentity 1 st.inode) posixBurnKeyId
+      (trimPosixBurnTail (st.diskBytes.take 104)) with
   | none => intro h; cases h
   | some p =>
     rcases p with ⟨bodies, lastTag⟩
@@ -1152,8 +1179,8 @@ end Qsag.SpecOracle
 #verify_inhabited Qsag.SpecOracle.LegacyPoseidon16.poseidon2Perm16_pair_invertible Qsag.SpecOracle.LegacyPoseidon16.witness_poseidon2Perm16_pair
 
 
-#tooth_pair Qsag.SpecOracle.posixBurnStep_tear_fails_closed vs Qsag.SpecOracle.tooth_posixBurn_retained_rejects_truncation
-#verify_inhabited Qsag.SpecOracle.posixBurnStep_tear_fails_closed Qsag.SpecOracle.witness_posixBurnTornDisk
+#tooth_pair Qsag.SpecOracle.posixBurnStep_tear_recovers_committed vs Qsag.SpecOracle.tooth_posixBurn_retained_rejects_truncation
+#verify_inhabited Qsag.SpecOracle.posixBurnStep_tear_recovers_committed Qsag.SpecOracle.witness_posixBurnTornDisk
 
 #tooth_pair Qsag.SpecOracle.fsBeltWal_rollback_refused vs Qsag.SpecOracle.tooth_fsBeltWal_corrupt_and_rmlock_refused
 #verify_inhabited Qsag.SpecOracle.fsBeltWal_rollback_refused Qsag.SpecOracle.witness_fsBeltWalRollbackArmed
