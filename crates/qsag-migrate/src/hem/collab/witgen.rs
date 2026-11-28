@@ -1108,9 +1108,13 @@ impl<'a, B: Backend> Witgen<'a, B> {
             let c = self.open(&[pack(&r)], true).await?[0].to_canonical_u64();
             return Ok(self.sub_from_public(c, &r, m, true).await?.0);
         }
-        let r = self.exact_mask().await?;
+        let r = SecretBuffer::new(self.exact_mask().await?);
         let c = self.open(&[pack(&r)], true).await?[0].to_canonical_u64();
-        let (d, beta) = self.sub_from_public(c, &r, 64, false).await?;
+        self.subtract_mask(c, &r, m).await
+    }
+
+    async fn subtract_mask(&self, c: u64, r: &[B::S], m: usize) -> Shares<B> {
+        let (d, beta) = self.sub_from_public(c, r, 64, false).await?;
         // x = D + beta - 2^32 beta: a carry `beta` into the low 32 bits, then a borrow of
         // `beta` minus the carry out of them into the bits above.
         let low = m.min(32);
@@ -1134,6 +1138,60 @@ impl<'a, B: Backend> Witgen<'a, B> {
             }
         }
         Ok(out)
+    }
+
+    // Rejection samples a mask uniformly in [0,p), including p-1. Only the
+    // rejection bit leaves the computation. Revealing the high product alone
+    // would identify the unique accepted mask having its top 32 bits set.
+    async fn uniform_decomposition(&self, x: B::S) -> Shares<B> {
+        loop {
+            let bits = SecretBuffer::new(self.fresh_bits(64).await?);
+            let mut level = SecretBuffer::new(
+                bits.iter()
+                    .enumerate()
+                    .map(|(j, &b)| if j < 32 { self.one - b } else { b })
+                    .collect::<Vec<_>>(),
+            );
+            while level.len() > 2 {
+                let xs = SecretBuffer::new(level.iter().step_by(2).copied().collect::<Vec<_>>());
+                let ys =
+                    SecretBuffer::new(level.iter().skip(1).step_by(2).copied().collect::<Vec<_>>());
+                level = SecretBuffer::new(self.mul(&xs, &ys).await?);
+            }
+            let reject = self.mul1(self.one - level[0], level[1]).await?;
+            if self.open(&[reject], true).await?[0] != F::ZERO {
+                continue;
+            }
+            let masked = bits
+                .iter()
+                .enumerate()
+                .fold(x, |s, (i, &b)| s + B::scale(b, pow2(i)));
+            let c = self.open(&[masked], true).await?[0].to_canonical_u64();
+            return self.subtract_mask(c, &bits, 64).await;
+        }
+    }
+
+    /// Jointly decompose a batch of full-width residues and settle the MAC
+    /// checks before returning their least-significant-first bit shares.
+    pub(super) fn canonical_bits(
+        &self,
+        xs: &[B::S],
+    ) -> Result<SecretBuffer<Vec<Vec<B::S>>>, WitgenError> {
+        let tasks: Vec<Boxed<'_, Shares<B>>> = xs
+            .iter()
+            .map(|&x| Box::pin(self.uniform_decomposition(x)) as Boxed<'_, _>)
+            .collect();
+        let results = self.wait(async { Ok(join_all(tasks).await) })?;
+        let mut bits = SecretBuffer::new(Vec::with_capacity(xs.len()));
+        let guarded: Vec<_> = results
+            .into_iter()
+            .map(|r| r.map(SecretBuffer::new))
+            .collect();
+        for row in guarded {
+            bits.push(row?.into_inner());
+        }
+        self.check()?;
+        Ok(bits)
     }
 
     fn matrix(&self, n: usize) -> Rc<Vec<Vec<F>>> {

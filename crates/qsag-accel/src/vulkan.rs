@@ -66,6 +66,8 @@ use crate::vulkan_ffi::RawVulkanEngine;
 pub enum VulkanError {
     /// Target OS, pointer width, or crate feature configuration does not enable the Vulkan loader.
     UnsupportedPlatform,
+    /// The prover rejected a transcript challenge before the next disclosure.
+    FoldChallengeRejected,
     /// Fixed shader resources exceed device limits.
     UnsupportedDeviceLimits,
     /// Driver executable telemetry rejected the compiled pipeline.
@@ -101,6 +103,7 @@ pub enum VulkanError {
 impl core::fmt::Display for VulkanError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {
+            Self::FoldChallengeRejected => f.write_str("WHIR challenge rejected"),
             Self::UnsupportedDeviceLimits => {
                 f.write_str("device limits cannot support the embedded shaders")
             }
@@ -1219,7 +1222,77 @@ impl VulkanSpirvBackend {
     }
 }
 
+#[cfg(feature = "std")]
+use crate::Fp5Table;
+
 impl AcceleratorBackend for VulkanSpirvBackend {
+    #[cfg(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
+    fn fp5_fold_even_odd(
+        &self,
+        table: Fp5Table<'_>,
+        phi: [u64; 5],
+        out: &mut [[u64; 5]],
+    ) -> Result<(), AccelError> {
+        self.fp5_session()
+            .map_err(accel_error)?
+            .fp5_fold_even_odd(table, phi, out)
+            .map_err(accel_error)
+    }
+
+    #[cfg(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
+    fn fp5_sumcheck_quad_evals(
+        &self,
+        table: Fp5Table<'_>,
+        weights: &[[u64; 5]],
+    ) -> Result<[[u64; 5]; 3], AccelError> {
+        self.fp5_session()
+            .map_err(accel_error)?
+            .fp5_sumcheck_quad_evals(table, weights)
+            .map_err(accel_error)
+    }
+
+    #[cfg(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
+    fn fp5_dot_batch(
+        &self,
+        table: Fp5Table<'_>,
+        weights: &[[u64; 5]],
+    ) -> Result<[u64; 5], AccelError> {
+        self.fp5_session()
+            .map_err(accel_error)?
+            .fp5_dot_batch(table, weights)
+            .map_err(accel_error)
+    }
+
+    #[cfg(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
+    fn whir_stage_fold_fp5(
+        &self,
+        table: Fp5Table<'_>,
+        shift: u64,
+        challenges: &[[[u64; 5]; 3]],
+        out: &mut [[u64; 5]],
+    ) -> Result<(), AccelError> {
+        self.fp5_session()
+            .map_err(accel_error)?
+            .whir_stage_fold_fp5(table, shift, challenges, out)
+            .map_err(accel_error)
+    }
+
     fn hardware_audit_digest(&self) -> [u8; 32] {
         if self.secret_slots_audited() {
             self.device_info().audit_evidence_digest()
@@ -2504,7 +2577,7 @@ mod tests {
 }
 
 #[cfg(feature = "std")]
-mod fp5;
+pub(crate) mod fp5;
 #[cfg(all(
     feature = "std",
     any(target_os = "macos", target_os = "linux"),
@@ -2512,4 +2585,4 @@ mod fp5;
 ))]
 pub(crate) use fp5::ComputePass;
 #[cfg(feature = "std")]
-pub use fp5::{CanopyProfile, VulkanFp5Session};
+pub use fp5::{CanopyProfile, RowEvaluations, VulkanFp5Session, WhirChallenges};

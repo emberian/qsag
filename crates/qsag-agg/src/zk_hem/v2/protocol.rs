@@ -1328,14 +1328,38 @@ fn row_round<T: GateField>(
     coeffs
 }
 
+type RowRounds = (Vec<Vec<E>>, Vec<E>, [E; 3]);
+
 pub(in crate::zk_hem) fn row_sumcheck(
+    tr: &mut impl Channel,
+    tau: &[E],
+    num_sbox: usize,
+    base: [Vec<F>; 3],
+    mask: &Mask,
+    rho: E,
+) -> RowRounds {
+    row_sumcheck_inner(
+        tr,
+        tau,
+        num_sbox,
+        base,
+        mask,
+        rho,
+        #[cfg(feature = "vulkan")]
+        None,
+    )
+    .expect("CPU row sumcheck is infallible")
+}
+
+fn row_sumcheck_inner(
     tr: &mut impl Channel,
     tau: &[E],
     num_sbox: usize,
     mut base: [Vec<F>; 3],
     mask: &Mask,
     rho: E,
-) -> (Vec<Vec<E>>, Vec<E>, [E; 3]) {
+    #[cfg(feature = "vulkan")] gpu: Option<&qsag_accel::vulkan::VulkanFp5Session<'_>>,
+) -> Result<RowRounds, ZkHemV2Error> {
     let _phase = crate::profile::span("zkhem2_row_sumcheck");
     let n = tau.len();
     let mut ext: [Vec<E>; 3] = core::array::from_fn(|_| Vec::new());
@@ -1347,12 +1371,7 @@ pub(in crate::zk_hem) fn row_sumcheck(
     let mut eq_bound = E::ONE;
     let mut rounds = Vec::with_capacity(n);
     let mut rx: Vec<E> = Vec::with_capacity(n);
-    for (round, &t) in tau.iter().enumerate() {
-        let mut h = if round == 0 {
-            row_round(base.each_ref().map(Vec::as_slice), &eq_rest, &selector)
-        } else {
-            row_round(ext.each_ref().map(Vec::as_slice), &eq_rest, &selector)
-        };
+    let mut message = |mut h: Vec<E>, t: E| {
         let l1 = eq_bound * (t + t - E::ONE);
         let l0 = eq_bound * (E::ONE - t);
         let mut coeffs = vec![E::ZERO; ROW_DEGREE + 1];
@@ -1371,6 +1390,67 @@ pub(in crate::zk_hem) fn row_sumcheck(
         rounds.push(coeffs);
         rx.push(c);
 
+        let tc = t * c;
+        eq_bound *= E::ONE - t - c + tc + tc;
+        c
+    };
+    #[cfg(feature = "vulkan")]
+    if let Some(gpu) = gpu {
+        let words = base.each_ref().map(|b| crate::vulkan::base_words(b));
+        let mut pairs = eq_rest.len();
+        let mut round = 0;
+        let values = gpu
+            .row_sumcheck(
+                words.each_ref().map(|b| b.as_flattened()),
+                &crate::vulkan::ext_words(&eq_rest),
+                num_sbox,
+                |evals| {
+                    let coeffs = |xs: &[[u64; 5]]| {
+                        let xs = SecretBuffer::new(
+                            xs.iter()
+                                .copied()
+                                .map(crate::vulkan::unpack)
+                                .collect::<Vec<_>>(),
+                        );
+                        SecretBuffer::new(evals_to_coeffs(&xs))
+                    };
+                    let mut h = vec![E::ZERO; ROW_DEGREE];
+                    for part in [coeffs(&evals.sbox), coeffs(&evals.mul)] {
+                        for (x, y) in h.iter_mut().zip(part.iter()) {
+                            *x += *y;
+                        }
+                    }
+                    let middle = selector.count / 2;
+                    if middle < pairs {
+                        let s = selector.at(2 * middle);
+                        let ds = selector.at(2 * middle + 1) - s;
+                        let mul = coeffs(&evals.boundary_mul);
+                        for (k, &a) in coeffs(&evals.boundary_sbox).iter().enumerate() {
+                            let b = mul.get(k).copied().unwrap_or(E::ZERO);
+                            h[k] += b + s * (a - b);
+                            h[k + 1] += ds * (a - b);
+                        }
+                    }
+                    let c = message(h, tau[round]);
+                    selector.fold(c);
+                    pairs /= 2;
+                    round += 1;
+                    c.0.map(F::to_canonical_u64)
+                },
+            )
+            .map_err(ZkHemV2Error::Vulkan);
+        for b in &mut base {
+            qsag_asm::volatile_fill(b, F::ZERO);
+        }
+        return Ok((rounds, rx, values?.map(crate::vulkan::unpack)));
+    }
+    for (round, &t) in tau.iter().enumerate() {
+        let h = if round == 0 {
+            row_round(base.each_ref().map(Vec::as_slice), &eq_rest, &selector)
+        } else {
+            row_round(ext.each_ref().map(Vec::as_slice), &eq_rest, &selector)
+        };
+        let c = message(h, t);
         if round == 0 {
             for (e, b) in ext.iter_mut().zip(base.iter_mut()) {
                 *e = fold_base(b, c);
@@ -1384,8 +1464,6 @@ pub(in crate::zk_hem) fn row_sumcheck(
         }
         selector.fold(c);
         if round + 1 < n {
-            let tc = t * c;
-            eq_bound *= E::ONE - t - c + tc + tc;
             fold_pairs(&mut eq_rest, false, |lo, hi| lo + hi);
         }
     }
@@ -1393,7 +1471,7 @@ pub(in crate::zk_hem) fn row_sumcheck(
     for e in &mut ext {
         qsag_asm::volatile_fill(e, E::ZERO);
     }
-    (rounds, rx, values)
+    Ok((rounds, rx, values))
 }
 
 pub(in crate::zk_hem) fn column_sumcheck(
@@ -1429,9 +1507,39 @@ fn column_sumcheck_inner(
     let mut tz = SecretBuffer::new(Vec::<E>::new());
     let mut rounds = Vec::with_capacity(n);
     let mut ry: Vec<E> = Vec::with_capacity(n);
+    let mut message = |mut evals: [E; 3]| {
+        let mut coeffs = evals_to_coeffs(&evals);
+        qsag_asm::volatile_fill(&mut evals, E::ZERO);
+        let mut g = mask.round_poly(&ry);
+        for (c, &g) in coeffs.iter_mut().zip(&g) {
+            *c += rho * g;
+        }
+        qsag_asm::volatile_fill(&mut g, E::ZERO);
+        tr.absorb_fp5_slice(b"COL_ROUND", &coeffs);
+        let c = tr.squeeze_fp5(b"COL_ROUND");
+        rounds.push(coeffs);
+        ry.push(c);
+        c
+    };
+    #[cfg(feature = "vulkan")]
+    if let Some(gpu) = gpu {
+        let words = crate::vulkan::base_words(z);
+        let result = gpu
+            .column_sumcheck(
+                qsag_accel::Fp5Table::Base(words.as_flattened()),
+                &crate::vulkan::ext_words(&tm),
+                |evals| {
+                    message(evals.map(crate::vulkan::unpack))
+                        .0
+                        .map(F::to_canonical_u64)
+                },
+            )
+            .map_err(ZkHemV2Error::Vulkan)?;
+        return Ok((rounds, ry, crate::vulkan::unpack(result)));
+    }
     for round in 0..n {
         let tm_ref = &tm;
-        let cpu_evals = || {
+        let evals = {
             if round == 0 {
                 round_evals(0..tm.len() / 2, |i| {
                     let (m0, m1) = (tm_ref[2 * i], tm_ref[2 * i + 1]);
@@ -1451,54 +1559,7 @@ fn column_sumcheck_inner(
                 })
             }
         };
-        #[cfg(feature = "vulkan")]
-        let mut evals = if let Some(gpu) = gpu {
-            let weights = crate::vulkan::ext_words(&tm);
-            let result = if round == 0 {
-                gpu.sumcheck_round(&crate::vulkan::base_words(z), &weights)
-            } else {
-                gpu.sumcheck_round(&crate::vulkan::ext_words(&tz), &weights)
-            };
-            result
-                .map_err(ZkHemV2Error::Vulkan)?
-                .map(|w| super::field5::Fp5(w.map(F::from_u64_reduced)))
-        } else {
-            cpu_evals()
-        };
-        #[cfg(not(feature = "vulkan"))]
-        let mut evals = cpu_evals();
-        let mut coeffs = evals_to_coeffs(&evals);
-        qsag_asm::volatile_fill(&mut evals, E::ZERO);
-        let mut g = mask.round_poly(&ry);
-        for (c, &g) in coeffs.iter_mut().zip(&g) {
-            *c += rho * g;
-        }
-        qsag_asm::volatile_fill(&mut g, E::ZERO);
-        tr.absorb_fp5_slice(b"COL_ROUND", &coeffs);
-        let c = tr.squeeze_fp5(b"COL_ROUND");
-        rounds.push(coeffs);
-        ry.push(c);
-        #[cfg(feature = "vulkan")]
-        if let Some(gpu) = gpu {
-            let r = c.0.map(F::to_canonical_u64);
-            let next = if round == 0 {
-                gpu.fold_table(&crate::vulkan::base_words(z), r)
-            } else {
-                gpu.fold_table(&crate::vulkan::ext_words(&tz), r)
-            };
-            let unpack = |v: Vec<[u64; 5]>| {
-                SecretBuffer::new(v)
-                    .iter()
-                    .map(|w| super::field5::Fp5(w.map(F::from_u64_reduced)))
-                    .collect()
-            };
-            tz = SecretBuffer::new(unpack(next.map_err(ZkHemV2Error::Vulkan)?));
-            tm = unpack(
-                gpu.fold_table(&crate::vulkan::ext_words(&tm), r)
-                    .map_err(ZkHemV2Error::Vulkan)?,
-            );
-            continue;
-        }
+        let c = message(evals);
         if round == 0 {
             tz = SecretBuffer::new(fold_base(z, c));
         } else {
@@ -1984,14 +2045,16 @@ fn prove_inner(
     let row_mask_sum = secrets.row_mask.sum();
     tr.absorb_fp5_slice(b"ROW_MASK_SUM", &[row_mask_sum]);
     let rho1 = tr.squeeze_fp5_nonzero(b"RHO1");
-    let (row_rounds, rx, mut row_values) = row_sumcheck(
+    let (row_rounds, rx, mut row_values) = row_sumcheck_inner(
         &mut tr,
         &tau,
         shape.num_sbox,
         row_base.into_inner(),
         &secrets.row_mask,
         rho1,
-    );
+        #[cfg(feature = "vulkan")]
+        gpu,
+    )?;
     // (G1), before the row values exist outside the prover.
     if !row_challenge_good(shape, &rx) {
         qsag_asm::volatile_fill(&mut row_values, E::ZERO);
