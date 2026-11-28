@@ -51,6 +51,7 @@ public import Qsag.Math.Poseidon2Gl24
 public import Qsag.Machine.PlatformContractInstances
 public import Qsag.Math.QuinticExt5
 public import Qsag.Protocol.Aggregation.Cwyz26JohnsonCertificate
+public import Qsag.Coding.AboveJohnsonWhir
 public import Qsag.Coding.Cwyz26
 public import Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold
 public import Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness

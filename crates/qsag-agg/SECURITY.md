@@ -3,10 +3,12 @@
 This document states what is proven about committed-mask Quintic `Fp5` **zk-Hem v2**
 (`src/zk_hem/v2/`, wire formats `QSAGZKH2` and `QSAGZKS2`), public Quintic `Fp5`
 **`HemQuintic128`** (`src/hem_quintic.rs`, wire format `QSAGHQM2`), regional composition
-**`HierarchicalHemAggregate`** (`src/recursive.rs`, wire format `QSAGHEM\x04`), and
+**`HierarchicalHemAggregate`** (`src/recursive.rs`, wire format `QSAGHEM\x04`),
 overlapping-bitfield binary recursive IVC **`SuccinctIvcProof`**
-(`src/zk_hem/recursive_ivc.rs`, wire format `QSAGIVC1`), under which hypotheses, and with
-which concrete bounds. The schedule calculator tables are computed by `src/zk_hem/v2/bounds.rs` and
+(`src/zk_hem/recursive_ivc.rs`, wire format `QSAGIVC1`), and high-arity commit-and-open
+committee aggregation **`HighArityProof`**
+(`src/zk_hem/recursive_ivc/high_arity_ivc.rs`, wire format `QSAGIVC2`), under which hypotheses,
+and with which concrete bounds. The schedule calculator tables are computed by `src/zk_hem/v2/bounds.rs` and
 `src/zk_hem/bounds.rs` using conservative directed integer-millibit rounding and pinned by
 automated regression tests.
 
@@ -281,9 +283,11 @@ cargo test --release -p qsag-agg --lib -- zk_hem::v2::bounds::tests::print_v2_ta
 | `2^26`, `2^26` | `2^27` | `266, 136, 92, 70` | 512 | `264.629` (Stage-0 query) | `198.999` | **128.051** (`128.142`, `129.112`) | `2^-128.283` | 839,782 |
 | `2^27`, `2^27` | `2^28` | `266, 136, 92, 70` | 512 | `264.627` (Stage-0 query) | `198.999` | **128.050** (`128.141`, `129.112`) | `2^-128.281` | 1,027,882 |
 
-#### 2.3.1 Rate-half packed commitments and the above-Johnson audit
+#### 2.3.1 Rate-half packed commitments (`tags 18–19`) and query-factor reality
 
 Tags 18–19 use $2N$ base evaluations and 644 distinct Stage-0 fibers, 2.41–2.42 times the legacy query count. Both the assignment and optional lookup helper use the selected profile. Each cube is sized with its own blinding requirement $2^s(644+25)$. Comparisons at fixed $N$ assume the relation fits both layouts. Later stages retain their original rates and query counts.
+
+**Exact query factor vs. unique decoding.** With folded fiber count $n=2N/2^s$, code dimension $k=n/2+2$ (rate $\rho=k/n=1/2+2/n$), inner error count $e=n/4-2<(n-k)/2$, and inner agreement $A=n-e=3n/4+2$, both `v2/bounds.rs` (`rate_half_stage_bound`) and `Qsag.Coding.AboveJohnsonWhir` (`rateHalfWitness`) prove and charge the without-replacement falling-factorial query bound $(A+1)_{644}/(n)_{644}$, whose per-query survival ratio $(A+1)/n=3/4+3/n\to 3/4=(1+\rho)/2$ coincides with ordinary unique decoding at rate $\rho=1/2$. Two-witness RVW13 halving (`aboveJohnson_rvw`; Chai–Fan, ePrint `2026/858` Theorem 5, unrefereed preprint) maps an outer proximity premise $\delta_{\mathrm{outer}}=2e/n<1-\rho$ on the first fold into the unique-decoding ball $\delta_{\mathrm{inner}}=e/n<(1-\rho)/2$, so its per-query factor $1-\delta_{\mathrm{outer}}/2>(1+\rho)/2$ approaches $1-(1-\rho)/2=(1+\rho)/2=3/4$ near capacity (and by AM–GM exceeds the Johnson factor $\sqrt{\rho}$ at every rate), saving **zero queries** over unique decoding. Moreover, knowledge extraction of R1CS, lookup, and evaluation claims (`word_list = 1`) already operates directly inside the inner unique-decoding ball $2^s A$ via CWYZ Theorem 5.1 and `aboveJohnson_lift_chain`, yielding the identical $(A+1)_{644}/(n)_{644}$ query bound; RVW13 only extends pure proximity rejection for unclaim-bound words from distance $1/4-2/n$ out to $1/2-4/n$. Tags 18–19 are therefore a **Stage-0 prover-memory and encoding-speed profile, not a proof-size optimization**: halving $|D_0|$ buys **$2.19\times$ faster Stage-0 CPU LDE** at $2^{20}$ (`211.395 ms` vs. `462.372 ms`) and **$-5{,}312\text{ MiB}$ (`-5.19 GiB`) Stage-0 Canopy device buffer footprint** at $2^{28}$, at the cost of **`+38.6%` to `+63.1%` larger proof bytes** vs. Rate-1/4 Johnson (`tags 16–17`: `+38.6%–38.7%` on `pin` at $2^{16}$, `+39.5%–63.1%` across the $2^{16}\dots 2^{28}$ max-byte envelope).
 
 **Which result transfers.** In Chai–Fan Theorem 5, two scalar challenges with codeword agreements on all but $h$ positions each yield a joint explanation on all but $2h$ positions. Subtracting the two equations on the intersection recovers the slope and then the intercept. This proves the bound of one exceptional scalar for any linear code, including the linear kernels of Corollary 48. A nonzero OOD evaluation defines an affine coset. Subtracting two explanations for it produces an element of the homogeneous kernel. For v2 the five OOD values are batched into the coefficient functional before the first fold. Its point terms extend to the overflow coefficients. The candidate-list OOD and claim-binding terms in §2.3 remain necessary. [Chai–Fan, Theorems 5, 14, 18 and Corollary 48](https://eprint.iacr.org/2026/858)
 

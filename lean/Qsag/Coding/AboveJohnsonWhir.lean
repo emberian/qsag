@@ -3,8 +3,12 @@ public import Qsag.Coding.WhirProfiles
 public import Qsag.Math.CoeffPoly
 
 /-! Half-threshold correlated agreement, the affine fold's agreement loss, and
-    distinct-fiber sampling. Distances are counted in positions on a common
-    domain, so all threshold comparisons are exact integer inequalities. -/
+    distinct-fiber sampling. Halving an outer error count `2e < n - k` on the
+    first scalar fold enters the unique-decoding ball `e < (n - k) / 2`, so the
+    resulting per-query survival ratio `(n - e + 1) / n` matches the unique-decoding
+    factor `(1 + ρ) / 2` (`3 / 4` at rate `ρ = 1 / 2`) rather than reducing query count.
+    Distances are counted in positions on a common domain, so all threshold comparisons
+    are exact integer inequalities. -/
 public section
 namespace Qsag
 set_option autoImplicit false
@@ -209,7 +213,8 @@ theorem aboveJohnson_query_of_lifts {I : Type} [DecidableEq I] (w : WhirAboveJoh
     exact False.elim (Nat.not_le_of_lt entry (aboveJohnson_lift_chain agreements _ _ h step))
   else omega
 
-/-- Canonical rate-half Stage-0 arithmetic. The code dimension includes two overflow slots. -/
+/-- Canonical rate-half Stage-0 arithmetic (`k = n / 2 + 2` including two overflow slots,
+    inner error budget `e = n / 4 - 2` inside unique decoding, `644` distinct-fiber queries). -/
 @[expose] def rateHalfWitness (logCells : Nat) : WhirAboveJohnsonWitness :=
   let s := if logCells = 16 then 4 else if logCells ≤ 20 then 5 else 6
   let n := 2 ^ (logCells + 1 - s)
