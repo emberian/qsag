@@ -1,5 +1,0 @@
-`verilator_config
-// qsag_cells.sv is the kept cell library of the existing design and is not edited by this lane. Its
-// behavioural row clock gate (qsag_latgate) initialises and clocks one variable; Verilator 5.055
-// reports that as MULTIDRIVEN. Nothing under v2/ is waived here.
-lint_off -rule MULTIDRIVEN -file "*rtl/qsag_cells.sv"
