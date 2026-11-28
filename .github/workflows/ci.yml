@@ -249,7 +249,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.workdir }}" = lean ]; then
-            lake build --wfail Qsag AuditAxioms SpecOracle IsaCosim spec-oracle qsag-kat audit-axioms
+            lake build --wfail Qsag AuditAxioms SpecOracle IsaCosim spec-oracle isa-cosim qsag-kat audit-axioms
             lake build QsagChallenge
           elif [ "${{ matrix.workdir }}" = aeneas/lean ]; then
             lake build --wfail QsagVerified QsagSpecWeld QsagCustodyWeld AuditMirAxioms QsagMirProofs audit-mir-axioms
