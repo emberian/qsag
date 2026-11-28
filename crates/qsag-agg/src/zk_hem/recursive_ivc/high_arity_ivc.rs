@@ -207,20 +207,13 @@ struct Column {
     claim: E,
 }
 
-fn column(
-    ch: &mut fold::Channel,
-    shape: &Shape,
-    g: &Geometry,
+/// The constant one and the public inputs of every single-signer statement,
+/// folded with the instance weights `eq_u`.
+fn public_prefix(
     stmt: &IvcSubtreeStatement,
     roster: &[Roster],
-    rx: &[E],
     eq_u: &[E],
-    abc: [E; 3],
-) -> Column {
-    let alpha = ch.tr.squeeze_fp5(b"COLUMN_BATCH");
-    let comb = [E::ONE, alpha, alpha.square()];
-    let mut matrix = protocol::column_table(shape, &protocol::eq_table(rx), &comb, 1 << g.columns);
-    let mut claim = abc[0] + comb[1] * abc[1] + comb[2] * abc[2];
+) -> [E; STATEMENT_WORDS + 1] {
     let mut prefix = [E::ZERO; STATEMENT_WORDS + 1];
     let mut weights = eq_u.iter();
     for rec in roster {
@@ -233,6 +226,21 @@ fn column(
             }
         }
     }
+    prefix
+}
+
+fn column(
+    ch: &mut fold::Channel,
+    shape: &Shape,
+    g: &Geometry,
+    rx: &[E],
+    prefix: [E; STATEMENT_WORDS + 1],
+    abc: [E; 3],
+) -> Column {
+    let alpha = ch.tr.squeeze_fp5(b"COLUMN_BATCH");
+    let comb = [E::ONE, alpha, alpha.square()];
+    let mut matrix = protocol::column_table(shape, &protocol::eq_table(rx), &comb, 1 << g.columns);
+    let mut claim = abc[0] + comb[1] * abc[1] + comb[2] * abc[2];
     let mut power = comb[2] * alpha;
     for (m, public) in matrix.iter_mut().zip(prefix) {
         *m += power;
@@ -400,7 +408,8 @@ pub fn prove_high_arity_tree(
         }
     });
     drop(table);
-    let col = column(&mut ch, &shape, &g, &stmt, &roster, &rx, &eq_u, fold.abc);
+    let prefix = public_prefix(&stmt, &roster, &eq_u);
+    let col = column(&mut ch, &shape, &g, &rx, prefix, fold.abc);
     let (col, y, [_, z]) =
         fold::sumcheck(&mut ch, b"COLUMN", 2, [col.matrix, folded], |[m, z]| m * z);
     ch.bind(b"OPEN_VALUE", &[z]);
@@ -454,16 +463,8 @@ fn verify(stmt: &IvcSubtreeStatement, p: &HighArityProof) -> Option<()> {
         protocol::eq_eval(&tau, &rx),
         claim,
     )?;
-    let col = column(
-        &mut ch,
-        &shape,
-        &g,
-        stmt,
-        &p.roster,
-        &rx,
-        &protocol::eq_table(&u),
-        p.fold.abc,
-    );
+    let prefix = public_prefix(stmt, &p.roster, &protocol::eq_table(&u));
+    let col = column(&mut ch, &shape, &g, &rx, prefix, p.fold.abc);
     let (y, end) = fold::check_rounds(&mut ch, b"COLUMN", &p.col, col.claim)?;
     let m = protocol::eq_table(&y)
         .into_iter()

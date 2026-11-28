@@ -324,34 +324,6 @@ impl<'a> VulkanFp5Session<'a> {
         Ok(result)
     }
 
-    /// Evaluate adjacent pairs of a multilinear table at a quintic challenge.
-    pub fn fold_table<const L: usize>(
-        &self,
-        table: &[[u64; L]],
-        challenge: [u64; 5],
-    ) -> Result<Vec<[u64; 5]>, VulkanError> {
-        if !matches!(L, 1 | 5) || table.len() < 2 || !table.len().is_power_of_two() {
-            return Err(AccelError::LengthOverflow.into());
-        }
-        let n = table.len() / 2;
-        self.extent(n, 5)?;
-        let pass = ComputePass::Dispatch {
-            constants: vec![count(n)?, 0, 0, (L == 1) as u32, 0, 0, 5, 0],
-            groups: count(n)?.div_ceil(256),
-            base_word: 5,
-            base_scale: 1,
-        };
-        let mut out = vec![[0; 5]; n];
-        self.job(
-            KernelSlot::Fp5WhirFold,
-            [table.as_flattened(), &[], &challenge],
-            1,
-            out.as_flattened_mut(),
-            &[pass],
-        )?;
-        Ok(out)
-    }
-
     /// Fold a complete coset codeword, pairing opposite evaluations at each challenge.
     pub fn fold_fibers(
         &self,

@@ -1068,7 +1068,8 @@ mod batch_tests {
             backend
                 .fp5_fold_even_odd(table, pack(r), &mut folded)
                 .unwrap();
-            for ((z, w), f) in z.chunks_exact(2).zip(w.chunks_exact(2)).zip(folded) {
+            let pairs = z.as_chunks::<2>().0.iter().zip(w.as_chunks::<2>().0);
+            for ((z, w), f) in pairs.zip(folded) {
                 assert_eq!(f, pack(z[0] + r * (z[1] - z[0])));
                 evals[0] += z[0] * w[0];
                 evals[1] += z[1] * w[1];
