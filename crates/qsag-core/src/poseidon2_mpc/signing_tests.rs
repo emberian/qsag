@@ -139,23 +139,27 @@ fn test_stateful_jorts_poseidon2_mpc_split_view_refused_without_committee_latch(
     let rogue_exact = rogue_same_epoch
         .certify_epoch(&[0, 1, 2], 0, bind(0, &mu_b))
         .unwrap();
-    let mut other = QuorumEpochLatchCluster::new(n, t - 1).unwrap();
-    let foreign_key = other
+    // Genuine `cluster` certificates at later epochs with wrong epoch, rebound epoch, or foreign key:
+    let other_epoch = cluster
+        .certify_epoch(&[0, 1, 2], 1, bind(1, &mu_b))
+        .unwrap();
+    // Bound to epoch 0 but reserved at epoch 2: the signer recomputes the binding per epoch.
+    let rebound_epoch = cluster
+        .certify_epoch(&[0, 1, 2], 2, bind(0, &mu_b))
+        .unwrap();
+    let foreign_key = cluster
         .certify_epoch(
             &[0, 1, 2],
-            0,
-            epoch_latch_binding(&[0x5a; 32], &pk.pk_root, 0, &mu_b),
+            3,
+            epoch_latch_binding(&[0x5a; 32], &pk.pk_root, 3, &mu_b),
         )
         .unwrap();
-    let other_epoch = other.certify_epoch(&[0, 1, 2], 1, bind(1, &mu_b)).unwrap();
-    // Bound to epoch 0 but reserved at epoch 2: the signer recomputes the binding per epoch.
-    let rebound_epoch = other.certify_epoch(&[0, 1, 2], 2, bind(0, &mu_b)).unwrap();
     let mut two_member = QuorumEpochLatchCluster::new(2, t - 1).unwrap();
     let other_committee = two_member
         .certify_epoch(&[0, 1], 0, bind(0, &mu_b))
         .unwrap();
 
-    let attempts: [(Option<&EpochLatchCertificate>, Poseidon2MpcError); 5] = [
+    let attempts: [(Option<&EpochLatchCertificate>, Poseidon2MpcError); 4] = [
         (
             None,
             Poseidon2MpcError::LatchCertificateRequired {
@@ -174,12 +178,6 @@ fn test_stateful_jorts_poseidon2_mpc_split_view_refused_without_committee_latch(
         // The certificate issued for message A does not authorise message B.
         (
             Some(&cert_a),
-            Poseidon2MpcError::LatchCertificateRejected(
-                QuorumLatchError::CertificateBindingMismatch { epoch: 0 },
-            ),
-        ),
-        (
-            Some(&foreign_key),
             Poseidon2MpcError::LatchCertificateRejected(
                 QuorumLatchError::CertificateBindingMismatch { epoch: 0 },
             ),
@@ -225,6 +223,47 @@ fn test_stateful_jorts_poseidon2_mpc_split_view_refused_without_committee_latch(
         );
         assert_eq!(retry, Err(expected));
     }
+    let foreign_key_sign = sign_jorts_poseidon2_mpc_cached(
+        [0x76; 32],
+        &params,
+        &pk,
+        Some(&cache),
+        t,
+        Some(&foreign_key),
+        &mut [&mut l1_rolled_back, &mut l2],
+        msg_b,
+        100_000,
+        &mut [&mut *k1, &mut *k2],
+        &mut [&mut *v1, &mut *v2],
+        &mut rngs[1..3],
+    );
+    assert_eq!(
+        foreign_key_sign,
+        Err(Poseidon2MpcError::LatchCertificateRejected(
+            QuorumLatchError::CertificateBindingMismatch { epoch: 3 }
+        ))
+    );
+    let foreign_key_retry = retry_jorts_poseidon2_mpc_cached(
+        [0x77; 32],
+        &params,
+        &pk,
+        Some(&cache),
+        t,
+        Some(&foreign_key),
+        &mut [&mut l1_rolled_back, &mut l2],
+        3,
+        msg_b,
+        100_000,
+        &mut [&mut *k1, &mut *k2],
+        &mut [&mut *v1, &mut *v2],
+        &mut rngs[1..3],
+    );
+    assert_eq!(
+        foreign_key_retry,
+        Err(Poseidon2MpcError::LatchCertificateRejected(
+            QuorumLatchError::CertificateBindingMismatch { epoch: 3 }
+        ))
+    );
     let rebound = sign_jorts_poseidon2_mpc_cached(
         [0x74; 32],
         &params,
@@ -512,13 +551,15 @@ fn test_stateful_jorts_poseidon2_mpc_exact_parity_latch_and_dishonest_majority_a
 #[test]
 fn multilayer_corduroy_poseidon2_mpc_end_to_end() {
     let _memory = crate::test_budget::reserve_mb(1200);
+    // Bind 128 FORS bits so the negative message-substitution assertion below cannot
+    // collide by chance on an 8-point `(2-bit leaf, 1-bit FORS)` selector space.
     let params = PqHashParams {
         w: 4,
         ell1: 128,
         max_sigs_log2: 2,
         num_layers: 2,
         subtree_height: 1,
-        fors_trees: 1,
+        fors_trees: 128,
         fors_height: 1,
         stateful: false,
     };
