@@ -1,5 +1,0 @@
-nfet_06v0 card: toxe 15.2 nm, ndep 1.7e17, vth0 0.673 V (typical)
-uniform Na = 1.7e+17 cm^-3: DEVSIM Vth(ns = Na) = 0.816 V, textbook formula 0.842 V
-uniform Na = 1.0e+17 cm^-3: DEVSIM Vth(ns = Na) = 0.571 V, textbook formula 0.590 V
-uniform Na = 7.0e+16 cm^-3: DEVSIM Vth(ns = Na) = 0.438 V, textbook formula 0.454 V
-uniform Na = 5.0e+16 cm^-3: DEVSIM Vth(ns = Na) = 0.333 V, textbook formula 0.346 V
